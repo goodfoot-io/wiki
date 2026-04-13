@@ -1,0 +1,16 @@
+{
+  "name": "goodfoot-wiki",
+  "interface": {
+    "displayName": "Wiki documentation plugins"
+  },
+  "plugins": [
+    {
+      "name": "wiki",
+      "source": {
+        "source": "local",
+        "path": "../../plugins/wiki"
+      },
+      "category": "Documentation"
+    }
+  ]
+}

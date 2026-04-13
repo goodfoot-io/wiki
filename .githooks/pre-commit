@@ -1,0 +1,63 @@
+#!/bin/bash
+# Pre-commit hook:
+# 1. Run biome check --fix on staged TS/JS files
+# 2. Run wiki check --fix on staged .md files
+
+set -e
+
+# Get list of staged files (excluding deleted files)
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=d)
+
+if [ -z "$STAGED_FILES" ]; then
+    exit 0
+fi
+
+# --- Biome formatting + linting fixes on staged TS/JS files ---
+if command -v npx &> /dev/null; then
+    echo "Running biome check --fix on staged files..."
+    BIOME_STAGED=$(echo "$STAGED_FILES" | grep -E '\.(ts|tsx|js|jsx)$' || true)
+    if [ -n "$BIOME_STAGED" ]; then
+        npx biome check --fix --staged --no-errors-on-unmatched
+        # Re-stage any files that biome modified (--staged only filters which files
+        # to check; it does not re-add the fixes to the index)
+        BIOME_CHANGED=""
+        for f in $BIOME_STAGED; do
+            if ! git diff --quiet -- "$f" 2>/dev/null; then
+                BIOME_CHANGED="$BIOME_CHANGED $f"
+            fi
+        done
+        if [ -n "$BIOME_CHANGED" ]; then
+            git add $BIOME_CHANGED
+            echo "Re-staged biome-fixed files:$BIOME_CHANGED"
+        fi
+    fi
+fi
+
+# Re-read staged files after biome may have modified them
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=d)
+
+if [ -z "$STAGED_FILES" ]; then
+    exit 0
+fi
+
+# --- Wiki validation on staged .md files ---
+if command -v wiki &> /dev/null; then
+    WIKI_STAGED=$(echo "$STAGED_FILES" | grep '\.md$' || true)
+    if [ -n "$WIKI_STAGED" ]; then
+        echo "Running wiki check --fix..."
+        wiki check --fix
+        # Re-stage any .md files that wiki check --fix modified
+        WIKI_FIXED=""
+        for f in $WIKI_STAGED; do
+            if ! git diff --quiet -- "$f" 2>/dev/null; then
+                WIKI_FIXED="$WIKI_FIXED $f"
+            fi
+        done
+        if [ -n "$WIKI_FIXED" ]; then
+            git add $WIKI_FIXED
+            echo "Re-staged wiki-fixed files:$WIKI_FIXED"
+        fi
+    fi
+fi
+
+exit 0

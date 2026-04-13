@@ -1,0 +1,145 @@
+name: Release CLI
+
+on:
+  push:
+    tags:
+      - "wiki-cli-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            npm-pkg: wiki-linux-x64
+            binary: wiki
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            npm-pkg: wiki-linux-arm64
+            binary: wiki
+            cross: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            npm-pkg: wiki-darwin-x64
+            binary: wiki
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            npm-pkg: wiki-darwin-arm64
+            binary: wiki
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            npm-pkg: wiki-win32-x64
+            binary: wiki.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Build
+        working-directory: packages/cli
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross && 'aarch64-linux-gnu-gcc' || '' }}
+
+      - name: Copy binary to npm package
+        shell: bash
+        run: |
+          mkdir -p npm/${{ matrix.npm-pkg }}/bin
+          cp packages/cli/target/${{ matrix.target }}/release/${{ matrix.binary }} npm/${{ matrix.npm-pkg }}/bin/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.npm-pkg }}
+          path: npm/${{ matrix.npm-pkg }}/
+
+  publish-npm:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare platform packages
+        run: |
+          for pkg in wiki-linux-x64 wiki-linux-arm64 wiki-darwin-x64 wiki-darwin-arm64 wiki-win32-x64; do
+            cp -r artifacts/$pkg/* npm/$pkg/
+            chmod +x npm/$pkg/bin/wiki* 2>/dev/null || true
+          done
+
+      - name: Publish platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for pkg in wiki-linux-x64 wiki-linux-arm64 wiki-darwin-x64 wiki-darwin-arm64 wiki-win32-x64; do
+            echo "Publishing @goodfoot/$pkg..."
+            cd npm/$pkg
+            npm publish --access public
+            cd ../..
+          done
+
+      - name: Publish meta-package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: packages/cli
+        run: npm publish --access public
+
+  github-release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          for pkg in wiki-linux-x64 wiki-linux-arm64 wiki-darwin-x64 wiki-darwin-arm64 wiki-win32-x64; do
+            if [ -f "artifacts/$pkg/bin/wiki.exe" ]; then
+              cp "artifacts/$pkg/bin/wiki.exe" "release-assets/$pkg.exe"
+            else
+              cp "artifacts/$pkg/bin/wiki" "release-assets/$pkg"
+            fi
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-assets/*

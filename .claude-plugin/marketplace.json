@@ -1,0 +1,24 @@
+{
+  "name": "goodfoot-wiki",
+  "owner": {
+    "name": "Goodfoot Media LLC",
+    "email": "contact@goodfoot.io"
+  },
+  "metadata": {
+    "description": "Wiki documentation system with CLI and VSCode extension",
+    "version": "1.0.0",
+    "pluginRoot": "./plugins"
+  },
+  "plugins": [
+    {
+      "name": "wiki",
+      "version": "1.0.0",
+      "source": "./plugins/wiki",
+      "description": "Wiki documentation system — fragment-linked documentation with change detection, full-text search, and automated maintenance",
+      "author": {
+        "name": "Goodfoot Media LLC"
+      },
+      "license": "MIT"
+    }
+  ]
+}

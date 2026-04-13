@@ -1,0 +1,106 @@
+{
+  "name": "wiki-extension",
+  "displayName": "Wiki Viewer",
+  "description": "Renders wiki markdown files in webview panels with wikilink navigation.",
+  "version": "0.5.0",
+  "publisher": "goodfoot",
+  "type": "module",
+  "engines": {
+    "vscode": "^1.101.0",
+    "node": ">=22"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/bundle.cjs",
+  "contributes": {
+    "configuration": {
+      "title": "Wiki",
+      "properties": {
+        "wiki.openFilesInViewer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open wiki markdown files ($WIKI_DIR/**/*.md and **/*.wiki.md) in the wiki viewer by default. When disabled, files open in the standard text editor."
+        }
+      }
+    },
+    "customEditors": [
+      {
+        "viewType": "wiki.viewer",
+        "displayName": "Wiki Viewer",
+        "selector": [
+          {
+            "filenamePattern": "**/wiki/**/*.md"
+          },
+          {
+            "filenamePattern": "**/*.wiki.md"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "commands": [
+      {
+        "command": "wiki.search",
+        "title": "Search",
+        "category": "Wiki"
+      },
+      {
+        "command": "wiki.openInEditor",
+        "title": "Open in Editor",
+        "category": "Wiki"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "wiki.search",
+        "key": "shift+cmd+l",
+        "mac": "shift+cmd+l"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "node scripts/build/build-production.js",
+    "build": "vsce package --no-dependencies && { [ -n \"${SKIP_INSTALL:-}\" ] || bash scripts/install-vsix.sh; }",
+    "build:testing": "node scripts/build/build-testing.js",
+    "test": "NODE_OPTIONS='--disable-warning=ExperimentalWarning' tsx ./test/runTest.ts",
+    "lint": "npx biome check --write --unsafe --max-diagnostics 500 ./src ./test ./scripts && jsdoczoom -l",
+    "typecheck": "tsgo --noEmit",
+    "clean": "rm -rf dist out dist-test-* *.vsix tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@vscode-elements/elements": "^2.5.1",
+    "@vscode/codicons": "^0.0.45",
+    "highlight.js": "^11.11.1",
+    "markdown-it": "^14.1.1",
+    "markdown-it-front-matter": "^0.2.4",
+    "morphdom": "^2.7.8"
+  },
+  "devDependencies": {
+    "@types/highlight.js": "^10.1.0",
+    "@types/markdown-it": "^14.1.2",
+    "@types/mocha": "^10.0.10",
+    "@types/morphdom": "^2.4.2",
+    "@types/node": "24.x",
+    "@types/vscode": "^1.100.0",
+    "@typescript/native-preview": "^7.0.0-dev",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "3.7.1",
+    "esbuild": "^0.27.2",
+    "glob": "^13.0.0",
+    "mocha": "^11.7.5",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/goodfoot-io/wiki"
+  },
+  "author": {
+    "name": "Goodfoot Media LLC",
+    "url": "https://goodfoot.io"
+  }
+}

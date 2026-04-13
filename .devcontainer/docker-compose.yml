@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  app:
+    init: true
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ..:/home/node/wiki:cached
+      - zsh-history:/home/node/.zsh_history
+      - claude-config:/home/node/.claude
+    environment:
+      - NODE_OPTIONS=--max-old-space-size=8192
+      - CLAUDE_CONFIG_DIR=/home/node/.claude
+    network_mode: host
+    dns:
+      - 1.1.1.1
+    command: sleep infinity
+
+volumes:
+  zsh-history:
+  claude-config:

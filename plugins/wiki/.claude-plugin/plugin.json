@@ -1,0 +1,15 @@
+{
+  "name": "wiki",
+  "version": "1.0.0",
+  "description": "Wiki documentation system — fragment-linked documentation with change detection, full-text search, and automated maintenance",
+  "author": {
+    "name": "Goodfoot Media LLC",
+    "email": "contact@goodfoot.io"
+  },
+  "homepage": "https://github.com/goodfoot-io/wiki",
+  "repository": "https://github.com/goodfoot-io/wiki",
+  "license": "MIT",
+  "keywords": ["wiki", "documentation", "fragment-links", "wikilinks"],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json"
+}

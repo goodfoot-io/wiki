@@ -1,0 +1,208 @@
+/**
+ * QuickPick command that lets the user search and open wiki pages.
+ *
+ * Shows all pages on first open (via wiki list), then passes every non-empty
+ * query directly to the wiki CLI. Search results are two-line items: the
+ * matched snippets appear where the summary sits for list items, and the
+ * summary is shown on the second line via `detail`. All search result items
+ * carry `alwaysShow: true` so VS Code's own fuzzy filter does not hide CLI
+ * results that only match on body text.
+ *
+ * @summary QuickPick command that lets the user search and open wiki pages.
+ */
+
+import * as vscode from 'vscode';
+import { runWikiCommand } from '../utils/wikiBinary.js';
+
+/** Item returned by `wiki list --format json`. */
+interface WikiListItem {
+  title: string;
+  aliases: string[];
+  tags: string[];
+  summary: string;
+  file: string;
+}
+
+/** Item returned by `wiki <query> --format json` (search). */
+interface WikiSearchItem {
+  title: string;
+  file: string;
+  summary: string;
+  snippets: Array<{ line: number; text: string }>;
+}
+
+/** A QuickPickItem extended with the resolved file path. */
+type WikiQuickPickItem = vscode.QuickPickItem & { file: string };
+
+/**
+ * Convert a wiki list item to a single-line QuickPickItem.
+ *
+ * @param item - A wiki list item returned by `wiki list --format json`.
+ * @returns A QuickPickItem with the page title as label and summary as description.
+ */
+function toListQuickPickItem(item: WikiListItem): WikiQuickPickItem {
+  return {
+    label: item.title,
+    detail: item.summary,
+    file: item.file
+  };
+}
+
+/**
+ * Convert a wiki search result to a two-line QuickPickItem.
+ *
+ * The `description` line (inline, after the title) shows the matched snippets
+ * joined by " … ". The `detail` line (below the title) shows the page summary.
+ * Bold highlighting of the matched term is not possible in VS Code QuickPick
+ * description/detail fields — they are plain text only.
+ *
+ * `alwaysShow: true` prevents VS Code's own fuzzy filter from hiding items
+ * whose match is in body text rather than the title or summary.
+ *
+ * @param item - A wiki search result returned by `wiki <query> --format json`.
+ * @returns A two-line QuickPickItem with snippets as description and summary as detail.
+ */
+function toSearchQuickPickItem(item: WikiSearchItem): WikiQuickPickItem {
+  const snippetText = item.snippets.map((s) => s.text.trim()).join(' … ');
+  return {
+    label: item.title,
+    description: snippetText.length > 0 ? snippetText : item.summary,
+    detail: snippetText.length > 0 ? item.summary : undefined,
+    alwaysShow: true,
+    file: item.file
+  };
+}
+
+/**
+ * Return the filesystem path of the first VS Code workspace folder, or undefined
+ * if no folder is open. The wiki CLI requires a cwd inside the git repo to
+ * discover repository boundaries.
+ *
+ * @returns The workspace root path, or undefined if no folder is open.
+ */
+function workspaceRoot(): string | undefined {
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+}
+
+/**
+ * Load all wiki pages for the initial (empty-query) state.
+ * Shows a VS Code error notification and returns an empty array on failure.
+ *
+ * @returns All wiki pages as QuickPickItems, or an empty array on error.
+ */
+async function loadAllPages(): Promise<WikiQuickPickItem[]> {
+  try {
+    const result = await runWikiCommand(['list', '--format', 'json'], undefined, workspaceRoot());
+    if (result.exitCode !== 0) {
+      const message = result.stderr.trim() || `wiki list exited with code ${result.exitCode}`;
+      console.warn('[wiki-extension] wiki list failed:', message);
+      void vscode.window.showErrorMessage(`Wiki: ${message}`);
+      return [];
+    }
+    const items = JSON.parse(result.stdout) as WikiListItem[];
+    return items.map(toListQuickPickItem);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[wiki-extension] Failed to load wiki pages:', err);
+    void vscode.window.showErrorMessage(`Wiki: ${message}`);
+    return [];
+  }
+}
+
+/**
+ * Search wiki pages for the given query.
+ * Shows a VS Code error notification and returns an empty array on failure.
+ *
+ * @param query - The search query to pass to the wiki CLI.
+ * @param signal - AbortSignal used to cancel the underlying wiki process.
+ * @returns Matching wiki pages as QuickPickItems, or an empty array on error.
+ */
+async function searchPages(query: string, signal: AbortSignal): Promise<WikiQuickPickItem[]> {
+  try {
+    const result = await runWikiCommand([query, '--format', 'json'], signal, workspaceRoot());
+    // If the signal was aborted, the process was killed intentionally — not an error.
+    if (signal.aborted) {
+      return [];
+    }
+    if (result.exitCode !== 0) {
+      const message = result.stderr.trim() || `wiki search exited with code ${result.exitCode}`;
+      console.warn('[wiki-extension] wiki search failed:', message);
+      void vscode.window.showErrorMessage(`Wiki: ${message}`);
+      return [];
+    }
+    const items = JSON.parse(result.stdout) as WikiSearchItem[];
+    return items.map(toSearchQuickPickItem);
+  } catch (err) {
+    // If the signal was aborted, the spawn error (EPIPE, etc.) is expected.
+    if (signal.aborted) {
+      return [];
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[wiki-extension] Failed to search wiki pages:', err);
+    void vscode.window.showErrorMessage(`Wiki: ${message}`);
+    return [];
+  }
+}
+
+/**
+ * Open a wiki file in the custom wiki viewer.
+ *
+ * @param file - Absolute path to the wiki file to open.
+ */
+async function openWikiFile(file: string): Promise<void> {
+  const uri = vscode.Uri.file(file);
+  await vscode.commands.executeCommand('vscode.openWith', uri, 'wiki.viewer');
+}
+
+/**
+ * Show a QuickPick that lets the user browse and search wiki pages.
+ * An empty query lists all pages; a non-empty query performs a ranked search.
+ */
+export async function wikiQuickPick(): Promise<void> {
+  const qp = vscode.window.createQuickPick<WikiQuickPickItem>();
+  qp.placeholder = 'Search wiki pages…';
+  qp.matchOnDetail = true;
+  qp.busy = true;
+
+  // Load all pages immediately for the initial empty state.
+  const initialItems = await loadAllPages();
+  qp.items = initialItems;
+  qp.busy = false;
+
+  let activeAbort: AbortController | undefined;
+
+  qp.onDidChangeValue((query) => {
+    activeAbort?.abort();
+
+    if (query.trim() === '') {
+      qp.items = initialItems;
+      return;
+    }
+
+    const abort = new AbortController();
+    activeAbort = abort;
+    qp.busy = true;
+
+    void (async () => {
+      const results = await searchPages(query.trim(), abort.signal);
+      if (!abort.signal.aborted) {
+        qp.items = results;
+        qp.busy = false;
+      }
+    })();
+  });
+
+  qp.onDidAccept(async () => {
+    const selected = qp.selectedItems[0];
+    if (selected == null) return;
+    qp.hide();
+    await openWikiFile(selected.file);
+  });
+
+  qp.onDidHide(() => {
+    activeAbort?.abort();
+    qp.dispose();
+  });
+
+  qp.show();
+}
