@@ -9,11 +9,11 @@ tags:
 
 # Gemini Wiki Maintenance
 
-The repository runs an automated wiki maintenance pass after every commit on the main workspace. [`examples/githooks/scripts/gemini-wiki-maintenance.sh`](examples/githooks/scripts/gemini-wiki-maintenance.sh#L1-L307) invokes Gemini CLI to inspect stale fragment links, update prose, re-pin links, and commit the result — all without human intervention.
+The repository runs an automated wiki maintenance pass after every commit on the main workspace. [`examples/githooks/scripts/gemini-wiki-maintenance.sh`](examples/githooks/scripts/gemini-wiki-maintenance.sh#L1-L307&e2b1474) invokes Gemini CLI to inspect stale fragment links, update prose, re-pin links, and commit the result — all without human intervention.
 
 ## When It Runs
 
-The [example post-commit hook](examples/githooks/gemini-post-commit.sh) fires the script in a background process (`&`) after every commit. A guard on the `GEMINI_WIKI_ACTIVE` environment variable prevents it from recursing into its own wiki commits.
+The [example post-commit hook](examples/githooks/gemini-post-commit.sh#e2b1474) fires the script in a background process (`&`) after every commit. A guard on the `GEMINI_WIKI_ACTIVE` environment variable prevents it from recursing into its own wiki commits.
 
 A fail-closed lockfile under `$GIT_COMMON_DIR/wiki-maintenance.lock` ensures only one run is active at a time. Stale locks (from crashed processes) are detected by checking whether the PID is still alive.
 
@@ -23,7 +23,7 @@ The script exits immediately (before the expensive worktree setup) if `wiki stal
 
 1. **Creates an isolated git worktree** on a temporary branch (`wiki-maintenance/<timestamp>`) pointing to the current `HEAD`. Gemini works inside this worktree — its changes are committed there before being merged back.
 
-2. **Runs Gemini** inside the worktree with an explicit admin-level policy file and a structured multi-step prompt that enforces [**fragment link discipline**](examples/githooks/scripts/gemini-wiki-maintenance.sh#L183-L193). Gemini's home directory is isolated (`$ISOLATED_HOME`) and its environment is strictly controlled, though `PATH` is forwarded so the `wiki` binary and other essential tools remain available. It uses separate credentials and cannot write outside the worktree.
+2. **Runs Gemini** inside the worktree with an explicit admin-level policy file and a structured multi-step prompt that enforces [**fragment link discipline**](examples/githooks/scripts/gemini-wiki-maintenance.sh#L183-L193&e2b1474). Gemini's home directory is isolated (`$ISOLATED_HOME`) and its environment is strictly controlled, though `PATH` is forwarded so the `wiki` binary and other essential tools remain available. It uses separate credentials and cannot write outside the worktree.
 
 3. **Verifies the result** with `wiki check` before accepting any changes. If the wiki is invalid after Gemini runs, the maintenance is aborted.
 
@@ -73,5 +73,5 @@ All output (stdout and stderr) is tee'd to `/workspace/.cards/logs/gemini-wiki-m
 
 ## References
 
-- [Gemini wiki maintenance script](examples/githooks/scripts/gemini-wiki-maintenance.sh)
-- [Gemini post-commit hook](examples/githooks/gemini-post-commit.sh)
+- [Gemini wiki maintenance script](examples/githooks/scripts/gemini-wiki-maintenance.sh#e2b1474)
+- [Gemini post-commit hook](examples/githooks/gemini-post-commit.sh#e2b1474)

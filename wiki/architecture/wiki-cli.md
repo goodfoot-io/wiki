@@ -25,7 +25,7 @@ The extract command (`packages/cli/src/commands/extract.rs`) reads arbitrary tex
 
 ## Context Injection Hook
 
-The [hook command](packages/cli/src/commands/hook.rs#e4b76c2ef) integrates the wiki with external tools like Claude Code. It processes `PostToolUse` JSON events from stdin and injects relevant wiki context into the system prompt.
+The [hook command](packages/cli/src/commands/hook.rs) integrates the wiki with external tools like Claude Code. It processes `PostToolUse` JSON events from stdin and injects relevant wiki context into the system prompt.
 
 ### Suppression Logic
 
@@ -39,15 +39,15 @@ To minimize prompt noise, the hook [tracks which file-path lookups have been sho
 
 Several commands support navigating and searching the wiki from the command line:
 
-- **Incoming Links**: The [links command](packages/cli/src/commands/links.rs#e4b76c2ef) finds all wiki pages that reference a given target, whether that target resolves as a wiki page, a workspace file, or both.
-- **Search**: The [search command](packages/cli/src/commands/search.rs#e4b76c2ef) is the primary entrypoint for finding wiki content. It performs a weighted search that ranks exact title matches, repo-relative path matches, and full-text matches (BM25) in a single unified flow.
+- **Incoming Links**: The [links command](packages/cli/src/commands/links.rs) finds all wiki pages that reference a given target, whether that target resolves as a wiki page, a workspace file, or both.
+- **Search**: The [search command](packages/cli/src/commands/search.rs) is the primary entrypoint for finding wiki content. It performs a weighted search that ranks exact title matches, repo-relative path matches, and full-text matches (BM25) in a single unified flow.
 - **Suggest**: The suggest command (used internally by the hook) finds the best matches for a query with a minimum score threshold, prioritizing titles and aliases.
-- **Summary**: The [summary command](packages/cli/src/commands/summary.rs#e4b76c2ef) outputs a page's frontmatter-defined summary along with a repo-relative path to its source file.
-- **Print**: The [print command](packages/cli/src/commands/print.rs#5ca0f4050) outputs the full raw markdown content of a wiki page to stdout.
+- **Summary**: The [summary command](packages/cli/src/commands/summary.rs) outputs a page's frontmatter-defined summary along with a repo-relative path to its source file.
+- **Print**: The [print command](packages/cli/src/commands/print.rs) outputs the full raw markdown content of a wiki page to stdout.
 
 ## Rendering and Serving
 
-The [html command](packages/cli/src/commands/html.rs#e4b76c2ef) renders the wiki as a static site. The [serve command](packages/cli/src/commands/serve.rs#81acdb20d) starts a local development server with live-reloading to preview changes. It caches the `WikiIndex` in application state to eliminate per-request index rebuilds, using a background worker thread with debouncing to handle file change events. The server supports incremental indexing via `refresh_paths` and defers search index updates to a background catch-up task. Both commands reserve their names in frontmatter to avoid routing conflicts.
+The [html command](packages/cli/src/commands/html.rs) renders the wiki as a static site. The [serve command](packages/cli/src/commands/serve.rs) starts a local development server with live-reloading to preview changes. It caches the `WikiIndex` in application state to eliminate per-request index rebuilds, using a background worker thread with debouncing to handle file change events. The server supports incremental indexing via `refresh_paths` and defers search index updates to a background catch-up task. Both commands reserve their names in frontmatter to avoid routing conflicts.
 
 ## Frontmatter
 
