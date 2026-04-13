@@ -9,7 +9,7 @@ tags:
 
 # Gemini Wiki Maintenance
 
-The repository runs an automated wiki maintenance pass after every commit on the main workspace. [`examples/githooks/scripts/gemini-wiki-maintenance.sh`](examples/githooks/scripts/gemini-wiki-maintenance.sh#L1-L307&e2b1474) invokes Gemini CLI to inspect stale fragment links, update prose, re-pin links, and commit the result — all without human intervention.
+The repository runs an automated wiki maintenance pass after every commit on the main workspace. [`examples/githooks/scripts/gemini-wiki-maintenance.sh`](examples/githooks/scripts/gemini-wiki-maintenance.sh) invokes Gemini CLI to inspect stale fragment links, update prose, re-pin links, and commit the result — all without human intervention.
 
 ## When It Runs
 
