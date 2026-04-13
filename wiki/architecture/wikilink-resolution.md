@@ -15,7 +15,7 @@ The [check command](packages/cli/src/commands/check.rs#L28-L29) validates that n
 
 ## Wikilink Extraction and Resolution
 
-The [extract command](packages/cli/src/commands/extract.rs#23a197090) reads text from stdin, parses all `[[wikilink]]` references using a parser that operates on scrubbed content (code blocks and inline code are blanked out to avoid false matches), and outputs the canonical title and summary for each resolved page. Unresolved wikilinks are reported to stderr with exit code 1, signaling an error that should be fixed.
+The [extract command](packages/cli/src/commands/extract.rs) reads text from stdin, parses all `[[wikilink]]` references using a parser that operates on scrubbed content (code blocks and inline code are blanked out to avoid false matches), and outputs the canonical title and summary for each resolved page. Unresolved wikilinks are reported to stderr with exit code 1, signaling an error that should be fixed.
 
 ## Fragment Link Anchoring
 

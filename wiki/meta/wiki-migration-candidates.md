@@ -27,7 +27,7 @@ See [[Wiki Organization]] for the embed vs. centralize decision criteria.
 - **e2e-git-testing.md** — `wiki/architecture/e2e-git-hook-testing.md`
   Reason: Cross-cutting test infrastructure architecture. Explains full subprocess chain from git operation through cards API. Relevant to multiple packages.
 
-- ~~**edh-template-update-procedure.md**~~ — migrated to [[EDH Template Maintenance]]
+- ~~**edh-template-update-procedure.md**~~ — migrated (target page in external repo)
 
 - **icon-server.md** — `wiki/architecture/icon-server-webview-api.md`
   Reason: API specification and design rationale for solving webview icon theme access problem. Cross-cutting feature spanning extension host and webview communication.

@@ -9,15 +9,15 @@ The wiki CLI validates and maintains fragment links between wiki pages and sourc
 
 ## Fragment Link Parsing
 
-The [parser](packages/cli/src/parser.rs#L6-L12) extracts two link types from markdown content: fragment links (`[label](path#sha-L10-L20)`) and wikilinks (`[[Title]]`). Both parsers operate on scrubbed content — code blocks, inline code, and HTML comments are blanked out before extraction to avoid false matches.
+The [parser](packages/cli/src/parser.rs#L6-L12&e2b1474) extracts two link types from markdown content: fragment links (`[label](path#sha-L10-L20)`) and wikilinks (`[[Title]]`). Both parsers operate on scrubbed content — code blocks, inline code, and HTML comments are blanked out before extraction to avoid false matches.
 
 ## Staleness Detection
 
-The [stale command](packages/cli/src/commands/stale.rs#L41-L54) compares each pinned SHA against the current HEAD to find fragment links whose referenced files have changed. It reports the number of commits since the pin and optionally includes a diff. For performance, it caches Git operation results (commits, stats, and patches) when multiple fragment links reference the same file and SHA.
+The [stale command](packages/cli/src/commands/stale.rs#L41-L54&e2b1474) compares each pinned SHA against the current HEAD to find fragment links whose referenced files have changed. It reports the number of commits since the pin and optionally includes a diff. For performance, it caches Git operation results (commits, stats, and patches) when multiple fragment links reference the same file and SHA.
 
 ## Validation Pipeline
 
-The [check command](packages/cli/src/commands/check.rs#L28-L29) runs a full validation pass: frontmatter parsing, title/alias collision detection, wikilink resolution, and fragment link verification (file existence and line range bounds at the pinned SHA). With `--fix`, unpinned fragment links are pinned automatically rather than reported as errors — already-pinned links are never touched.
+The [check command](packages/cli/src/commands/check.rs#L28-L29&e2b1474) runs a full validation pass: frontmatter parsing, title/alias collision detection, wikilink resolution, and fragment link verification (file existence and line range bounds at the pinned SHA). With `--fix`, unpinned fragment links are pinned automatically rather than reported as errors — already-pinned links are never touched.
 
 ## Extract
 
@@ -29,11 +29,11 @@ The [hook command](packages/cli/src/commands/hook.rs#e4b76c2ef) integrates the w
 
 ### Suppression Logic
 
-To avoid circularity, the hook [suppresses injection](packages/cli/src/commands/hook.rs#L33-L45) when the tool is operating on a wiki document. This is determined by checking if the file is inside the wiki directory or has a `.wiki.md` extension.
+To avoid circularity, the hook [suppresses injection](packages/cli/src/commands/hook.rs#L33-L45&e2b1474) when the tool is operating on a wiki document. This is determined by checking if the file is inside the wiki directory or has a `.wiki.md` extension.
 
 ### Session Deduplication
 
-To minimize prompt noise, the hook [tracks which file-path lookups have been shown](packages/cli/src/commands/hook.rs#L77-L87) in a given session. If a page that references the current file has already been injected in the current session, it is skipped. Wikilinks explicitly mentioned in tool output are always injected, regardless of the session state.
+To minimize prompt noise, the hook [tracks which file-path lookups have been shown](packages/cli/src/commands/hook.rs#L77-L87&e2b1474) in a given session. If a page that references the current file has already been injected in the current session, it is skipped. Wikilinks explicitly mentioned in tool output are always injected, regardless of the session state.
 
 ## Navigation and Discovery
 
@@ -51,4 +51,4 @@ The [html command](packages/cli/src/commands/html.rs#e4b76c2ef) renders the wiki
 
 ## Frontmatter
 
-The [frontmatter module](packages/cli/src/frontmatter.rs#L37-L47) parses and validates YAML frontmatter from wiki pages. It reserves certain titles (`check`, `pin`, `stale`, `links`, `list`, `summary`, `print`, `html`, `serve`) to prevent ambiguity with command-line dispatch.
+The [frontmatter module](packages/cli/src/frontmatter.rs#L37-L47&e2b1474) parses and validates YAML frontmatter from wiki pages. It reserves certain titles (`check`, `pin`, `stale`, `links`, `list`, `summary`, `print`, `html`, `serve`) to prevent ambiguity with command-line dispatch.
