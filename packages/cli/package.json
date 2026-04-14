@@ -1,7 +1,6 @@
 {
   "name": "@goodfoot/wiki",
   "version": "0.5.0",
-  "private": true,
   "bin": "bin/wiki",
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
