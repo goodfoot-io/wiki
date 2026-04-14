@@ -50,6 +50,12 @@ jobs:
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/cli
+          key: ${{ matrix.target }}
+
       - name: Install cross-compilation tools (Linux ARM64)
         if: matrix.cross
         run: |
