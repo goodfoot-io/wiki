@@ -49,9 +49,16 @@
     "impeccable@impeccable": false,
     "frontend-design@claude-plugins-official": true,
     "plugin-dev@claude-plugins-official": true,
-    "claude-code-hooks@goodfoot": true
+    "claude-code-hooks@goodfoot": true,
+    "last30days@last30days-skill": true
   },
   "extraKnownMarketplaces": {
+    "last30days-skill": {
+      "source": {
+        "source": "github",
+        "repo": "mvanhorn/last30days-skill"
+      }
+    },
     "impeccable": {
       "source": {
         "source": "github",
