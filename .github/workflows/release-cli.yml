@@ -77,6 +77,8 @@ jobs:
   publish-npm:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4
@@ -100,20 +102,25 @@ jobs:
           done
 
       - name: Publish platform packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for pkg in wiki-linux-x64 wiki-linux-arm64 wiki-darwin-x64 wiki-darwin-arm64 wiki-win32-x64; do
             echo "Publishing @goodfoot/$pkg..."
             cd npm/$pkg
-            npm publish --access public
+            npm publish --access public --provenance
             cd ../..
           done
 
       - name: Publish meta-package
-        env:
-          YARN_NPM_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: yarn workspace @goodfoot/wiki npm publish --access public
+        working-directory: packages/cli
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json'));
+            for (const k of Object.keys(pkg.optionalDependencies || {}))
+              pkg.optionalDependencies[k] = pkg.version;
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+          "
+          npm publish --access public --provenance
 
   github-release:
     needs: build
