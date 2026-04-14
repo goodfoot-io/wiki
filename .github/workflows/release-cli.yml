@@ -108,6 +108,8 @@ jobs:
           done
 
       - name: Publish platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for pkg in wiki-linux-x64 wiki-linux-arm64 wiki-darwin-x64 wiki-darwin-arm64 wiki-win32-x64; do
             echo "Publishing @goodfoot/$pkg..."
@@ -117,6 +119,8 @@ jobs:
           done
 
       - name: Publish meta-package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: packages/cli
         run: |
           node -e "
