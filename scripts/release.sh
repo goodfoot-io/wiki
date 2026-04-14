@@ -12,7 +12,7 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 
-TAG="wiki-v$VERSION"
+TAG="wiki-cli-v$VERSION"
 
 # --- Branch check ---
 BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)
