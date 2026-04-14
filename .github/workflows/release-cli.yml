@@ -18,11 +18,12 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             npm-pkg: wiki-linux-x64
             binary: wiki
+            cross: true
           - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
             npm-pkg: wiki-linux-arm64
             binary: wiki
             cross: true
@@ -56,17 +57,15 @@ jobs:
           workspaces: packages/cli
           key: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools (Linux ARM64)
+      - name: Install cross
         if: matrix.cross
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
       - name: Build
         working-directory: packages/cli
-        run: cargo build --release --target ${{ matrix.target }}
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross && 'aarch64-linux-gnu-gcc' || '' }}
+        run: ${{ matrix.cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }}
 
       - name: Copy binary to npm package
         shell: bash
