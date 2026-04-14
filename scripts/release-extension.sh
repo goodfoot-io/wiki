@@ -9,19 +9,19 @@ EXT_PKG="$REPO_ROOT/packages/extension/package.json"
 CLI_VERSION=$(node -pe "require('$CLI_PKG').version")
 EXT_VERSION=$(node -pe "require('$EXT_PKG').version")
 
-if [[ ! "$CLI_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "ERROR: Version '$CLI_VERSION' in packages/cli/package.json is not valid semver." >&2
+if [[ ! "$EXT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "ERROR: Version '$EXT_VERSION' in packages/extension/package.json is not valid semver." >&2
   exit 1
 fi
 
 # --- Version lock check ---
 if [[ "$CLI_VERSION" != "$EXT_VERSION" ]]; then
-  echo "ERROR: CLI version ($CLI_VERSION) does not match extension version ($EXT_VERSION)." >&2
+  echo "ERROR: Extension version ($EXT_VERSION) does not match CLI version ($CLI_VERSION)." >&2
   echo "       Bump both packages to the same version before releasing." >&2
   exit 1
 fi
 
-TAG="wiki-cli-v$CLI_VERSION"
+TAG="wiki-ext-v$EXT_VERSION"
 
 # --- Branch check ---
 BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)
