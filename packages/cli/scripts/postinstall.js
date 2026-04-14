@@ -1,19 +1,17 @@
 #!/usr/bin/env node
 
-"use strict";
-
-const fs = require("fs");
-const path = require("path");
+const fs = require('fs');
+const path = require('path');
 
 const PLATFORM_MAP = {
-  linux: "linux",
-  darwin: "darwin",
-  win32: "win32",
+  linux: 'linux',
+  darwin: 'darwin',
+  win32: 'win32'
 };
 
 const ARCH_MAP = {
-  x64: "x64",
-  arm64: "arm64",
+  x64: 'x64',
+  arm64: 'arm64'
 };
 
 function main() {
@@ -28,28 +26,24 @@ function main() {
   }
 
   const packageName = `@goodfoot/wiki-${platform}-${arch}`;
-  const binaryName = process.platform === "win32" ? "wiki.exe" : "wiki";
+  const binaryName = process.platform === 'win32' ? 'wiki.exe' : 'wiki';
 
   let packageDir;
   try {
     packageDir = path.dirname(require.resolve(`${packageName}/package.json`));
   } catch {
     // Platform package not installed -- user may have built from source
-    console.log(
-      `@goodfoot/wiki: Optional package ${packageName} not found. Skipping binary setup.`
-    );
+    console.log(`@goodfoot/wiki: Optional package ${packageName} not found. Skipping binary setup.`);
     process.exit(0);
   }
 
-  const sourceBinary = path.join(packageDir, "bin", binaryName);
+  const sourceBinary = path.join(packageDir, 'bin', binaryName);
   if (!fs.existsSync(sourceBinary)) {
-    console.log(
-      `@goodfoot/wiki: Binary not found in ${packageName}. The package may not have been published yet.`
-    );
+    console.log(`@goodfoot/wiki: Binary not found in ${packageName}. The package may not have been published yet.`);
     process.exit(0);
   }
 
-  const targetDir = path.join(__dirname, "..", "bin");
+  const targetDir = path.join(__dirname, '..', 'lib');
   const targetBinary = path.join(targetDir, binaryName);
 
   fs.mkdirSync(targetDir, { recursive: true });

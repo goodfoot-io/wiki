@@ -1,7 +1,9 @@
 {
   "name": "@goodfoot/wiki",
   "version": "0.5.0",
-  "bin": "bin/wiki",
+  "bin": {
+    "wiki": "bin/wiki"
+  },
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
     "build": "env CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=target/build cargo build --release",
@@ -10,6 +12,10 @@
     "lint": "env CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=target/lint cargo clippy --quiet -- -D warnings",
     "typecheck": "env CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=target/typecheck cargo check --quiet"
   },
+  "files": [
+    "bin/",
+    "scripts/postinstall.js"
+  ],
   "optionalDependencies": {
     "@goodfoot/wiki-darwin-arm64": "workspace:*",
     "@goodfoot/wiki-darwin-x64": "workspace:*",

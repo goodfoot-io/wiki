@@ -109,9 +109,8 @@ jobs:
 
       - name: Publish meta-package
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        working-directory: packages/cli
-        run: npm publish --access public
+          YARN_NPM_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: yarn workspace @goodfoot/wiki npm publish --access public
 
   github-release:
     needs: build

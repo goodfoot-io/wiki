@@ -1,1 +1,20 @@
-/home/node/wiki/npm/wiki-linux-arm64/bin/wiki
+#!/usr/bin/env node
+"use strict";
+
+const { spawnSync } = require("child_process");
+const path = require("path");
+const fs = require("fs");
+
+const binaryName = process.platform === "win32" ? "wiki.exe" : "wiki";
+const nativePath = path.join(__dirname, "..", "lib", binaryName);
+
+if (!fs.existsSync(nativePath)) {
+  process.stderr.write(
+    "@goodfoot/wiki: Native binary not found.\n" +
+    "Try reinstalling: npm install @goodfoot/wiki\n"
+  );
+  process.exit(1);
+}
+
+const result = spawnSync(nativePath, process.argv.slice(2), { stdio: "inherit" });
+process.exit(result.status ?? 1);
