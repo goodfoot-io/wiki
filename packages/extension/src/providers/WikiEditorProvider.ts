@@ -225,18 +225,36 @@ export class WikiEditorProvider implements vscode.CustomReadonlyEditorProvider {
           // Resolve the target page URI via wiki summary.
           const targetUri = await this._resolvePageUri(message.pageName);
           if (targetUri == null) {
-            // Fallback: treat as a workspace-relative source file path when the
-            // name has a non-markdown extension (e.g. [[packages/foo/bar.ts]]).
+            // Fallback: treat as a workspace-relative file path when the name
+            // looks like a path (e.g. [[packages/foo/bar.ts]] or
+            // [[public/plugins/runtime/skills/card/SKILL.md]]).
             const ext = path.extname(message.pageName).toLowerCase();
-            const isSourceFile = ext !== '' && ext !== '.md';
-            if (isSourceFile) {
+            const isFilePath = ext !== '' && message.pageName.includes('/');
+            if (isFilePath) {
               const workspaceRoot = this._workspaceRoot();
               if (workspaceRoot != null) {
                 const fileUri = vscode.Uri.file(path.join(workspaceRoot, message.pageName));
                 try {
                   await vscode.workspace.fs.stat(fileUri);
-                  const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
-                  await vscode.window.showTextDocument(fileUri, { viewColumn, preview: false });
+                  if (ext === '.md') {
+                    // Render markdown files in the wiki viewer.
+                    if (message.split) {
+                      await vscode.commands.executeCommand('vscode.openWith', fileUri, 'wiki.viewer', {
+                        viewColumn: vscode.ViewColumn.Beside
+                      });
+                    } else {
+                      history.splice(currentIndex + 1);
+                      history.push({ uri: fileUri, pageName: message.pageName, scrollY: 0 });
+                      currentIndex = history.length - 1;
+                      currentUri = fileUri;
+                      await this._renderPage(webviewPanel.webview, fileUri, webviewPanel);
+                      postNavigationState();
+                    }
+                  } else {
+                    // Open source files in the text editor.
+                    const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
+                    await vscode.window.showTextDocument(fileUri, { viewColumn, preview: false });
+                  }
                   return;
                 } catch (err) {
                   const isNotFound = err instanceof vscode.FileSystemError && err.code === 'FileNotFound';
