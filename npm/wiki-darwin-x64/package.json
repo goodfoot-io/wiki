@@ -11,5 +11,9 @@
   ],
   "files": [
     "bin/"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/goodfoot-io/wiki"
+  }
 }

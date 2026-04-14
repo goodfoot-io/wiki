@@ -22,5 +22,9 @@
     "@goodfoot/wiki-linux-arm64": "workspace:*",
     "@goodfoot/wiki-linux-x64": "workspace:*",
     "@goodfoot/wiki-win32-x64": "workspace:*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/goodfoot-io/wiki"
   }
 }
