@@ -1,10 +1,15 @@
 name: Release Extension
 
 on:
-  workflow_dispatch: # disabled: push tags re-enable when ready to publish
+  push:
+    tags:
+      - "wiki-ext-v*"
 
 permissions:
   contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   publish:
@@ -34,11 +39,11 @@ jobs:
 
       - name: Publish to VS Code Marketplace
         working-directory: packages/extension
-        run: npx vsce publish --pat ${{ secrets.VSCE_PAT }} --no-dependencies
+        run: npx vsce publish --pat ${{ secrets.WIKI_EXTENSION_VS_MARKETPLACE_TOKEN }} --no-dependencies
 
-      - name: Publish to Open VSIX
+      - name: Publish to Open VSX
         working-directory: packages/extension
-        run: npx ovsx publish *.vsix --pat ${{ secrets.OVSX_PAT }}
+        run: npx ovsx publish *.vsix --pat ${{ secrets.WIKI_EXTENSION_OPEN_VSX_TOKEN }}
 
       - name: Upload VSIX to GitHub Release
         uses: softprops/action-gh-release@v2
