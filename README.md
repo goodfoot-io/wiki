@@ -48,7 +48,38 @@ wiki serve
 
 # Run inside a git hook (indexes new/changed articles)
 wiki hook post-commit
+
+# Install the Codex integration (skill, PostToolUse hook, feature flag)
+wiki install --codex
 ```
+
+### Installing the Codex integration
+
+`wiki install --codex` downloads the latest plugin assets from
+[goodfoot-io/wiki](https://github.com/goodfoot-io/wiki) and installs them into
+your Codex home (resolved from `--codex-home`, `$CODEX_HOME`, or `~/.codex`). It
+installs:
+
+- The `wiki` skill under `$CODEX_HOME/skills/wiki/`
+- A managed `PostToolUse` hook group in `$CODEX_HOME/hooks.json` that runs
+  `wiki hook --codex`
+- `[features].codex_hooks = true` in `$CODEX_HOME/config.toml`
+
+Re-running the command updates the install in place: the managed skill
+directory is replaced atomically, the managed hook group is upserted without
+touching unrelated hook config, and `codex_hooks` is ensured. Backups of any
+changed files are written under `$CODEX_HOME/.wiki-install/backups/`.
+
+```bash
+wiki install --codex                        # install or update from main
+wiki install --codex --ref v1.0.2           # pin to a tag, branch, or SHA
+wiki install --codex --codex-home ./codex   # override the Codex home
+wiki install --codex --dry-run              # print planned changes, write nothing
+wiki install --codex --force                # overwrite unmanaged skill/hook conflicts
+```
+
+The command is fail-closed: if the download, archive validation, or existing
+`hooks.json`/`config.toml` parse fails, no files are written.
 
 ### Features
 

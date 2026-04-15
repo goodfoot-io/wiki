@@ -180,6 +180,20 @@ Perf scope events measure execution time and record success/error status. They a
 | 405 | `"**{kind}** — `{file}:{line}`"` | Formatted diagnostic with location and message |
 | 414 | `"Fixed {count} file(s)."` | Summary of auto-fixes applied |
 
+### commands/install.rs
+
+| Line | Message | Purpose |
+|------|---------|---------|
+| 741 | `"wiki install: enabled [features].codex_hooks in {path}"` | Reports that the installer flipped `codex_hooks` from `false` to `true` in `$CODEX_HOME/config.toml` |
+| 927 | `"wiki install --codex: done"` | Final status line after a successful install/update |
+| 928 | Install summary header | Leads the per-section status block (skill, hooks, config, backups, manifest) |
+| 933 | `"  hooks.json:  {label}"` | Per-file status for the managed `PostToolUse` group upsert |
+| 934 | `"  config.toml: {label}"` | Per-file status for the `[features].codex_hooks` edit |
+| 936-938 | Backup paths list | Paths of any backups written under `$CODEX_HOME/.wiki-install/backups/` |
+| 942 | `"  manifest:    {path}"` | Path of the updated `.wiki-install/manifest.json` |
+| 989-996 | `"wiki install --codex [DRY RUN]"` and planned files | Dry-run preview (codex home, ref, planned files); no network, no writes |
+| 1000-1002 | `"wiki install --codex"` header | Install-start banner (codex home, ref) |
+
 ### commands/hook.rs
 
 | Line | Message | Purpose |
