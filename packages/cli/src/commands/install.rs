@@ -812,6 +812,46 @@ fn write_manifest(
     Ok(())
 }
 
+// ── Pre-flight validation ───────────────────────────────────────────────────
+
+/// Parse existing `hooks.json` and `config.toml` under `codex_home` without
+/// mutating anything, so that a syntactically broken file causes the install
+/// to fail before any skill files are written.
+fn preflight_validate_existing(codex_home: &Path) -> Result<()> {
+    let hooks_path = codex_home.join("hooks.json");
+    if hooks_path.exists() {
+        let body = std::fs::read_to_string(&hooks_path)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("wiki install: failed to read {}", hooks_path.display()))?;
+        let parsed: JsonValue = serde_json::from_str(&body).map_err(|e| {
+            miette!(
+                "wiki install: {} is not valid JSON: {e}. Fix or remove the file and retry.",
+                hooks_path.display()
+            )
+        })?;
+        if !parsed.is_object() {
+            return Err(miette!(
+                "wiki install: {} top-level value must be a JSON object",
+                hooks_path.display()
+            ));
+        }
+    }
+
+    let config_path = codex_home.join("config.toml");
+    if config_path.exists() {
+        let body = std::fs::read_to_string(&config_path)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("wiki install: failed to read {}", config_path.display()))?;
+        let _doc: DocumentMut = body.parse().map_err(|e| {
+            miette!(
+                "wiki install: {} is not valid TOML: {e}. Fix or remove the file and retry.",
+                config_path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 // ── Orchestration ───────────────────────────────────────────────────────────
 
 /// Apply the three install phases against `codex_home` from a pre-extracted
@@ -837,6 +877,11 @@ pub fn apply_install(
             staged_skill.display()
         ));
     }
+
+    // Pre-flight: fail closed on invalid existing config files BEFORE we
+    // mutate anything on disk. Without this, a broken hooks.json would cause
+    // install_skill to run first and leave a partial install behind.
+    preflight_validate_existing(codex_home)?;
 
     let installed_at = rfc3339_utc(SystemTime::now());
     let manifest = read_manifest(codex_home);
@@ -908,6 +953,22 @@ pub fn run(
     codex_home: Option<&Path>,
     git_ref: &str,
 ) -> Result<i32> {
+    run_with_fetcher(codex, force, dry_run, codex_home, git_ref, &GitHubFetcher)
+}
+
+/// Run the `wiki install` command against a caller-supplied [`SourceFetcher`].
+///
+/// This is the seam used by integration tests to exercise the entire install
+/// flow — including codex-home resolution, dry-run handling, archive
+/// extraction, and [`apply_install`] — without hitting `github.com`.
+pub fn run_with_fetcher(
+    codex: bool,
+    force: bool,
+    dry_run: bool,
+    codex_home: Option<&Path>,
+    git_ref: &str,
+    fetcher: &dyn SourceFetcher,
+) -> Result<i32> {
     if !codex {
         return Err(miette!(
             "wiki install: --codex is required (only the Codex integration is supported)"
@@ -940,7 +1001,6 @@ pub fn run(
     println!("  codex home: {}", home.display());
     println!("  ref:        {git_ref}");
 
-    let fetcher = GitHubFetcher;
     let archive = fetcher.fetch_archive(git_ref)?;
     let temp = tempfile::Builder::new()
         .prefix("wiki-install-")
