@@ -923,24 +923,92 @@ pub fn apply_install(
     })
 }
 
+/// Print the shared header used by both dry-run and real-run output.
+fn print_install_header(codex_home: &Path, git_ref: &str, dry_run: bool) {
+    if dry_run {
+        println!("wiki install --codex (preview — nothing will be downloaded or written)");
+    } else {
+        println!("wiki install --codex");
+    }
+    println!();
+    println!("Downloading from: {SOURCE_OWNER}/{SOURCE_REPO} @ {git_ref}");
+    println!(
+        "  (git branch, tag, or commit on github.com/{SOURCE_OWNER}/{SOURCE_REPO} —");
+    println!("   the wiki content and hook scripts are fetched from this ref)");
+    println!("Installing into:  {}", codex_home.display());
+    println!();
+}
+
+/// Print the grouped "new files" / "merged in place" sections.
+///
+/// When `summary` is `None` we're in dry-run mode and every item is described
+/// in the future tense with no status suffix. When `summary` is `Some`, the
+/// actual [`ActionStatus`] for each target is appended.
+fn print_planned_files(summary: Option<&InstallSummary>) {
+    let (hooks_status, config_status, skill_status, skill_count) = match summary {
+        Some(s) => (
+            Some(s.hooks),
+            Some(s.config),
+            Some(s.skill),
+            Some(s.skill_files.len()),
+        ),
+        None => (None, None, None, None),
+    };
+
+    println!("New files (written fresh — any existing managed copy is replaced):");
+    match (skill_status, skill_count) {
+        (Some(status), Some(n)) => println!(
+            "  - skills/wiki/        the wiki skill + reference docs ({n} file(s), {})",
+            status.label()
+        ),
+        _ => println!(
+            "  - skills/wiki/        the wiki skill + reference docs"
+        ),
+    }
+    println!("  - .wiki-install/manifest.json");
+    println!("                        bookkeeping: records this install so");
+    println!("                        future runs can detect drift");
+    println!();
+
+    println!("Merged into existing files (other content preserved;");
+    println!("a timestamped backup is written before any change):");
+    match hooks_status {
+        Some(status) => println!(
+            "  - hooks.json          adds/updates the wiki PostToolUse hook entry ({})",
+            status.label()
+        ),
+        None => println!(
+            "  - hooks.json          adds/updates the wiki PostToolUse hook entry"
+        ),
+    }
+    println!("                        (existing hooks in other groups are left alone)");
+    match config_status {
+        Some(status) => println!(
+            "  - config.toml         sets [features].codex_hooks = true ({})",
+            status.label()
+        ),
+        None => println!(
+            "  - config.toml         sets [features].codex_hooks = true"
+        ),
+    }
+    println!("                        (every other key in the file is left untouched)");
+}
+
 /// Print a human-readable summary of an install to stdout.
 fn print_summary(codex_home: &Path, summary: &InstallSummary) {
-    println!("wiki install --codex: done");
-    println!(
-        "  skills/wiki: {} ({} file(s))",
-        summary.skill.label(),
-        summary.skill_files.len()
-    );
-    println!("  hooks.json:  {}", summary.hooks.label());
-    println!("  config.toml: {}", summary.config.label());
+    print_planned_files(Some(summary));
+
     if !summary.backups.is_empty() {
-        println!("  backups:");
+        println!();
+        println!("Backups written:");
         for b in &summary.backups {
-            println!("    - {}", b.display());
+            println!("  - {}", b.display());
         }
     }
+
+    println!();
     let manifest_path = codex_home.join(".wiki-install/manifest.json");
-    println!("  manifest:    {}", manifest_path.display());
+    println!("Manifest: {}", manifest_path.display());
     print!("{}", codex_extension_footer());
 }
 
@@ -951,9 +1019,9 @@ const VSCODE_MARKETPLACE_URL: &str =
 const OPEN_VSX_URL: &str = "https://open-vsx.org/extension/goodfoot/wiki-extension";
 /// Claude Code plugin marketplace docs URL.
 const CLAUDE_DOCS_URL: &str = "https://code.claude.com/docs/en/discover-plugins";
-/// Exact command users should run to add the wiki marketplace to Claude Code.
+/// Exact command users should run to install the wiki plugin into Claude Code.
 const CLAUDE_MARKETPLACE_CMD: &str =
-    "claude plugin marketplace add goodfoot-io/wiki --scope project";
+    "claude plugin marketplace add goodfoot-io/wiki --scope project && claude plugin install wiki@goodfoot-wiki --scope project";
 
 /// Footer appended after a successful `--codex` install pointing users at the
 /// VS Code / Open VSX extension listings.
@@ -964,7 +1032,7 @@ const CLAUDE_MARKETPLACE_CMD: &str =
 pub fn codex_extension_footer() -> String {
     let mut out = String::new();
     writeln!(out).unwrap();
-    writeln!(out, "You might also like the wiki VS Code extension:").unwrap();
+    writeln!(out, "VS Code extension:").unwrap();
     writeln!(out, "  - {VSCODE_MARKETPLACE_URL}").unwrap();
     writeln!(out, "  - {OPEN_VSX_URL}").unwrap();
     out
@@ -976,31 +1044,21 @@ pub fn codex_extension_footer() -> String {
 /// `&mut dyn FmtWrite` so tests can assert on the produced text without
 /// capturing stdout.
 pub fn write_claude_info(out: &mut dyn FmtWrite) -> std::fmt::Result {
-    writeln!(out, "Welcome! Glad to have you here.")?;
+    // ANSI bold + bright cyan; harmless on terminals that strip escapes, and
+    // the raw command text is still present as a substring for tests.
+    const BOLD_CYAN: &str = "\x1b[1;96m";
+    const RESET: &str = "\x1b[0m";
+
+    writeln!(out, "Run:")?;
     writeln!(out)?;
-    writeln!(
-        out,
-        "wiki integrates with Claude Code via the official plugin marketplace."
-    )?;
+    writeln!(out, "    {BOLD_CYAN}{CLAUDE_MARKETPLACE_CMD}{RESET}")?;
     writeln!(out)?;
-    writeln!(out, "To add the marketplace, run this command yourself:")?;
-    writeln!(out)?;
-    writeln!(out, "    {CLAUDE_MARKETPLACE_CMD}")?;
-    writeln!(out)?;
-    writeln!(
-        out,
-        "Note: this CLI will NOT run the command for you — copy it and run it"
-    )?;
-    writeln!(out, "in your shell when you are ready.")?;
-    writeln!(out)?;
-    writeln!(out, "Learn more:")?;
+    writeln!(out, "Learn more about Claude plugins:")?;
     writeln!(out, "  - {CLAUDE_DOCS_URL}")?;
     writeln!(out)?;
     writeln!(out, "VS Code extension:")?;
     writeln!(out, "  - {VSCODE_MARKETPLACE_URL}")?;
     writeln!(out, "  - {OPEN_VSX_URL}")?;
-    writeln!(out)?;
-    writeln!(out, "Happy wiki-ing!")?;
     Ok(())
 }
 
@@ -1070,29 +1128,14 @@ pub fn run_with_fetcher(
 
     let home = resolve_codex_home(codex_home)?;
 
-    let planned: [&str; 5] = [
-        "skills/wiki/SKILL.md",
-        "skills/wiki/references/maintenance.md",
-        "hooks.json",
-        "config.toml",
-        ".wiki-install/manifest.json",
-    ];
-
     if dry_run {
-        println!("wiki install --codex [DRY RUN]");
-        println!("  codex home: {}", home.display());
-        println!("  ref:        {git_ref}");
-        println!("  planned files:");
-        for rel in planned {
-            println!("    - {}/{}", home.display(), rel);
-        }
-        println!("dry run: no network, no files written.");
+        print_install_header(&home, git_ref, true);
+        print_planned_files(None);
+        print!("{}", codex_extension_footer());
         return Ok(0);
     }
 
-    println!("wiki install --codex");
-    println!("  codex home: {}", home.display());
-    println!("  ref:        {git_ref}");
+    print_install_header(&home, git_ref, false);
 
     let archive = fetcher.fetch_archive(git_ref)?;
     let temp = tempfile::Builder::new()

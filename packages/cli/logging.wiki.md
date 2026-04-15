@@ -185,14 +185,10 @@ Perf scope events measure execution time and record success/error status. They a
 | Line | Message | Purpose |
 |------|---------|---------|
 | 741 | `"wiki install: enabled [features].codex_hooks in {path}"` | Reports that the installer flipped `codex_hooks` from `false` to `true` in `$CODEX_HOME/config.toml` |
-| 927 | `"wiki install --codex: done"` | Final status line after a successful install/update |
-| 928 | Install summary header | Leads the per-section status block (skill, hooks, config, backups, manifest) |
-| 933 | `"  hooks.json:  {label}"` | Per-file status for the managed `PostToolUse` group upsert |
-| 934 | `"  config.toml: {label}"` | Per-file status for the `[features].codex_hooks` edit |
-| 936-938 | Backup paths list | Paths of any backups written under `$CODEX_HOME/.wiki-install/backups/` |
-| 942 | `"  manifest:    {path}"` | Path of the updated `.wiki-install/manifest.json` |
-| 989-996 | `"wiki install --codex [DRY RUN]"` and planned files | Dry-run preview (codex home, ref, planned files); no network, no writes |
-| 1000-1002 | `"wiki install --codex"` header | Install-start banner (codex home, ref) |
+| `print_install_header` | `"wiki install --codex"` banner + "Downloading from: …/Installing into: …" | Install-start header shown in both real-run and dry-run (dry-run appends "(preview — nothing will be downloaded or written)") |
+| `print_planned_files` | Grouped "New files" / "Merged into existing files" sections with per-file explanations | Natural-language description of every file the installer touches; status suffixes (`new`/`updated`/`unchanged`) are appended on real runs |
+| `print_summary` | "Backups written:" list + "Manifest: {path}" | Post-install tail listing any backups and the manifest path |
+| `codex_extension_footer` | "VS Code extension:" + marketplace URLs | Trailing block printed on both real-run and dry-run pointing users at the companion extension |
 
 ### commands/hook.rs
 
