@@ -1,9 +1,7 @@
 {
   "name": "@goodfoot/wiki",
   "version": "0.5.11",
-  "bin": {
-    "wiki": "bin/wiki"
-  },
+  "bin": "bin/wiki",
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
     "build": "env CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=target/build cargo build --release",
