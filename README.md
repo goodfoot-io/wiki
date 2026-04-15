@@ -76,10 +76,16 @@ wiki install --codex --ref v1.0.2           # pin to a tag, branch, or SHA
 wiki install --codex --codex-home ./codex   # override the Codex home
 wiki install --codex --dry-run              # print planned changes, write nothing
 wiki install --codex --force                # overwrite unmanaged skill/hook conflicts
+wiki install --claude                       # print friendly Claude Code setup instructions
 ```
 
 The command is fail-closed: if the download, archive validation, or existing
 `hooks.json`/`config.toml` parse fails, no files are written.
+
+Using Claude Code instead? Run `wiki install --claude` for a friendly,
+copy-pasteable guide to adding the wiki plugin marketplace. That mode is
+informational only — it never runs commands, fetches anything, or touches the
+filesystem; you stay in control.
 
 ### Features
 

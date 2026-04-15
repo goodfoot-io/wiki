@@ -13,6 +13,7 @@
 //! `.wiki-install/manifest.json`, fail-closed conflict handling, and a
 //! per-file summary printed at the end.
 
+use std::fmt::Write as FmtWrite;
 use std::io::{Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -940,20 +941,98 @@ fn print_summary(codex_home: &Path, summary: &InstallSummary) {
     }
     let manifest_path = codex_home.join(".wiki-install/manifest.json");
     println!("  manifest:    {}", manifest_path.display());
+    print!("{}", codex_extension_footer());
+}
+
+/// VS Code Marketplace listing for the wiki extension.
+const VSCODE_MARKETPLACE_URL: &str =
+    "https://marketplace.visualstudio.com/items?itemName=goodfoot.wiki-extension";
+/// Open VSX listing for the wiki extension.
+const OPEN_VSX_URL: &str = "https://open-vsx.org/extension/goodfoot/wiki-extension";
+/// Claude Code plugin marketplace docs URL.
+const CLAUDE_DOCS_URL: &str = "https://code.claude.com/docs/en/discover-plugins";
+/// Exact command users should run to add the wiki marketplace to Claude Code.
+const CLAUDE_MARKETPLACE_CMD: &str =
+    "claude plugin marketplace add goodfoot-io/wiki --scope project";
+
+/// Footer appended after a successful `--codex` install pointing users at the
+/// VS Code / Open VSX extension listings.
+///
+/// Returned (rather than printed) so it can be unit-tested without capturing
+/// stdout. Always emitted — even on reruns where everything was Unchanged —
+/// so users always see the links.
+pub fn codex_extension_footer() -> String {
+    let mut out = String::new();
+    writeln!(out).unwrap();
+    writeln!(out, "You might also like the wiki VS Code extension:").unwrap();
+    writeln!(out, "  - {VSCODE_MARKETPLACE_URL}").unwrap();
+    writeln!(out, "  - {OPEN_VSX_URL}").unwrap();
+    out
+}
+
+/// Write the friendly `wiki install --claude` guide into `out`.
+///
+/// Pure formatting — no I/O, no filesystem, no network. Returned via a
+/// `&mut dyn FmtWrite` so tests can assert on the produced text without
+/// capturing stdout.
+pub fn write_claude_info(out: &mut dyn FmtWrite) -> std::fmt::Result {
+    writeln!(out, "Welcome! Glad to have you here.")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "wiki integrates with Claude Code via the official plugin marketplace."
+    )?;
+    writeln!(out)?;
+    writeln!(out, "To add the marketplace, run this command yourself:")?;
+    writeln!(out)?;
+    writeln!(out, "    {CLAUDE_MARKETPLACE_CMD}")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "Note: this CLI will NOT run the command for you — copy it and run it"
+    )?;
+    writeln!(out, "in your shell when you are ready.")?;
+    writeln!(out)?;
+    writeln!(out, "Learn more:")?;
+    writeln!(out, "  - {CLAUDE_DOCS_URL}")?;
+    writeln!(out)?;
+    writeln!(out, "VS Code extension:")?;
+    writeln!(out, "  - {VSCODE_MARKETPLACE_URL}")?;
+    writeln!(out, "  - {OPEN_VSX_URL}")?;
+    writeln!(out)?;
+    writeln!(out, "Happy wiki-ing!")?;
+    Ok(())
+}
+
+/// Convenience entry point used by tests: produces the Claude info text and
+/// always returns `Ok(0)`.
+pub fn run_claude_info() -> Result<i32> {
+    let mut out = String::new();
+    write_claude_info(&mut out).expect("writing to String cannot fail");
+    print!("{out}");
+    Ok(0)
 }
 
 /// Run the `wiki install` command.
 ///
-/// Fails closed unless `--codex` is provided — only the Codex integration is
-/// supported initially.
+/// Fails closed unless exactly one of `--codex` or `--claude` is provided.
 pub fn run(
     codex: bool,
+    claude: bool,
     force: bool,
     dry_run: bool,
     codex_home: Option<&Path>,
     git_ref: &str,
 ) -> Result<i32> {
-    run_with_fetcher(codex, force, dry_run, codex_home, git_ref, &GitHubFetcher)
+    run_with_fetcher(
+        codex,
+        claude,
+        force,
+        dry_run,
+        codex_home,
+        git_ref,
+        &GitHubFetcher,
+    )
 }
 
 /// Run the `wiki install` command against a caller-supplied [`SourceFetcher`].
@@ -963,16 +1042,30 @@ pub fn run(
 /// extraction, and [`apply_install`] — without hitting `github.com`.
 pub fn run_with_fetcher(
     codex: bool,
+    claude: bool,
     force: bool,
     dry_run: bool,
     codex_home: Option<&Path>,
     git_ref: &str,
     fetcher: &dyn SourceFetcher,
 ) -> Result<i32> {
-    if !codex {
-        return Err(miette!(
-            "wiki install: --codex is required (only the Codex integration is supported)"
-        ));
+    match (codex, claude) {
+        (true, true) => {
+            return Err(miette!(
+                "wiki install: --codex and --claude are mutually exclusive; pass exactly one"
+            ));
+        }
+        (false, false) => {
+            return Err(miette!(
+                "wiki install: one of --codex or --claude is required"
+            ));
+        }
+        (false, true) => {
+            // --claude is informational only: ignore force/dry_run/codex_home/git_ref.
+            let _ = (force, dry_run, codex_home, git_ref);
+            return run_claude_info();
+        }
+        (true, false) => {}
     }
 
     let home = resolve_codex_home(codex_home)?;
@@ -1080,15 +1173,72 @@ mod tests {
     }
 
     #[test]
-    fn requires_codex_flag() {
-        let err = run(false, false, false, None, "main").unwrap_err();
-        assert!(err.to_string().contains("--codex is required"));
+    fn requires_codex_or_claude_flag() {
+        let err = run(false, false, false, false, None, "main").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("one of --codex or --claude is required"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_both_codex_and_claude() {
+        let err = run(true, true, false, false, None, "main").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mutually exclusive"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn claude_flag_succeeds_without_touching_filesystem() {
+        let target = Path::new("/tmp/wiki-claude-info-should-not-exist");
+        let code = run(false, true, false, false, None, "main").expect("claude run");
+        assert_eq!(code, 0);
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn run_claude_info_returns_zero() {
+        assert_eq!(run_claude_info().expect("ok"), 0);
+    }
+
+    #[test]
+    fn claude_info_text_contains_command_and_urls() {
+        let mut out = String::new();
+        write_claude_info(&mut out).expect("write");
+        assert!(
+            out.contains(CLAUDE_MARKETPLACE_CMD),
+            "missing marketplace command in: {out}"
+        );
+        assert!(out.contains(CLAUDE_DOCS_URL), "missing docs URL in: {out}");
+        assert!(
+            out.contains(VSCODE_MARKETPLACE_URL),
+            "missing vscode marketplace URL in: {out}"
+        );
+        assert!(out.contains(OPEN_VSX_URL), "missing open-vsx URL in: {out}");
+    }
+
+    #[test]
+    fn codex_extension_footer_contains_extension_urls() {
+        let footer = codex_extension_footer();
+        assert!(
+            footer.contains(VSCODE_MARKETPLACE_URL),
+            "missing vscode marketplace URL in: {footer}"
+        );
+        assert!(
+            footer.contains(OPEN_VSX_URL),
+            "missing open-vsx URL in: {footer}"
+        );
     }
 
     #[test]
     fn dry_run_prints_and_exits_zero() {
         let code = run(
             true,
+            false,
             false,
             true,
             Some(Path::new("/tmp/codex-test-home-dry-run")),

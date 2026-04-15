@@ -197,8 +197,16 @@ fn fresh_install_via_codex_home_flag_writes_all_artifacts() {
     let codex = TempDir::new().unwrap();
     let fetcher = FixtureFetcher::new(good_archive());
 
-    let code =
-        run_with_fetcher(true, false, false, Some(codex.path()), "main", &fetcher).expect("run");
+    let code = run_with_fetcher(
+        true,
+        false,
+        false,
+        false,
+        Some(codex.path()),
+        "main",
+        &fetcher,
+    )
+    .expect("run");
     assert_eq!(code, 0);
 
     assert_install_artifacts(codex.path());
@@ -216,7 +224,16 @@ fn fresh_install_writes_hooks_json_with_codex_command() {
     let codex = TempDir::new().unwrap();
     let fetcher = FixtureFetcher::new(good_archive());
 
-    run_with_fetcher(true, false, false, Some(codex.path()), "main", &fetcher).expect("run");
+    run_with_fetcher(
+        true,
+        false,
+        false,
+        false,
+        Some(codex.path()),
+        "main",
+        &fetcher,
+    )
+    .expect("run");
 
     let hooks = read_json(&codex.path().join("hooks.json"));
     let post = hooks["hooks"]["PostToolUse"].as_array().expect("array");
@@ -237,7 +254,16 @@ fn fresh_install_enables_codex_hooks_feature_flag() {
     let codex = TempDir::new().unwrap();
     let fetcher = FixtureFetcher::new(good_archive());
 
-    run_with_fetcher(true, false, false, Some(codex.path()), "main", &fetcher).expect("run");
+    run_with_fetcher(
+        true,
+        false,
+        false,
+        false,
+        Some(codex.path()),
+        "main",
+        &fetcher,
+    )
+    .expect("run");
 
     let body = std::fs::read_to_string(codex.path().join("config.toml")).unwrap();
     assert!(body.contains("[features]"));
@@ -252,7 +278,16 @@ fn install_preserves_unrelated_config_toml_keys() {
     std::fs::write(codex.path().join("config.toml"), original).unwrap();
 
     let fetcher = FixtureFetcher::new(good_archive());
-    run_with_fetcher(true, false, false, Some(codex.path()), "main", &fetcher).expect("run");
+    run_with_fetcher(
+        true,
+        false,
+        false,
+        false,
+        Some(codex.path()),
+        "main",
+        &fetcher,
+    )
+    .expect("run");
 
     let body = std::fs::read_to_string(codex.path().join("config.toml")).unwrap();
     assert!(body.contains("# user comment"));
@@ -283,7 +318,16 @@ fn install_preserves_unrelated_hook_groups_and_events() {
     .unwrap();
 
     let fetcher = FixtureFetcher::new(good_archive());
-    run_with_fetcher(true, false, false, Some(codex.path()), "main", &fetcher).expect("run");
+    run_with_fetcher(
+        true,
+        false,
+        false,
+        false,
+        Some(codex.path()),
+        "main",
+        &fetcher,
+    )
+    .expect("run");
 
     let parsed = read_json(&codex.path().join("hooks.json"));
     assert_eq!(
@@ -313,8 +357,26 @@ fn rerun_replaces_managed_hook_group_without_duplicating() {
     let codex = TempDir::new().unwrap();
     let fetcher = FixtureFetcher::new(good_archive());
 
-    run_with_fetcher(true, false, false, Some(codex.path()), "main", &fetcher).expect("first");
-    run_with_fetcher(true, false, false, Some(codex.path()), "main", &fetcher).expect("rerun");
+    run_with_fetcher(
+        true,
+        false,
+        false,
+        false,
+        Some(codex.path()),
+        "main",
+        &fetcher,
+    )
+    .expect("first");
+    run_with_fetcher(
+        true,
+        false,
+        false,
+        false,
+        Some(codex.path()),
+        "main",
+        &fetcher,
+    )
+    .expect("rerun");
 
     let parsed = read_json(&codex.path().join("hooks.json"));
     let post = parsed["hooks"]["PostToolUse"].as_array().unwrap();
@@ -345,7 +407,16 @@ fn rerun_updates_managed_skill_without_stale_files() {
         ),
     ]);
     let first = FixtureFetcher::new(first_archive);
-    run_with_fetcher(true, false, false, Some(codex.path()), "main", &first).expect("first");
+    run_with_fetcher(
+        true,
+        false,
+        false,
+        false,
+        Some(codex.path()),
+        "main",
+        &first,
+    )
+    .expect("first");
     assert!(
         codex
             .path()
@@ -354,7 +425,16 @@ fn rerun_updates_managed_skill_without_stale_files() {
     );
 
     let second = FixtureFetcher::new(good_archive_updated());
-    run_with_fetcher(true, false, false, Some(codex.path()), "main", &second).expect("rerun");
+    run_with_fetcher(
+        true,
+        false,
+        false,
+        false,
+        Some(codex.path()),
+        "main",
+        &second,
+    )
+    .expect("rerun");
 
     let body = std::fs::read_to_string(codex.path().join("skills/wiki/SKILL.md")).unwrap();
     assert!(body.contains("new body"));
@@ -380,7 +460,16 @@ fn manifest_contains_installer_source_ref_files_and_hook_id() {
     let codex = TempDir::new().unwrap();
     let fetcher = FixtureFetcher::new(good_archive());
 
-    run_with_fetcher(true, false, false, Some(codex.path()), "v1.2.3", &fetcher).expect("run");
+    run_with_fetcher(
+        true,
+        false,
+        false,
+        false,
+        Some(codex.path()),
+        "v1.2.3",
+        &fetcher,
+    )
+    .expect("run");
 
     let manifest = read_json(&codex.path().join(".wiki-install/manifest.json"));
     assert_eq!(manifest["installer"].as_str(), Some("wiki install --codex"));
@@ -413,7 +502,7 @@ fn codex_home_env_fallback_is_used_when_flag_absent() {
 
     let fetcher = FixtureFetcher::new(good_archive());
     // Pass None for --codex-home so resolution falls through to $CODEX_HOME.
-    run_with_fetcher(true, false, false, None, "main", &fetcher).expect("run");
+    run_with_fetcher(true, false, false, false, None, "main", &fetcher).expect("run");
 
     assert_install_artifacts(codex.path());
 }
@@ -428,8 +517,16 @@ fn unmanaged_skill_without_force_fails_and_leaves_dir_unchanged() {
     std::fs::write(target.join("README.md"), "user-authored").unwrap();
 
     let fetcher = FixtureFetcher::new(good_archive());
-    let err =
-        run_with_fetcher(true, false, false, Some(codex.path()), "main", &fetcher).unwrap_err();
+    let err = run_with_fetcher(
+        true,
+        false,
+        false,
+        false,
+        Some(codex.path()),
+        "main",
+        &fetcher,
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("not managed"), "got: {err}");
 
     // User-authored file still there, no managed marker, no manifest.
@@ -446,7 +543,16 @@ fn force_backs_up_unmanaged_skill_and_replaces_it() {
     std::fs::write(target.join("README.md"), "user-authored").unwrap();
 
     let fetcher = FixtureFetcher::new(good_archive());
-    run_with_fetcher(true, true, false, Some(codex.path()), "main", &fetcher).expect("run");
+    run_with_fetcher(
+        true,
+        false,
+        true,
+        false,
+        Some(codex.path()),
+        "main",
+        &fetcher,
+    )
+    .expect("run");
 
     // New skill in place, old file gone from target.
     assert!(target.join("SKILL.md").is_file());
@@ -484,6 +590,7 @@ fn dry_run_writes_nothing_and_does_not_fetch() {
     run_with_fetcher(
         true,
         false,
+        false,
         true,
         Some(codex.path()),
         "main",
@@ -507,8 +614,16 @@ fn invalid_existing_hooks_json_fails_closed_without_touching_skill_files() {
     std::fs::write(codex.path().join("hooks.json"), "not json {").unwrap();
 
     let fetcher = FixtureFetcher::new(good_archive());
-    let err =
-        run_with_fetcher(true, false, false, Some(codex.path()), "main", &fetcher).unwrap_err();
+    let err = run_with_fetcher(
+        true,
+        false,
+        false,
+        false,
+        Some(codex.path()),
+        "main",
+        &fetcher,
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("not valid JSON"), "got: {err}");
 
     // Pre-flight validation must reject hooks.json before any files are
@@ -531,8 +646,16 @@ fn missing_skill_md_in_archive_fails_without_touching_destination() {
     std::fs::write(codex.path().join("sentinel"), "keep").unwrap();
 
     let fetcher = FixtureFetcher::new(archive_missing_skill_md());
-    let err =
-        run_with_fetcher(true, false, false, Some(codex.path()), "main", &fetcher).unwrap_err();
+    let err = run_with_fetcher(
+        true,
+        false,
+        false,
+        false,
+        Some(codex.path()),
+        "main",
+        &fetcher,
+    )
+    .unwrap_err();
     assert!(
         err.to_string().contains("SKILL.md"),
         "expected SKILL.md error, got: {err}"

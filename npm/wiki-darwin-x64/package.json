@@ -1,6 +1,6 @@
 {
   "name": "@goodfoot/wiki-darwin-x64",
-  "version": "0.5.12",
+  "version": "0.5.13",
   "description": "Platform-specific binary for @goodfoot/wiki",
   "license": "MIT",
   "os": [

@@ -195,13 +195,20 @@ enum Commands {
 
     /// Install the wiki integration into an external tool's config home.
     ///
-    /// Currently only Codex is supported via --codex. Downloads the latest
+    /// Use --codex to install the Codex integration (downloads the latest
     /// plugin assets, installs the wiki skill, and configures a PostToolUse
-    /// hook that runs `wiki hook --codex`. Repeat runs update the install.
+    /// hook that runs `wiki hook --codex`; repeat runs update the install).
+    /// Use --claude to print friendly setup instructions for the Claude Code
+    /// plugin marketplace — this mode is informational only and never
+    /// touches the filesystem or the network.
     Install {
         /// Install the Codex integration.
         #[arg(long = "codex")]
         codex: bool,
+
+        /// Print friendly Claude Code setup instructions (informational only).
+        #[arg(long = "claude")]
+        claude: bool,
 
         /// Overwrite locally modified managed files after recording a backup.
         #[arg(long = "force")]
@@ -387,11 +394,19 @@ fn run(
         }) => commands::html::run(&title, fragment, file_base_url.as_deref(), &repo_root),
         Some(Commands::Install {
             codex,
+            claude,
             force,
             dry_run,
             codex_home,
             git_ref,
-        }) => commands::install::run(codex, force, dry_run, codex_home.as_deref(), &git_ref),
+        }) => commands::install::run(
+            codex,
+            claude,
+            force,
+            dry_run,
+            codex_home.as_deref(),
+            &git_ref,
+        ),
         Some(Commands::Serve { port, no_reload }) => {
             commands::serve::run(port, no_reload, &repo_root)
         }
