@@ -2,6 +2,7 @@ pub mod check;
 pub mod extract;
 pub mod hook;
 pub mod html;
+pub mod install;
 pub mod links;
 pub mod list;
 pub mod pin;

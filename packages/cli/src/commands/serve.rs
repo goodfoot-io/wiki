@@ -368,10 +368,7 @@ async fn render_page_response(
 ) -> std::result::Result<PageResponse, String> {
     task::spawn_blocking(move || {
         let guard = index.lock().map_err(|e| e.to_string())?;
-        match guard
-            .resolve_page(&requested)
-            .map_err(|e| e.to_string())?
-        {
+        match guard.resolve_page(&requested).map_err(|e| e.to_string())? {
             Some(page) => {
                 let body = render_html(&page.content, RenderMode::FullPage, &guard);
                 Ok(PageResponse::Found {

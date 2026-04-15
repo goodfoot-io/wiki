@@ -3,13 +3,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use turso::{Builder, Connection, Row, Rows, params, params_from_iter};
 use miette::{Context, IntoDiagnostic, Result, miette};
 use regex::RegexBuilder;
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
+use turso::{Builder, Connection, Row, Rows, params, params_from_iter};
 
 use crate::commands::{looks_like_path, normalize_repo_relative_path, resolve_link_path};
 use crate::frontmatter::parse_frontmatter;
@@ -314,18 +314,8 @@ async fn open_and_prepare_connection(repo_root: &Path) -> Result<Connection> {
 
 async fn try_open_and_prepare(repo_root: &Path) -> Result<Connection> {
     let mut conn = open_index_connection(repo_root).await?;
-    perf::scope_async_result(
-        "index.bootstrap_schema",
-        json!({}),
-        bootstrap_schema(&conn),
-    )
-    .await?;
-    perf::scope_async_result(
-        "index.verify_integrity",
-        json!({}),
-        verify_integrity(&conn),
-    )
-    .await?;
+    perf::scope_async_result("index.bootstrap_schema", json!({}), bootstrap_schema(&conn)).await?;
+    perf::scope_async_result("index.verify_integrity", json!({}), verify_integrity(&conn)).await?;
     perf::scope_async_result(
         "index.sync",
         json!({}),
@@ -1053,7 +1043,6 @@ fn matches_default_discovery_path(path_rel: &str, wiki_dir_name: &str) -> bool {
     let wiki_dir = Path::new(wiki_dir_name);
     path.starts_with(wiki_dir)
 }
-
 
 async fn validate_lookup_collisions(
     conn: &Connection,
@@ -2304,5 +2293,4 @@ mod tests {
         assert!(index.resolve_page("Example").expect("resolve").is_none());
         assert!(index.resolve_page("Other").expect("resolve").is_some());
     }
-
 }

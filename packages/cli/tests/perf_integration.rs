@@ -126,7 +126,10 @@ fn summary_uses_fts_suggestions_for_missing_pages() {
     repo.commit_all("init");
 
     let bootstrap = run_wiki(&repo, &["rust"]);
-    assert!(bootstrap.status.success(), "bootstrap search should succeed");
+    assert!(
+        bootstrap.status.success(),
+        "bootstrap search should succeed"
+    );
 
     repo.create_file(
         "wiki/example.md",
@@ -143,7 +146,11 @@ fn summary_uses_fts_suggestions_for_missing_pages() {
     );
 
     let missing = run_wiki(&repo, &["summary", "Graph"]);
-    assert_eq!(missing.status.code(), Some(1), "missing summary should exit 1");
+    assert_eq!(
+        missing.status.code(),
+        Some(1),
+        "missing summary should exit 1"
+    );
     // With native Tantivy FTS, suggestions work without an explicit sync step.
     let events = log_events(&repo);
     assert!(

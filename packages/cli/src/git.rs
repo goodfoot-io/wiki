@@ -260,7 +260,10 @@ pub fn repo_inventory(repo: &Path) -> Result<Vec<String>> {
     let mut paths = Vec::new();
 
     for_each_tracked_path(&repo, |path| {
-        paths.push(utf8_repo_path(path, "git inventory path is not valid UTF-8")?);
+        paths.push(utf8_repo_path(
+            path,
+            "git inventory path is not valid UTF-8",
+        )?);
         Ok(())
     })?;
 
@@ -712,7 +715,10 @@ mod tests {
     #[test]
     fn head_sha_fails_for_unborn_head() {
         let repo = TestRepo::new();
-        assert!(head_sha(repo.path()).is_err(), "expected unborn HEAD to fail");
+        assert!(
+            head_sha(repo.path()).is_err(),
+            "expected unborn HEAD to fail"
+        );
     }
 
     #[test]

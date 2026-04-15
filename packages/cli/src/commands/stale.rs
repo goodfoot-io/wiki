@@ -40,7 +40,15 @@ pub struct StaleError {
 ///
 /// Returns exit code: 0 = none stale, 1 = any stale, 2 = runtime error.
 pub fn run(globs: &[String], diff_mode: Option<&str>, json: bool, repo_root: &Path) -> Result<i32> {
-    run_with_git(globs, diff_mode, json, repo_root, commits_since, diff_stat, diff_patch)
+    run_with_git(
+        globs,
+        diff_mode,
+        json,
+        repo_root,
+        commits_since,
+        diff_stat,
+        diff_patch,
+    )
 }
 
 fn run_with_git(

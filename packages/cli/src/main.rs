@@ -11,6 +11,7 @@ mod test_support;
 mod version;
 
 use std::io::{self, BufRead, IsTerminal};
+use std::path::PathBuf;
 use std::process;
 use std::time::Instant;
 
@@ -28,7 +29,7 @@ enum Format {
     version = crate::version::VERSION,
     before_help = concat!("wiki ", env!("WIKI_VERSION"), "\n"),
     about = "wiki - Read and maintain wiki pages",
-    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, pin, stale, links, list, summary, extract, hook, html, serve) are reserved and cannot be used as page titles.",
+    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, pin, stale, links, list, summary, extract, hook, html, install, serve) are reserved and cannot be used as page titles.",
     disable_help_subcommand = true,
     disable_version_flag = true,
 )]
@@ -192,6 +193,33 @@ enum Commands {
         file_base_url: Option<String>,
     },
 
+    /// Install the wiki integration into an external tool's config home.
+    ///
+    /// Currently only Codex is supported via --codex. Downloads the latest
+    /// plugin assets, installs the wiki skill, and configures a PostToolUse
+    /// hook that runs `wiki hook --codex`. Repeat runs update the install.
+    Install {
+        /// Install the Codex integration.
+        #[arg(long = "codex")]
+        codex: bool,
+
+        /// Overwrite locally modified managed files after recording a backup.
+        #[arg(long = "force")]
+        force: bool,
+
+        /// Print the planned file changes without writing.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+
+        /// Override $CODEX_HOME and ~/.codex.
+        #[arg(long = "codex-home", value_name = "PATH")]
+        codex_home: Option<PathBuf>,
+
+        /// Git ref (branch, tag, or SHA) to install from.
+        #[arg(long = "ref", value_name = "REF", default_value = "main")]
+        git_ref: String,
+    },
+
     /// Start a local web server that renders wiki pages as HTML.
     Serve {
         /// Port to listen on
@@ -293,7 +321,13 @@ fn main() {
     }
 }
 
-fn run(command: Option<Commands>, query: Option<String>, limit: i64, offset: usize, json: bool) -> Result<i32> {
+fn run(
+    command: Option<Commands>,
+    query: Option<String>,
+    limit: i64,
+    offset: usize,
+    json: bool,
+) -> Result<i32> {
     let repo_root = git::repo_root()?;
     let command_name = command_name(command.as_ref(), query.as_deref());
     perf::init(&repo_root, command_name, json);
@@ -351,6 +385,13 @@ fn run(command: Option<Commands>, query: Option<String>, limit: i64, offset: usi
             fragment,
             file_base_url,
         }) => commands::html::run(&title, fragment, file_base_url.as_deref(), &repo_root),
+        Some(Commands::Install {
+            codex,
+            force,
+            dry_run,
+            codex_home,
+            git_ref,
+        }) => commands::install::run(codex, force, dry_run, codex_home.as_deref(), &git_ref),
         Some(Commands::Serve { port, no_reload }) => {
             commands::serve::run(port, no_reload, &repo_root)
         }
@@ -413,6 +454,7 @@ fn command_name(command: Option<&Commands>, query: Option<&str>) -> &'static str
         Some(Commands::List { .. }) => "list",
         Some(Commands::Summary { .. }) => "summary",
         Some(Commands::Html { .. }) => "html",
+        Some(Commands::Install { .. }) => "install",
         Some(Commands::Serve { .. }) => "serve",
         None if query.is_some() => "search",
         None => "help",
@@ -434,8 +476,8 @@ mod tests {
 
     #[test]
     fn parses_top_level_query_with_offset() {
-        let cli =
-            Cli::try_parse_from(["wiki", "--limit", "3", "--offset", "6", "runtime"]).expect("parse");
+        let cli = Cli::try_parse_from(["wiki", "--limit", "3", "--offset", "6", "runtime"])
+            .expect("parse");
         assert_eq!(cli.query.as_deref(), Some("runtime"));
         assert_eq!(cli.limit, 3);
         assert_eq!(cli.offset, 6);

@@ -171,7 +171,11 @@ pub fn run(input: &str, repo_root: &Path) -> Result<i32> {
     // Gate the file-path lookup on whether this file has been processed before.
     let unseen_file_path_rel = event.file_path.as_deref().and_then(|path| {
         let path_rel = normalize_path(path, repo_root);
-        if shown_files.contains(&path_rel) { None } else { Some(path_rel) }
+        if shown_files.contains(&path_rel) {
+            None
+        } else {
+            Some(path_rel)
+        }
     });
 
     if titles.is_empty() && unseen_file_path_rel.is_none() {
@@ -816,7 +820,10 @@ mod tests {
 
         // Session file must be recorded after first call.
         let (shown_files, _) = load_session(session_id);
-        assert!(!shown_files.is_empty(), "session file path must be recorded");
+        assert!(
+            !shown_files.is_empty(),
+            "session file path must be recorded"
+        );
 
         // Second call in same session: file already seen — phase 2 and 3 skipped.
         let code2 = run(&make_event("tu_second"), repo.path()).expect("run 2");
