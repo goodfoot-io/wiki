@@ -155,6 +155,9 @@ pub struct WikiIndex {
     runtime: Runtime,
     conn: Connection,
     repo_root: PathBuf,
+    // Held for the lifetime of this index so concurrent `wiki` processes
+    // serialize on the same wiki directory. Dropped after `conn`.
+    _lock: IndexLock,
 }
 
 impl WikiIndex {
@@ -166,12 +169,13 @@ impl WikiIndex {
                 .wrap_err("failed to create runtime for wiki index")?;
 
             let repo_root = repo_root.to_path_buf();
-            let conn = runtime.block_on(open_and_prepare_connection(&repo_root))?;
+            let (conn, lock) = runtime.block_on(open_and_prepare_connection(&repo_root))?;
 
             Ok(Self {
                 runtime,
                 conn,
                 repo_root,
+                _lock: lock,
             })
         })
     }
@@ -312,19 +316,91 @@ pub fn is_lock_error(err: &miette::Error) -> bool {
 /// or was created by an incompatible binary version. In that case the file is
 /// deleted and the whole sequence is retried once from a clean state.
 ///
-/// Lock errors are propagated without deleting the database — the file is
-/// valid; it is just held by a concurrent writer.
-async fn open_and_prepare_connection(repo_root: &Path) -> Result<Connection> {
+/// Concurrent `wiki` invocations are serialized on an OS-level advisory lock
+/// (`.index.lock` in the wiki directory). turso's local DB open takes an
+/// exclusive file lock on `.index.db` for the entire connection lifetime, so
+/// without our own lock processes race at `Builder::build()` and the loser
+/// sees "Failed locking file". Holding `.index.lock` across the whole
+/// open/bootstrap/verify/sync/connection lifecycle means each process waits
+/// in the kernel for its predecessor to finish, rather than polling turso.
+async fn open_and_prepare_connection(repo_root: &Path) -> Result<(Connection, IndexLock)> {
+    let lock = IndexLock::acquire(repo_root)?;
     match try_open_and_prepare(repo_root).await {
-        Ok(conn) => Ok(conn),
+        Ok(conn) => Ok((conn, lock)),
         Err(err) if is_lock_error(&err) => Err(err),
         Err(_) => {
             // Delete the stale or incompatible database and retry from scratch.
             let wiki_dir = wiki_dir(repo_root)?;
             let db_path = wiki_dir.join(".index.db");
             let _ = std::fs::remove_file(&db_path);
-            try_open_and_prepare(repo_root).await
+            let conn = try_open_and_prepare(repo_root).await?;
+            Ok((conn, lock))
         }
+    }
+}
+
+/// OS-level advisory file lock held for the lifetime of an index connection.
+///
+/// Dropping the struct releases the lock via `fs4::FileExt::unlock`. Held by
+/// [`Index`] for the full command duration so concurrent `wiki` processes
+/// serialize cleanly on the same wiki directory.
+pub struct IndexLock {
+    file: std::fs::File,
+}
+
+impl IndexLock {
+    /// Bounded wait for the index lock.
+    ///
+    /// Polls with `try_lock_exclusive` instead of a blocking `lock_exclusive`
+    /// so a stuck wiki process (or a buggy caller that leaks the lock) can
+    /// never hang a fresh invocation indefinitely. The total wait budget is
+    /// generous enough that normal concurrent-CLI contention is invisible,
+    /// but short enough that a human can interrupt and diagnose.
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+    const TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+    fn acquire(repo_root: &Path) -> Result<Self> {
+        use fs4::fs_std::FileExt;
+        let wiki_dir = wiki_dir(repo_root)?;
+        let lock_path = wiki_dir.join(".index.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("failed to open index lock file at {}", lock_path.display()))?;
+
+        let deadline = std::time::Instant::now() + Self::TOTAL_BUDGET;
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(true) => return Ok(Self { file }),
+                Ok(false) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(miette!(
+                            "timed out after {:?} waiting for index lock at {} — another wiki process is holding it, or a previous run left it stuck",
+                            Self::TOTAL_BUDGET,
+                            lock_path.display()
+                        ));
+                    }
+                    std::thread::sleep(Self::POLL_INTERVAL);
+                }
+                Err(e) => {
+                    return Err(miette!(e).wrap_err(format!(
+                        "failed to acquire index lock at {}",
+                        lock_path.display()
+                    )));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for IndexLock {
+    fn drop(&mut self) {
+        use fs4::fs_std::FileExt;
+        let _ = FileExt::unlock(&self.file);
     }
 }
 
@@ -2141,6 +2217,7 @@ mod tests {
 
         let index = WikiIndex::prepare(repo.path()).expect("prepare");
         assert!(index.resolve_page("Old").expect("resolve").is_some());
+        drop(index);
 
         repo.rename("wiki/old.md", "wiki/new.md");
         repo.create_file(
@@ -2151,6 +2228,7 @@ mod tests {
         let index = WikiIndex::prepare(repo.path()).expect("prepare");
         assert!(index.resolve_page("Old").expect("resolve").is_none());
         assert!(index.resolve_page("New").expect("resolve").is_some());
+        drop(index);
 
         repo.remove("wiki/new.md");
         let index = WikiIndex::prepare(repo.path()).expect("prepare");
@@ -2250,6 +2328,7 @@ mod tests {
         let index = WikiIndex::prepare(repo.path()).expect("prepare");
         let initial = index.search("rust").expect("search");
         assert_eq!(initial.len(), 1);
+        drop(index);
 
         repo.create_file(
             "wiki/example.md",
@@ -2274,6 +2353,7 @@ mod tests {
 
         let index = WikiIndex::prepare(repo.path()).expect("prepare");
         assert!(index.resolve_page("Example").expect("resolve").is_some());
+        drop(index);
 
         repo.create_file(
             "wiki/example.md",
@@ -2296,6 +2376,7 @@ mod tests {
 
         let index = WikiIndex::prepare(repo.path()).expect("prepare");
         assert!(index.resolve_page("Example").expect("resolve").is_some());
+        drop(index);
 
         repo.create_file(
             "docs/other.md",

@@ -71,6 +71,7 @@ yarn-error.log*
 .index.db
 .index.db-shm
 .index.db-wal
+.index.lock
 
 .yarn/install-state.gz
 

@@ -576,6 +576,9 @@ mod tests {
             !links.is_empty(),
             "test setup: wiki page must reference src/lib.rs"
         );
+        // Drop the index before calling run(), which prepares its own — the
+        // IndexLock is exclusive per-process, so holding two at once deadlocks.
+        drop(index);
 
         // First call: file not yet seen — succeeds.
         let code1 = run(&make_event("tu_first"), repo.path()).expect("run 1");
@@ -773,6 +776,7 @@ mod tests {
             keywords.iter().any(|(kw, _)| kw == "cards-create"),
             "keyword must be indexed"
         );
+        drop(index);
 
         let code = run(&hook_event.to_string(), repo.path()).expect("run");
         assert_eq!(code, 0);
