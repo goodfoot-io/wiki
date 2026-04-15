@@ -9,3 +9,7 @@
 *.toml text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
+
+# Resolve version conflicts automatically during merges by picking the highest semver
+.claude-plugin/marketplace.json merge=json-version
+plugins/*/.claude-plugin/plugin.json merge=json-version
