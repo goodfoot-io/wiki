@@ -255,10 +255,26 @@ fn wiki_dir(repo_root: &Path) -> Result<PathBuf> {
 
 async fn bootstrap_schema(conn: &Connection) -> Result<()> {
     // PRAGMA journal_mode returns a result row so it cannot go in execute_batch.
-    conn.query("PRAGMA journal_mode=WAL", ())
+    // Setting journal_mode takes an EXCLUSIVE lock even when the DB is already
+    // in WAL mode, which causes spurious "Failed locking file" errors whenever
+    // another process has the DB open. Read the mode first and only flip it if
+    // the DB is not already WAL — steady-state opens then skip the write lock.
+    let mut rows = conn
+        .query("PRAGMA journal_mode", ())
         .await
         .into_diagnostic()
-        .wrap_err("failed to set WAL journal mode")?;
+        .wrap_err("failed to read journal_mode")?;
+    let current_mode = match next_row(&mut rows).await? {
+        Some(row) => row_string(&row, 0)?,
+        None => String::new(),
+    };
+    drop(rows);
+    if !current_mode.eq_ignore_ascii_case("wal") {
+        conn.query("PRAGMA journal_mode=WAL", ())
+            .await
+            .into_diagnostic()
+            .wrap_err("failed to set WAL journal mode")?;
+    }
 
     conn.execute_batch(
         "
