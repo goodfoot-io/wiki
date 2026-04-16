@@ -22,7 +22,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.window.registerCustomEditorProvider('wiki.viewer', provider, {
-      webviewOptions: { retainContextWhenHidden: true }
+      webviewOptions: { retainContextWhenHidden: true, enableFindWidget: true }
     }),
 
     vscode.commands.registerCommand('wiki.search', () => wikiQuickPick()),
