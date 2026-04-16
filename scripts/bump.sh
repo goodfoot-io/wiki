@@ -15,14 +15,16 @@ esac
 
 NEW_VERSION=$(node -e "
   const fs = require('fs');
-  const pkg = JSON.parse(fs.readFileSync('$SOURCE', 'utf8'));
+  const raw = fs.readFileSync('$SOURCE', 'utf8');
+  const pkg = JSON.parse(raw);
   const [maj, min, pat] = pkg.version.split('.').map(Number);
   const next = '$LEVEL' === 'major' ? [maj + 1, 0, 0]
              : '$LEVEL' === 'minor' ? [maj, min + 1, 0]
              : [maj, min, pat + 1];
-  pkg.version = next.join('.');
-  fs.writeFileSync('$SOURCE', JSON.stringify(pkg, null, 2) + '\n');
-  console.log(pkg.version);
+  const newVersion = next.join('.');
+  const updated = raw.replace(/\"version\": \"[^\"]+\"/, JSON.stringify('version') + ': ' + JSON.stringify(newVersion));
+  fs.writeFileSync('$SOURCE', updated);
+  console.log(newVersion);
 ")
 
 echo "Bumped packages/cli to $NEW_VERSION"
