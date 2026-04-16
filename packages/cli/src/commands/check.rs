@@ -318,6 +318,9 @@ pub fn run(globs: &[String], json: bool, fix: bool, repo_root: &Path) -> Result<
             let mut specs: Vec<RewriteSpec> = Vec::new();
             for link in links {
                 let resolved_path = crate::commands::resolve_link_path(&link.path, path, repo_root);
+                if !repo_root.join(&resolved_path).exists() {
+                    continue;
+                }
                 let repo_relative_path = resolved_path.to_string_lossy().to_string();
                 let is_repo_relative = link.path == repo_relative_path;
 
@@ -833,6 +836,41 @@ mod tests {
         assert!(
             content.contains("](src/foo.rs#"),
             "expected path to be converted to repo-relative, got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn test_check_fix_does_not_rewrite_missing_pinned_link_path() {
+        let repo = TestRepo::new();
+        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        repo.create_file("wiki/page.md", "placeholder\n");
+        repo.commit("add wiki");
+        let sha_output = Command::new("git")
+            .current_dir(repo.path())
+            .args(["rev-parse", "--short", "HEAD"])
+            .output()
+            .expect("git rev-parse");
+        let sha = String::from_utf8(sha_output.stdout)
+            .expect("utf8")
+            .trim()
+            .to_string();
+
+        let original = make_wiki_page(
+            "Page",
+            &format!(
+                "The [path/to/missing/file.md](path/to/missing/file.md#L73-L172&{sha}) link must not be rewritten."
+            ),
+        );
+        repo.create_file("wiki/page.md", &original);
+        repo.commit("add broken link");
+
+        let code = run(&[], false, true, repo.path()).expect("run");
+        assert_eq!(code, 1, "missing pinned link should remain an error");
+
+        let content = fs::read_to_string(repo.path().join("wiki/page.md")).expect("read");
+        assert_eq!(
+            content, original,
+            "missing pinned link path must remain unchanged by --fix"
         );
     }
 }
