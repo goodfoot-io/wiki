@@ -1,10 +1,10 @@
 /**
- * CustomReadonlyEditorProvider that renders wiki markdown in a webview panel.
+ * CustomTextEditorProvider that renders wiki markdown in a webview panel.
  *
  * Supports wikilink navigation with back/forward history, live reload on file changes,
  * and scroll preservation across reloads and navigation events.
  *
- * @summary CustomReadonlyEditorProvider that renders wiki markdown in a webview panel.
+ * @summary CustomTextEditorProvider that renders wiki markdown in a webview panel.
  */
 
 import { readFile } from 'node:fs/promises';
@@ -42,10 +42,10 @@ interface WikiSummaryJson {
 // ---------------------------------------------------------------------------
 
 /**
- * Registers as a custom readonly editor for *.md and *.wiki.md files.
+ * Registers as a custom text editor for *.md and *.wiki.md files.
  * Each open document gets its own webview panel with isolated state.
  */
-export class WikiEditorProvider implements vscode.CustomReadonlyEditorProvider {
+export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
   constructor(private readonly _extensionUri: vscode.Uri) {}
 
   /**
@@ -97,7 +97,7 @@ export class WikiEditorProvider implements vscode.CustomReadonlyEditorProvider {
    * @param uri - The file URI to test.
    * @returns True if the file belongs to the wiki, false otherwise.
    */
-  private _isWikiFile(uri: vscode.Uri): boolean {
+  isWikiFile(uri: vscode.Uri): boolean {
     if (uri.fsPath.endsWith('.wiki.md')) return true;
     const wikiDir = this._wikiDir();
     if (wikiDir == null) return false;
@@ -105,19 +105,11 @@ export class WikiEditorProvider implements vscode.CustomReadonlyEditorProvider {
   }
 
   // --------------------------------------------------------------------------
-  // CustomReadonlyEditorProvider
+  // CustomTextEditorProvider
   // --------------------------------------------------------------------------
 
-  openCustomDocument(
-    uri: vscode.Uri,
-    _openContext: vscode.CustomDocumentOpenContext,
-    _token: vscode.CancellationToken
-  ): vscode.CustomDocument {
-    return { uri, dispose: () => {} };
-  }
-
-  async resolveCustomEditor(
-    document: vscode.CustomDocument,
+  async resolveCustomTextEditor(
+    document: vscode.TextDocument,
     webviewPanel: vscode.WebviewPanel,
     _token: vscode.CancellationToken
   ): Promise<void> {
@@ -136,7 +128,7 @@ export class WikiEditorProvider implements vscode.CustomReadonlyEditorProvider {
     // Files that match the manifest selector but fall outside $WIKI_DIR
     // (e.g. /home/node/wiki/README.md when the git root IS ~/wiki/) are
     // redirected to the text editor so they open normally.
-    if (!this._isWikiFile(document.uri)) {
+    if (!this.isWikiFile(document.uri)) {
       webviewPanel.dispose();
       await vscode.window.showTextDocument(document.uri, { preview: false });
       return;
@@ -177,14 +169,8 @@ export class WikiEditorProvider implements vscode.CustomReadonlyEditorProvider {
       });
     };
 
-    // Live-reload watcher: watches all *.md and *.wiki.md files (Fix 1).
-    // The callback checks the changed path against the currently displayed URI
-    // so only edits to the visible page trigger a reload.
-    const watcher = vscode.workspace.createFileSystemWatcher('**/*.{md,wiki.md}');
-
-    const onFileChange = async (changedUri: vscode.Uri) => {
-      // Only reload if the changed file matches the currently displayed page.
-      if (changedUri.fsPath !== currentUri.fsPath) return;
+    const onDocumentChange = async (changedDocument: vscode.TextDocument) => {
+      if (changedDocument.uri.toString() !== currentUri.toString()) return;
       const currentEntry = history[currentIndex];
       if (currentEntry == null) return;
       const savedScrollY = await this._getScrollPosition(webviewPanel.webview);
@@ -193,8 +179,9 @@ export class WikiEditorProvider implements vscode.CustomReadonlyEditorProvider {
       postNavigationState();
     };
 
-    watcher.onDidChange(onFileChange);
-    watcher.onDidCreate(onFileChange);
+    const changeDisposable = vscode.workspace.onDidChangeTextDocument((event) => {
+      void onDocumentChange(event.document);
+    });
 
     // Handle messages from the webview.
     const messageDisposable = webviewPanel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
@@ -326,15 +313,20 @@ export class WikiEditorProvider implements vscode.CustomReadonlyEditorProvider {
           const currentEntry = history[currentIndex];
           if (currentEntry == null) return;
           const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
-          await vscode.window.showTextDocument(currentEntry.uri, { viewColumn, preview: false });
+          await vscode.commands.executeCommand('wiki.openInEditor', currentEntry.uri, { viewColumn, preview: false });
           break;
         }
 
         case 'openFile': {
           try {
             const fileUri = vscode.Uri.parse(message.uri);
-            const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
-            await vscode.window.showTextDocument(fileUri, { viewColumn, preview: false });
+            if (this.isWikiFile(fileUri)) {
+              const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
+              await vscode.commands.executeCommand('wiki.openInEditor', fileUri, { viewColumn, preview: false });
+            } else {
+              const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
+              await vscode.window.showTextDocument(fileUri, { viewColumn, preview: false });
+            }
           } catch (err) {
             console.error('[wiki-extension] Failed to open file URI:', message.uri, err);
           }
@@ -366,7 +358,7 @@ export class WikiEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
     // Clean up on panel close.
     webviewPanel.onDidDispose(() => {
-      watcher.dispose();
+      changeDisposable.dispose();
       messageDisposable.dispose();
     });
   }
@@ -398,7 +390,7 @@ export class WikiEditorProvider implements vscode.CustomReadonlyEditorProvider {
     try {
       // Read file content and run summary command concurrently.
       [text, summaryResult] = await Promise.all([
-        readFile(uri.fsPath, 'utf8'),
+        this._readDocumentText(uri),
         runWikiCommand(['summary', uri.fsPath, '--format', 'json'], undefined, this._workspaceRoot())
       ]);
     } catch (err) {
@@ -449,6 +441,21 @@ export class WikiEditorProvider implements vscode.CustomReadonlyEditorProvider {
       console.error('[wiki-extension] Failed to parse wiki summary for page:', pageName, parseErr);
       return null;
     }
+  }
+
+  /**
+   * Read the current text for a URI, preferring an already-open TextDocument so
+   * the webview stays in sync with unsaved in-memory edits.
+   *
+   * @param uri - File URI of the wiki page.
+   * @returns The current text content.
+   */
+  private async _readDocumentText(uri: vscode.Uri): Promise<string> {
+    const openDocument = vscode.workspace.textDocuments.find((document) => document.uri.toString() === uri.toString());
+    if (openDocument != null) {
+      return openDocument.getText();
+    }
+    return readFile(uri.fsPath, 'utf8');
   }
 
   /**

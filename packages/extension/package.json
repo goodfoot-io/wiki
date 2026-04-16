@@ -39,7 +39,7 @@
             "filenamePattern": "**/*.wiki.md"
           }
         ],
-        "priority": "default"
+        "priority": "option"
       }
     ],
     "commands": [
