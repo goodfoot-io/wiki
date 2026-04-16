@@ -26,7 +26,8 @@ function main() {
   }
 
   const packageName = `@goodfoot/wiki-${platform}-${arch}`;
-  const binaryName = process.platform === 'win32' ? 'wiki.exe' : 'wiki';
+  const sourceBinaryName = process.platform === 'win32' ? 'wiki.exe' : 'wiki';
+  const runtimeBinaryName = 'wiki';
 
   let packageDir;
   try {
@@ -37,33 +38,38 @@ function main() {
     process.exit(0);
   }
 
-  const sourceBinary = path.join(packageDir, 'bin', binaryName);
+  const sourceBinary = path.join(packageDir, 'bin', sourceBinaryName);
   if (!fs.existsSync(sourceBinary)) {
     console.log(`@goodfoot/wiki: Binary not found in ${packageName}. The package may not have been published yet.`);
     process.exit(0);
   }
 
   const targetDir = path.join(__dirname, '..', 'lib');
-  const targetBinary = path.join(targetDir, binaryName);
+  const runtimeBinary = path.join(targetDir, runtimeBinaryName);
 
   fs.mkdirSync(targetDir, { recursive: true });
 
-  // Remove existing binary if present
-  try {
-    fs.unlinkSync(targetBinary);
-  } catch {
-    // Ignore if it doesn't exist
+  for (const targetPath of [runtimeBinary, path.join(targetDir, sourceBinaryName)]) {
+    try {
+      fs.unlinkSync(targetPath);
+    } catch {
+      // Ignore if it doesn't exist
+    }
   }
 
   // Try symlink first, fall back to copy
   try {
-    fs.symlinkSync(sourceBinary, targetBinary);
+    fs.symlinkSync(sourceBinary, runtimeBinary);
   } catch {
-    fs.copyFileSync(sourceBinary, targetBinary);
-    fs.chmodSync(targetBinary, 0o755);
+    fs.copyFileSync(sourceBinary, runtimeBinary);
+    fs.chmodSync(runtimeBinary, 0o755);
   }
 
-  console.log(`@goodfoot/wiki: Installed ${binaryName} from ${packageName}`);
+  if (sourceBinaryName !== runtimeBinaryName) {
+    fs.copyFileSync(runtimeBinary, path.join(targetDir, sourceBinaryName));
+  }
+
+  console.log(`@goodfoot/wiki: Installed ${runtimeBinaryName} from ${packageName}`);
 }
 
 main();
