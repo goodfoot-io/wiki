@@ -1912,6 +1912,26 @@ fn search_tokens(query: &str) -> Vec<String> {
     }
 }
 
+fn strip_markdown_links(text: &str) -> std::borrow::Cow<'_, str> {
+    static LINK_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = LINK_RE.get_or_init(|| {
+        regex::Regex::new(r"\[([^\]]+)\]\([^)]*\)").expect("inline link regex")
+    });
+    re.replace_all(text, "$1")
+}
+
+fn snippet_context(lines: &[&str], center: usize, radius: usize) -> String {
+    let start = center.saturating_sub(radius);
+    let end = (center + radius + 1).min(lines.len());
+    lines[start..end]
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| strip_markdown_links(l).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn matched_snippets(source: &str, tokens: &[String]) -> Vec<Snippet> {
     if tokens.is_empty() {
         return Vec::new();
@@ -1928,8 +1948,10 @@ fn matched_snippets(source: &str, tokens: &[String]) -> Vec<Snippet> {
     .build()
     .expect("search token regex should compile");
 
-    source
-        .lines()
+    let lines: Vec<&str> = source.lines().collect();
+
+    lines
+        .iter()
         .enumerate()
         .filter_map(|(index, line)| {
             let trimmed = line.trim();
@@ -1949,13 +1971,16 @@ fn matched_snippets(source: &str, tokens: &[String]) -> Vec<Snippet> {
             tokens
                 .iter()
                 .any(|token| normalized.contains(token))
-                .then(|| Snippet {
-                    line: index + 1,
-                    text: highlight_re
-                        .replace_all(trimmed, |caps: &regex::Captures<'_>| {
-                            format!("**{}**", &caps[0])
-                        })
-                        .into_owned(),
+                .then(|| {
+                    let text = snippet_context(&lines, index, 1);
+                    Snippet {
+                        line: index + 1,
+                        text: highlight_re
+                            .replace_all(&text, |caps: &regex::Captures<'_>| {
+                                format!("**{}**", &caps[0])
+                            })
+                            .into_owned(),
+                    }
                 })
         })
         .take(3)
@@ -1963,15 +1988,15 @@ fn matched_snippets(source: &str, tokens: &[String]) -> Vec<Snippet> {
 }
 
 fn line_snippet(source: &str, line_number: usize) -> Option<Snippet> {
-    source
-        .lines()
-        .nth(line_number.saturating_sub(1))
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(|line| Snippet {
-            line: line_number,
-            text: line.to_string(),
-        })
+    let lines: Vec<&str> = source.lines().collect();
+    let index = line_number.saturating_sub(1);
+    if index >= lines.len() || lines[index].trim().is_empty() {
+        return None;
+    }
+    Some(Snippet {
+        line: line_number,
+        text: snippet_context(&lines, index, 1),
+    })
 }
 
 fn token_match_score(title: &str, summary: &str, source: &str, tokens: &[String]) -> f64 {

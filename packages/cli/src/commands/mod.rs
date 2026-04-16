@@ -56,13 +56,17 @@ pub fn resolve_link_path(link_path: &str, source_file: &Path, repo_root: &Path) 
             .unwrap_or_else(|_| path.to_path_buf());
     }
 
-    // Try repo-relative first: if it exists at repo_root/link_path, use it.
-    let repo_relative = repo_root.join(path);
-    if repo_relative.exists() {
+    // If the path doesn't start with `.` or `..`, it's repo-relative by convention.
+    let first = path.components().next();
+    let is_explicitly_relative = matches!(
+        first,
+        Some(std::path::Component::CurDir) | Some(std::path::Component::ParentDir)
+    );
+    if !is_explicitly_relative {
         return PathBuf::from(link_path);
     }
 
-    // Otherwise, treat as relative to the source file.
+    // Treat as relative to the source file.
     let source_dir = source_file.parent().unwrap_or_else(|| Path::new("."));
     let combined = source_dir.join(path);
 
@@ -362,6 +366,31 @@ mod tests {
             keywords: vec![],
             summary: "A summary.".into(),
         }
+    }
+
+    #[test]
+    fn test_resolve_link_path_bare_nonexistent_stays_repo_relative() {
+        // A bare path like `packages/wiki/src/commands/serve.rs` that doesn't exist on disk
+        // must NOT be rewritten as relative to the source file.
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path();
+        let source = root.join("wiki/guides/page.md");
+        let result = resolve_link_path("packages/wiki/src/commands/serve.rs", &source, root);
+        assert_eq!(
+            result,
+            PathBuf::from("packages/wiki/src/commands/serve.rs"),
+            "bare repo-relative path must not be rewritten even when the file is absent"
+        );
+    }
+
+    #[test]
+    fn test_resolve_link_path_dotdot_uses_file_relative() {
+        // An explicit `../` path must still be resolved relative to the source file.
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path();
+        let source = root.join("wiki/guides/page.md");
+        let result = resolve_link_path("../architecture/design.md", &source, root);
+        assert_eq!(result, PathBuf::from("wiki/architecture/design.md"));
     }
 
     #[test]
