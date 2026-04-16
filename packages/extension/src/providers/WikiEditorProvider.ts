@@ -103,6 +103,7 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
    */
   isWikiFile(uri: vscode.Uri): boolean {
     if (uri.fsPath.endsWith('.wiki.md')) return true;
+    if (!uri.fsPath.endsWith('.md')) return false;
     const wikiDir = this._wikiDir();
     if (wikiDir == null) return false;
     return uri.fsPath.startsWith(wikiDir);

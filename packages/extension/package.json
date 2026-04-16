@@ -20,11 +20,6 @@
     "configuration": {
       "title": "Wiki",
       "properties": {
-        "wiki.openFilesInViewer": {
-          "type": "boolean",
-          "default": true,
-          "description": "Open wiki markdown files ($WIKI_DIR/**/*.md and **/*.wiki.md) in the wiki viewer by default. When disabled, files open in the standard text editor."
-        },
         "wiki.binary.releaseBaseUrl": {
           "type": "string",
           "default": "https://github.com/goodfoot-io/wiki/releases/download",
@@ -35,6 +30,12 @@
           "default": false,
           "description": "Allow the extension to use a wiki binary already on PATH instead of the managed install. Intended for development and advanced setups."
         }
+      }
+    },
+    "configurationDefaults": {
+      "workbench.editorAssociations": {
+        "{git}:/**/*.md": "default",
+        "{git}:/**/*.wiki.md": "default"
       }
     },
     "customEditors": [
@@ -49,7 +50,7 @@
             "filenamePattern": "**/*.wiki.md"
           }
         ],
-        "priority": "option"
+        "priority": "default"
       }
     ],
     "commands": [

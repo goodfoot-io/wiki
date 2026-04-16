@@ -21,8 +21,6 @@ import { WikiBinaryManager, wasManagedInstall } from './utils/wikiInstaller.js';
 export function activate(context: vscode.ExtensionContext): void {
   const binaryManager = new WikiBinaryManager(context);
   const provider = new WikiEditorProvider(context.extensionUri, binaryManager);
-  const suppressedTextOpens = new Set<string>();
-  const openingInViewer = new Set<string>();
 
   void binaryManager
     .start()
@@ -36,27 +34,6 @@ export function activate(context: vscode.ExtensionContext): void {
     .catch((error) => {
       console.error('[wiki-extension] Failed to prepare managed wiki CLI:', error);
     });
-
-  const withSuppressedTextOpen = async (
-    uri: vscode.Uri,
-    open: () => Thenable<unknown> | Promise<unknown>
-  ): Promise<void> => {
-    const key = uri.toString();
-    suppressedTextOpens.add(key);
-    try {
-      await open();
-    } finally {
-      setTimeout(() => suppressedTextOpens.delete(key), 0);
-    }
-  };
-  const toShowOptions = (
-    options?: vscode.TextDocumentShowOptions | vscode.ViewColumn
-  ): vscode.TextDocumentShowOptions => {
-    if (typeof options === 'number') {
-      return { viewColumn: options, preview: false };
-    }
-    return options ?? { preview: false };
-  };
 
   context.subscriptions.push(
     vscode.window.registerCustomEditorProvider('wiki.viewer', provider, {
@@ -84,35 +61,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.registerCommand(
       'wiki.openInEditor',
-      (uri: vscode.Uri, options?: vscode.TextDocumentShowOptions | vscode.ViewColumn) =>
-        withSuppressedTextOpen(uri, () => vscode.window.showTextDocument(uri, toShowOptions(options)))
-    ),
-
-    vscode.window.onDidChangeActiveTextEditor((editor) => {
-      if (editor == null) return;
-
-      const uri = editor.document.uri;
-      if (!provider.isWikiFile(uri)) return;
-
-      const openInViewer = vscode.workspace.getConfiguration('wiki').get<boolean>('openFilesInViewer', true);
-      if (!openInViewer) return;
-
-      const activeTab = vscode.window.tabGroups.activeTabGroup.activeTab;
-      if (activeTab?.input instanceof vscode.TabInputTextDiff) return;
-
-      const key = uri.toString();
-      if (suppressedTextOpens.has(key) || openingInViewer.has(key)) return;
-
-      openingInViewer.add(key);
-      void Promise.resolve(
-        vscode.commands.executeCommand('vscode.openWith', uri, 'wiki.viewer', {
-          viewColumn: editor.viewColumn,
-          preview: false
-        })
-      ).finally(() => {
-        openingInViewer.delete(key);
-      });
-    })
+      (uri: vscode.Uri, options?: vscode.TextDocumentShowOptions | vscode.ViewColumn) => {
+        const showOptions: vscode.TextDocumentShowOptions =
+          typeof options === 'number' ? { viewColumn: options, preview: false } : (options ?? { preview: false });
+        return vscode.window.showTextDocument(uri, showOptions);
+      }
+    )
   );
 }
 

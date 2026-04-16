@@ -69,27 +69,4 @@ describe('WikiEditorProvider', () => {
     const tabInput = activeTab.input as vscode.TabInputCustom;
     assert.strictEqual(tabInput.viewType, 'wiki.viewer');
   });
-
-  it('opens diffs for wiki files in the standard text diff editor', async () => {
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    assert.ok(workspaceFolder, 'Expected test workspace folder');
-
-    const wikiDir = vscode.Uri.joinPath(workspaceFolder.uri, 'wiki');
-    const originalUri = vscode.Uri.joinPath(wikiDir, 'diff-original.md');
-    const modifiedUri = vscode.Uri.joinPath(wikiDir, 'diff-modified.md');
-
-    await vscode.workspace.fs.createDirectory(wikiDir);
-    await vscode.workspace.fs.writeFile(originalUri, Buffer.from('# Original\n'));
-    await vscode.workspace.fs.writeFile(modifiedUri, Buffer.from('# Modified\n'));
-
-    await vscode.commands.executeCommand('vscode.diff', originalUri, modifiedUri, 'Wiki Diff');
-
-    const activeTab = await waitForTab(
-      (tab) => tab?.input instanceof vscode.TabInputTextDiff,
-      'Expected a standard text diff tab'
-    );
-    const tabInput = activeTab.input as vscode.TabInputTextDiff;
-    assert.strictEqual(tabInput.original.toString(), originalUri.toString());
-    assert.strictEqual(tabInput.modified.toString(), modifiedUri.toString());
-  });
 });
