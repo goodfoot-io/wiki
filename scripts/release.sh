@@ -21,7 +21,7 @@ if [[ "$CLI_VERSION" != "$EXT_VERSION" ]]; then
   exit 1
 fi
 
-TAG="wiki-cli-v$CLI_VERSION"
+TAG="wiki-v$CLI_VERSION"
 
 # --- Branch check ---
 BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)

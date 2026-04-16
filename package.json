@@ -21,7 +21,7 @@
     "clean:tsbuildinfo": "find . \\( -name 'tsconfig.tsbuildinfo' -o -name 'tsconfig.typecheck-main.tsbuildinfo' \\) -not -path '*/node_modules/*' -not -path '*/.worktrees/*' -delete",
     "validate": "bash scripts/validate.sh",
     "bump": "bash scripts/bump.sh && yarn install",
-    "release": "bash scripts/release.sh && bash scripts/release-extension.sh"
+    "release": "bash scripts/release.sh"
   },
   "private": true,
   "packageManager": "yarn@4.13.0",

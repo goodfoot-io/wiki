@@ -3,7 +3,7 @@ name: Release CLI
 on:
   push:
     tags:
-      - "wiki-cli-v*"
+      - "wiki-v*"
 
 permissions:
   contents: write
@@ -152,8 +152,45 @@ jobs:
             fi
           done
 
+      - name: Generate checksums manifest
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          node <<'EOF'
+          const crypto = require('node:crypto');
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          const releaseVersion = process.env.RELEASE_VERSION.replace(/^wiki-v/, '');
+          const releaseDir = path.join(process.cwd(), 'release-assets');
+          const assets = {
+            'linux-x64': 'wiki-linux-x64',
+            'linux-arm64': 'wiki-linux-arm64',
+            'darwin-x64': 'wiki-darwin-x64',
+            'darwin-arm64': 'wiki-darwin-arm64',
+            'win32-x64': 'wiki-win32-x64.exe'
+          };
+
+          const manifest = { version: releaseVersion, assets: {} };
+          for (const [key, fileName] of Object.entries(assets)) {
+            const sha256 = crypto.createHash('sha256').update(fs.readFileSync(path.join(releaseDir, fileName))).digest('hex');
+            manifest.assets[key] = { name: fileName, sha256 };
+          }
+
+          fs.writeFileSync(path.join(releaseDir, 'wiki-cli-checksums.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+          EOF
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: release-assets/*
+
+  release-extension:
+    needs:
+      - publish-npm
+      - github-release
+    uses: ./.github/workflows/release-extension.yml
+    secrets: inherit
+    with:
+      release_tag: ${{ github.ref_name }}

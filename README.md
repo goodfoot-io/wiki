@@ -160,8 +160,7 @@ Per-package validation runs from each package directory with its own `yarn lint`
 
 Releases are tag-driven:
 
-- `wiki-cli-v*` triggers [`.github/workflows/release-cli.yml`](./.github/workflows/release-cli.yml) (cross-compiles binaries, publishes NPM packages, creates a GitHub release)
-- `wiki-ext-v*` triggers [`.github/workflows/release-extension.yml`](./.github/workflows/release-extension.yml) (packages the VSIX, publishes to VS Code Marketplace and Open VSIX)
+- `wiki-v*` triggers [`.github/workflows/release-cli.yml`](./.github/workflows/release-cli.yml), which publishes the CLI first and then invokes [`.github/workflows/release-extension.yml`](./.github/workflows/release-extension.yml) to package and publish the extension from the same tag
 
 ## License
 

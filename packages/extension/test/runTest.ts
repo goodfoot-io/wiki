@@ -1,10 +1,8 @@
 /**
  * Wiki extension test runner.
  *
- * Mirrors the structure of packages/extension/test/runTest.ts with one difference:
- * if the wiki binary is not found on PATH, the test runner exits with code 1 instead
- * of 0. Per CLAUDE.md golden rule: "A test that does not run because of an
- * infrastructure error is a blocking condition."
+ * Mirrors the structure of packages/extension/test/runTest.ts while provisioning
+ * a local wiki fixture binary for development PATH fallback during tests.
  *
  * Supports headless Linux environments via Xvfb and uses a unique dist directory
  * per test run to enable safe parallel execution.
@@ -37,6 +35,7 @@ const INSTANCE_ID = process.pid;
  */
 const TEST_WORKSPACE_PATH = `/tmp/wiki-ext-test-workspace-${INSTANCE_ID}`;
 const USER_DATA_DIR_PATH = `/tmp/wiki-ext-test-${INSTANCE_ID}`;
+const TEST_BIN_PATH = `/tmp/wiki-ext-test-bin-${INSTANCE_ID}`;
 
 /**
  * Unique dist directory for this test run.
@@ -53,20 +52,6 @@ const state = {
   xvfbProcess: null as cp.ChildProcess | null,
   cleanupDone: false
 };
-
-/**
- * Check whether the wiki binary is available on PATH.
- *
- * @returns True if wiki is found, false otherwise.
- */
-function hasWikiBinary(): boolean {
-  try {
-    cp.execSync('which wiki', { encoding: 'utf-8' });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Reads the minimum VS Code version from package.json engines.vscode field.
@@ -225,7 +210,7 @@ function performCleanup(): void {
   }
   cleanX11LockFiles();
 
-  for (const dir of [TEST_WORKSPACE_PATH, USER_DATA_DIR_PATH, TEST_DIST_PATH]) {
+  for (const dir of [TEST_WORKSPACE_PATH, USER_DATA_DIR_PATH, TEST_DIST_PATH, TEST_BIN_PATH]) {
     if (fs.existsSync(dir)) {
       try {
         fs.rmSync(dir, { recursive: true, force: true });
@@ -257,19 +242,56 @@ function prepareTestWorkspace(): void {
   fs.writeFileSync(path.join(TEST_WORKSPACE_PATH, 'README.md'), '# Test Workspace\n');
 }
 
+function installWikiFixtureBinary(): void {
+  fs.rmSync(TEST_BIN_PATH, { recursive: true, force: true });
+  fs.mkdirSync(TEST_BIN_PATH, { recursive: true });
+
+  const fixtureScriptPath = path.join(TEST_BIN_PATH, 'wiki-fixture.js');
+  fs.writeFileSync(
+    fixtureScriptPath,
+    `#!/usr/bin/env node
+const path = require('node:path');
+const args = process.argv.slice(2);
+const writeJson = (value) => process.stdout.write(JSON.stringify(value));
+
+if (args[0] === 'list' && args[1] === '--format' && args[2] === 'json') {
+  writeJson([]);
+  process.exit(0);
+}
+
+if (args[0] === 'summary' && args[2] === '--format' && args[3] === 'json') {
+  const target = args[1];
+  const workspacePath = process.env.TEST_WORKSPACE_PATH || process.cwd();
+  const file = path.isAbsolute(target) ? target : path.join(workspacePath, 'wiki', \`\${target}.md\`);
+  writeJson({
+    title: path.basename(file, path.extname(file)),
+    file,
+    summary: ''
+  });
+  process.exit(0);
+}
+
+writeJson([]);
+process.exit(0);
+`,
+    { mode: 0o755 }
+  );
+
+  if (process.platform === 'win32') {
+    fs.writeFileSync(path.join(TEST_BIN_PATH, 'wiki.cmd'), `@echo off\r\nnode "${fixtureScriptPath}" %*\r\n`);
+  } else {
+    fs.writeFileSync(path.join(TEST_BIN_PATH, 'wiki'), `#!/usr/bin/env bash\nnode "${fixtureScriptPath}" "$@"\n`, {
+      mode: 0o755
+    });
+  }
+
+  process.env['PATH'] = `${TEST_BIN_PATH}${path.delimiter}${process.env['PATH'] ?? ''}`;
+}
+
 /**
  * Main entry point.
  */
 async function main(): Promise<void> {
-  // Fail closed if wiki binary is not available — a test that does not run because of
-  // an infrastructure error is a blocking condition (CLAUDE.md golden rule).
-  if (!hasWikiBinary()) {
-    console.error(
-      '[runTest] wiki binary not found on PATH. A test that does not run because of an infrastructure error is a blocking condition.'
-    );
-    process.exit(1);
-  }
-
   let exitCode = 1;
 
   // extensionDevelopmentPath points to the unique dist directory which contains
@@ -298,6 +320,7 @@ async function main(): Promise<void> {
     }
 
     prepareTestWorkspace();
+    installWikiFixtureBinary();
 
     // Remove VSCODE_ and ELECTRON_RUN_AS_NODE env vars that cause MODULE_NOT_FOUND errors.
     const problematicVars = Object.keys(process.env).filter(
@@ -311,7 +334,7 @@ async function main(): Promise<void> {
       version: getMinVSCodeVersion(),
       extensionDevelopmentPath,
       extensionTestsPath,
-      extensionTestsEnv: { ...process.env },
+      extensionTestsEnv: { ...process.env, TEST_WORKSPACE_PATH, WIKI_EXTENSION_USE_PATH_FALLBACK: '1' },
       launchArgs: [
         TEST_WORKSPACE_PATH,
         '--disable-extensions',
@@ -355,7 +378,7 @@ async function main(): Promise<void> {
           version: getMinVSCodeVersion(),
           extensionDevelopmentPath,
           extensionTestsPath,
-          extensionTestsEnv: { ...process.env },
+          extensionTestsEnv: { ...process.env, TEST_WORKSPACE_PATH, WIKI_EXTENSION_USE_PATH_FALLBACK: '1' },
           launchArgs: [
             TEST_WORKSPACE_PATH,
             '--disable-extensions',

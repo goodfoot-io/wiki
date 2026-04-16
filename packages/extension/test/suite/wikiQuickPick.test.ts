@@ -21,4 +21,9 @@ describe('wikiQuickPick', () => {
     const commands = await vscode.commands.getCommands();
     assert.ok(commands.includes('wiki.openInEditor'), 'wiki.openInEditor not registered');
   });
+
+  it('wiki.retryInstall command is registered', async () => {
+    const commands = await vscode.commands.getCommands();
+    assert.ok(commands.includes('wiki.retryInstall'), 'wiki.retryInstall not registered');
+  });
 });

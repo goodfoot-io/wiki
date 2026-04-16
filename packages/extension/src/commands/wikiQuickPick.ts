@@ -13,6 +13,7 @@
 
 import * as vscode from 'vscode';
 import { runWikiCommand } from '../utils/wikiBinary.js';
+import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
 
 /** Item returned by `wiki list --format json`. */
 interface WikiListItem {
@@ -88,11 +89,12 @@ function workspaceRoot(): string | undefined {
  * Load all wiki pages for the initial (empty-query) state.
  * Shows a VS Code error notification and returns an empty array on failure.
  *
+ * @param binaryPath - Absolute path to the resolved wiki CLI binary.
  * @returns All wiki pages as QuickPickItems, or an empty array on error.
  */
-async function loadAllPages(): Promise<WikiQuickPickItem[]> {
+async function loadAllPages(binaryPath: string): Promise<WikiQuickPickItem[]> {
   try {
-    const result = await runWikiCommand(['list', '--format', 'json'], undefined, workspaceRoot());
+    const result = await runWikiCommand(binaryPath, ['list', '--format', 'json'], undefined, workspaceRoot());
     if (result.exitCode !== 0) {
       const message = result.stderr.trim() || `wiki list exited with code ${result.exitCode}`;
       console.warn('[wiki-extension] wiki list failed:', message);
@@ -113,13 +115,14 @@ async function loadAllPages(): Promise<WikiQuickPickItem[]> {
  * Search wiki pages for the given query.
  * Shows a VS Code error notification and returns an empty array on failure.
  *
+ * @param binaryPath - Absolute path to the resolved wiki CLI binary.
  * @param query - The search query to pass to the wiki CLI.
  * @param signal - AbortSignal used to cancel the underlying wiki process.
  * @returns Matching wiki pages as QuickPickItems, or an empty array on error.
  */
-async function searchPages(query: string, signal: AbortSignal): Promise<WikiQuickPickItem[]> {
+async function searchPages(binaryPath: string, query: string, signal: AbortSignal): Promise<WikiQuickPickItem[]> {
   try {
-    const result = await runWikiCommand([query, '--format', 'json'], signal, workspaceRoot());
+    const result = await runWikiCommand(binaryPath, [query, '--format', 'json'], signal, workspaceRoot());
     // If the signal was aborted, the process was killed intentionally — not an error.
     if (signal.aborted) {
       return [];
@@ -157,15 +160,30 @@ async function openWikiFile(file: string): Promise<void> {
 /**
  * Show a QuickPick that lets the user browse and search wiki pages.
  * An empty query lists all pages; a non-empty query performs a ranked search.
+ *
+ * @param binaryManager - Service that resolves or installs the wiki CLI.
  */
-export async function wikiQuickPick(): Promise<void> {
+export async function wikiQuickPick(binaryManager: WikiBinaryManager): Promise<void> {
+  let binaryPath: string;
+  try {
+    binaryPath = (
+      await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'Preparing wiki CLI…' },
+        () => binaryManager.ready()
+      )
+    ).path;
+  } catch (error) {
+    void vscode.window.showErrorMessage(`Wiki: ${binaryManager.formatFailure(error)}`);
+    return;
+  }
+
   const qp = vscode.window.createQuickPick<WikiQuickPickItem>();
   qp.placeholder = 'Search wiki pages…';
   qp.matchOnDetail = true;
   qp.busy = true;
 
   // Load all pages immediately for the initial empty state.
-  const initialItems = await loadAllPages();
+  const initialItems = await loadAllPages(binaryPath);
   qp.items = initialItems;
   qp.busy = false;
 
@@ -184,7 +202,7 @@ export async function wikiQuickPick(): Promise<void> {
     qp.busy = true;
 
     void (async () => {
-      const results = await searchPages(query.trim(), abort.signal);
+      const results = await searchPages(binaryPath, query.trim(), abort.signal);
       if (!abort.signal.aborted) {
         qp.items = results;
         qp.busy = false;

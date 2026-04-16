@@ -11,7 +11,8 @@ import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { render } from '../rendering/MarkdownRenderer.js';
-import { findWikiBinary, runWikiCommand } from '../utils/wikiBinary.js';
+import { runWikiCommand } from '../utils/wikiBinary.js';
+import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
 import type { HostMessage, WebviewMessage } from '../webviews/wiki/types.js';
 
 // ---------------------------------------------------------------------------
@@ -46,7 +47,10 @@ interface WikiSummaryJson {
  * Each open document gets its own webview panel with isolated state.
  */
 export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
-  constructor(private readonly _extensionUri: vscode.Uri) {}
+  constructor(
+    private readonly _extensionUri: vscode.Uri,
+    private readonly _binaryManager: WikiBinaryManager
+  ) {}
 
   /**
    * Return the filesystem path of the first VS Code workspace folder, or undefined
@@ -134,9 +138,6 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
       return;
     }
 
-    // Locate the wiki binary (may be null — handled in the 'ready' message handler).
-    const wikiBin = findWikiBinary();
-
     // Set the tab icon to the library codicon.
     webviewPanel.iconPath = new vscode.ThemeIcon('library');
 
@@ -188,14 +189,14 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
       switch (message.type) {
         case 'ready': {
           // Render the initial page only once the webview signals readiness.
-          // If the binary is missing, show an error instead of hanging on the spinner.
-          if (wikiBin == null) {
+          try {
+            await this._binaryManager.ready();
+            await this._renderPage(webviewPanel.webview, document.uri, webviewPanel);
+          } catch (error) {
             this._postMessage(webviewPanel.webview, {
               type: 'showError',
-              message: 'wiki binary not found on PATH. Install the wiki CLI and reload the window.'
+              message: `Failed to install wiki CLI for this extension: ${this._binaryManager.formatFailure(error)}`
             });
-          } else {
-            await this._renderPage(webviewPanel.webview, document.uri, webviewPanel);
           }
           postNavigationState();
           break;
@@ -388,10 +389,11 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     let summaryResult: Awaited<ReturnType<typeof runWikiCommand>>;
 
     try {
+      const handle = await this._binaryManager.ready();
       // Read file content and run summary command concurrently.
       [text, summaryResult] = await Promise.all([
         this._readDocumentText(uri),
-        runWikiCommand(['summary', uri.fsPath, '--format', 'json'], undefined, this._workspaceRoot())
+        runWikiCommand(handle.path, ['summary', uri.fsPath, '--format', 'json'], undefined, this._workspaceRoot())
       ]);
     } catch (err) {
       // File read error or spawn error (e.g. ENOENT — binary not found after initial check).
@@ -429,7 +431,13 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
    * @returns The VS Code URI for the page's file, or null if not found.
    */
   private async _resolvePageUri(pageName: string): Promise<vscode.Uri | null> {
-    const result = await runWikiCommand(['summary', pageName, '--format', 'json'], undefined, this._workspaceRoot());
+    const handle = await this._binaryManager.ready();
+    const result = await runWikiCommand(
+      handle.path,
+      ['summary', pageName, '--format', 'json'],
+      undefined,
+      this._workspaceRoot()
+    );
     if (result.exitCode !== 0 || result.stdout.trim() === '') {
       console.warn(`[wiki-extension] Could not resolve page "${pageName}":`, result.stderr.trim());
       return null;
