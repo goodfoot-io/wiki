@@ -27,7 +27,6 @@ function main() {
 
   const packageName = `@goodfoot/wiki-${platform}-${arch}`;
   const sourceBinaryName = process.platform === 'win32' ? 'wiki.exe' : 'wiki';
-  const runtimeBinaryName = 'wiki';
 
   let packageDir;
   try {
@@ -44,32 +43,23 @@ function main() {
     process.exit(0);
   }
 
-  const targetDir = path.join(__dirname, '..', 'lib');
-  const runtimeBinary = path.join(targetDir, runtimeBinaryName);
+  const binWiki = path.join(__dirname, '..', 'bin', 'wiki');
 
-  fs.mkdirSync(targetDir, { recursive: true });
-
-  for (const targetPath of [runtimeBinary, path.join(targetDir, sourceBinaryName)]) {
-    try {
-      fs.unlinkSync(targetPath);
-    } catch {
-      // Ignore if it doesn't exist
-    }
+  try {
+    fs.unlinkSync(binWiki);
+  } catch {
+    // Ignore if it doesn't exist
   }
 
   // Try symlink first, fall back to copy
   try {
-    fs.symlinkSync(sourceBinary, runtimeBinary);
+    fs.symlinkSync(sourceBinary, binWiki);
   } catch {
-    fs.copyFileSync(sourceBinary, runtimeBinary);
-    fs.chmodSync(runtimeBinary, 0o755);
+    fs.copyFileSync(sourceBinary, binWiki);
+    fs.chmodSync(binWiki, 0o755);
   }
 
-  if (sourceBinaryName !== runtimeBinaryName) {
-    fs.copyFileSync(runtimeBinary, path.join(targetDir, sourceBinaryName));
-  }
-
-  console.log(`@goodfoot/wiki: Installed ${runtimeBinaryName} from ${packageName}`);
+  console.log(`@goodfoot/wiki: Installed wiki from ${packageName}`);
 }
 
 main();
