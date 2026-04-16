@@ -257,7 +257,11 @@ fn discover_files_by_walk(globs: &[String], repo_root: &Path) -> Result<Vec<Path
         }
         search_tasks.push((repo_root.to_path_buf(), vec!["**/*.wiki.md".to_string()]));
     } else {
-        search_tasks.push((repo_root.to_path_buf(), globs.to_vec()));
+        let normalized_globs = globs
+            .iter()
+            .map(|glob| normalize_repo_relative_path(glob, repo_root))
+            .collect();
+        search_tasks.push((repo_root.to_path_buf(), normalized_globs));
     };
 
     for (base_dir, patterns) in search_tasks {
@@ -559,6 +563,17 @@ mod tests {
             .expect("explicit glob should succeed without WIKI_DIR");
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("page.md"));
+    }
+
+    #[test]
+    fn test_discover_explicit_glob_with_dot_slash_prefix() {
+        let repo = TestRepo::new();
+        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
+        let globs = vec!["./wiki/page.md".to_string()];
+        let files = discover_files(&globs, repo.path()).expect("discover");
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("wiki/page.md"));
     }
 
     #[test]
