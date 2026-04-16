@@ -18,6 +18,11 @@ jobs:
         with:
           components: clippy
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/cli
+
       - name: Cargo check
         run: cd packages/cli && cargo check --quiet
 
