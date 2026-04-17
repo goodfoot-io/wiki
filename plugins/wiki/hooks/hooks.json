@@ -9,6 +9,15 @@
             "command": "wiki hook --claude"
           }
         ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "wiki hook --check"
+          }
+        ]
       }
     ]
   }

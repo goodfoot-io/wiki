@@ -149,11 +149,16 @@ enum Commands {
     /// in the hookSpecificOutput envelope expected by Claude Code (--claude)
     /// or Codex (--codex). Produces no output when no wikilinks are found.
     /// Use directly as the "command" value in a PostToolUse hook definition.
+    ///
+    /// With --check, runs `wiki check --fix` on the written/edited file path
+    /// from the PostToolUse event and emits a systemMessage when errors remain.
     Hook {
-        #[arg(long = "claude", conflicts_with = "codex")]
+        #[arg(long = "claude", conflicts_with_all = ["codex", "check"])]
         claude: bool,
-        #[arg(long = "codex", conflicts_with = "claude")]
+        #[arg(long = "codex", conflicts_with_all = ["claude", "check"])]
         codex: bool,
+        #[arg(long = "check", conflicts_with_all = ["claude", "codex"])]
+        check: bool,
     },
 
     /// List all wiki pages with metadata (title, aliases, tags, file path).
@@ -366,9 +371,14 @@ fn run(
             let input = lines.join("\n");
             commands::extract::run(&input, json, &repo_root)
         }
-        Some(Commands::Hook { claude, codex }) => {
+        Some(Commands::Hook { claude, codex, check }) => {
+            if check {
+                let lines = read_stdin_lines();
+                let input = lines.join("\n");
+                return commands::hook_check::run(&input, &repo_root);
+            }
             if !claude && !codex {
-                eprintln!("error: one of --claude or --codex must be provided");
+                eprintln!("error: one of --claude, --codex, or --check must be provided");
                 return Ok(2);
             }
             let lines = read_stdin_lines();
