@@ -21,7 +21,7 @@ pub struct CheckDiagnostic {
     pub message: String,
 }
 
-// ── Public entry point ────────────────────────────────────────────────────────
+// ── Public entry points ───────────────────────────────────────────────────────
 
 /// Run the check command.
 ///
@@ -39,7 +39,79 @@ pub fn run(globs: &[String], json: bool, fix: bool, repo_root: &Path) -> Result<
         }
     };
 
+    let index_files = if globs.is_empty() {
+        files.clone()
+    } else {
+        discover_files(&[], repo_root).unwrap_or_else(|_| files.clone())
+    };
+
+    let diagnostics = match collect_for_files(&files, &index_files, fix, repo_root) {
+        Ok(d) => d,
+        Err(e) => {
+            if json {
+                eprintln!("{}", serde_json::json!({"error": e.to_string()}));
+            } else {
+                eprintln!("error: {e}");
+            }
+            return Ok(2);
+        }
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&diagnostics).unwrap());
+    } else {
+        for d in &diagnostics {
+            if d.kind == "fixed" {
+                continue;
+            }
+            println!("**{}** — `{}:{}`\n{}\n", d.kind, d.file, d.line, d.message);
+        }
+        if fix {
+            let changed: std::collections::HashSet<&str> = diagnostics
+                .iter()
+                .filter(|d| d.kind == "fixed")
+                .map(|d| d.file.as_str())
+                .collect();
+            if !changed.is_empty() {
+                println!("Fixed {} file(s).", changed.len());
+            }
+        }
+    }
+
+    if diagnostics
+        .iter()
+        .any(|d| d.kind != "alias_resolve" && d.kind != "fixed")
+    {
+        Ok(1)
+    } else {
+        Ok(0)
+    }
+}
+
+/// Collect diagnostics for the given glob patterns without printing output.
+///
+/// Returns `Err` only on discovery failure; validation errors are returned as
+/// diagnostics.  On discovery failure the caller should treat this as exit
+/// code 2.
+pub fn collect(globs: &[String], fix: bool, repo_root: &Path) -> Result<Vec<CheckDiagnostic>> {
+    let files = discover_files(globs, repo_root)?;
+    let index_files = if globs.is_empty() {
+        files.clone()
+    } else {
+        discover_files(&[], repo_root).unwrap_or_else(|_| files.clone())
+    };
+    collect_for_files(&files, &index_files, fix, repo_root)
+}
+
+fn collect_for_files(
+    files: &[PathBuf],
+    index_files: &[PathBuf],
+    fix: bool,
+    repo_root: &Path,
+) -> Result<Vec<CheckDiagnostic>> {
     let mut diagnostics: Vec<CheckDiagnostic> = Vec::new();
+
+    let files_set: std::collections::HashSet<&PathBuf> = files.iter().collect();
 
     // ── Parse frontmatter for all pages ──────────────────────────────────────
     let mut pages: Vec<(PathBuf, Frontmatter)> = Vec::new();
@@ -47,16 +119,19 @@ pub fn run(globs: &[String], json: bool, fix: bool, repo_root: &Path) -> Result<
     // broken_wikilink diagnostics when the real problem is a frontmatter error.
     let mut invalid_titles: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for path in &files {
+    for path in index_files {
+        let in_scope = files_set.contains(path);
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => {
-                diagnostics.push(CheckDiagnostic {
-                    kind: "runtime".into(),
-                    file: path.display().to_string(),
-                    line: 0,
-                    message: format!("Could not read file: {e}"),
-                });
+                if in_scope {
+                    diagnostics.push(CheckDiagnostic {
+                        kind: "runtime".into(),
+                        file: path.display().to_string(),
+                        line: 0,
+                        message: format!("Could not read file: {e}"),
+                    });
+                }
                 continue;
             }
         };
@@ -66,24 +141,28 @@ pub fn run(globs: &[String], json: bool, fix: bool, repo_root: &Path) -> Result<
                 pages.push((path.clone(), fm));
             }
             Ok(None) => {
-                diagnostics.push(CheckDiagnostic {
-                    kind: "frontmatter".into(),
-                    file: path.display().to_string(),
-                    line: 1,
-                    message: "Add a `---` frontmatter block. `title` and `summary` are required."
-                        .into(),
-                });
+                if in_scope {
+                    diagnostics.push(CheckDiagnostic {
+                        kind: "frontmatter".into(),
+                        file: path.display().to_string(),
+                        line: 1,
+                        message: "Add a `---` frontmatter block. `title` and `summary` are required."
+                            .into(),
+                    });
+                }
             }
             Err(e) => {
                 if let Some(title) = parse_title(&content) {
                     invalid_titles.insert(title.to_lowercase());
                 }
-                diagnostics.push(CheckDiagnostic {
-                    kind: "frontmatter".into(),
-                    file: path.display().to_string(),
-                    line: 1,
-                    message: e.to_string(),
-                });
+                if in_scope {
+                    diagnostics.push(CheckDiagnostic {
+                        kind: "frontmatter".into(),
+                        file: path.display().to_string(),
+                        line: 1,
+                        message: e.to_string(),
+                    });
+                }
             }
         }
     }
@@ -92,16 +171,18 @@ pub fn run(globs: &[String], json: bool, fix: bool, repo_root: &Path) -> Result<
     let (index, collisions) = build_index(&pages);
 
     for col in &collisions {
-        diagnostics.push(CheckDiagnostic {
-            kind: "collision".into(),
-            file: col.offending_path.display().to_string(),
-            line: 1,
-            message: format!(
-                "Title or alias `{}` is already defined in `{}`. Rename this page's title or remove the conflicting alias.",
-                col.key,
-                col.existing_path.display()
-            ),
-        });
+        if files_set.contains(&col.offending_path) {
+            diagnostics.push(CheckDiagnostic {
+                kind: "collision".into(),
+                file: col.offending_path.display().to_string(),
+                line: 1,
+                message: format!(
+                    "Title or alias `{}` is already defined in `{}`. Rename this page's title or remove the conflicting alias.",
+                    col.key,
+                    col.existing_path.display()
+                ),
+            });
+        }
     }
 
     // Build a map from path -> content (for heading extraction)
@@ -116,7 +197,7 @@ pub fn run(globs: &[String], json: bool, fix: bool, repo_root: &Path) -> Result<
     // When --fix is active, collect (path, link) pairs for links to fix later.
     let mut links_to_fix: Vec<(PathBuf, FragmentLink)> = Vec::new();
 
-    for path in &files {
+    for path in files {
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(_) => continue, // already reported above
@@ -396,37 +477,7 @@ pub fn run(globs: &[String], json: bool, fix: bool, repo_root: &Path) -> Result<
         }
     }
 
-    // ── Output ────────────────────────────────────────────────────────────────
-    if json {
-        println!("{}", serde_json::to_string_pretty(&diagnostics).unwrap());
-    } else {
-        for d in &diagnostics {
-            if d.kind == "fixed" {
-                continue;
-            }
-            println!("**{}** — `{}:{}`\n{}\n", d.kind, d.file, d.line, d.message);
-        }
-        if fix {
-            let changed: std::collections::HashSet<&str> = diagnostics
-                .iter()
-                .filter(|d| d.kind == "fixed")
-                .map(|d| d.file.as_str())
-                .collect();
-            if !changed.is_empty() {
-                println!("Fixed {} file(s).", changed.len());
-            }
-        }
-    }
-
-    // "fixed" and "alias_resolve" are non-error kinds — only other kinds are errors.
-    if diagnostics
-        .iter()
-        .any(|d| d.kind != "alias_resolve" && d.kind != "fixed")
-    {
-        Ok(1)
-    } else {
-        Ok(0)
-    }
+    Ok(diagnostics)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -871,6 +922,60 @@ mod tests {
         assert_eq!(
             content, original,
             "missing pinned link path must remain unchanged by --fix"
+        );
+    }
+
+    #[test]
+    fn test_check_glob_resolves_wikilinks_against_full_index() {
+        // Regression: passing a file path must not limit the index to that file only.
+        let repo = TestRepo::new();
+        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        repo.create_file("wiki/page_a.md", &make_wiki_page("Page A", "See [[Page B]]."));
+        repo.create_file("wiki/page_b.md", &make_wiki_page("Page B", "Target."));
+        repo.commit("add pages");
+
+        let globs = vec!["wiki/page_a.md".to_string()];
+        let code = run(&globs, false, false, repo.path()).expect("run");
+        assert_eq!(
+            code, 0,
+            "wikilink to a page outside the glob must resolve against the full wiki index"
+        );
+    }
+
+    #[test]
+    fn test_check_glob_still_reports_genuinely_missing_wikilinks() {
+        let repo = TestRepo::new();
+        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        repo.create_file(
+            "wiki/page_a.md",
+            &make_wiki_page("Page A", "See [[Does Not Exist]]."),
+        );
+        repo.create_file("wiki/page_b.md", &make_wiki_page("Page B", "Unrelated."));
+        repo.commit("add pages");
+
+        let globs = vec!["wiki/page_a.md".to_string()];
+        let code = run(&globs, false, false, repo.path()).expect("run");
+        assert_eq!(
+            code, 1,
+            "a truly missing wikilink must still be reported when using a file glob"
+        );
+    }
+
+    #[test]
+    fn test_check_glob_does_not_report_collisions_outside_scope() {
+        // Collisions between pages not in the glob must not appear in the output.
+        let repo = TestRepo::new();
+        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        repo.create_file("wiki/a.md", &make_wiki_page("Shared Title", ""));
+        repo.create_file("wiki/b.md", &make_wiki_page("Shared Title", ""));
+        repo.create_file("wiki/c.md", &make_wiki_page("Clean", "No issues here."));
+        repo.commit("add pages");
+
+        let globs = vec!["wiki/c.md".to_string()];
+        let diagnostics = collect(&globs, false, repo.path()).expect("collect");
+        assert!(
+            diagnostics.is_empty(),
+            "collision between out-of-scope pages must not appear when checking an unrelated file: {diagnostics:?}"
         );
     }
 }
