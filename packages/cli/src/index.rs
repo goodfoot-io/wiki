@@ -125,7 +125,7 @@ enum PendingIncomingLinkKind {
 #[derive(Debug, Clone)]
 struct SearchRow {
     title: String,
-    path_abs: String,
+    path_rel: String,
     summary: String,
     source_raw: String,
 }
@@ -197,12 +197,13 @@ impl WikiIndex {
         offset: usize,
     ) -> Result<(Vec<SearchResult>, usize)> {
         self.runtime
-            .block_on(search_weighted_async(&self.conn, query, limit, offset))
+            .block_on(search_weighted_async(&self.conn, &self.repo_root, query, limit, offset))
     }
 
     pub fn suggest(&self, query: &str) -> Result<Vec<SearchResult>> {
         self.runtime.block_on(search_async(
             &self.conn,
+            &self.repo_root,
             query,
             Some(SUGGESTION_LIMIT),
             SUGGESTION_MIN_SCORE,
@@ -210,7 +211,7 @@ impl WikiIndex {
     }
 
     pub fn list_pages(&self, tag: Option<&str>) -> Result<Vec<PageListEntry>> {
-        self.runtime.block_on(list_pages_async(&self.conn, tag))
+        self.runtime.block_on(list_pages_async(&self.conn, &self.repo_root, tag))
     }
 
     pub fn links(&self, input: &str) -> Result<Vec<SearchResult>> {
@@ -512,8 +513,8 @@ async fn recreate_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_tags_document_id ON tags(document_id);
         CREATE INDEX IF NOT EXISTS idx_tags_tag_key ON tags(tag_key);
         CREATE INDEX IF NOT EXISTS idx_incoming_links_target ON incoming_links(target_kind, target_key);
-        CREATE INDEX IF NOT EXISTS idx_documents_fts ON documents USING fts (title, aliases_text, tags_text, keywords_text, summary, body)
-        WITH (weights = 'title=5.0,aliases_text=4.0,tags_text=3.0,keywords_text=3.0,summary=2.0,body=1.0');
+        CREATE INDEX IF NOT EXISTS idx_documents_fts ON documents USING fts (title, aliases_text, tags_text, keywords_text, summary)
+        WITH (weights = 'title=5.0,aliases_text=4.0,tags_text=3.0,keywords_text=3.0,summary=2.0');
         ",
     )
     .await
@@ -1316,6 +1317,7 @@ async fn fetch_page_by_path(
 
 async fn search_weighted_async(
     conn: &Connection,
+    repo_root: &Path,
     query: &str,
     limit: i64,
     offset: usize,
@@ -1337,15 +1339,15 @@ async fn search_weighted_async(
             let mut all_results = Vec::new();
             let mut seen_titles = HashMap::new();
 
-            for result in search_exact_matches_async(conn, query, &tokens).await? {
+            for result in search_exact_matches_async(conn, repo_root, query, &tokens).await? {
                 push_weighted_result(&mut all_results, &mut seen_titles, result);
             }
 
-            for result in search_path_matches_async(conn, query, &tokens).await? {
+            for result in search_path_matches_async(conn, repo_root, query, &tokens).await? {
                 push_weighted_result(&mut all_results, &mut seen_titles, result);
             }
 
-            for result in search_async(conn, query, None, 0.0).await? {
+            for result in search_async(conn, repo_root, query, None, 0.0).await? {
                 push_weighted_result(&mut all_results, &mut seen_titles, result);
             }
 
@@ -1374,6 +1376,7 @@ async fn search_weighted_async(
 
 async fn search_exact_matches_async(
     conn: &Connection,
+    repo_root: &Path,
     query: &str,
     tokens: &[String],
 ) -> Result<Vec<SearchResult>> {
@@ -1385,7 +1388,7 @@ async fn search_exact_matches_async(
     let mut rows = conn
         .query(
             "
-            SELECT d.title, d.path_abs, d.summary, d.source_raw, lk.kind
+            SELECT d.title, d.path_rel, d.summary, d.source_raw, lk.kind
             FROM lookup_keys lk
             JOIN documents d ON d.id = lk.document_id
             WHERE lk.key = ?1
@@ -1399,9 +1402,10 @@ async fn search_exact_matches_async(
 
     let mut results = Vec::new();
     while let Some(row) = next_row(&mut rows).await? {
+        let path_rel = row_string(&row, 1)?;
         results.push(SearchResult {
             title: row_string(&row, 0)?,
-            file: row_string(&row, 1)?,
+            file: repo_root.join(&path_rel).to_string_lossy().into_owned(),
             summary: row_string(&row, 2)?,
             alias: None,
             snippets: matched_snippets(&row_string(&row, 3)?, tokens),
@@ -1412,6 +1416,7 @@ async fn search_exact_matches_async(
 
 async fn search_path_matches_async(
     conn: &Connection,
+    repo_root: &Path,
     query: &str,
     tokens: &[String],
 ) -> Result<Vec<SearchResult>> {
@@ -1430,7 +1435,7 @@ async fn search_path_matches_async(
         .join(" AND ");
     let sql = format!(
         "
-        SELECT d.title, d.path_abs, d.summary, d.source_raw
+        SELECT d.title, d.path_rel, d.summary, d.source_raw
         FROM documents d
         WHERE {predicate}
         ORDER BY d.path_rel ASC, d.title ASC
@@ -1449,9 +1454,10 @@ async fn search_path_matches_async(
 
     let mut results = Vec::new();
     while let Some(row) = next_row(&mut rows).await? {
+        let path_rel = row_string(&row, 1)?;
         results.push(SearchResult {
             title: row_string(&row, 0)?,
-            file: row_string(&row, 1)?,
+            file: repo_root.join(&path_rel).to_string_lossy().into_owned(),
             summary: row_string(&row, 2)?,
             alias: None,
             snippets: matched_snippets(&row_string(&row, 3)?, tokens),
@@ -1474,6 +1480,7 @@ async fn search_path_matches_async(
 
 async fn search_async(
     conn: &Connection,
+    repo_root: &Path,
     query: &str,
     limit: Option<i64>,
     min_score: f64,
@@ -1496,12 +1503,12 @@ async fn search_async(
                 "
                 SELECT
                     d.title,
-                    d.path_abs,
+                    d.path_rel,
                     d.summary,
                     d.source_raw,
-                    fts_score(d.title, d.aliases_text, d.tags_text, d.keywords_text, d.summary, d.body, ?1) AS score
+                    fts_score(d.title, d.aliases_text, d.tags_text, d.keywords_text, d.summary, ?1) AS score
                 FROM documents d
-                WHERE fts_match(d.title, d.aliases_text, d.tags_text, d.keywords_text, d.summary, d.body, ?1)
+                WHERE fts_match(d.title, d.aliases_text, d.tags_text, d.keywords_text, d.summary, ?1)
                 ORDER BY score DESC, d.title ASC
                 {limit_clause}
                 "
@@ -1518,7 +1525,7 @@ async fn search_async(
             while let Some(row) = next_row(&mut rows).await? {
                 let row = SearchRow {
                     title: row_string(&row, 0)?,
-                    path_abs: row_string(&row, 1)?,
+                    path_rel: row_string(&row, 1)?,
                     summary: row_string(&row, 2)?,
                     source_raw: row_string(&row, 3)?,
                 };
@@ -1528,7 +1535,7 @@ async fn search_async(
                 }
                 results.push(SearchResult {
                     title: row.title,
-                    file: row.path_abs,
+                    file: repo_root.join(&row.path_rel).to_string_lossy().into_owned(),
                     summary: row.summary,
                     alias: None,
                     snippets: matched_snippets(&row.source_raw, &tokens),
@@ -1576,7 +1583,7 @@ fn escape_like_pattern(token: &str) -> String {
         .replace('_', "\\_")
 }
 
-async fn list_pages_async(conn: &Connection, tag: Option<&str>) -> Result<Vec<PageListEntry>> {
+async fn list_pages_async(conn: &Connection, repo_root: &Path, tag: Option<&str>) -> Result<Vec<PageListEntry>> {
     perf::scope_async_result(
         "index.list_pages",
         json!({
@@ -1586,7 +1593,7 @@ async fn list_pages_async(conn: &Connection, tag: Option<&str>) -> Result<Vec<Pa
             let mut rows = if let Some(tag) = tag {
                 conn.query(
                     "
-                    SELECT DISTINCT d.id, d.title, d.summary, d.path_abs
+                    SELECT DISTINCT d.id, d.title, d.summary, d.path_rel
                     FROM documents d
                     JOIN tags t ON t.document_id = d.id
                     WHERE t.tag_key = ?1
@@ -1597,7 +1604,7 @@ async fn list_pages_async(conn: &Connection, tag: Option<&str>) -> Result<Vec<Pa
                 .await
             } else {
                 conn.query(
-                    "SELECT d.id, d.title, d.summary, d.path_abs FROM documents d ORDER BY d.title ASC",
+                    "SELECT d.id, d.title, d.summary, d.path_rel FROM documents d ORDER BY d.title ASC",
                     (),
                 )
                 .await
@@ -1608,10 +1615,11 @@ async fn list_pages_async(conn: &Connection, tag: Option<&str>) -> Result<Vec<Pa
             let mut pages = Vec::new();
             while let Some(row) = next_row(&mut rows).await? {
                 let document_id = row_i64(&row, 0)?;
+                let path_rel = row_string(&row, 3)?;
                 pages.push(PageListEntry {
                     title: row_string(&row, 1)?,
                     summary: row_string(&row, 2)?,
-                    file: row_string(&row, 3)?,
+                    file: repo_root.join(&path_rel).to_string_lossy().into_owned(),
                     aliases: load_aliases(conn, document_id).await?,
                     tags: load_tags(conn, document_id).await?,
                 });
@@ -1888,17 +1896,31 @@ async fn fetch_pages_by_ids_async(
 }
 
 fn build_fts_query(query: &str) -> String {
-    let tokens = search_tokens(query);
-    tokens.join(" ")
+    parse_query_segments(query)
+        .into_iter()
+        .map(|seg| match seg {
+            QuerySegment::Phrase(p) => format!("\"{}\"", p.to_lowercase()),
+            QuerySegment::Terms(t) => t,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn search_tokens(query: &str) -> Vec<String> {
-    let tokens = query
-        .split(|character: char| !character.is_alphanumeric())
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .map(|token| token.to_lowercase())
-        .collect::<Vec<_>>();
+    let tokens: Vec<String> = parse_query_segments(query)
+        .into_iter()
+        .flat_map(|seg| match seg {
+            QuerySegment::Phrase(p) => p
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|t| !t.is_empty())
+                .map(|t| t.to_lowercase())
+                .collect::<Vec<_>>(),
+            QuerySegment::Terms(t) => t
+                .split_whitespace()
+                .map(|t| t.to_lowercase())
+                .collect::<Vec<_>>(),
+        })
+        .collect();
 
     if tokens.is_empty() {
         let trimmed = query.trim();
@@ -1910,6 +1932,68 @@ fn search_tokens(query: &str) -> Vec<String> {
     } else {
         tokens
     }
+}
+
+enum QuerySegment {
+    Phrase(String),
+    Terms(String),
+}
+
+/// Split a query string into alternating phrase (double-quoted) and term segments.
+/// Quoted substrings are preserved intact for Tantivy phrase query syntax.
+/// Unquoted substrings are tokenized (split on non-alphanumeric, lowercased, space-joined).
+fn parse_query_segments(query: &str) -> Vec<QuerySegment> {
+    let mut segments = Vec::new();
+    let mut rest = query;
+
+    while !rest.is_empty() {
+        match rest.find('"') {
+            None => {
+                // No more quotes — flush remaining text as terms.
+                let terms = tokenize_terms(rest);
+                if !terms.is_empty() {
+                    segments.push(QuerySegment::Terms(terms));
+                }
+                break;
+            }
+            Some(quote_pos) => {
+                // Flush unquoted text before the opening quote.
+                let terms = tokenize_terms(&rest[..quote_pos]);
+                if !terms.is_empty() {
+                    segments.push(QuerySegment::Terms(terms));
+                }
+                let after_open = &rest[quote_pos + 1..];
+                match after_open.find('"') {
+                    Some(close_pos) => {
+                        let phrase = &after_open[..close_pos];
+                        if !phrase.trim().is_empty() {
+                            segments.push(QuerySegment::Phrase(phrase.to_string()));
+                        }
+                        rest = &after_open[close_pos + 1..];
+                    }
+                    None => {
+                        // Unclosed quote — treat remainder as terms.
+                        let terms = tokenize_terms(after_open);
+                        if !terms.is_empty() {
+                            segments.push(QuerySegment::Terms(terms));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    segments
+}
+
+fn tokenize_terms(text: &str) -> String {
+    text.split(|c: char| !c.is_alphanumeric())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn strip_markdown_links(text: &str) -> std::borrow::Cow<'_, str> {
@@ -2269,8 +2353,8 @@ mod tests {
             "---\ntitle: Rust Indexing\nsummary: Title match.\n---\nBody.\n",
         );
         repo.create_file(
-            "wiki/body-match.md",
-            "---\ntitle: Secondary\nsummary: Body match.\n---\nRust indexing appears in the body.\n",
+            "wiki/summary-match.md",
+            "---\ntitle: Secondary\nsummary: Rust indexing summary match.\n---\nBody.\n",
         );
 
         let index = WikiIndex::prepare(repo.path()).expect("prepare");
@@ -2286,7 +2370,6 @@ mod tests {
             results.get(1).map(|result| result.title.as_str()),
             Some("Secondary")
         );
-        assert!(!results[1].snippets.is_empty());
     }
 
     #[test]
@@ -2298,8 +2381,8 @@ mod tests {
             "---\ntitle: Unrelated\nsummary: Path match.\n---\nNothing here.\n",
         );
         repo.create_file(
-            "wiki/body-match.md",
-            "---\ntitle: Body Match\nsummary: Body match.\n---\nRust indexing guide appears in the body.\n",
+            "wiki/summary-match.md",
+            "---\ntitle: Summary Match\nsummary: Rust indexing guide appears in the summary.\n---\nNothing here.\n",
         );
 
         let index = WikiIndex::prepare(repo.path()).expect("prepare");
@@ -2313,7 +2396,7 @@ mod tests {
         );
         assert_eq!(
             results.get(1).map(|result| result.title.as_str()),
-            Some("Body Match")
+            Some("Summary Match")
         );
     }
 
@@ -2323,15 +2406,15 @@ mod tests {
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
         repo.create_file(
             "wiki/a.md",
-            "---\ntitle: Alpha\nsummary: Alpha summary.\n---\nneedle one.\n",
+            "---\ntitle: Alpha\nsummary: needle one.\n---\nBody.\n",
         );
         repo.create_file(
             "wiki/b.md",
-            "---\ntitle: Beta\nsummary: Beta summary.\n---\nneedle two.\n",
+            "---\ntitle: Beta\nsummary: needle two.\n---\nBody.\n",
         );
         repo.create_file(
             "wiki/c.md",
-            "---\ntitle: Gamma\nsummary: Gamma summary.\n---\nneedle three.\n",
+            "---\ntitle: Gamma\nsummary: needle three.\n---\nBody.\n",
         );
 
         let index = WikiIndex::prepare(repo.path()).expect("prepare");
@@ -2347,7 +2430,7 @@ mod tests {
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
         repo.create_file(
             "wiki/example.md",
-            "---\ntitle: Example\nsummary: Example summary.\n---\nRust indexing appears here.\n",
+            "---\ntitle: Example\nsummary: Rust indexing appears here.\n---\nBody.\n",
         );
 
         let index = WikiIndex::prepare(repo.path()).expect("prepare");
@@ -2357,7 +2440,7 @@ mod tests {
 
         repo.create_file(
             "wiki/example.md",
-            "---\ntitle: Example\nsummary: Example summary.\n---\nGraph traversal appears here.\n",
+            "---\ntitle: Example\nsummary: Graph traversal appears here.\n---\nBody.\n",
         );
 
         let index = WikiIndex::prepare(repo.path()).expect("prepare");
