@@ -13,7 +13,7 @@ import * as vscode from 'vscode';
 import { render } from '../rendering/MarkdownRenderer.js';
 import { runWikiCommand } from '../utils/wikiBinary.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
-import type { HostMessage, WebviewMessage } from '../webviews/wiki/types.js';
+import type { HostMessage, RefEntry, WebviewMessage } from '../webviews/wiki/types.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -295,13 +295,18 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
 
     let text: string;
     let summaryResult: Awaited<ReturnType<typeof runWikiCommand>>;
+    let refsResult: Awaited<ReturnType<typeof runWikiCommand>> | null;
 
     try {
       const handle = await this._binaryManager.ready();
-      // Read file content and run summary command concurrently.
-      [text, summaryResult] = await Promise.all([
+      // Read file content, run summary, and pre-fetch tooltip refs concurrently.
+      // refs is best-effort: its failure is caught inline so it never rejects the Promise.all.
+      [text, summaryResult, refsResult] = await Promise.all([
         this._readDocumentText(uri),
-        runWikiCommand(handle.path, ['summary', uri.fsPath, '--format', 'json'], undefined, this._workspaceRoot())
+        runWikiCommand(handle.path, ['summary', uri.fsPath, '--format', 'json'], undefined, this._workspaceRoot()),
+        runWikiCommand(handle.path, ['refs', uri.fsPath, '--format', 'json'], undefined, this._workspaceRoot()).catch(
+          () => null
+        )
       ]);
     } catch (err) {
       // File read error or spawn error (e.g. ENOENT — binary not found after initial check).
@@ -323,11 +328,16 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
       }
     }
 
-    const updateMessage: HostMessage = {
-      type: 'updateContent',
-      html,
-      scrollY
-    };
+    let refs: RefEntry[] | undefined;
+    if (refsResult != null && refsResult.exitCode === 0 && refsResult.stdout.trim() !== '') {
+      try {
+        refs = JSON.parse(refsResult.stdout) as RefEntry[];
+      } catch (parseErr) {
+        console.warn('[wiki-extension] Failed to parse wiki refs JSON:', parseErr);
+      }
+    }
+
+    const updateMessage: HostMessage = { type: 'updateContent', html, scrollY, refs };
     this._postMessage(webview, updateMessage);
   }
 
@@ -400,6 +410,7 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     const codiconUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'dist', 'codicons', 'codicon.css'));
     const markdownCssUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'markdown.css'));
     const highlightCssUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'highlight.css'));
+    const tooltipCssUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'tooltip.css'));
 
     // Content security policy: allow scripts and fonts from the extension's dist and media origins.
     const cspSource = webview.cspSource;
@@ -416,6 +427,7 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
   <link href="${codiconUri}" rel="stylesheet" id="vscode-codicon-stylesheet" />
   <link href="${markdownCssUri}" rel="stylesheet" />
   <link href="${highlightCssUri}" rel="stylesheet" />
+  <link href="${tooltipCssUri}" rel="stylesheet" />
   <title>Wiki Viewer</title>
 </head>
 <body class="vscode-body">

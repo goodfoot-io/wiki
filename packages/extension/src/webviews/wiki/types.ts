@@ -6,9 +6,21 @@
  * @summary Discriminated union message types for the wiki webview host↔webview channel.
  */
 
+// Tooltip metadata for a resolved wikilink, as returned by `wiki refs --format json`.
+export type ResolvedRefEntry = {
+  wikilink: string;
+  title: string;
+  file: string;
+  summary: string;
+  aliases: string[];
+  tags: string[];
+};
+
+export type RefEntry = ResolvedRefEntry | { wikilink: string; error: string };
+
 // Host -> Webview messages
 export type HostMessage =
-  | { type: 'updateContent'; html: string; scrollY?: number }
+  | { type: 'updateContent'; html: string; scrollY?: number; refs?: RefEntry[] }
   | { type: 'showLoading' }
   | { type: 'showError'; message: string };
 

@@ -13,7 +13,8 @@ import { getScrollY, patch, scrollTo } from './content.js';
 import { renderDiagrams } from './diagrams.js';
 import { onHostMessage, post } from './messaging.js';
 import { mount as mountToolbar } from './toolbar.js';
-import type { HostMessage } from './types.js';
+import { hideTooltip, initTooltip, showTooltip } from './tooltip.js';
+import type { HostMessage, ResolvedRefEntry } from './types.js';
 import '@vscode-elements/elements/dist/vscode-progress-ring/index.js';
 
 // ---------------------------------------------------------------------------
@@ -21,6 +22,62 @@ import '@vscode-elements/elements/dist/vscode-progress-ring/index.js';
 // ---------------------------------------------------------------------------
 
 mountToolbar();
+initTooltip();
+
+// ---------------------------------------------------------------------------
+// Refs map — populated on each updateContent message
+// ---------------------------------------------------------------------------
+
+let refsMap = new Map<string, ResolvedRefEntry>();
+
+function isWikilink(href: string): boolean {
+  return (
+    href.length > 0 &&
+    !href.startsWith('#') &&
+    !href.startsWith('file:///') &&
+    !href.startsWith('http://') &&
+    !href.startsWith('https://') &&
+    !href.startsWith('mailto:')
+  );
+}
+
+function wikilinkKey(href: string): string {
+  const decoded = decodeURIComponent(href.replace(/^\//, ''));
+  const hashIdx = decoded.indexOf('#');
+  return (hashIdx >= 0 ? decoded.slice(0, hashIdx) : decoded).toLowerCase();
+}
+
+// ---------------------------------------------------------------------------
+// Delegated wikilink hover — shows tooltip after 250 ms
+// ---------------------------------------------------------------------------
+
+let hoverTimer: ReturnType<typeof setTimeout> | null = null;
+
+document.addEventListener('mouseover', (e: MouseEvent) => {
+  const anchor = (e.target as Element).closest('a');
+  if (anchor == null) return;
+  const href = anchor.getAttribute('href');
+  if (href == null || !isWikilink(href)) return;
+  const entry = refsMap.get(wikilinkKey(href));
+  if (entry == null) return;
+  if (hoverTimer != null) clearTimeout(hoverTimer);
+  hoverTimer = setTimeout(() => {
+    showTooltip(anchor as HTMLElement, entry);
+  }, 250);
+});
+
+document.addEventListener('mouseout', (e: MouseEvent) => {
+  const anchor = (e.target as Element).closest('a');
+  if (anchor == null) return;
+  if (anchor.contains(e.relatedTarget as Node | null)) return;
+  const href = anchor.getAttribute('href');
+  if (href == null || !isWikilink(href)) return;
+  if (hoverTimer != null) {
+    clearTimeout(hoverTimer);
+    hoverTimer = null;
+  }
+  hideTooltip();
+});
 
 // ---------------------------------------------------------------------------
 // Delegated link click interceptor
@@ -79,6 +136,15 @@ onHostMessage((message: HostMessage) => {
       const errorEl = document.getElementById('error');
       if (errorEl != null) {
         errorEl.style.display = 'none';
+      }
+      hideTooltip();
+      refsMap = new Map<string, ResolvedRefEntry>();
+      if (message.refs != null) {
+        for (const entry of message.refs) {
+          if ('title' in entry) {
+            refsMap.set(entry.wikilink.toLowerCase(), entry);
+          }
+        }
       }
       patch(message.html);
       void renderDiagrams();

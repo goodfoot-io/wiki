@@ -1,0 +1,66 @@
+#wiki-tooltip {
+  position: fixed;
+  z-index: 9999;
+  max-width: 380px;
+  min-width: 160px;
+  background: var(--vscode-editorHoverWidget-background);
+  color: var(--vscode-editorHoverWidget-foreground);
+  border: 1px solid var(--vscode-editorHoverWidget-border);
+  border-radius: 3px;
+  font-size: 13px;
+  line-height: 1.4;
+  pointer-events: none;
+  display: none;
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+}
+
+#wiki-tooltip.wiki-tooltip--visible {
+  display: block;
+  animation: wiki-tooltip-fadein 100ms ease forwards;
+}
+
+@keyframes wiki-tooltip-fadein {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.wiki-tooltip-body {
+  padding: 6px 8px;
+}
+
+.wiki-tooltip-title {
+  font-weight: 600;
+  margin-bottom: 3px;
+}
+
+.wiki-tooltip-summary {
+  opacity: 0.9;
+}
+
+.wiki-tooltip-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.wiki-tooltip-arrow {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  background: var(--vscode-editorHoverWidget-background);
+  border: 1px solid var(--vscode-editorHoverWidget-border);
+  transform: rotate(45deg);
+}
+
+.wiki-tooltip-arrow--down {
+  bottom: -5px;
+  border-top: none;
+  border-left: none;
+}
+
+.wiki-tooltip-arrow--up {
+  top: -5px;
+  border-bottom: none;
+  border-right: none;
+}

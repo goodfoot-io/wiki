@@ -70,6 +70,17 @@ pub struct ResolvedPage {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ResolvedPageFull {
+    pub title: String,
+    pub file: String,
+    pub summary: String,
+    pub aliases: Vec<String>,
+    pub tags: Vec<String>,
+    #[serde(skip_serializing)]
+    pub alias: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PageListEntry {
     pub title: String,
     pub aliases: Vec<String>,
@@ -183,6 +194,11 @@ impl WikiIndex {
     pub fn resolve_page(&self, input: &str) -> Result<Option<ResolvedPage>> {
         self.runtime
             .block_on(resolve_page_async(&self.conn, &self.repo_root, input))
+    }
+
+    pub fn resolve_page_full(&self, input: &str) -> Result<Option<ResolvedPageFull>> {
+        self.runtime
+            .block_on(resolve_page_full_async(&self.conn, &self.repo_root, input))
     }
 
     pub fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
@@ -1248,6 +1264,26 @@ async fn resolve_page_async(
         },
     )
     .await
+}
+
+async fn resolve_page_full_async(
+    conn: &Connection,
+    repo_root: &Path,
+    input: &str,
+) -> Result<Option<ResolvedPageFull>> {
+    let Some(page) = resolve_page_async(conn, repo_root, input).await? else {
+        return Ok(None);
+    };
+    let aliases = load_aliases(conn, page.document_id).await?;
+    let tags = load_tags(conn, page.document_id).await?;
+    Ok(Some(ResolvedPageFull {
+        title: page.title,
+        file: page.file,
+        summary: page.summary,
+        aliases,
+        tags,
+        alias: page.alias,
+    }))
 }
 
 async fn fetch_page_by_lookup(conn: &Connection, input: &str) -> Result<Option<ResolvedPage>> {

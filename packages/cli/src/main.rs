@@ -29,7 +29,7 @@ enum Format {
     version = crate::version::VERSION,
     before_help = concat!("wiki ", env!("WIKI_VERSION"), "\n"),
     about = "wiki - Read and maintain wiki pages",
-    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, pin, stale, links, list, summary, extract, hook, html, install, serve) are reserved and cannot be used as page titles.",
+    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, pin, stale, links, list, summary, extract, refs, hook, html, install, serve) are reserved and cannot be used as page titles.",
     disable_help_subcommand = true,
     disable_version_flag = true,
 )]
@@ -178,6 +178,20 @@ enum Commands {
     /// --format json, emits
     /// { title, file, summary }.
     Summary {
+        /// Page title, alias, or file path; reads from stdin if omitted
+        #[arg(value_name = "title|path")]
+        title: Option<String>,
+    },
+
+    /// Print metadata for all wikilinks referenced by a wiki page.
+    ///
+    /// Resolves all [[wikilinks]] found in the given page and returns
+    /// their title, summary, aliases, and tags. Useful for pre-fetching
+    /// tooltip data for all links on a page in one call.
+    /// Reads from stdin when the argument is omitted. With --format json,
+    /// emits [{ wikilink, title, file, summary, aliases, tags }] for
+    /// resolved links and [{ wikilink, error }] for unresolved ones.
+    Refs {
         /// Page title, alias, or file path; reads from stdin if omitted
         #[arg(value_name = "title|path")]
         title: Option<String>,
@@ -397,6 +411,14 @@ fn run(
                 false,
             )
         }
+        Some(Commands::Refs { title }) => {
+            let inputs = resolve_inputs(title, read_stdin_lines)?;
+            run_for_each(
+                inputs,
+                |input| commands::refs::run(input, json, &repo_root),
+                false,
+            )
+        }
         Some(Commands::Html {
             title,
             fragment,
@@ -478,6 +500,7 @@ fn command_name(command: Option<&Commands>, query: Option<&str>) -> &'static str
         Some(Commands::Hook { .. }) => "hook",
         Some(Commands::List { .. }) => "list",
         Some(Commands::Summary { .. }) => "summary",
+        Some(Commands::Refs { .. }) => "refs",
         Some(Commands::Html { .. }) => "html",
         Some(Commands::Install { .. }) => "install",
         Some(Commands::Serve { .. }) => "serve",

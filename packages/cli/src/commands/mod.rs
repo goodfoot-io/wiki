@@ -7,6 +7,7 @@ pub mod install;
 pub mod links;
 pub mod list;
 pub mod pin;
+pub mod refs;
 pub mod search;
 pub mod serve;
 pub mod stale;
