@@ -13,7 +13,7 @@ import { getScrollY, patch, scrollTo } from './content.js';
 import { renderDiagrams } from './diagrams.js';
 import { onHostMessage, post } from './messaging.js';
 import { mount as mountToolbar } from './toolbar.js';
-import { hideTooltip, initTooltip, showTooltip } from './tooltip.js';
+import { hideTooltip, initTooltip, showFileTooltip, showTooltip } from './tooltip.js';
 import type { HostMessage, ResolvedRefEntry } from './types.js';
 import '@vscode-elements/elements/dist/vscode-progress-ring/index.js';
 
@@ -41,6 +41,19 @@ function isWikilink(href: string): boolean {
   );
 }
 
+function isFilePath(href: string): boolean {
+  return (
+    href.length > 0 &&
+    !href.startsWith('/') &&
+    !href.startsWith('#') &&
+    !href.startsWith('file:///') &&
+    !href.startsWith('http://') &&
+    !href.startsWith('https://') &&
+    !href.startsWith('mailto:') &&
+    (href.includes('/') || href.includes('.'))
+  );
+}
+
 function wikilinkKey(href: string): string {
   const decoded = decodeURIComponent(href.replace(/^\//, ''));
   const hashIdx = decoded.indexOf('#');
@@ -57,13 +70,19 @@ document.addEventListener('mouseover', (e: MouseEvent) => {
   const anchor = (e.target as Element).closest('a');
   if (anchor == null) return;
   const href = anchor.getAttribute('href');
-  if (href == null || !isWikilink(href)) return;
-  const entry = refsMap.get(wikilinkKey(href));
-  if (entry == null) return;
+  if (href == null) return;
   if (hoverTimer != null) clearTimeout(hoverTimer);
-  hoverTimer = setTimeout(() => {
-    showTooltip(anchor as HTMLElement, entry);
-  }, 250);
+  if (isWikilink(href)) {
+    const entry = refsMap.get(wikilinkKey(href));
+    if (entry == null) return;
+    hoverTimer = setTimeout(() => {
+      showTooltip(anchor as HTMLElement, entry);
+    }, 250);
+  } else if (isFilePath(href)) {
+    hoverTimer = setTimeout(() => {
+      showFileTooltip(anchor as HTMLElement, href);
+    }, 250);
+  }
 });
 
 document.addEventListener('mouseout', (e: MouseEvent) => {
@@ -71,7 +90,7 @@ document.addEventListener('mouseout', (e: MouseEvent) => {
   if (anchor == null) return;
   if (anchor.contains(e.relatedTarget as Node | null)) return;
   const href = anchor.getAttribute('href');
-  if (href == null || !isWikilink(href)) return;
+  if (href == null || (!isWikilink(href) && !isFilePath(href))) return;
   if (hoverTimer != null) {
     clearTimeout(hoverTimer);
     hoverTimer = null;

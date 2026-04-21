@@ -1,12 +1,12 @@
 /// <reference lib="dom" />
 /**
- * Floating tooltip for wikilink hover previews.
+ * Floating tooltip for wikilink and file-link hover previews.
  *
  * Creates a single fixed-position `#wiki-tooltip` element and repositions it
- * on each {@link showTooltip} call. Styled via `media/tooltip.css` using
- * VSCode hover-widget CSS variables for automatic light/dark support.
+ * on each show call. Styled via `media/tooltip.css` using VSCode hover-widget
+ * CSS variables for automatic light/dark support.
  *
- * @summary Floating tooltip DOM management for wikilink hover previews.
+ * @summary Floating tooltip DOM management for wikilink and file-link hover previews.
  */
 
 import '@vscode-elements/elements/dist/vscode-badge/index.js';
@@ -44,7 +44,7 @@ export function initTooltip(): void {
  * @param entry - Resolved wikilink metadata to display.
  */
 export function showTooltip(anchor: HTMLElement, entry: ResolvedRefEntry): void {
-  if (tooltipEl == null || bodyEl == null || arrowEl == null) return;
+  if (bodyEl == null) return;
 
   const tagsHtml =
     entry.tags.length > 0
@@ -52,6 +52,63 @@ export function showTooltip(anchor: HTMLElement, entry: ResolvedRefEntry): void 
       : '';
 
   bodyEl.innerHTML = `<div class="wiki-tooltip-title">${escapeHtml(entry.title)}</div><div class="wiki-tooltip-summary">${escapeHtml(entry.summary)}</div>${tagsHtml}`;
+  positionAndShow(anchor);
+}
+
+const FILE_LANG: Record<string, string> = {
+  ts: 'TypeScript',
+  tsx: 'TypeScript',
+  js: 'JavaScript',
+  jsx: 'JavaScript',
+  rs: 'Rust',
+  go: 'Go',
+  py: 'Python',
+  rb: 'Ruby',
+  java: 'Java',
+  c: 'C',
+  cpp: 'C++',
+  cs: 'C#',
+  md: 'Markdown',
+  json: 'JSON',
+  yaml: 'YAML',
+  toml: 'TOML'
+};
+
+/**
+ * Show a tooltip for a repo-relative file link (e.g. `packages/foo/bar.ts@sha#L10-L45`).
+ *
+ * @param anchor - The hovered anchor element.
+ * @param href - The raw href attribute of the anchor.
+ */
+export function showFileTooltip(anchor: HTMLElement, href: string): void {
+  if (bodyEl == null) return;
+
+  const hashIdx = href.indexOf('#');
+  const rawPath = hashIdx >= 0 ? href.slice(0, hashIdx) : href;
+  const fragment = hashIdx >= 0 ? href.slice(hashIdx + 1) : '';
+
+  // Strip @sha pin added by `wiki check --fix`.
+  const atIdx = rawPath.indexOf('@');
+  const filePath = atIdx >= 0 ? rawPath.slice(0, atIdx) : rawPath;
+
+  const ext = filePath.split('.').pop()?.toLowerCase() ?? '';
+  const lang = FILE_LANG[ext];
+
+  let lineHtml = '';
+  const lineMatch = fragment.match(/^L(\d+)(?:-L?(\d+))?$/i);
+  if (lineMatch) {
+    const [, start, end] = lineMatch;
+    lineHtml = `<div class="wiki-tooltip-summary">${end ? `Lines ${start}–${end}` : `Line ${start}`}</div>`;
+  }
+
+  const badgeHtml =
+    lang != null ? `<div class="wiki-tooltip-tags"><vscode-badge>${escapeHtml(lang)}</vscode-badge></div>` : '';
+  bodyEl.innerHTML = `<div class="wiki-tooltip-title">${escapeHtml(filePath)}</div>${lineHtml}${badgeHtml}`;
+  positionAndShow(anchor);
+}
+
+function positionAndShow(anchor: HTMLElement): void {
+  if (tooltipEl == null || arrowEl == null) return;
 
   // Make visible but off-screen to measure dimensions before final positioning.
   tooltipEl.style.visibility = 'hidden';
