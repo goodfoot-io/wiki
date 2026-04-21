@@ -50,14 +50,16 @@ await esbuild.build({
 });
 
 // Webview — runs in the browser sandbox inside the panel.
-// extensionUri points at OUT_DIR, so the webview must be at OUT_DIR/dist/wiki.js.
+// extensionUri points at OUT_DIR, so the webview entry must be at OUT_DIR/dist/wiki.js.
+// ESM + splitting so mermaid is emitted as a separate chunk and loaded lazily.
 const distDir = path.join(OUT_DIR, 'dist');
 fs.mkdirSync(distDir, { recursive: true });
 await esbuild.build({
-  entryPoints: [path.join(EXTENSION_ROOT, 'src/webviews/wiki/index.ts')],
+  entryPoints: { wiki: path.join(EXTENSION_ROOT, 'src/webviews/wiki/index.ts') },
   bundle: true,
-  outfile: path.join(distDir, 'wiki.js'),
-  format: 'iife',
+  outdir: distDir,
+  format: 'esm',
+  splitting: true,
   platform: 'browser',
   target: 'es2022',
   sourcemap: true

@@ -10,7 +10,7 @@
  */
 
 import { getScrollY, patch, scrollTo } from './content.js';
-import { initMermaid, renderDiagrams } from './diagrams.js';
+import { renderDiagrams } from './diagrams.js';
 import { onHostMessage, post } from './messaging.js';
 import { mount as mountToolbar } from './toolbar.js';
 import type { HostMessage } from './types.js';
@@ -21,7 +21,6 @@ import '@vscode-elements/elements/dist/vscode-progress-ring/index.js';
 // ---------------------------------------------------------------------------
 
 mountToolbar();
-initMermaid();
 
 // ---------------------------------------------------------------------------
 // Delegated link click interceptor

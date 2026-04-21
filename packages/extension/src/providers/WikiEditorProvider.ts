@@ -423,7 +423,7 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
   <vscode-progress-ring id="loading"></vscode-progress-ring>
   <div id="error" style="display:none" role="alert"></div>
   <div id="content" class="markdown-body vscode-body"></div>
-  <script src="${scriptUri}"></script>
+  <script type="module" src="${scriptUri}"></script>
 </body>
 </html>`;
   }

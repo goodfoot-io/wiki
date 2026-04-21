@@ -35,11 +35,13 @@ await esbuild.build({
 });
 
 // Webview — runs in the browser sandbox inside the panel.
+// ESM + splitting so mermaid is emitted as a separate chunk and loaded lazily.
 await esbuild.build({
-  entryPoints: [path.join(EXTENSION_ROOT, 'src/webviews/wiki/index.ts')],
+  entryPoints: { wiki: path.join(EXTENSION_ROOT, 'src/webviews/wiki/index.ts') },
   bundle: true,
-  outfile: path.join(DIST, 'wiki.js'),
-  format: 'iife',
+  outdir: DIST,
+  format: 'esm',
+  splitting: true,
   platform: 'browser',
   target: 'es2022',
   sourcemap: true,
