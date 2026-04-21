@@ -1,8 +1,8 @@
 /**
  * CustomTextEditorProvider that renders wiki markdown in a webview panel.
  *
- * Supports wikilink navigation with back/forward history, live reload on file changes,
- * and scroll preservation across reloads and navigation events.
+ * Supports wikilink navigation via vscode.open, live reload on file changes,
+ * and scroll position persistence via workspaceState memento.
  *
  * @summary CustomTextEditorProvider that renders wiki markdown in a webview panel.
  */
@@ -18,16 +18,6 @@ import type { HostMessage, WebviewMessage } from '../webviews/wiki/types.js';
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-/** One entry in the navigation history stack. */
-interface HistoryEntry {
-  /** VS Code URI for the wiki file. Used for file watching and openInEditor. */
-  uri: vscode.Uri;
-  /** Wiki page name (decoded, unescaped). Used to look up alternate paths. */
-  pageName: string;
-  /** Scroll position at the time this entry was left. */
-  scrollY: number;
-}
 
 /** Summary JSON returned by `wiki summary <path> --format json`. */
 interface WikiSummaryJson {
@@ -49,7 +39,8 @@ interface WikiSummaryJson {
 export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
   constructor(
     private readonly _extensionUri: vscode.Uri,
-    private readonly _binaryManager: WikiBinaryManager
+    private readonly _binaryManager: WikiBinaryManager,
+    private readonly _context: vscode.ExtensionContext
   ) {}
 
   /**
@@ -154,31 +145,11 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     // Set the initial HTML shell (loads dist/wiki.js).
     webviewPanel.webview.html = this._buildShellHtml(webviewPanel.webview);
 
-    // Initialise navigation history with the document URI.
-    const initialPageName = path.basename(document.uri.fsPath, path.extname(document.uri.fsPath));
-    const history: HistoryEntry[] = [{ uri: document.uri, pageName: initialPageName, scrollY: 0 }];
-    let currentIndex = 0;
-
-    // Track the currently displayed URI for file-watcher scoping (Fix 1).
-    let currentUri = document.uri;
-
-    // Post updateNavigation after any history change (Fix 2).
-    const postNavigationState = () => {
-      this._postMessage(webviewPanel.webview, {
-        type: 'updateNavigation',
-        canGoBack: currentIndex > 0,
-        canGoForward: currentIndex < history.length - 1
-      });
-    };
+    const scrollKey = `scroll:${document.uri.toString()}`;
 
     const onDocumentChange = async (changedDocument: vscode.TextDocument) => {
-      if (changedDocument.uri.toString() !== currentUri.toString()) return;
-      const currentEntry = history[currentIndex];
-      if (currentEntry == null) return;
-      const savedScrollY = await this._getScrollPosition(webviewPanel.webview);
-      currentEntry.scrollY = savedScrollY;
-      await this._renderPage(webviewPanel.webview, currentEntry.uri, webviewPanel, savedScrollY);
-      postNavigationState();
+      if (changedDocument.uri.toString() !== document.uri.toString()) return;
+      await this._renderPage(webviewPanel.webview, document.uri, webviewPanel);
     };
 
     const changeDisposable = vscode.workspace.onDidChangeTextDocument((event) => {
@@ -192,25 +163,18 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
           // Render the initial page only once the webview signals readiness.
           try {
             await this._binaryManager.ready();
-            await this._renderPage(webviewPanel.webview, document.uri, webviewPanel);
+            const savedScrollY = this._context.workspaceState.get<number>(scrollKey);
+            await this._renderPage(webviewPanel.webview, document.uri, webviewPanel, savedScrollY);
           } catch (error) {
             this._postMessage(webviewPanel.webview, {
               type: 'showError',
               message: `Failed to install wiki CLI for this extension: ${this._binaryManager.formatFailure(error)}`
             });
           }
-          postNavigationState();
           break;
         }
 
         case 'navigate': {
-          // Save current scroll position before navigating.
-          const scrollY = await this._getScrollPosition(webviewPanel.webview);
-          const currentEntry = history[currentIndex];
-          if (currentEntry != null) {
-            currentEntry.scrollY = scrollY;
-          }
-
           // Resolve the target page URI via wiki summary.
           const targetUri = await this._resolvePageUri(message.pageName);
           if (targetUri == null) {
@@ -225,23 +189,10 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
                 const fileUri = vscode.Uri.file(path.join(workspaceRoot, message.pageName));
                 try {
                   await vscode.workspace.fs.stat(fileUri);
+                  const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
                   if (ext === '.md') {
-                    // Render markdown files in the wiki viewer.
-                    if (message.split) {
-                      await vscode.commands.executeCommand('vscode.openWith', fileUri, 'wiki.viewer', {
-                        viewColumn: vscode.ViewColumn.Beside
-                      });
-                    } else {
-                      history.splice(currentIndex + 1);
-                      history.push({ uri: fileUri, pageName: message.pageName, scrollY: 0 });
-                      currentIndex = history.length - 1;
-                      currentUri = fileUri;
-                      await this._renderPage(webviewPanel.webview, fileUri, webviewPanel);
-                      postNavigationState();
-                    }
+                    await vscode.commands.executeCommand('vscode.open', fileUri, viewColumn);
                   } else {
-                    // Open source files in the text editor.
-                    const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
                     await vscode.window.showTextDocument(fileUri, { viewColumn, preview: false });
                   }
                   return;
@@ -260,62 +211,19 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
             return;
           }
 
-          // Cmd/Ctrl-click: open the target wiki page in a new panel beside.
           if (message.split) {
             await vscode.commands.executeCommand('vscode.openWith', targetUri, 'wiki.viewer', {
               viewColumn: vscode.ViewColumn.Beside
             });
-            return;
+          } else {
+            await vscode.commands.executeCommand('vscode.open', targetUri, vscode.ViewColumn.Active);
           }
-
-          // Truncate forward history and push the new entry.
-          history.splice(currentIndex + 1);
-          history.push({ uri: targetUri, pageName: message.pageName, scrollY: 0 });
-          currentIndex = history.length - 1;
-          currentUri = targetUri; // Fix 1: update tracked URI on navigation
-
-          await this._renderPage(webviewPanel.webview, targetUri, webviewPanel);
-          postNavigationState();
-          break;
-        }
-
-        case 'goBack': {
-          if (currentIndex <= 0) return;
-          const scrollY = await this._getScrollPosition(webviewPanel.webview);
-          const currentEntry = history[currentIndex];
-          if (currentEntry != null) {
-            currentEntry.scrollY = scrollY;
-          }
-          currentIndex -= 1;
-          const prevEntry = history[currentIndex];
-          if (prevEntry == null) return;
-          currentUri = prevEntry.uri; // Fix 1: update tracked URI on navigation
-          await this._renderPage(webviewPanel.webview, prevEntry.uri, webviewPanel, prevEntry.scrollY);
-          postNavigationState();
-          break;
-        }
-
-        case 'goForward': {
-          if (currentIndex >= history.length - 1) return;
-          const scrollY = await this._getScrollPosition(webviewPanel.webview);
-          const currentEntry = history[currentIndex];
-          if (currentEntry != null) {
-            currentEntry.scrollY = scrollY;
-          }
-          currentIndex += 1;
-          const nextEntry = history[currentIndex];
-          if (nextEntry == null) return;
-          currentUri = nextEntry.uri; // Fix 1: update tracked URI on navigation
-          await this._renderPage(webviewPanel.webview, nextEntry.uri, webviewPanel, nextEntry.scrollY);
-          postNavigationState();
           break;
         }
 
         case 'openInEditor': {
-          const currentEntry = history[currentIndex];
-          if (currentEntry == null) return;
           const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
-          await vscode.commands.executeCommand('wiki.openInEditor', currentEntry.uri, { viewColumn, preview: false });
+          await vscode.commands.executeCommand('wiki.openInEditor', document.uri, { viewColumn, preview: false });
           break;
         }
 
@@ -346,8 +254,7 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
         }
 
         case 'scrollPosition': {
-          // Handled via the pending promise in _getScrollPosition.
-          // No additional action needed here.
+          void this._context.workspaceState.update(scrollKey, message.y);
           break;
         }
 
@@ -465,32 +372,6 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
       return openDocument.getText();
     }
     return readFile(uri.fsPath, 'utf8');
-  }
-
-  /**
-   * Request the current scroll position from the webview.
-   * Waits up to 200 ms for a reply; returns 0 on timeout.
-   *
-   * @param webview - The webview to query.
-   * @returns Promise resolving to the current scrollY value, or 0 on timeout.
-   */
-  private _getScrollPosition(webview: vscode.Webview): Promise<number> {
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        disposable.dispose();
-        resolve(0);
-      }, 200);
-
-      const disposable = webview.onDidReceiveMessage((message: WebviewMessage) => {
-        if (message.type === 'scrollPosition') {
-          clearTimeout(timeout);
-          disposable.dispose();
-          resolve(message.y);
-        }
-      });
-
-      this._postMessage(webview, { type: 'getScrollPosition' });
-    });
   }
 
   /**

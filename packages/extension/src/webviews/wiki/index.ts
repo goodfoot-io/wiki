@@ -11,7 +11,7 @@
 
 import { getScrollY, patch, scrollTo } from './content.js';
 import { onHostMessage, post } from './messaging.js';
-import { mount as mountToolbar, setCanGoBack, setCanGoForward } from './toolbar.js';
+import { mount as mountToolbar } from './toolbar.js';
 import type { HostMessage } from './types.js';
 import '@vscode-elements/elements/dist/vscode-progress-ring/index.js';
 
@@ -53,6 +53,18 @@ document.addEventListener('click', (e: MouseEvent) => {
 });
 
 // ---------------------------------------------------------------------------
+// Debounced scroll position reporter
+// ---------------------------------------------------------------------------
+
+let scrollSaveTimeout: ReturnType<typeof setTimeout> | null = null;
+window.addEventListener('scroll', () => {
+  if (scrollSaveTimeout != null) clearTimeout(scrollSaveTimeout);
+  scrollSaveTimeout = setTimeout(() => {
+    post({ type: 'scrollPosition', y: getScrollY() });
+  }, 200);
+});
+
+// ---------------------------------------------------------------------------
 // Host message handler
 // ---------------------------------------------------------------------------
 
@@ -76,10 +88,6 @@ onHostMessage((message: HostMessage) => {
       }
       break;
     }
-    case 'getScrollPosition': {
-      post({ type: 'scrollPosition', y: getScrollY() });
-      break;
-    }
     case 'showLoading': {
       const loadingEl = document.getElementById('loading');
       if (loadingEl != null) {
@@ -101,11 +109,6 @@ onHostMessage((message: HostMessage) => {
         errorEl.textContent = message.message;
         errorEl.style.display = '';
       }
-      break;
-    }
-    case 'updateNavigation': {
-      setCanGoBack(message.canGoBack);
-      setCanGoForward(message.canGoForward);
       break;
     }
     default: {

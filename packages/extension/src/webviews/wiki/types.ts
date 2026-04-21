@@ -9,10 +9,8 @@
 // Host -> Webview messages
 export type HostMessage =
   | { type: 'updateContent'; html: string; scrollY?: number }
-  | { type: 'getScrollPosition' }
   | { type: 'showLoading' }
-  | { type: 'showError'; message: string }
-  | { type: 'updateNavigation'; canGoBack: boolean; canGoForward: boolean };
+  | { type: 'showError'; message: string };
 
 // Webview -> Host messages
 export type WebviewMessage =
@@ -22,6 +20,4 @@ export type WebviewMessage =
   | { type: 'openFile'; uri: string; split: boolean }
   | { type: 'openExternal'; uri: string }
   | { type: 'openSearch' }
-  | { type: 'goBack' }
-  | { type: 'goForward' }
   | { type: 'ready' };

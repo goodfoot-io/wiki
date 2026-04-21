@@ -20,7 +20,7 @@ import { WikiBinaryManager, wasManagedInstall } from './utils/wikiInstaller.js';
  */
 export function activate(context: vscode.ExtensionContext): void {
   const binaryManager = new WikiBinaryManager(context);
-  const provider = new WikiEditorProvider(context.extensionUri, binaryManager);
+  const provider = new WikiEditorProvider(context.extensionUri, binaryManager, context);
 
   void binaryManager
     .start()
