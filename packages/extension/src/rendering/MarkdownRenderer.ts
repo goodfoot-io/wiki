@@ -226,7 +226,13 @@ const pluginWikilinks: MarkdownIt.PluginSimple = (md) => {
 const md = new MarkdownIt({ html: false, linkify: true, typographer: true });
 
 // Configure highlight.js for fenced code blocks.
+// Mermaid fences return a <pre class="mermaid"> wrapper so markdown-it uses it
+// as-is (it skips the default <pre><code> wrap when the result starts with <pre>).
 md.options.highlight = (code, lang) => {
+  if (lang.trim().toLowerCase() === 'mermaid') {
+    const escaped = code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return `<pre class="mermaid">${escaped}</pre>`;
+  }
   if (lang && hljs.getLanguage(lang)) {
     try {
       return hljs.highlight(code, { language: lang, ignoreIllegals: true }).value;
