@@ -204,7 +204,6 @@ impl TestRepo {
 // 1. Link Creation Tests
 
 #[test]
-#[ignore]
 fn test_create_link_success() -> Result<()> {
     let mut test_repo = TestRepo::new()?;
     test_repo.write_file("file1.txt", "1\n2\n3\n4\n5\n")?;
