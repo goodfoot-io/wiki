@@ -113,6 +113,7 @@ pub struct CommitInput {
     pub removes: Vec<[RangeSpec; 2]>,
     pub message: String,
     pub anchor_sha: Option<String>,
+    pub expected_tip: Option<String>,
     pub amend: bool,
 }
 

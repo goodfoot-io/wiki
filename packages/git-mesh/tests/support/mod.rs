@@ -149,6 +149,18 @@ impl TestRepo {
         self.git_output(["rev-parse", name])
     }
 
+    pub fn show_file(&self, revision: &str, path: &str) -> Result<String> {
+        self.git_output(["show", &format!("{revision}:{path}")])
+    }
+
+    pub fn commit_parents(&self, revision: &str) -> Result<Vec<String>> {
+        Ok(self
+            .git_output(["show", "-s", "--format=%P", revision])?
+            .split_whitespace()
+            .map(str::to_string)
+            .collect())
+    }
+
     pub fn set_ref(&mut self, name: &str, oid: &str) -> Result<()> {
         self.git_output(["update-ref", name, oid])?;
         self.repo = gix::open(self.dir.path())?;
@@ -189,6 +201,9 @@ impl TestRepo {
         message: &str,
         link_ids: &[&str],
     ) -> Result<String> {
+        let mut link_ids = link_ids.to_vec();
+        link_ids.sort();
+        link_ids.dedup();
         let mut links_text = String::new();
         for id in link_ids {
             links_text.push_str(id);

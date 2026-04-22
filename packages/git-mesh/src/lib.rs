@@ -17,26 +17,8 @@ pub fn create_link(repo: &gix::Repository, input: CreateLinkInput) -> Result<(St
         None => git_stdout(work_dir, ["rev-parse", "HEAD"])?,
     };
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let [left, right] = input.sides;
-    let mut sides = [
-        build_link_side(work_dir, &anchor_sha, left)?,
-        build_link_side(work_dir, &anchor_sha, right)?,
-    ];
-    sides.sort();
-    let link = Link {
-        anchor_sha,
-        created_at: Utc::now().to_rfc3339(),
-        sides,
-    };
-    let blob_oid = git_with_input(
-        work_dir,
-        ["hash-object", "-w", "--stdin"],
-        &serialize_link(&link),
-    )?;
-    git_stdout(
-        work_dir,
-        ["update-ref", &format!("refs/links/v1/{id}"), &blob_oid],
-    )?;
+    let link = build_link(work_dir, &anchor_sha, input.sides)?;
+    write_link_ref(work_dir, &id, &link)?;
     Ok((id, link))
 }
 
@@ -55,6 +37,20 @@ fn build_link_side(
         blob,
         copy_detection: side.copy_detection.unwrap_or(DEFAULT_COPY_DETECTION),
         ignore_whitespace: side.ignore_whitespace.unwrap_or(DEFAULT_IGNORE_WHITESPACE),
+    })
+}
+
+fn build_link(work_dir: &Path, anchor_sha: &str, sides: [SideSpec; 2]) -> Result<Link> {
+    let [left, right] = normalize_side_specs(sides);
+    let mut sides = [
+        build_link_side(work_dir, anchor_sha, left)?,
+        build_link_side(work_dir, anchor_sha, right)?,
+    ];
+    sides.sort();
+    Ok(Link {
+        anchor_sha: anchor_sha.to_string(),
+        created_at: Utc::now().to_rfc3339(),
+        sides,
     })
 }
 
@@ -92,6 +88,11 @@ pub fn commit_mesh(repo: &gix::Repository, input: CommitInput) -> Result<()> {
     let work_dir = repo
         .workdir()
         .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
+    let mesh_ref = format!("refs/meshes/v1/{}", input.name);
+    let expected_tip = match input.expected_tip.as_deref() {
+        Some(expected_tip) => Some(git_stdout(work_dir, ["rev-parse", expected_tip])?),
+        None => git_stdout(work_dir, ["rev-parse", &mesh_ref]).ok(),
+    };
 
     if input.amend && (!input.adds.is_empty() || !input.removes.is_empty()) {
         anyhow::bail!("amend does not accept link changes");
@@ -101,39 +102,50 @@ pub fn commit_mesh(repo: &gix::Repository, input: CommitInput) -> Result<()> {
         anyhow::bail!("mesh commit must add or remove at least one link");
     }
 
-    let mut links = if input.amend {
-        let mesh = show_mesh(repo, &input.name)?;
-        mesh.links
-    } else if !input.removes.is_empty() {
-        show_mesh(repo, &input.name)?.links
-    } else {
-        show_mesh(repo, &input.name)
-            .map(|mesh| mesh.links)
-            .unwrap_or_default()
-    };
-
-    for sides in input.removes {
-        remove_mesh_link(work_dir, &mut links, &normalize_range_specs(sides))?;
+    if expected_tip.is_none() && input.adds.is_empty() {
+        anyhow::bail!(
+            "mesh `{}` does not exist; supply --link to create it",
+            input.name
+        );
     }
 
+    let mut links = match expected_tip.as_deref() {
+        Some(tip) => read_mesh_links(repo, &gix::ObjectId::from_hex(tip.as_bytes())?)?,
+        None => Vec::new(),
+    };
+
+    for sides in &input.removes {
+        remove_mesh_link(work_dir, &mut links, &normalize_range_specs(sides.clone()))?;
+    }
+
+    let anchor_sha = match input.anchor_sha {
+        Some(anchor_sha) => anchor_sha,
+        None => git_stdout(work_dir, ["rev-parse", "HEAD"])?,
+    };
+    let mut prepared_links = Vec::with_capacity(input.adds.len());
     for sides in input.adds {
         let normalized_sides = normalize_side_specs(sides);
         if mesh_contains_sides(work_dir, &links, &normalized_sides)? {
             anyhow::bail!("mesh already contains link for pair");
         }
-
-        let (id, _) = create_link(
-            repo,
-            CreateLinkInput {
-                sides: normalized_sides,
-                anchor_sha: input.anchor_sha.clone(),
-                id: None,
-            },
-        )?;
+        let link = build_link(work_dir, &anchor_sha, normalized_sides)?;
+        let id = Uuid::new_v4().to_string();
+        prepared_links.push((id.clone(), link));
         links.push(id);
     }
 
-    write_mesh_commit(work_dir, &input.name, &input.message, &links)
+    for (id, link) in prepared_links {
+        write_link_ref(work_dir, &id, &link)?;
+    }
+
+    write_mesh_commit(
+        work_dir,
+        &input.name,
+        &input.message,
+        &links,
+        expected_tip.as_deref(),
+        input.amend,
+    )
 }
 
 pub fn remove_mesh(repo: &gix::Repository, name: &str) -> Result<()> {
@@ -350,6 +362,19 @@ pub fn read_mesh_links(_repo: &gix::Repository, _commit_id: &gix::ObjectId) -> R
         .workdir()
         .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
     git_show_file_lines(work_dir, &_commit_id.to_string(), "links")
+}
+
+fn write_link_ref(work_dir: &Path, id: &str, link: &Link) -> Result<()> {
+    let blob_oid = git_with_input(
+        work_dir,
+        ["hash-object", "-w", "--stdin"],
+        &serialize_link(link),
+    )?;
+    git_stdout(
+        work_dir,
+        ["update-ref", &format!("refs/links/v1/{id}"), &blob_oid],
+    )?;
+    Ok(())
 }
 
 fn read_link_from_ref(work_dir: &Path, id: &str) -> Result<Link> {
@@ -605,12 +630,31 @@ fn link_matches_ranges(link: &Link, sides: &[RangeSpec; 2]) -> bool {
         })
 }
 
-fn write_mesh_commit(work_dir: &Path, name: &str, message: &str, links: &[String]) -> Result<()> {
+fn canonicalize_links(links: &[String]) -> Vec<String> {
+    let mut canonical = links.to_vec();
+    canonical.sort();
+    canonical.dedup();
+    canonical
+}
+
+fn serialize_links_file(links: &[String]) -> String {
     let mut links_text = String::new();
-    for link in links {
-        links_text.push_str(link);
+    for link in canonicalize_links(links) {
+        links_text.push_str(&link);
         links_text.push('\n');
     }
+    links_text
+}
+
+fn write_mesh_commit(
+    work_dir: &Path,
+    name: &str,
+    message: &str,
+    links: &[String],
+    expected_tip: Option<&str>,
+    amend: bool,
+) -> Result<()> {
+    let links_text = serialize_links_file(links);
 
     let links_blob = git_with_input(work_dir, ["hash-object", "-w", "--stdin"], &links_text)?;
     let tree_oid = git_with_input(
@@ -620,7 +664,15 @@ fn write_mesh_commit(work_dir: &Path, name: &str, message: &str, links: &[String
     )?;
 
     let mesh_ref = format!("refs/meshes/v1/{name}");
-    let parent = git_stdout(work_dir, ["rev-parse", &mesh_ref]).ok();
+    let parents = match (amend, expected_tip) {
+        (true, Some(tip)) => git_stdout(work_dir, ["show", "-s", "--format=%P", tip])?
+            .split_whitespace()
+            .map(str::to_string)
+            .collect(),
+        (true, None) => Vec::new(),
+        (false, Some(tip)) => vec![tip.to_string()],
+        (false, None) => Vec::new(),
+    };
 
     let mut args = vec![
         "commit-tree".to_string(),
@@ -628,13 +680,24 @@ fn write_mesh_commit(work_dir: &Path, name: &str, message: &str, links: &[String
         "-m".to_string(),
         message.to_string(),
     ];
-    if let Some(parent) = parent {
+    for parent in parents {
         args.push("-p".to_string());
         args.push(parent);
     }
 
     let commit_oid = git_stdout_with_identity(work_dir, args.iter().map(String::as_str))?;
-    git_stdout(work_dir, ["update-ref", &mesh_ref, &commit_oid])?;
+    match expected_tip {
+        Some(tip) => git_stdout(work_dir, ["update-ref", &mesh_ref, &commit_oid, tip])?,
+        None => git_stdout(
+            work_dir,
+            [
+                "update-ref",
+                &mesh_ref,
+                &commit_oid,
+                "0000000000000000000000000000000000000000",
+            ],
+        )?,
+    };
     Ok(())
 }
 

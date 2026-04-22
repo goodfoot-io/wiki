@@ -48,7 +48,7 @@ fn test_read_mesh_returns_full_stored_link_data() -> Result<()> {
 }
 
 #[test]
-fn test_read_mesh_preserves_stored_link_order() -> Result<()> {
+fn test_read_mesh_returns_canonical_link_order() -> Result<()> {
     let mut test_repo = TestRepo::new()?;
     let (first_link_id, _, _) = test_repo.create_link_fixture(
         "z-link",
@@ -71,7 +71,7 @@ fn test_read_mesh_preserves_stored_link_order() -> Result<()> {
             .iter()
             .map(|link| link.id.as_str())
             .collect::<Vec<_>>(),
-        vec![first_link_id.as_str(), second_link_id.as_str()]
+        vec![second_link_id.as_str(), first_link_id.as_str()]
     );
 
     Ok(())
