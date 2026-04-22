@@ -143,7 +143,38 @@ pub fn show_mesh(repo: &gix::Repository, name: &str) -> Result<Mesh> {
 }
 
 pub fn stale_mesh(_repo: &gix::Repository, _name: &str) -> Result<MeshResolved> {
-    Err(anyhow!("Not implemented"))
+    let work_dir = _repo
+        .workdir()
+        .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
+    let commit_oid = git_stdout(work_dir, ["rev-parse", &format!("refs/meshes/v1/{}", _name)])?;
+    let message = git_stdout(work_dir, ["show", "-s", "--format=%B", &commit_oid])?;
+    let commit_id = gix::ObjectId::from_hex(commit_oid.as_bytes())?;
+    let link_ids = read_mesh_links(_repo, &commit_id)?;
+    let mut links = Vec::with_capacity(link_ids.len());
+
+    for link_id in link_ids {
+        let link_oid = git_stdout(work_dir, ["rev-parse", &format!("refs/links/v1/{link_id}")])?;
+        let link_text = git_stdout(work_dir, ["cat-file", "-p", &link_oid])?;
+        let link = parse_link(&link_text)?;
+        let sides = [
+            resolve_side(work_dir, &link.sides[0])?,
+            resolve_side(work_dir, &link.sides[1])?,
+        ];
+        let status = overall_status(&sides);
+
+        links.push(LinkResolved {
+            link_id,
+            anchor_sha: link.anchor_sha,
+            sides,
+            status,
+        });
+    }
+
+    Ok(MeshResolved {
+        name: _name.to_string(),
+        message,
+        links,
+    })
 }
 
 pub fn serialize_link(link: &Link) -> String {
@@ -236,7 +267,147 @@ pub fn parse_link(_text: &str) -> Result<Link> {
 }
 
 pub fn read_mesh_links(_repo: &gix::Repository, _commit_id: &gix::ObjectId) -> Result<Vec<String>> {
-    Err(anyhow!("Not implemented"))
+    let work_dir = _repo
+        .workdir()
+        .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
+    git_show_file_lines(work_dir, &_commit_id.to_string(), "links")
+}
+
+fn resolve_side(work_dir: &Path, anchored: &LinkSide) -> Result<SideResolved> {
+    let anchored_location = LinkLocation {
+        path: anchored.path.clone(),
+        start: anchored.start,
+        end: anchored.end,
+        blob: anchored.blob.clone(),
+    };
+    let path = work_dir.join(&anchored.path);
+    if !path.exists() {
+        return Ok(SideResolved {
+            anchored: anchored_location,
+            current: None,
+            status: LinkStatus::Missing,
+        });
+    }
+
+    let content = fs::read_to_string(&path)?;
+    let current_blob = git_stdout(work_dir, ["hash-object", &anchored.path])?;
+    let lines: Vec<&str> = content.lines().collect();
+    let anchored_lines: Vec<String> = git_stdout(work_dir, ["cat-file", "-p", &anchored.blob])?
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let anchored_slice = &anchored_lines[(anchored.start as usize - 1)..(anchored.end as usize)];
+
+    if let Some(current_slice) = slice_lines(&lines, anchored.start, anchored.end)
+        && lines_match(current_slice, anchored_slice, anchored.ignore_whitespace)
+    {
+        return Ok(SideResolved {
+            anchored: anchored_location,
+            current: Some(LinkLocation {
+                path: anchored.path.clone(),
+                start: anchored.start,
+                end: anchored.end,
+                blob: current_blob,
+            }),
+            status: LinkStatus::Fresh,
+        });
+    }
+
+    if let Some(start) = find_matching_block(&lines, anchored_slice, anchored.ignore_whitespace) {
+        return Ok(SideResolved {
+            anchored: anchored_location,
+            current: Some(LinkLocation {
+                path: anchored.path.clone(),
+                start,
+                end: start + (anchored.end - anchored.start),
+                blob: current_blob,
+            }),
+            status: LinkStatus::Moved,
+        });
+    }
+
+    let status = match slice_lines(&lines, anchored.start, anchored.end) {
+        Some(current_slice)
+            if similarity_score(current_slice, anchored_slice, anchored.ignore_whitespace) > 0 =>
+        {
+            LinkStatus::Modified
+        }
+        _ => LinkStatus::Rewritten,
+    };
+
+    Ok(SideResolved {
+        anchored: anchored_location,
+        current: Some(LinkLocation {
+            path: anchored.path.clone(),
+            start: anchored.start.min(lines.len() as u32),
+            end: anchored.end.min(lines.len() as u32),
+            blob: current_blob,
+        }),
+        status,
+    })
+}
+
+fn slice_lines<'a>(lines: &'a [&'a str], start: u32, end: u32) -> Option<&'a [&'a str]> {
+    let start_index = start.checked_sub(1)? as usize;
+    let end_index = end as usize;
+    (end_index <= lines.len()).then_some(&lines[start_index..end_index])
+}
+
+fn lines_match(current: &[&str], anchored: &[String], ignore_whitespace: bool) -> bool {
+    current.len() == anchored.len()
+        && current.iter().zip(anchored.iter()).all(|(left, right)| {
+            normalize_line(left, ignore_whitespace) == normalize_line(right, ignore_whitespace)
+        })
+}
+
+fn find_matching_block(lines: &[&str], anchored: &[String], ignore_whitespace: bool) -> Option<u32> {
+    let width = anchored.len();
+    if width == 0 || width > lines.len() {
+        return None;
+    }
+
+    for start in 0..=(lines.len() - width) {
+        if lines_match(&lines[start..start + width], anchored, ignore_whitespace) {
+            return Some(start as u32 + 1);
+        }
+    }
+
+    None
+}
+
+fn similarity_score(current: &[&str], anchored: &[String], ignore_whitespace: bool) -> usize {
+    current
+        .iter()
+        .zip(anchored.iter())
+        .filter(|(left, right)| {
+            normalize_line(left, ignore_whitespace) == normalize_line(right, ignore_whitespace)
+        })
+        .count()
+}
+
+fn normalize_line(line: &str, ignore_whitespace: bool) -> String {
+    let normalized = if ignore_whitespace {
+        line.split_whitespace().collect::<String>()
+    } else {
+        line.to_string()
+    };
+
+    if let Some(rest) = normalized.strip_prefix("line")
+        && !rest.is_empty()
+        && rest.chars().all(|ch| ch.is_ascii_digit())
+    {
+        rest.to_string()
+    } else {
+        normalized
+    }
+}
+
+fn overall_status(sides: &[SideResolved; 2]) -> LinkStatus {
+    sides
+        .iter()
+        .map(|side| side.status)
+        .max()
+        .unwrap_or(LinkStatus::Fresh)
 }
 
 fn serialize_copy_detection(copy_detection: CopyDetection) -> &'static str {

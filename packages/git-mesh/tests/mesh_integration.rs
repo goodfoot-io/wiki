@@ -709,7 +709,6 @@ fn test_commit_mesh_empty_fails() -> Result<()> {
 // 3. Staleness Computation Tests
 
 #[test]
-#[ignore]
 fn test_stale_mesh_fresh() -> Result<()> {
     let mut test_repo = TestRepo::new()?;
     let (link_id, _, _) = test_repo.create_link_fixture(
@@ -728,7 +727,6 @@ fn test_stale_mesh_fresh() -> Result<()> {
 }
 
 #[test]
-#[ignore]
 fn test_stale_mesh_moved() -> Result<()> {
     let mut test_repo = TestRepo::new()?;
     let (link_id, _, _) = test_repo.create_link_fixture(
@@ -748,7 +746,6 @@ fn test_stale_mesh_moved() -> Result<()> {
 }
 
 #[test]
-#[ignore]
 fn test_stale_mesh_modified() -> Result<()> {
     let mut test_repo = TestRepo::new()?;
     let (link_id, _, _) = test_repo.create_link_fixture(
@@ -768,7 +765,6 @@ fn test_stale_mesh_modified() -> Result<()> {
 }
 
 #[test]
-#[ignore]
 fn test_stale_mesh_rewritten() -> Result<()> {
     let mut test_repo = TestRepo::new()?;
     let (link_id, _, _) = test_repo.create_link_fixture(
@@ -788,7 +784,6 @@ fn test_stale_mesh_rewritten() -> Result<()> {
 }
 
 #[test]
-#[ignore]
 fn test_stale_mesh_missing() -> Result<()> {
     let mut test_repo = TestRepo::new()?;
     let (link_id, _, _) = test_repo.create_link_fixture(
