@@ -327,7 +327,6 @@ fn test_create_link_canonicalization() -> Result<()> {
 // 2. Mesh Commit Tests
 
 #[test]
-#[ignore]
 fn test_commit_mesh_create_fresh() -> Result<()> {
     let test_repo = TestRepo::new()?;
     let input = CommitInput {
@@ -592,7 +591,6 @@ fn test_commit_mesh_amend_message() -> Result<()> {
 }
 
 #[test]
-#[ignore]
 fn test_commit_mesh_amend_with_links_fails() -> Result<()> {
     let test_repo = TestRepo::new()?;
     let input = CommitInput {
@@ -698,7 +696,6 @@ fn test_commit_mesh_remove_nonexistent_pair_fails() -> Result<()> {
 }
 
 #[test]
-#[ignore]
 fn test_commit_mesh_empty_fails() -> Result<()> {
     let test_repo = TestRepo::new()?;
     let input = CommitInput {

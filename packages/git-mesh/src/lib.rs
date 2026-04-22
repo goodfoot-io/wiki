@@ -4,6 +4,7 @@ pub use types::*;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 use uuid::Uuid;
 
@@ -63,8 +64,43 @@ fn validate_side_range(work_dir: &std::path::Path, side: &SideSpec) -> Result<()
     Ok(())
 }
 
-pub fn commit_mesh(_repo: &gix::Repository, _input: CommitInput) -> Result<()> {
-    Err(anyhow!("Not implemented"))
+pub fn commit_mesh(repo: &gix::Repository, input: CommitInput) -> Result<()> {
+    let work_dir = repo
+        .workdir()
+        .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
+
+    if input.amend && (!input.adds.is_empty() || !input.removes.is_empty()) {
+        anyhow::bail!("amend does not accept link changes");
+    }
+
+    if !input.amend && input.adds.is_empty() && input.removes.is_empty() {
+        anyhow::bail!("mesh commit must add or remove at least one link");
+    }
+
+    if !input.removes.is_empty() {
+        anyhow::bail!("remove operations are not implemented");
+    }
+
+    let mut links = if input.amend {
+        let mesh = show_mesh(repo, &input.name)?;
+        mesh.links
+    } else {
+        Vec::new()
+    };
+
+    for sides in input.adds {
+        let (id, _) = create_link(
+            repo,
+            CreateLinkInput {
+                sides,
+                anchor_sha: input.anchor_sha.clone(),
+                id: None,
+            },
+        )?;
+        links.push(id);
+    }
+
+    write_mesh_commit(work_dir, &input.name, &input.message, &links)
 }
 
 pub fn remove_mesh(_repo: &gix::Repository, _name: &str) -> Result<()> {
@@ -84,8 +120,19 @@ pub fn restore_mesh(_repo: &gix::Repository, _name: &str, _commit_ish: &str) -> 
     Err(anyhow!("Not implemented"))
 }
 
-pub fn show_mesh(_repo: &gix::Repository, _name: &str) -> Result<Mesh> {
-    Err(anyhow!("Not implemented"))
+pub fn show_mesh(repo: &gix::Repository, name: &str) -> Result<Mesh> {
+    let work_dir = repo
+        .workdir()
+        .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
+    let commit_oid = git_stdout(work_dir, ["rev-parse", &format!("refs/meshes/v1/{name}")])?;
+    let message = git_stdout(work_dir, ["show", "-s", "--format=%B", &commit_oid])?;
+    let links = git_show_file_lines(work_dir, &commit_oid, "links")?;
+
+    Ok(Mesh {
+        name: name.to_string(),
+        links,
+        message,
+    })
 }
 
 pub fn stale_mesh(_repo: &gix::Repository, _name: &str) -> Result<MeshResolved> {
@@ -129,6 +176,48 @@ fn serialize_copy_detection(copy_detection: CopyDetection) -> &'static str {
     }
 }
 
+fn write_mesh_commit(work_dir: &Path, name: &str, message: &str, links: &[String]) -> Result<()> {
+    let mut links_text = String::new();
+    for link in links {
+        links_text.push_str(link);
+        links_text.push('\n');
+    }
+
+    let links_blob = git_with_input(work_dir, ["hash-object", "-w", "--stdin"], &links_text)?;
+    let tree_oid = git_with_input(
+        work_dir,
+        ["mktree"],
+        &format!("100644 blob {links_blob}\tlinks\n"),
+    )?;
+
+    let mesh_ref = format!("refs/meshes/v1/{name}");
+    let parent = git_stdout(work_dir, ["rev-parse", &mesh_ref]).ok();
+
+    let mut args = vec![
+        "commit-tree".to_string(),
+        tree_oid,
+        "-m".to_string(),
+        message.to_string(),
+    ];
+    if let Some(parent) = parent {
+        args.push("-p".to_string());
+        args.push(parent);
+    }
+
+    let commit_oid = git_stdout_with_identity(work_dir, args.iter().map(String::as_str))?;
+    git_stdout(work_dir, ["update-ref", &mesh_ref, &commit_oid])?;
+    Ok(())
+}
+
+fn git_show_file_lines(work_dir: &Path, commit_oid: &str, path: &str) -> Result<Vec<String>> {
+    let output = git_stdout(work_dir, ["show", &format!("{commit_oid}:{path}")])?;
+    Ok(output
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 fn git_stdout<I, S>(work_dir: &std::path::Path, args: I) -> Result<String>
 where
     I: IntoIterator<Item = S>,
@@ -136,6 +225,27 @@ where
 {
     let output = Command::new("git")
         .current_dir(work_dir)
+        .args(args.into_iter().map(|arg| arg.as_ref().to_string()))
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+fn git_stdout_with_identity<I, S>(work_dir: &Path, args: I) -> Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let output = Command::new("git")
+        .current_dir(work_dir)
+        .env("GIT_AUTHOR_NAME", "git-mesh")
+        .env("GIT_AUTHOR_EMAIL", "git-mesh@example.com")
+        .env("GIT_COMMITTER_NAME", "git-mesh")
+        .env("GIT_COMMITTER_EMAIL", "git-mesh@example.com")
         .args(args.into_iter().map(|arg| arg.as_ref().to_string()))
         .output()?;
     anyhow::ensure!(

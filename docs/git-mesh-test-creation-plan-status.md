@@ -4,16 +4,20 @@ This document tracks the implementation progress of the `docs/git-mesh-test-crea
 
 ## Current Implementation State
 
-As of Wednesday, April 22, 2026, the implementation is partially complete and the ignored scaffold validates cleanly.
+As of Wednesday, April 22, 2026, the implementation includes the first enabled `commit_mesh` batch and validates cleanly for the targeted package checks.
 
 ### Summary
 - **Linting (`yarn lint` -> `cargo clippy -- -D warnings`)**: Passing.
 - **Typechecking (`yarn typecheck` -> `cargo check`)**: Passing.
-- **Tests (`yarn test` -> `cargo test`)**:
-  - Total Tests: 20
-  - Passed: 0
+- **Focused tests (`cargo test --quiet test_commit_mesh --test mesh_integration -- --test-threads=1`)**:
+  - Passed: 3
   - Failed: 0
-  - Ignored: 20
+  - Ignored: 6
+- **Overall test scaffold (`yarn test` -> `cargo test`)**:
+  - Total Tests: 20
+  - Passed: 3
+  - Failed: 0
+  - Ignored: 17
 
 ### Phase 1: Data Structures and Types
 - [x] Storage Models (`Link`, `LinkSide`, `CopyDetection`, `Mesh`)
@@ -40,16 +44,16 @@ As of Wednesday, April 22, 2026, the implementation is partially complete and th
 - Status: **Complete**. Tests are present and ignored to validate the API boundary without requiring implementation logic yet.
 
 #### 3.2. Mesh Commit Tests
-- [x] `test_commit_mesh_create_fresh`: **Ignored**.
+- [x] `test_commit_mesh_create_fresh`: **Enabled and passing**.
 - [x] `test_commit_mesh_add_link_to_existing`: **Ignored**.
 - [x] `test_commit_mesh_remove_link`: **Ignored**.
 - [x] `test_commit_mesh_reconcile`: **Ignored**.
 - [x] `test_commit_mesh_amend_message`: **Ignored**.
-- [x] `test_commit_mesh_amend_with_links_fails`: **Ignored**.
+- [x] `test_commit_mesh_amend_with_links_fails`: **Enabled and passing**.
 - [x] `test_commit_mesh_add_existing_pair_fails`: **Ignored**.
 - [x] `test_commit_mesh_remove_nonexistent_pair_fails`: **Ignored**.
-- [x] `test_commit_mesh_empty_fails`: **Ignored**.
-- Status: **Complete**. Tests are present and ignored, matching the planned TDD initialization technique.
+- [x] `test_commit_mesh_empty_fails`: **Enabled and passing**.
+- Status: **In progress**. The first `commit_mesh` batch is now enabled and passing; the remaining commit-mesh scenarios stay ignored.
 
 #### 3.3. Staleness Computation Tests
 - [x] `test_stale_mesh_fresh`: **Ignored**.
@@ -66,15 +70,15 @@ As of Wednesday, April 22, 2026, the implementation is partially complete and th
 - Status: **Complete**. Tests are present and ignored.
 
 ## Next Steps
-1. Re-run crate validation to confirm the boundary-only scaffold compiles cleanly.
-2. Begin the implementation phase by removing `#[ignore]` from one test at a time.
-3. Implement the minimum logic required to pass each newly enabled test.
-4. Update this status document after each test or feature slice is completed.
+1. Keep enabling `commit_mesh` tests one small batch at a time.
+2. Implement only the runtime behavior required for the next enabled batch.
+3. Re-run focused package validation after each batch.
+4. Update this status document after each feature slice is completed.
 
 ## Validation Log (Latest)
 ```
 2026-04-22 (`packages/git-mesh`)
 - `yarn lint`: passed
 - `yarn typecheck`: passed
-- `yarn test`: passed (`20 ignored`, `0 failed`)
+- `cargo test --quiet test_commit_mesh --test mesh_integration -- --test-threads=1`: passed (`3 passed`, `6 ignored`, `0 failed`)
 ```
