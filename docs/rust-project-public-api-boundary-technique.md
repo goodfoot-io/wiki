@@ -64,6 +64,13 @@ Create a comprehensive suite of integration tests (e.g., in the `tests/` directo
 - **Crucial Step:** Annotate *every single test* with `#[ignore]`.
 - Because the tests are ignored, the `cargo test` suite will compile and "pass" immediately. This proves the API boundaries are structurally sound and type-safe.
 
+### Phase 6: Freeze the Scaffold Before Expanding Runtime Logic
+
+Before feature work begins, verify that the project is still in the intended boundary-only state.
+- Re-check that public operations are still stubs and have not drifted into partial implementations that sit awkwardly between "API design" and "real behavior."
+- Ensure the ignored tests are not merely present, but fully model the intended scenarios with realistic setup and assertions.
+- If you are maintaining a temporary planning or status document during this phase, keep it aligned with the actual code and tests. Do not let the documentation describe a pure stub-first state while the crate has already drifted into partial runtime behavior.
+
 ## Execution and Iteration
 
 Once the Data Structures, Function Stubs, and Skipped Tests are in place, the project is ready for the implementation phase. 
@@ -74,6 +81,60 @@ The development workflow becomes a standard TDD loop:
 3.  Write the minimal implementation in the function stub to make the test pass.
 4.  Refactor as needed.
 5.  Repeat until all tests are unskipped and passing.
+
+In practice, "one test at a time" should be interpreted pragmatically:
+- Prefer enabling the smallest coherent batch of tests that share the same missing behavior.
+- Keep batches narrow enough that a failing validation run still points to one clear implementation gap.
+- Avoid enabling unrelated slices together just to reduce the number of commits. A good batch usually maps to one API surface or one state-transition family.
+
+Examples of coherent batches:
+- multiple happy-path and guardrail tests for the same command
+- an append/update batch for one mutable record type
+- a remove/reconcile batch that depends on the same matching logic
+
+Examples of incoherent batches:
+- mixing a read-model feature with unrelated ref-management commands
+- enabling tests across multiple unfinished APIs that do not share helpers or state transitions
+
+## Operational Lessons
+
+Several recurring patterns are worth making explicit for future projects using this technique.
+
+### Keep Ignored Tests Realistic
+
+Ignored tests should still be fully implemented scenarios, not placeholders.
+- Build the real fixture state the eventual implementation will need.
+- Assert the intended observable result, not just that "something happened."
+- Treat ignored tests as compiled executable specifications, not as sketches.
+
+This matters because a test that compiles but does not model the real scenario can give false confidence about the public API boundary.
+
+### Validate After Every Batch
+
+After each implementation slice:
+- run linting
+- run type checking
+- run the smallest focused test command that exercises the newly enabled batch
+- periodically run the full workspace or repository validation command, not just the package-local checks
+
+This catches cross-workspace breakage early, which is especially important in monorepos where package-local success is not the whole story.
+
+### Split Large Integration Suites After the Behavior Stabilizes
+
+It is often better to begin with one large integration file while the API is still settling, then split it by behavior once the suite is mostly enabled and stable.
+
+Recommended end state:
+- one integration test file per major behavior slice
+- shared fixtures and setup logic in `tests/support/mod.rs` or a similarly scoped support module
+
+One Rust-specific caveat: every file in `tests/` is compiled as its own crate. That means shared support modules may trigger `dead_code` warnings because each integration crate only uses part of the helper surface. Handle that intentionally rather than by duplicating fixtures across test files.
+
+### Temporary Planning Docs Should Have a Lifecycle
+
+Planning and status documents are useful while a project is moving from specification to implementation, but they should not become permanent stale artifacts by default.
+- Use them actively during scaffold creation and phased implementation.
+- Update them when the current phase meaningfully changes.
+- Replace or remove them once the project reaches a stable implemented state, ideally with a higher-level project status document if ongoing tracking is still valuable.
 
 ## Why this works well for Rust
 
