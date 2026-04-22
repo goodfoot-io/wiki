@@ -805,7 +805,6 @@ fn test_stale_mesh_missing() -> Result<()> {
 // 4. Structural Operation Tests
 
 #[test]
-#[ignore]
 fn test_structural_rm() -> Result<()> {
     let mut test_repo = TestRepo::new()?;
     let (link_id, _, _) = test_repo.create_link_fixture(
@@ -823,7 +822,6 @@ fn test_structural_rm() -> Result<()> {
 }
 
 #[test]
-#[ignore]
 fn test_structural_mv() -> Result<()> {
     let mut test_repo = TestRepo::new()?;
     let (link_id, _, _) = test_repo.create_link_fixture(
@@ -845,7 +843,6 @@ fn test_structural_mv() -> Result<()> {
 }
 
 #[test]
-#[ignore]
 fn test_structural_restore() -> Result<()> {
     let mut test_repo = TestRepo::new()?;
     let (first_link_id, _, _) = test_repo.create_link_fixture(

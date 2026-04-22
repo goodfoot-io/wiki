@@ -110,21 +110,49 @@ pub fn commit_mesh(repo: &gix::Repository, input: CommitInput) -> Result<()> {
     write_mesh_commit(work_dir, &input.name, &input.message, &links)
 }
 
-pub fn remove_mesh(_repo: &gix::Repository, _name: &str) -> Result<()> {
-    Err(anyhow!("Not implemented"))
+pub fn remove_mesh(repo: &gix::Repository, name: &str) -> Result<()> {
+    let work_dir = repo
+        .workdir()
+        .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
+    let mesh_ref = format!("refs/meshes/v1/{name}");
+    git_stdout(work_dir, ["update-ref", "-d", &mesh_ref])?;
+    Ok(())
 }
 
 pub fn rename_mesh(
-    _repo: &gix::Repository,
-    _old_name: &str,
-    _new_name: &str,
-    _keep: bool,
+    repo: &gix::Repository,
+    old_name: &str,
+    new_name: &str,
+    keep: bool,
 ) -> Result<()> {
-    Err(anyhow!("Not implemented"))
+    let work_dir = repo
+        .workdir()
+        .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
+    let old_ref = format!("refs/meshes/v1/{old_name}");
+    let new_ref = format!("refs/meshes/v1/{new_name}");
+    let commit_oid = git_stdout(work_dir, ["rev-parse", &old_ref])?;
+    git_stdout(work_dir, ["update-ref", &new_ref, &commit_oid])?;
+    if !keep {
+        git_stdout(work_dir, ["update-ref", "-d", &old_ref])?;
+    }
+    Ok(())
 }
 
-pub fn restore_mesh(_repo: &gix::Repository, _name: &str, _commit_ish: &str) -> Result<()> {
-    Err(anyhow!("Not implemented"))
+pub fn restore_mesh(repo: &gix::Repository, name: &str, commit_ish: &str) -> Result<()> {
+    let work_dir = repo
+        .workdir()
+        .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
+    let mesh_ref = format!("refs/meshes/v1/{name}");
+    let revision = if commit_ish == "HEAD" {
+        mesh_ref.clone()
+    } else if let Some(suffix) = commit_ish.strip_prefix("HEAD") {
+        format!("{mesh_ref}{suffix}")
+    } else {
+        commit_ish.to_string()
+    };
+    let commit_oid = git_stdout(work_dir, ["rev-parse", &revision])?;
+    git_stdout(work_dir, ["update-ref", &mesh_ref, &commit_oid])?;
+    Ok(())
 }
 
 pub fn show_mesh(repo: &gix::Repository, name: &str) -> Result<Mesh> {
