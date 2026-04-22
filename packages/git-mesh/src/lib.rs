@@ -3,6 +3,7 @@ pub mod types;
 pub use types::*;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
+use std::fs;
 use std::process::Command;
 use uuid::Uuid;
 
@@ -16,27 +17,12 @@ pub fn create_link(repo: &gix::Repository, input: CreateLinkInput) -> Result<(St
     };
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let [left, right] = input.sides;
+    let mut sides = [build_link_side(work_dir, left)?, build_link_side(work_dir, right)?];
+    sides.sort();
     let link = Link {
         anchor_sha,
         created_at: Utc::now().to_rfc3339(),
-        sides: [
-            LinkSide {
-                path: left.path.clone(),
-                start: left.start,
-                end: left.end,
-                blob: git_stdout(work_dir, ["rev-parse", &format!("HEAD:{}", left.path)])?,
-                copy_detection: left.copy_detection.unwrap_or(DEFAULT_COPY_DETECTION),
-                ignore_whitespace: left.ignore_whitespace.unwrap_or(DEFAULT_IGNORE_WHITESPACE),
-            },
-            LinkSide {
-                path: right.path.clone(),
-                start: right.start,
-                end: right.end,
-                blob: git_stdout(work_dir, ["rev-parse", &format!("HEAD:{}", right.path)])?,
-                copy_detection: right.copy_detection.unwrap_or(DEFAULT_COPY_DETECTION),
-                ignore_whitespace: right.ignore_whitespace.unwrap_or(DEFAULT_IGNORE_WHITESPACE),
-            },
-        ],
+        sides,
     };
     let blob_oid = git_with_input(
         work_dir,
@@ -45,6 +31,36 @@ pub fn create_link(repo: &gix::Repository, input: CreateLinkInput) -> Result<(St
     )?;
     git_stdout(work_dir, ["update-ref", &format!("refs/links/v1/{id}"), &blob_oid])?;
     Ok((id, link))
+}
+
+fn build_link_side(work_dir: &std::path::Path, side: SideSpec) -> Result<LinkSide> {
+    validate_side_range(work_dir, &side)?;
+
+    Ok(LinkSide {
+        path: side.path.clone(),
+        start: side.start,
+        end: side.end,
+        blob: git_stdout(work_dir, ["rev-parse", &format!("HEAD:{}", side.path)])?,
+        copy_detection: side.copy_detection.unwrap_or(DEFAULT_COPY_DETECTION),
+        ignore_whitespace: side.ignore_whitespace.unwrap_or(DEFAULT_IGNORE_WHITESPACE),
+    })
+}
+
+fn validate_side_range(work_dir: &std::path::Path, side: &SideSpec) -> Result<()> {
+    anyhow::ensure!(side.start >= 1, "range start must be at least 1");
+    anyhow::ensure!(side.end >= side.start, "range end must be at least start");
+
+    let line_count = fs::read_to_string(work_dir.join(&side.path))?.lines().count() as u32;
+    anyhow::ensure!(
+        side.end <= line_count,
+        "range {}..={} is out of bounds for {} lines in {}",
+        side.start,
+        side.end,
+        line_count,
+        side.path
+    );
+
+    Ok(())
 }
 
 pub fn commit_mesh(_repo: &gix::Repository, _input: CommitInput) -> Result<()> {

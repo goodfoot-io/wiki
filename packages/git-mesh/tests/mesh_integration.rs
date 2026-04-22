@@ -249,7 +249,6 @@ fn test_create_link_success() -> Result<()> {
 }
 
 #[test]
-#[ignore]
 fn test_create_link_out_of_bounds() -> Result<()> {
     let mut test_repo = TestRepo::new()?;
     test_repo.write_file("file1.txt", "1\n2\n")?;
@@ -283,7 +282,6 @@ fn test_create_link_out_of_bounds() -> Result<()> {
 }
 
 #[test]
-#[ignore]
 fn test_create_link_canonicalization() -> Result<()> {
     let mut test_repo = TestRepo::new()?;
     test_repo.write_file("a.txt", "1\n2\n3\n4\n5\n")?;
