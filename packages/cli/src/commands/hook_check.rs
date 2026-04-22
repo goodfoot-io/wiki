@@ -26,6 +26,12 @@ pub fn run(input: &str, repo_root: &Path) -> Result<i32> {
         return Ok(0);
     }
 
+    let wiki_dir_name = std::env::var("WIKI_DIR").unwrap_or_else(|_| "wiki".to_string());
+    let rel_path = super::normalize_repo_relative_path(&file_path, repo_root);
+    if !super::matches_default_discovery_path(&rel_path, &wiki_dir_name) {
+        return Ok(0);
+    }
+
     let globs = vec![file_path.clone()];
     let diagnostics = match check::collect(&globs, true, repo_root) {
         Ok(d) => d,
