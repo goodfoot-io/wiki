@@ -25,16 +25,38 @@ impl TestRepo {
         fs::write(p, content)?;
         Ok(())
     }
+
+    fn commit_all(&mut self, message: &str) -> Result<()> {
+        std::process::Command::new("git")
+            .current_dir(self.dir.path())
+            .arg("add")
+            .arg(".")
+            .output()?;
+
+        std::process::Command::new("git")
+            .current_dir(self.dir.path())
+            .arg("commit")
+            .arg("-m")
+            .arg(message)
+            .env("GIT_AUTHOR_NAME", "Test User")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test User")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()?;
+            
+        self.repo = gix::open(self.dir.path())?;
+        Ok(())
+    }
 }
 
 // 1. Link Creation Tests
 
 #[test]
-#[ignore]
 fn test_create_link_success() -> Result<()> {
-    let test_repo = TestRepo::new()?;
+    let mut test_repo = TestRepo::new()?;
     test_repo.write_file("file1.txt", "1\n2\n3\n4\n5\n")?;
     test_repo.write_file("file2.txt", "10\n11\n12\n13\n14\n15\n")?;
+    test_repo.commit_all("init")?;
 
     let input = CreateLinkInput {
         sides: [
@@ -64,11 +86,11 @@ fn test_create_link_success() -> Result<()> {
 }
 
 #[test]
-#[ignore]
 fn test_create_link_out_of_bounds() -> Result<()> {
-    let test_repo = TestRepo::new()?;
+    let mut test_repo = TestRepo::new()?;
     test_repo.write_file("file1.txt", "1\n2\n")?;
     test_repo.write_file("file2.txt", "1\n2\n")?;
+    test_repo.commit_all("init")?;
 
     let input = CreateLinkInput {
         sides: [
@@ -97,11 +119,11 @@ fn test_create_link_out_of_bounds() -> Result<()> {
 }
 
 #[test]
-#[ignore]
 fn test_create_link_canonicalization() -> Result<()> {
-    let test_repo = TestRepo::new()?;
+    let mut test_repo = TestRepo::new()?;
     test_repo.write_file("a.txt", "1\n2\n3\n4\n5\n")?;
     test_repo.write_file("b.txt", "1\n2\n3\n4\n5\n")?;
+    test_repo.commit_all("init")?;
     
     let side1 = SideSpec {
         path: "a.txt".to_string(),
