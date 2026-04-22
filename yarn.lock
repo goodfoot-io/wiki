@@ -502,6 +502,61 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@goodfoot/git-mesh-darwin-arm64@npm:0.1.0, @goodfoot/git-mesh-darwin-arm64@workspace:npm/git-mesh-darwin-arm64":
+  version: 0.0.0-use.local
+  resolution: "@goodfoot/git-mesh-darwin-arm64@workspace:npm/git-mesh-darwin-arm64"
+  languageName: unknown
+  linkType: soft
+
+"@goodfoot/git-mesh-darwin-x64@npm:0.1.0, @goodfoot/git-mesh-darwin-x64@workspace:npm/git-mesh-darwin-x64":
+  version: 0.0.0-use.local
+  resolution: "@goodfoot/git-mesh-darwin-x64@workspace:npm/git-mesh-darwin-x64"
+  languageName: unknown
+  linkType: soft
+
+"@goodfoot/git-mesh-linux-arm64@npm:0.1.0, @goodfoot/git-mesh-linux-arm64@workspace:npm/git-mesh-linux-arm64":
+  version: 0.0.0-use.local
+  resolution: "@goodfoot/git-mesh-linux-arm64@workspace:npm/git-mesh-linux-arm64"
+  languageName: unknown
+  linkType: soft
+
+"@goodfoot/git-mesh-linux-x64@npm:0.1.0, @goodfoot/git-mesh-linux-x64@workspace:npm/git-mesh-linux-x64":
+  version: 0.0.0-use.local
+  resolution: "@goodfoot/git-mesh-linux-x64@workspace:npm/git-mesh-linux-x64"
+  languageName: unknown
+  linkType: soft
+
+"@goodfoot/git-mesh-win32-x64@npm:0.1.0, @goodfoot/git-mesh-win32-x64@workspace:npm/git-mesh-win32-x64":
+  version: 0.0.0-use.local
+  resolution: "@goodfoot/git-mesh-win32-x64@workspace:npm/git-mesh-win32-x64"
+  languageName: unknown
+  linkType: soft
+
+"@goodfoot/git-mesh@workspace:packages/git-mesh":
+  version: 0.0.0-use.local
+  resolution: "@goodfoot/git-mesh@workspace:packages/git-mesh"
+  dependencies:
+    "@goodfoot/git-mesh-darwin-arm64": "npm:0.1.0"
+    "@goodfoot/git-mesh-darwin-x64": "npm:0.1.0"
+    "@goodfoot/git-mesh-linux-arm64": "npm:0.1.0"
+    "@goodfoot/git-mesh-linux-x64": "npm:0.1.0"
+    "@goodfoot/git-mesh-win32-x64": "npm:0.1.0"
+  dependenciesMeta:
+    "@goodfoot/git-mesh-darwin-arm64":
+      optional: true
+    "@goodfoot/git-mesh-darwin-x64":
+      optional: true
+    "@goodfoot/git-mesh-linux-arm64":
+      optional: true
+    "@goodfoot/git-mesh-linux-x64":
+      optional: true
+    "@goodfoot/git-mesh-win32-x64":
+      optional: true
+  bin:
+    git-mesh: bin/git-mesh
+  languageName: unknown
+  linkType: soft
+
 "@goodfoot/wiki-darwin-arm64@npm:0.5.29, @goodfoot/wiki-darwin-arm64@workspace:npm/wiki-darwin-arm64":
   version: 0.0.0-use.local
   resolution: "@goodfoot/wiki-darwin-arm64@workspace:npm/wiki-darwin-arm64"
