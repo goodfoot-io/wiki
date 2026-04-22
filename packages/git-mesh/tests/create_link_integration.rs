@@ -1,7 +1,7 @@
 mod support;
 
 use anyhow::Result;
-use git_mesh::{create_link, CopyDetection, CreateLinkInput, SideSpec};
+use git_mesh::{CopyDetection, CreateLinkInput, SideSpec, create_link};
 
 use support::TestRepo;
 
@@ -132,8 +132,10 @@ fn test_create_link_uses_anchor_commit_blob_and_range() -> Result<()> {
     test_repo.write_file("file2.txt", "b1\nb2\nb3\n")?;
     test_repo.commit_all("anchor")?;
     let anchor_sha = test_repo.head_sha()?;
-    let anchor_file1_blob = test_repo.git_output(["rev-parse", &format!("{anchor_sha}:file1.txt")])?;
-    let anchor_file2_blob = test_repo.git_output(["rev-parse", &format!("{anchor_sha}:file2.txt")])?;
+    let anchor_file1_blob =
+        test_repo.git_output(["rev-parse", &format!("{anchor_sha}:file1.txt")])?;
+    let anchor_file2_blob =
+        test_repo.git_output(["rev-parse", &format!("{anchor_sha}:file2.txt")])?;
 
     test_repo.write_file("file1.txt", "new1\nnew2\n")?;
     test_repo.write_file("file2.txt", "new1\nnew2\nnew3\nnew4\n")?;

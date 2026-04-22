@@ -1,7 +1,7 @@
 mod support;
 
 use anyhow::Result;
-use git_mesh::{commit_mesh, show_mesh, CommitInput, RangeSpec, SideSpec};
+use git_mesh::{CommitInput, RangeSpec, SideSpec, commit_mesh, show_mesh};
 
 use support::TestRepo;
 
@@ -88,7 +88,10 @@ fn test_commit_mesh_remove_link() -> Result<()> {
     let input2 = CommitInput {
         name: "my_mesh".to_string(),
         adds: vec![],
-        removes: vec![[range_spec("file1.txt", 1, 5), range_spec("file2.txt", 10, 15)]],
+        removes: vec![[
+            range_spec("file1.txt", 1, 5),
+            range_spec("file2.txt", 10, 15),
+        ]],
         message: "Remove link".to_string(),
         anchor_sha: None,
         amend: false,
@@ -116,7 +119,10 @@ fn test_commit_mesh_reconcile() -> Result<()> {
     let input2 = CommitInput {
         name: "my_mesh".to_string(),
         adds: vec![[side_spec("file1.txt", 2, 6), side_spec("file2.txt", 10, 15)]],
-        removes: vec![[range_spec("file1.txt", 1, 5), range_spec("file2.txt", 10, 15)]],
+        removes: vec![[
+            range_spec("file1.txt", 1, 5),
+            range_spec("file2.txt", 10, 15),
+        ]],
         message: "Reconcile drift".to_string(),
         anchor_sha: None,
         amend: false,
@@ -207,7 +213,10 @@ fn test_commit_mesh_remove_nonexistent_pair_fails() -> Result<()> {
     let input = CommitInput {
         name: "my_mesh".to_string(),
         adds: vec![],
-        removes: vec![[range_spec("file1.txt", 1, 5), range_spec("file2.txt", 10, 15)]],
+        removes: vec![[
+            range_spec("file1.txt", 1, 5),
+            range_spec("file2.txt", 10, 15),
+        ]],
         message: "Remove nonexistent link".to_string(),
         anchor_sha: None,
         amend: false,

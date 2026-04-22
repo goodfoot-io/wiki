@@ -36,6 +36,20 @@ pub struct Mesh {
     pub message: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredLink {
+    pub id: String,
+    pub anchor_sha: String,
+    pub sides: [LinkSide; 2],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeshStored {
+    pub name: String,
+    pub message: String,
+    pub links: Vec<StoredLink>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LinkStatus {
     Fresh,

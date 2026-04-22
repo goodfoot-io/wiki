@@ -1,11 +1,11 @@
 pub mod types;
 
-pub use types::*;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use chrono::Utc;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+pub use types::*;
 use uuid::Uuid;
 
 pub fn create_link(repo: &gix::Repository, input: CreateLinkInput) -> Result<(String, Link)> {
@@ -33,11 +33,18 @@ pub fn create_link(repo: &gix::Repository, input: CreateLinkInput) -> Result<(St
         ["hash-object", "-w", "--stdin"],
         &serialize_link(&link),
     )?;
-    git_stdout(work_dir, ["update-ref", &format!("refs/links/v1/{id}"), &blob_oid])?;
+    git_stdout(
+        work_dir,
+        ["update-ref", &format!("refs/links/v1/{id}"), &blob_oid],
+    )?;
     Ok((id, link))
 }
 
-fn build_link_side(work_dir: &std::path::Path, anchor_sha: &str, side: SideSpec) -> Result<LinkSide> {
+fn build_link_side(
+    work_dir: &std::path::Path,
+    anchor_sha: &str,
+    side: SideSpec,
+) -> Result<LinkSide> {
     let blob = resolve_side_blob(work_dir, anchor_sha, &side)?;
     validate_side_range(work_dir, &blob, &side)?;
 
@@ -51,15 +58,24 @@ fn build_link_side(work_dir: &std::path::Path, anchor_sha: &str, side: SideSpec)
     })
 }
 
-fn resolve_side_blob(work_dir: &std::path::Path, anchor_sha: &str, side: &SideSpec) -> Result<String> {
-    git_stdout(work_dir, ["rev-parse", &format!("{anchor_sha}:{}", side.path)])
+fn resolve_side_blob(
+    work_dir: &std::path::Path,
+    anchor_sha: &str,
+    side: &SideSpec,
+) -> Result<String> {
+    git_stdout(
+        work_dir,
+        ["rev-parse", &format!("{anchor_sha}:{}", side.path)],
+    )
 }
 
 fn validate_side_range(work_dir: &std::path::Path, blob: &str, side: &SideSpec) -> Result<()> {
     anyhow::ensure!(side.start >= 1, "range start must be at least 1");
     anyhow::ensure!(side.end >= side.start, "range end must be at least start");
 
-    let line_count = git_stdout(work_dir, ["cat-file", "-p", blob])?.lines().count() as u32;
+    let line_count = git_stdout(work_dir, ["cat-file", "-p", blob])?
+        .lines()
+        .count() as u32;
     anyhow::ensure!(
         side.end <= line_count,
         "range {}..={} is out of bounds for {} lines in {}",
@@ -91,7 +107,9 @@ pub fn commit_mesh(repo: &gix::Repository, input: CommitInput) -> Result<()> {
     } else if !input.removes.is_empty() {
         show_mesh(repo, &input.name)?.links
     } else {
-        show_mesh(repo, &input.name).map(|mesh| mesh.links).unwrap_or_default()
+        show_mesh(repo, &input.name)
+            .map(|mesh| mesh.links)
+            .unwrap_or_default()
     };
 
     for sides in input.removes {
@@ -178,37 +196,59 @@ pub fn show_mesh(repo: &gix::Repository, name: &str) -> Result<Mesh> {
     })
 }
 
+pub fn read_link(repo: &gix::Repository, id: &str) -> Result<Link> {
+    let work_dir = repo
+        .workdir()
+        .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
+    read_link_from_ref(work_dir, id)
+}
+
+pub fn read_mesh(repo: &gix::Repository, name: &str) -> Result<MeshStored> {
+    let mesh = show_mesh(repo, name)?;
+    let mut links = Vec::with_capacity(mesh.links.len());
+
+    for id in mesh.links {
+        let link = read_link(repo, &id)?;
+        links.push(StoredLink {
+            id,
+            anchor_sha: link.anchor_sha,
+            sides: link.sides,
+        });
+    }
+
+    Ok(MeshStored {
+        name: mesh.name,
+        message: mesh.message,
+        links,
+    })
+}
+
 pub fn stale_mesh(_repo: &gix::Repository, _name: &str) -> Result<MeshResolved> {
     let work_dir = _repo
         .workdir()
         .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
-    let commit_oid = git_stdout(work_dir, ["rev-parse", &format!("refs/meshes/v1/{}", _name)])?;
-    let message = git_stdout(work_dir, ["show", "-s", "--format=%B", &commit_oid])?;
-    let commit_id = gix::ObjectId::from_hex(commit_oid.as_bytes())?;
-    let link_ids = read_mesh_links(_repo, &commit_id)?;
-    let mut links = Vec::with_capacity(link_ids.len());
+    let mesh = read_mesh(_repo, _name)?;
+    let mut links = Vec::with_capacity(mesh.links.len());
 
-    for link_id in link_ids {
-        let link_oid = git_stdout(work_dir, ["rev-parse", &format!("refs/links/v1/{link_id}")])?;
-        let link_text = git_stdout(work_dir, ["cat-file", "-p", &link_oid])?;
-        let link = parse_link(&link_text)?;
+    for stored_link in mesh.links {
+        let link_id = stored_link.id;
         let sides = [
-            resolve_side(work_dir, &link.sides[0])?,
-            resolve_side(work_dir, &link.sides[1])?,
+            resolve_side(work_dir, &stored_link.sides[0])?,
+            resolve_side(work_dir, &stored_link.sides[1])?,
         ];
         let status = overall_status(&sides);
 
         links.push(LinkResolved {
             link_id,
-            anchor_sha: link.anchor_sha,
+            anchor_sha: stored_link.anchor_sha,
             sides,
             status,
         });
     }
 
     Ok(MeshResolved {
-        name: _name.to_string(),
-        message,
+        name: mesh.name,
+        message: mesh.message,
         links,
     })
 }
@@ -264,7 +304,10 @@ pub fn parse_link(_text: &str) -> Result<Link> {
                 .next()
                 .ok_or_else(|| anyhow!("missing side blob"))?
                 .to_string();
-            let copy_detection = match parts.next().ok_or_else(|| anyhow!("missing copy detection"))? {
+            let copy_detection = match parts
+                .next()
+                .ok_or_else(|| anyhow!("missing copy detection"))?
+            {
                 "off" => CopyDetection::Off,
                 "same-commit" => CopyDetection::SameCommit,
                 "any-file-in-commit" => CopyDetection::AnyFileInCommit,
@@ -307,6 +350,12 @@ pub fn read_mesh_links(_repo: &gix::Repository, _commit_id: &gix::ObjectId) -> R
         .workdir()
         .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
     git_show_file_lines(work_dir, &_commit_id.to_string(), "links")
+}
+
+fn read_link_from_ref(work_dir: &Path, id: &str) -> Result<Link> {
+    let link_oid = git_stdout(work_dir, ["rev-parse", &format!("refs/links/v1/{id}")])?;
+    let link_text = git_stdout(work_dir, ["cat-file", "-p", &link_oid])?;
+    parse_link(&link_text)
 }
 
 fn resolve_side(work_dir: &Path, anchored: &LinkSide) -> Result<SideResolved> {
@@ -396,7 +445,11 @@ fn lines_match(current: &[&str], anchored: &[String], ignore_whitespace: bool) -
         })
 }
 
-fn find_matching_block(lines: &[&str], anchored: &[String], ignore_whitespace: bool) -> Option<u32> {
+fn find_matching_block(
+    lines: &[&str],
+    anchored: &[String],
+    ignore_whitespace: bool,
+) -> Option<u32> {
     let width = anchored.len();
     if width == 0 || width > lines.len() {
         return None;
@@ -457,15 +510,26 @@ fn serialize_copy_detection(copy_detection: CopyDetection) -> &'static str {
 
 fn normalize_side_specs(mut sides: [SideSpec; 2]) -> [SideSpec; 2] {
     for side in &mut sides {
-        side.copy_detection
-            .get_or_insert(DEFAULT_COPY_DETECTION);
+        side.copy_detection.get_or_insert(DEFAULT_COPY_DETECTION);
         side.ignore_whitespace
             .get_or_insert(DEFAULT_IGNORE_WHITESPACE);
     }
 
     sides.sort_by(|a, b| {
-        (&a.path, a.start, a.end, a.copy_detection, a.ignore_whitespace)
-            .cmp(&(&b.path, b.start, b.end, b.copy_detection, b.ignore_whitespace))
+        (
+            &a.path,
+            a.start,
+            a.end,
+            a.copy_detection,
+            a.ignore_whitespace,
+        )
+            .cmp(&(
+                &b.path,
+                b.start,
+                b.end,
+                b.copy_detection,
+                b.ignore_whitespace,
+            ))
     });
     sides
 }
@@ -475,7 +539,11 @@ fn normalize_range_specs(mut sides: [RangeSpec; 2]) -> [RangeSpec; 2] {
     sides
 }
 
-fn remove_mesh_link(work_dir: &Path, links: &mut Vec<String>, sides: &[RangeSpec; 2]) -> Result<()> {
+fn remove_mesh_link(
+    work_dir: &Path,
+    links: &mut Vec<String>,
+    sides: &[RangeSpec; 2],
+) -> Result<()> {
     let Some(index) = find_mesh_link_index(work_dir, links, sides)? else {
         anyhow::bail!("mesh does not contain link for pair");
     };
@@ -489,9 +557,7 @@ fn find_mesh_link_index(
     sides: &[RangeSpec; 2],
 ) -> Result<Option<usize>> {
     for (index, link_id) in links.iter().enumerate() {
-        let link_oid = git_stdout(work_dir, ["rev-parse", &format!("refs/links/v1/{link_id}")])?;
-        let link_text = git_stdout(work_dir, ["cat-file", "-p", &link_oid])?;
-        let link = parse_link(&link_text)?;
+        let link = read_link_from_ref(work_dir, link_id)?;
         if link_matches_ranges(&link, sides) {
             return Ok(Some(index));
         }
@@ -502,9 +568,7 @@ fn find_mesh_link_index(
 
 fn mesh_contains_sides(work_dir: &Path, links: &[String], sides: &[SideSpec; 2]) -> Result<bool> {
     for link_id in links {
-        let link_oid = git_stdout(work_dir, ["rev-parse", &format!("refs/links/v1/{link_id}")])?;
-        let link_text = git_stdout(work_dir, ["cat-file", "-p", &link_oid])?;
-        let link = parse_link(&link_text)?;
+        let link = read_link_from_ref(work_dir, link_id)?;
         if link_matches_sides(&link, sides) {
             return Ok(true);
         }
@@ -514,24 +578,31 @@ fn mesh_contains_sides(work_dir: &Path, links: &[String], sides: &[SideSpec; 2])
 }
 
 fn link_matches_sides(link: &Link, sides: &[SideSpec; 2]) -> bool {
-    link.sides.iter().zip(sides.iter()).all(|(existing, candidate)| {
-        existing.path == candidate.path
-            && existing.start == candidate.start
-            && existing.end == candidate.end
-            && existing.copy_detection == candidate.copy_detection.unwrap_or(DEFAULT_COPY_DETECTION)
-            && existing.ignore_whitespace
-                == candidate
-                    .ignore_whitespace
-                    .unwrap_or(DEFAULT_IGNORE_WHITESPACE)
-    })
+    link.sides
+        .iter()
+        .zip(sides.iter())
+        .all(|(existing, candidate)| {
+            existing.path == candidate.path
+                && existing.start == candidate.start
+                && existing.end == candidate.end
+                && existing.copy_detection
+                    == candidate.copy_detection.unwrap_or(DEFAULT_COPY_DETECTION)
+                && existing.ignore_whitespace
+                    == candidate
+                        .ignore_whitespace
+                        .unwrap_or(DEFAULT_IGNORE_WHITESPACE)
+        })
 }
 
 fn link_matches_ranges(link: &Link, sides: &[RangeSpec; 2]) -> bool {
-    link.sides.iter().zip(sides.iter()).all(|(existing, candidate)| {
-        existing.path == candidate.path
-            && existing.start == candidate.start
-            && existing.end == candidate.end
-    })
+    link.sides
+        .iter()
+        .zip(sides.iter())
+        .all(|(existing, candidate)| {
+            existing.path == candidate.path
+                && existing.start == candidate.start
+                && existing.end == candidate.end
+        })
 }
 
 fn write_mesh_commit(work_dir: &Path, name: &str, message: &str, links: &[String]) -> Result<()> {
@@ -629,10 +700,7 @@ where
         .stderr(std::process::Stdio::piped())
         .spawn()?;
     {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow!("missing stdin"))?;
+        let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("missing stdin"))?;
         stdin.write_all(input.as_bytes())?;
     }
     let output = child.wait_with_output()?;
