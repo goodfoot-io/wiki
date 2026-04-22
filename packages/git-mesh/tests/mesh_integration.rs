@@ -14,7 +14,16 @@ impl TestRepo {
     fn new() -> Result<Self> {
         let dir = tempfile::tempdir()?;
         let repo = gix::init(dir.path())?;
-        Ok(Self { repo, dir })
+        let mut test_repo = Self { repo, dir };
+        
+        test_repo.write_file("initial.txt", "initial content")?;
+        test_repo.write_file("file1.txt", "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n")?;
+        test_repo.write_file("file2.txt", "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\nline13\nline14\nline15\nline16\n")?;
+        test_repo.write_file("file3.txt", "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n")?;
+        test_repo.write_file("file4.txt", "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\nline13\nline14\nline15\nline16\n")?;
+        test_repo.commit_all("initial commit")?;
+        
+        Ok(test_repo)
     }
 
     fn write_file(&self, path: &str, content: &str) -> Result<()> {
@@ -164,7 +173,7 @@ fn test_create_link_canonicalization() -> Result<()> {
 // 2. Mesh Commit Tests
 
 #[test]
-#[ignore]
+
 fn test_commit_mesh_create_fresh() -> Result<()> {
     let test_repo = TestRepo::new()?;
     let input = CommitInput {
@@ -201,7 +210,7 @@ fn test_commit_mesh_create_fresh() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn test_commit_mesh_add_link_to_existing() -> Result<()> {
     let test_repo = TestRepo::new()?;
     let input1 = CommitInput {
@@ -260,7 +269,7 @@ fn test_commit_mesh_add_link_to_existing() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn test_commit_mesh_remove_link() -> Result<()> {
     let test_repo = TestRepo::new()?;
     let input1 = CommitInput {
@@ -315,7 +324,7 @@ fn test_commit_mesh_remove_link() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn test_commit_mesh_reconcile() -> Result<()> {
     let test_repo = TestRepo::new()?;
     let input1 = CommitInput {
@@ -385,7 +394,7 @@ fn test_commit_mesh_reconcile() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn test_commit_mesh_amend_message() -> Result<()> {
     let test_repo = TestRepo::new()?;
     let input1 = CommitInput {
@@ -429,7 +438,7 @@ fn test_commit_mesh_amend_message() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn test_commit_mesh_amend_with_links_fails() -> Result<()> {
     let test_repo = TestRepo::new()?;
     let input = CommitInput {
@@ -462,7 +471,7 @@ fn test_commit_mesh_amend_with_links_fails() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn test_commit_mesh_add_existing_pair_fails() -> Result<()> {
     let test_repo = TestRepo::new()?;
     let sides = [
@@ -506,7 +515,7 @@ fn test_commit_mesh_add_existing_pair_fails() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn test_commit_mesh_remove_nonexistent_pair_fails() -> Result<()> {
     let test_repo = TestRepo::new()?;
     let input = CommitInput {
@@ -535,7 +544,7 @@ fn test_commit_mesh_remove_nonexistent_pair_fails() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn test_commit_mesh_empty_fails() -> Result<()> {
     let test_repo = TestRepo::new()?;
     let input = CommitInput {
