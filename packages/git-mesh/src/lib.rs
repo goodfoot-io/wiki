@@ -18,7 +18,10 @@ pub fn create_link(repo: &gix::Repository, input: CreateLinkInput) -> Result<(St
     };
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let [left, right] = input.sides;
-    let mut sides = [build_link_side(work_dir, left)?, build_link_side(work_dir, right)?];
+    let mut sides = [
+        build_link_side(work_dir, &anchor_sha, left)?,
+        build_link_side(work_dir, &anchor_sha, right)?,
+    ];
     sides.sort();
     let link = Link {
         anchor_sha,
@@ -34,24 +37,29 @@ pub fn create_link(repo: &gix::Repository, input: CreateLinkInput) -> Result<(St
     Ok((id, link))
 }
 
-fn build_link_side(work_dir: &std::path::Path, side: SideSpec) -> Result<LinkSide> {
-    validate_side_range(work_dir, &side)?;
+fn build_link_side(work_dir: &std::path::Path, anchor_sha: &str, side: SideSpec) -> Result<LinkSide> {
+    let blob = resolve_side_blob(work_dir, anchor_sha, &side)?;
+    validate_side_range(work_dir, &blob, &side)?;
 
     Ok(LinkSide {
         path: side.path.clone(),
         start: side.start,
         end: side.end,
-        blob: git_stdout(work_dir, ["rev-parse", &format!("HEAD:{}", side.path)])?,
+        blob,
         copy_detection: side.copy_detection.unwrap_or(DEFAULT_COPY_DETECTION),
         ignore_whitespace: side.ignore_whitespace.unwrap_or(DEFAULT_IGNORE_WHITESPACE),
     })
 }
 
-fn validate_side_range(work_dir: &std::path::Path, side: &SideSpec) -> Result<()> {
+fn resolve_side_blob(work_dir: &std::path::Path, anchor_sha: &str, side: &SideSpec) -> Result<String> {
+    git_stdout(work_dir, ["rev-parse", &format!("{anchor_sha}:{}", side.path)])
+}
+
+fn validate_side_range(work_dir: &std::path::Path, blob: &str, side: &SideSpec) -> Result<()> {
     anyhow::ensure!(side.start >= 1, "range start must be at least 1");
     anyhow::ensure!(side.end >= side.start, "range end must be at least start");
 
-    let line_count = fs::read_to_string(work_dir.join(&side.path))?.lines().count() as u32;
+    let line_count = git_stdout(work_dir, ["cat-file", "-p", blob])?.lines().count() as u32;
     anyhow::ensure!(
         side.end <= line_count,
         "range {}..={} is out of bounds for {} lines in {}",
