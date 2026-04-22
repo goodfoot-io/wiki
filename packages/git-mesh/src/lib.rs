@@ -77,16 +77,18 @@ pub fn commit_mesh(repo: &gix::Repository, input: CommitInput) -> Result<()> {
         anyhow::bail!("mesh commit must add or remove at least one link");
     }
 
-    if !input.removes.is_empty() {
-        anyhow::bail!("remove operations are not implemented");
-    }
-
     let mut links = if input.amend {
         let mesh = show_mesh(repo, &input.name)?;
         mesh.links
+    } else if !input.removes.is_empty() {
+        show_mesh(repo, &input.name)?.links
     } else {
         show_mesh(repo, &input.name).map(|mesh| mesh.links).unwrap_or_default()
     };
+
+    for sides in input.removes {
+        remove_mesh_link(work_dir, &mut links, &normalize_range_specs(sides))?;
+    }
 
     for sides in input.adds {
         let normalized_sides = normalize_side_specs(sides);
@@ -261,6 +263,36 @@ fn normalize_side_specs(mut sides: [SideSpec; 2]) -> [SideSpec; 2] {
     sides
 }
 
+fn normalize_range_specs(mut sides: [RangeSpec; 2]) -> [RangeSpec; 2] {
+    sides.sort();
+    sides
+}
+
+fn remove_mesh_link(work_dir: &Path, links: &mut Vec<String>, sides: &[RangeSpec; 2]) -> Result<()> {
+    let Some(index) = find_mesh_link_index(work_dir, links, sides)? else {
+        anyhow::bail!("mesh does not contain link for pair");
+    };
+    links.remove(index);
+    Ok(())
+}
+
+fn find_mesh_link_index(
+    work_dir: &Path,
+    links: &[String],
+    sides: &[RangeSpec; 2],
+) -> Result<Option<usize>> {
+    for (index, link_id) in links.iter().enumerate() {
+        let link_oid = git_stdout(work_dir, ["rev-parse", &format!("refs/links/v1/{link_id}")])?;
+        let link_text = git_stdout(work_dir, ["cat-file", "-p", &link_oid])?;
+        let link = parse_link(&link_text)?;
+        if link_matches_ranges(&link, sides) {
+            return Ok(Some(index));
+        }
+    }
+
+    Ok(None)
+}
+
 fn mesh_contains_sides(work_dir: &Path, links: &[String], sides: &[SideSpec; 2]) -> Result<bool> {
     for link_id in links {
         let link_oid = git_stdout(work_dir, ["rev-parse", &format!("refs/links/v1/{link_id}")])?;
@@ -284,6 +316,14 @@ fn link_matches_sides(link: &Link, sides: &[SideSpec; 2]) -> bool {
                 == candidate
                     .ignore_whitespace
                     .unwrap_or(DEFAULT_IGNORE_WHITESPACE)
+    })
+}
+
+fn link_matches_ranges(link: &Link, sides: &[RangeSpec; 2]) -> bool {
+    link.sides.iter().zip(sides.iter()).all(|(existing, candidate)| {
+        existing.path == candidate.path
+            && existing.start == candidate.start
+            && existing.end == candidate.end
     })
 }
 

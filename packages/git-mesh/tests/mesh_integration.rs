@@ -421,7 +421,6 @@ fn test_commit_mesh_add_link_to_existing() -> Result<()> {
 }
 
 #[test]
-#[ignore]
 fn test_commit_mesh_remove_link() -> Result<()> {
     let test_repo = TestRepo::new()?;
     let input1 = CommitInput {
@@ -476,7 +475,6 @@ fn test_commit_mesh_remove_link() -> Result<()> {
 }
 
 #[test]
-#[ignore]
 fn test_commit_mesh_reconcile() -> Result<()> {
     let test_repo = TestRepo::new()?;
     let input1 = CommitInput {
@@ -665,7 +663,6 @@ fn test_commit_mesh_add_existing_pair_fails() -> Result<()> {
 }
 
 #[test]
-#[ignore]
 fn test_commit_mesh_remove_nonexistent_pair_fails() -> Result<()> {
     let test_repo = TestRepo::new()?;
     let input = CommitInput {

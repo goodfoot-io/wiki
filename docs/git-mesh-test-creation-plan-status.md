@@ -4,15 +4,15 @@ This document tracks the implementation progress of the `docs/git-mesh-test-crea
 
 ## Current Implementation State
 
-As of Wednesday, April 22, 2026, the implementation includes the next append-path `commit_mesh` batch and validates cleanly for the targeted package checks.
+As of Wednesday, April 22, 2026, the implementation includes the remove/reconcile `commit_mesh` batch and validates cleanly for the targeted package checks.
 
 ### Summary
 - **Linting (`yarn lint` -> `cargo clippy -- -D warnings`)**: Passing.
 - **Typechecking (`yarn typecheck` -> `cargo check`)**: Passing.
 - **Focused tests (`cargo test --quiet test_commit_mesh --test mesh_integration -- --test-threads=1`)**:
-  - Passed: 5
+  - Passed: 8
   - Failed: 0
-  - Ignored: 4
+  - Ignored: 1
 - **Overall test scaffold (`yarn test` -> `cargo test`)**:
   - Total Tests: 20
   - Passed: 3
@@ -46,14 +46,14 @@ As of Wednesday, April 22, 2026, the implementation includes the next append-pat
 #### 3.2. Mesh Commit Tests
 - [x] `test_commit_mesh_create_fresh`: **Enabled and passing**.
 - [x] `test_commit_mesh_add_link_to_existing`: **Enabled and passing**.
-- [x] `test_commit_mesh_remove_link`: **Ignored**.
-- [x] `test_commit_mesh_reconcile`: **Ignored**.
+- [x] `test_commit_mesh_remove_link`: **Enabled and passing**.
+- [x] `test_commit_mesh_reconcile`: **Enabled and passing**.
 - [x] `test_commit_mesh_amend_message`: **Ignored**.
 - [x] `test_commit_mesh_amend_with_links_fails`: **Enabled and passing**.
 - [x] `test_commit_mesh_add_existing_pair_fails`: **Enabled and passing**.
-- [x] `test_commit_mesh_remove_nonexistent_pair_fails`: **Ignored**.
+- [x] `test_commit_mesh_remove_nonexistent_pair_fails`: **Enabled and passing**.
 - [x] `test_commit_mesh_empty_fails`: **Enabled and passing**.
-- Status: **In progress**. The append-path batch is now enabled and passing; remove, reconcile, and amend-message scenarios remain ignored.
+- Status: **In progress**. The remove/reconcile batch is now enabled and passing; only amend-message remains ignored in `commit_mesh`.
 
 #### 3.3. Staleness Computation Tests
 - [x] `test_stale_mesh_fresh`: **Ignored**.
@@ -80,5 +80,5 @@ As of Wednesday, April 22, 2026, the implementation includes the next append-pat
 2026-04-22 (`packages/git-mesh`)
 - `yarn lint`: passed
 - `yarn typecheck`: passed
-- `cargo test --quiet test_commit_mesh --test mesh_integration -- --test-threads=1`: passed (`5 passed`, `4 ignored`, `0 failed`)
+- `cargo test --quiet test_commit_mesh --test mesh_integration -- --test-threads=1`: passed (`8 passed`, `1 ignored`, `0 failed`)
 ```
