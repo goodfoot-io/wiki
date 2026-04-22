@@ -363,7 +363,6 @@ fn test_commit_mesh_create_fresh() -> Result<()> {
 }
 
 #[test]
-#[ignore]
 fn test_commit_mesh_add_link_to_existing() -> Result<()> {
     let test_repo = TestRepo::new()?;
     let input1 = CommitInput {
@@ -623,7 +622,6 @@ fn test_commit_mesh_amend_with_links_fails() -> Result<()> {
 }
 
 #[test]
-#[ignore]
 fn test_commit_mesh_add_existing_pair_fails() -> Result<()> {
     let test_repo = TestRepo::new()?;
     let sides = [

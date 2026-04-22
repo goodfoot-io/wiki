@@ -85,14 +85,19 @@ pub fn commit_mesh(repo: &gix::Repository, input: CommitInput) -> Result<()> {
         let mesh = show_mesh(repo, &input.name)?;
         mesh.links
     } else {
-        Vec::new()
+        show_mesh(repo, &input.name).map(|mesh| mesh.links).unwrap_or_default()
     };
 
     for sides in input.adds {
+        let normalized_sides = normalize_side_specs(sides);
+        if mesh_contains_sides(work_dir, &links, &normalized_sides)? {
+            anyhow::bail!("mesh already contains link for pair");
+        }
+
         let (id, _) = create_link(
             repo,
             CreateLinkInput {
-                sides,
+                sides: normalized_sides,
                 anchor_sha: input.anchor_sha.clone(),
                 id: None,
             },
@@ -160,7 +165,72 @@ pub fn serialize_link(link: &Link) -> String {
 }
 
 pub fn parse_link(_text: &str) -> Result<Link> {
-    Err(anyhow!("Not implemented"))
+    let mut anchor_sha = None;
+    let mut created_at = None;
+    let mut sides = Vec::with_capacity(2);
+
+    for line in _text.lines() {
+        if let Some(rest) = line.strip_prefix("anchor ") {
+            anchor_sha = Some(rest.to_string());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("created ") {
+            created_at = Some(rest.to_string());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("side ") {
+            let (meta, path) = rest
+                .split_once('\t')
+                .ok_or_else(|| anyhow!("invalid side line"))?;
+            let mut parts = meta.split_whitespace();
+            let start = parts
+                .next()
+                .ok_or_else(|| anyhow!("missing side start"))?
+                .parse()?;
+            let end = parts
+                .next()
+                .ok_or_else(|| anyhow!("missing side end"))?
+                .parse()?;
+            let blob = parts
+                .next()
+                .ok_or_else(|| anyhow!("missing side blob"))?
+                .to_string();
+            let copy_detection = match parts.next().ok_or_else(|| anyhow!("missing copy detection"))? {
+                "off" => CopyDetection::Off,
+                "same-commit" => CopyDetection::SameCommit,
+                "any-file-in-commit" => CopyDetection::AnyFileInCommit,
+                "any-file-in-repo" => CopyDetection::AnyFileInRepo,
+                _ => anyhow::bail!("invalid copy detection"),
+            };
+            let ignore_whitespace = parts
+                .next()
+                .ok_or_else(|| anyhow!("missing ignore_whitespace"))?
+                .parse()?;
+            anyhow::ensure!(parts.next().is_none(), "unexpected side fields");
+
+            sides.push(LinkSide {
+                path: path.to_string(),
+                start,
+                end,
+                blob,
+                copy_detection,
+                ignore_whitespace,
+            });
+        }
+    }
+
+    anyhow::ensure!(sides.len() == 2, "link must contain exactly two sides");
+    sides.sort();
+
+    let [left, right]: [LinkSide; 2] = sides
+        .try_into()
+        .map_err(|_| anyhow!("link must contain exactly two sides"))?;
+
+    Ok(Link {
+        anchor_sha: anchor_sha.ok_or_else(|| anyhow!("missing anchor"))?,
+        created_at: created_at.ok_or_else(|| anyhow!("missing created timestamp"))?,
+        sides: [left, right],
+    })
 }
 
 pub fn read_mesh_links(_repo: &gix::Repository, _commit_id: &gix::ObjectId) -> Result<Vec<String>> {
@@ -174,6 +244,47 @@ fn serialize_copy_detection(copy_detection: CopyDetection) -> &'static str {
         CopyDetection::AnyFileInCommit => "any-file-in-commit",
         CopyDetection::AnyFileInRepo => "any-file-in-repo",
     }
+}
+
+fn normalize_side_specs(mut sides: [SideSpec; 2]) -> [SideSpec; 2] {
+    for side in &mut sides {
+        side.copy_detection
+            .get_or_insert(DEFAULT_COPY_DETECTION);
+        side.ignore_whitespace
+            .get_or_insert(DEFAULT_IGNORE_WHITESPACE);
+    }
+
+    sides.sort_by(|a, b| {
+        (&a.path, a.start, a.end, a.copy_detection, a.ignore_whitespace)
+            .cmp(&(&b.path, b.start, b.end, b.copy_detection, b.ignore_whitespace))
+    });
+    sides
+}
+
+fn mesh_contains_sides(work_dir: &Path, links: &[String], sides: &[SideSpec; 2]) -> Result<bool> {
+    for link_id in links {
+        let link_oid = git_stdout(work_dir, ["rev-parse", &format!("refs/links/v1/{link_id}")])?;
+        let link_text = git_stdout(work_dir, ["cat-file", "-p", &link_oid])?;
+        let link = parse_link(&link_text)?;
+        if link_matches_sides(&link, sides) {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn link_matches_sides(link: &Link, sides: &[SideSpec; 2]) -> bool {
+    link.sides.iter().zip(sides.iter()).all(|(existing, candidate)| {
+        existing.path == candidate.path
+            && existing.start == candidate.start
+            && existing.end == candidate.end
+            && existing.copy_detection == candidate.copy_detection.unwrap_or(DEFAULT_COPY_DETECTION)
+            && existing.ignore_whitespace
+                == candidate
+                    .ignore_whitespace
+                    .unwrap_or(DEFAULT_IGNORE_WHITESPACE)
+    })
 }
 
 fn write_mesh_commit(work_dir: &Path, name: &str, message: &str, links: &[String]) -> Result<()> {
