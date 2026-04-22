@@ -544,7 +544,6 @@ fn test_commit_mesh_reconcile() -> Result<()> {
 }
 
 #[test]
-#[ignore]
 fn test_commit_mesh_amend_message() -> Result<()> {
     let test_repo = TestRepo::new()?;
     let input1 = CommitInput {
