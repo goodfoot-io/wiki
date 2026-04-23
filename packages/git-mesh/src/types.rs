@@ -82,6 +82,13 @@ pub struct SideResolved {
     pub anchored: LinkLocation,
     pub current: Option<LinkLocation>,
     pub status: LinkStatus,
+    pub culprit: Option<CulpritCommit>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CulpritCommit {
+    pub commit_oid: String,
+    pub summary: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,6 +97,7 @@ pub struct LinkResolved {
     pub anchor_sha: String,
     pub sides: [SideResolved; 2],
     pub status: LinkStatus,
+    pub reconcile_command: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

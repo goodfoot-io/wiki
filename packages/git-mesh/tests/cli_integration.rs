@@ -111,6 +111,49 @@ fn cli_stale_supports_exit_code_and_machine_formats() -> Result<()> {
 }
 
 #[test]
+fn cli_stale_includes_culprit_and_reconcile_data() -> Result<()> {
+    let mut test_repo = TestRepo::new()?;
+    test_repo.mesh_stdout([
+        "commit",
+        "my-mesh",
+        "--link",
+        "file1.txt#L1-L5:file2.txt#L10-L15",
+        "-m",
+        "Track ranges",
+    ])?;
+
+    test_repo.write_file(
+        "file1.txt",
+        "line1\nline2\nupdated\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
+    )?;
+    test_repo.commit_all("modify file1")?;
+
+    let human = test_repo.mesh_stdout(["stale", "my-mesh"])?;
+    assert!(human.contains("caused by"));
+    assert!(human.contains("modify file1"));
+    assert!(human.contains("reconcile with:"));
+    assert!(human.contains("git mesh commit my-mesh --unlink"));
+
+    let porcelain = test_repo.mesh_stdout(["stale", "my-mesh", "--format=porcelain"])?;
+    assert!(porcelain.contains("reconcile=git mesh commit my-mesh --unlink"));
+    assert!(porcelain.contains("leftCulprit="));
+    assert!(porcelain.contains("modify file1"));
+
+    let json = test_repo.mesh_stdout(["stale", "my-mesh", "--format=json"])?;
+    let payload: Value = serde_json::from_str(&json)?;
+    assert_eq!(
+        payload["meshes"][0]["links"][0]["reconcile_command"],
+        "git mesh commit my-mesh --unlink file1.txt#L1-L5:file2.txt#L10-L15 --link file1.txt#L1-L5:file2.txt#L10-L15 -m \"...\""
+    );
+    assert_eq!(
+        payload["meshes"][0]["links"][0]["sides"][0]["culprit"]["summary"],
+        "modify file1"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn cli_stale_without_name_scans_all_meshes_and_since_filters_links() -> Result<()> {
     let mut test_repo = TestRepo::new()?;
     let before = test_repo.head_sha()?;
@@ -145,7 +188,8 @@ fn cli_stale_without_name_scans_all_meshes_and_since_filters_links() -> Result<(
     assert!(!filtered.contains("mesh=old-mesh"));
     assert!(filtered.contains("mesh=new-mesh"));
 
-    let filtered_old = test_repo.mesh_stdout(["stale", "old-mesh", "--format=json", "--since", &since])?;
+    let filtered_old =
+        test_repo.mesh_stdout(["stale", "old-mesh", "--format=json", "--since", &since])?;
     let payload: Value = serde_json::from_str(&filtered_old)?;
     assert_eq!(payload["meshes"][0]["name"], "old-mesh");
     assert_eq!(payload["meshes"][0]["link_count"], 0);

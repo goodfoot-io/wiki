@@ -96,6 +96,18 @@ fn test_stale_mesh_reports_modified_and_rewritten() -> Result<()> {
 
     let modified = stale_mesh(&test_repo.repo, "modified_mesh")?;
     assert_eq!(modified.links[0].status, LinkStatus::Modified);
+    assert_eq!(
+        modified.links[0].sides[0]
+            .culprit
+            .as_ref()
+            .map(|c| c.summary.as_str()),
+        Some("modify file1")
+    );
+    assert!(
+        modified.links[0]
+            .reconcile_command
+            .contains("--link file1.txt#L1-L5:file2.txt#L10-L15")
+    );
 
     let (rewritten_id, _, _) = test_repo.create_link_fixture(
         "rewritten-link",
@@ -113,6 +125,13 @@ fn test_stale_mesh_reports_modified_and_rewritten() -> Result<()> {
 
     let rewritten = stale_mesh(&test_repo.repo, "rewritten_mesh")?;
     assert_eq!(rewritten.links[0].status, LinkStatus::Rewritten);
+    assert_eq!(
+        rewritten.links[0].sides[0]
+            .culprit
+            .as_ref()
+            .map(|c| c.summary.as_str()),
+        Some("rewrite file3")
+    );
     Ok(())
 }
 
@@ -133,6 +152,8 @@ fn test_stale_mesh_reports_missing_after_delete() -> Result<()> {
     let resolved = stale_mesh(&test_repo.repo, "my_mesh")?;
     assert_eq!(resolved.links[0].status, LinkStatus::Missing);
     assert!(resolved.links[0].sides[0].current.is_none());
+    assert!(resolved.links[0].reconcile_command.contains("--unlink"));
+    assert!(!resolved.links[0].reconcile_command.contains(" --link "));
     Ok(())
 }
 

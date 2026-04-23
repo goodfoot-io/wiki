@@ -281,7 +281,11 @@ pub fn resolve_commit_ish(repo: &gix::Repository, commit_ish: &str) -> Result<St
     git_stdout(work_dir, ["rev-parse", commit_ish])
 }
 
-pub fn is_ancestor_commit(repo: &gix::Repository, ancestor: &str, descendant: &str) -> Result<bool> {
+pub fn is_ancestor_commit(
+    repo: &gix::Repository,
+    ancestor: &str,
+    descendant: &str,
+) -> Result<bool> {
     let work_dir = repo
         .workdir()
         .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
@@ -345,12 +349,14 @@ pub fn stale_mesh(repo: &gix::Repository, name: &str) -> Result<MeshResolved> {
             ]
         };
         let status = overall_status(&sides);
+        let reconcile_command = build_reconcile_command(name, &sides);
 
         links.push(LinkResolved {
             link_id,
             anchor_sha: stored_link.anchor_sha,
             sides,
             status,
+            reconcile_command,
         });
     }
 
@@ -359,6 +365,38 @@ pub fn stale_mesh(repo: &gix::Repository, name: &str) -> Result<MeshResolved> {
         message: mesh.message,
         links,
     })
+}
+
+fn build_reconcile_command(name: &str, sides: &[SideResolved; 2]) -> String {
+    let anchored_pair = format!(
+        "{}:{}",
+        range_text(
+            &sides[0].anchored.path,
+            sides[0].anchored.start,
+            sides[0].anchored.end,
+        ),
+        range_text(
+            &sides[1].anchored.path,
+            sides[1].anchored.start,
+            sides[1].anchored.end,
+        )
+    );
+
+    let mut command = format!("git mesh commit {name} --unlink {anchored_pair}");
+    if let (Some(left), Some(right)) = (&sides[0].current, &sides[1].current) {
+        let current_pair = format!(
+            "{}:{}",
+            range_text(&left.path, left.start, left.end),
+            range_text(&right.path, right.start, right.end)
+        );
+        command.push_str(&format!(" --link {current_pair}"));
+    }
+    command.push_str(" -m \"...\"");
+    command
+}
+
+fn range_text(path: &str, start: u32, end: u32) -> String {
+    format!("{path}#L{start}-L{end}")
 }
 
 pub fn serialize_link(link: &Link) -> String {
@@ -489,6 +527,7 @@ fn orphaned_side(anchored: &LinkSide) -> SideResolved {
         },
         current: None,
         status: LinkStatus::Orphaned,
+        culprit: None,
     }
 }
 
@@ -510,6 +549,7 @@ fn resolve_side(work_dir: &Path, anchor_sha: &str, anchored: &LinkSide) -> Resul
             anchored: anchored_location,
             current: None,
             status: LinkStatus::Missing,
+            culprit: None,
         });
     };
 
@@ -520,6 +560,7 @@ fn resolve_side(work_dir: &Path, anchor_sha: &str, anchored: &LinkSide) -> Resul
             anchored: anchored_location,
             current: Some(location),
             status: LinkStatus::Missing,
+            culprit: None,
         });
     };
 
@@ -540,10 +581,24 @@ fn resolve_side(work_dir: &Path, anchor_sha: &str, anchored: &LinkSide) -> Resul
         LinkStatus::Rewritten
     };
 
+    let culprit = match status {
+        LinkStatus::Modified | LinkStatus::Rewritten => blame_culprit_commit(
+            work_dir,
+            &location.path,
+            location.start,
+            location.end,
+            anchored_slice,
+            current_slice,
+            anchored.ignore_whitespace,
+        )?,
+        _ => None,
+    };
+
     Ok(SideResolved {
         anchored: anchored_location,
         current: Some(location),
         status,
+        culprit,
     })
 }
 
@@ -589,6 +644,101 @@ fn normalize_line(line: &str, ignore_whitespace: bool) -> String {
     } else {
         normalized
     }
+}
+
+fn blame_culprit_commit(
+    work_dir: &Path,
+    path: &str,
+    start: u32,
+    _end: u32,
+    anchored: &[String],
+    current: &[&str],
+    ignore_whitespace: bool,
+) -> Result<Option<CulpritCommit>> {
+    let differing_lines = differing_line_numbers(start, anchored, current, ignore_whitespace);
+    if differing_lines.is_empty() {
+        return Ok(None);
+    }
+
+    let mut newest: Option<(i64, CulpritCommit)> = None;
+    for line_number in differing_lines {
+        let output = git_stdout(
+            work_dir,
+            [
+                "blame",
+                "--porcelain",
+                "-L",
+                &format!("{line_number},{line_number}"),
+                "HEAD",
+                "--",
+                path,
+            ],
+        )?;
+        let Some(culprit) = parse_blame_culprit(&output) else {
+            continue;
+        };
+        match &newest {
+            Some((timestamp, _)) if *timestamp >= culprit.0 => {}
+            _ => newest = Some((culprit.0, culprit.1)),
+        }
+    }
+
+    Ok(newest.map(|(_, culprit)| culprit))
+}
+
+fn differing_line_numbers(
+    start: u32,
+    anchored: &[String],
+    current: &[&str],
+    ignore_whitespace: bool,
+) -> Vec<u32> {
+    let max_len = anchored.len().max(current.len());
+    let mut lines = Vec::new();
+    for index in 0..max_len {
+        let same = anchored
+            .get(index)
+            .map(|line| normalize_line(line, ignore_whitespace))
+            == current
+                .get(index)
+                .map(|line| normalize_line(line, ignore_whitespace));
+        if !same {
+            lines.push(start + index as u32);
+        }
+    }
+    lines
+}
+
+fn parse_blame_culprit(output: &str) -> Option<(i64, CulpritCommit)> {
+    let mut lines = output.lines();
+    let commit_oid = lines
+        .next()?
+        .split_whitespace()
+        .next()
+        .map(str::to_string)?;
+    let mut timestamp = None;
+    let mut summary = None;
+
+    for line in lines {
+        if let Some(value) = line.strip_prefix("committer-time ") {
+            timestamp = value.parse().ok();
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("summary ") {
+            summary = Some(value.to_string());
+            continue;
+        }
+        if line.starts_with('\t') {
+            break;
+        }
+    }
+
+    Some((
+        timestamp?,
+        CulpritCommit {
+            commit_oid,
+            summary: summary.unwrap_or_default(),
+        },
+    ))
 }
 
 #[derive(Clone, Debug)]

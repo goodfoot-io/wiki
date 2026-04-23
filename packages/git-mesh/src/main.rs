@@ -1,9 +1,10 @@
 use anyhow::{Context, Result, anyhow};
 use clap::{Arg, ArgAction, Command, value_parser};
 use git_mesh::{
-    CommitInput, CopyDetection, LinkResolved, LinkStatus, Mesh, MeshCommitInfo, MeshResolved,
-    RangeSpec, SideSpec, commit_mesh, is_ancestor_commit, list_mesh_names, mesh_commit_info,
-    remove_mesh, rename_mesh, resolve_commit_ish, restore_mesh, show_mesh, stale_mesh,
+    CommitInput, CopyDetection, CulpritCommit, LinkResolved, LinkStatus, Mesh, MeshCommitInfo,
+    MeshResolved, RangeSpec, SideSpec, commit_mesh, is_ancestor_commit, list_mesh_names,
+    mesh_commit_info, remove_mesh, rename_mesh, resolve_commit_ish, restore_mesh, show_mesh,
+    stale_mesh,
 };
 use serde::Serialize;
 
@@ -33,7 +34,11 @@ fn run() -> Result<i32> {
                 .get_one::<String>("since")
                 .map(|value| resolve_commit_ish(&repo, value))
                 .transpose()?;
-            let reports = load_stale_reports(&repo, sub_matches.get_one::<String>("name"), since.as_deref())?;
+            let reports = load_stale_reports(
+                &repo,
+                sub_matches.get_one::<String>("name"),
+                since.as_deref(),
+            )?;
 
             match format {
                 StaleFormat::Human => print_human_stale(&reports)?,
@@ -363,7 +368,17 @@ fn print_stale(mesh: &MeshResolved, info: &MeshCommitInfo) -> Result<()> {
                 format_status(side.status),
                 format_side_summary(side)
             );
+            if let Some(culprit) = &side.culprit {
+                println!(
+                    "                caused by {} {}",
+                    abbreviate_oid(&culprit.commit_oid),
+                    culprit.summary
+                );
+            }
         }
+        println!();
+        println!("             reconcile with:");
+        println!("               {}", link.reconcile_command);
     }
 
     Ok(())
@@ -375,14 +390,17 @@ fn print_porcelain_stale(reports: &[StaleMeshReport]) {
             let anchored_pair = format_resolved_pair(&link).expect("format pair");
             let current_pair = format_current_pair(&link);
             println!(
-                "mesh={}\tcommit={}\tstatus={}\tanchor={}\tpair={}\tcurrentPair={}\tlinkId={}",
+                "mesh={}\tcommit={}\tstatus={}\tanchor={}\tpair={}\tcurrentPair={}\tlinkId={}\treconcile={}\tleftCulprit={}\trightCulprit={}",
                 report.mesh.name,
                 report.info.commit_oid,
                 format_status(link.status),
                 link.anchor_sha,
                 anchored_pair,
                 current_pair,
-                link.link_id
+                link.link_id,
+                shell_escape(&link.reconcile_command),
+                format_culprit_field(link.sides[0].culprit.as_ref()),
+                format_culprit_field(link.sides[1].culprit.as_ref()),
             );
         }
     }
@@ -394,6 +412,7 @@ fn print_json_stale(reports: &[StaleMeshReport]) -> Result<()> {
         status: LinkStatus,
         anchored: String,
         current: Option<String>,
+        culprit: Option<CulpritCommit>,
     }
 
     #[derive(Serialize)]
@@ -403,6 +422,7 @@ fn print_json_stale(reports: &[StaleMeshReport]) -> Result<()> {
         anchor_sha: String,
         pair: String,
         current_pair: String,
+        reconcile_command: String,
         sides: [JsonSide; 2],
     }
 
@@ -443,16 +463,25 @@ fn print_json_stale(reports: &[StaleMeshReport]) -> Result<()> {
                         anchor_sha: link.anchor_sha.clone(),
                         pair: format_resolved_pair(&link).expect("format pair"),
                         current_pair: format_current_pair(&link),
+                        reconcile_command: link.reconcile_command.clone(),
                         sides: [
                             JsonSide {
                                 status: link.sides[0].status,
                                 anchored: format_side_anchored(&link.sides[0]),
-                                current: link.sides[0].current.as_ref().map(format_current_location),
+                                current: link.sides[0]
+                                    .current
+                                    .as_ref()
+                                    .map(format_current_location),
+                                culprit: link.sides[0].culprit.clone(),
                             },
                             JsonSide {
                                 status: link.sides[1].status,
                                 anchored: format_side_anchored(&link.sides[1]),
-                                current: link.sides[1].current.as_ref().map(format_current_location),
+                                current: link.sides[1]
+                                    .current
+                                    .as_ref()
+                                    .map(format_current_location),
+                                culprit: link.sides[1].culprit.clone(),
                             },
                         ],
                     })
@@ -582,6 +611,16 @@ fn format_side_summary(side: &git_mesh::SideResolved) -> String {
     }
 }
 
+fn format_culprit_field(culprit: Option<&CulpritCommit>) -> String {
+    culprit
+        .map(|culprit| format!("{} {}", culprit.commit_oid, culprit.summary))
+        .unwrap_or_default()
+}
+
+fn shell_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\t', "\\t")
+}
+
 fn format_current_location(location: &git_mesh::LinkLocation) -> String {
     format!("{}#L{}-L{}", location.path, location.start, location.end)
 }
@@ -662,7 +701,11 @@ fn sorted_links(mesh: &MeshResolved) -> Vec<LinkResolved> {
 }
 
 fn reports_have_stale(reports: &[StaleMeshReport]) -> bool {
-    reports
-        .iter()
-        .any(|report| report.mesh.links.iter().any(|link| link.status != LinkStatus::Fresh))
+    reports.iter().any(|report| {
+        report
+            .mesh
+            .links
+            .iter()
+            .any(|link| link.status != LinkStatus::Fresh)
+    })
 }
