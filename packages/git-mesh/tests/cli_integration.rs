@@ -400,6 +400,41 @@ fn cli_rm_mv_and_restore_work() -> Result<()> {
 }
 
 #[test]
+fn cli_commit_retries_implicit_tip_race() -> Result<()> {
+    let test_repo = TestRepo::new()?;
+    test_repo.mesh_stdout([
+        "commit",
+        "mesh-a",
+        "--link",
+        "file1.txt#L1-L5:file2.txt#L10-L15",
+        "-m",
+        "Original state",
+    ])?;
+
+    let hook_command = "blob1=$(git rev-parse --verify HEAD:file3.txt)\nblob2=$(git rev-parse --verify HEAD:file4.txt)\nlink_blob=$(printf 'anchor %s\\ncreated 2026-01-01T00:00:00Z\\nside 1 5 %s same-commit true\\tfile3.txt\\nside 10 15 %s same-commit true\\tfile4.txt\\n' \"$(git rev-parse HEAD)\" \"$blob1\" \"$blob2\" | git hash-object -w --stdin)\ngit update-ref refs/links/v1/cli-raced-link \"$link_blob\"\nlinks_blob=$(printf 'cli-raced-link\\n' | git hash-object -w --stdin)\ntree=$(printf '100644 blob %s\\tlinks\\n' \"$links_blob\" | git mktree)\ncommit=$(GIT_AUTHOR_NAME='Test User' GIT_AUTHOR_EMAIL='test@example.com' GIT_COMMITTER_NAME='Test User' GIT_COMMITTER_EMAIL='test@example.com' git commit-tree \"$tree\" -p \"$(git rev-parse refs/meshes/v1/mesh-a)\" -m 'Concurrent state')\ngit update-ref refs/meshes/v1/mesh-a \"$commit\"";
+    test_repo.mesh_stdout_with_env(
+        [
+            "commit",
+            "mesh-a",
+            "--link",
+            "file1.txt#L2-L6:file2.txt#L10-L15",
+            "-m",
+            "Retried state",
+        ],
+        [(
+            "GIT_MESH_TEST_HOOK",
+            format!("commit_mesh_before_transaction:once:{hook_command}"),
+        )],
+    )?;
+
+    let show = test_repo.mesh_stdout(["mesh-a"])?;
+    assert!(show.contains("Retried state"));
+    assert!(show.contains("file3.txt#L1-L5:file4.txt#L10-L15"));
+    assert!(show.contains("file1.txt#L2-L6:file2.txt#L10-L15"));
+    Ok(())
+}
+
+#[test]
 fn cli_show_supports_at_log_diff_and_no_abbrev() -> Result<()> {
     let test_repo = TestRepo::new()?;
     test_repo.mesh_stdout([

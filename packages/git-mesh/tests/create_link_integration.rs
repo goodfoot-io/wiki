@@ -188,3 +188,55 @@ fn test_create_link_uses_anchor_commit_blob_and_range() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_create_link_fails_when_ref_already_exists() -> Result<()> {
+    let mut test_repo = TestRepo::new()?;
+    test_repo.write_file("file1.txt", "1\n2\n3\n4\n5\n")?;
+    test_repo.write_file("file2.txt", "10\n11\n12\n13\n14\n15\n")?;
+    test_repo.commit_all("init")?;
+    test_repo.create_link_fixture(
+        "existing-link",
+        [
+            git_mesh::RangeSpec {
+                path: "file1.txt".to_string(),
+                start: 1,
+                end: 5,
+            },
+            git_mesh::RangeSpec {
+                path: "file2.txt".to_string(),
+                start: 1,
+                end: 5,
+            },
+        ],
+    )?;
+    let original_oid = test_repo.read_ref("refs/links/v1/existing-link")?;
+
+    let result = create_link(
+        &test_repo.repo,
+        CreateLinkInput {
+            sides: [
+                SideSpec {
+                    path: "file1.txt".to_string(),
+                    start: 1,
+                    end: 5,
+                    copy_detection: None,
+                    ignore_whitespace: None,
+                },
+                SideSpec {
+                    path: "file2.txt".to_string(),
+                    start: 1,
+                    end: 5,
+                    copy_detection: None,
+                    ignore_whitespace: None,
+                },
+            ],
+            anchor_sha: None,
+            id: Some("existing-link".to_string()),
+        },
+    );
+
+    assert!(result.is_err());
+    assert_eq!(test_repo.read_ref("refs/links/v1/existing-link")?, original_oid);
+    Ok(())
+}

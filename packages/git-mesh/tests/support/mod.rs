@@ -358,6 +358,19 @@ impl TestRepo {
         Ok(())
     }
 
+    pub fn ref_exists(&self, name: &str) -> bool {
+        self.read_ref(name).is_ok()
+    }
+
+    pub fn list_refs(&self, prefix: &str) -> Result<Vec<String>> {
+        Ok(self
+            .git_output(["for-each-ref", "--format=%(refname)", prefix])?
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
     pub fn run_mesh<I, S>(&self, args: I) -> Result<Output>
     where
         I: IntoIterator<Item = S>,

@@ -2,14 +2,19 @@ pub mod types;
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 pub use types::*;
 use uuid::Uuid;
 
 const RESERVED_MESH_NAMES: &[&str] = &[
     "commit", "rm", "mv", "restore", "stale", "fetch", "push", "doctor", "log", "help",
 ];
+
+const COMMIT_MESH_MAX_ATTEMPTS: usize = 8;
+static TEST_HOOKS_RUN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 pub fn validate_mesh_name(name: &str) -> Result<()> {
     anyhow::ensure!(
@@ -29,7 +34,14 @@ pub fn create_link(repo: &gix::Repository, input: CreateLinkInput) -> Result<(St
     };
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let link = build_link(work_dir, &anchor_sha, input.sides)?;
-    write_link_ref(work_dir, &id, &link)?;
+    let blob_oid = write_link_blob(work_dir, &link)?;
+    apply_ref_transaction(
+        work_dir,
+        &[RefUpdate::Create {
+            name: format!("refs/links/v1/{id}"),
+            new_oid: blob_oid,
+        }],
+    )?;
     Ok((id, link))
 }
 
@@ -101,9 +113,9 @@ pub fn commit_mesh(repo: &gix::Repository, input: CommitInput) -> Result<()> {
         .workdir()
         .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
     let mesh_ref = format!("refs/meshes/v1/{}", input.name);
-    let expected_tip = match input.expected_tip.as_deref() {
+    let explicit_expected_tip = match input.expected_tip.as_deref() {
         Some(expected_tip) => Some(git_stdout(work_dir, ["rev-parse", expected_tip])?),
-        None => git_stdout(work_dir, ["rev-parse", &mesh_ref]).ok(),
+        None => None,
     };
 
     if input.amend && (!input.adds.is_empty() || !input.removes.is_empty()) {
@@ -113,51 +125,84 @@ pub fn commit_mesh(repo: &gix::Repository, input: CommitInput) -> Result<()> {
     if !input.amend && input.adds.is_empty() && input.removes.is_empty() {
         anyhow::bail!("mesh commit must add or remove at least one link");
     }
-
-    if expected_tip.is_none() && input.adds.is_empty() {
-        anyhow::bail!(
-            "mesh `{}` does not exist; supply --link to create it",
-            input.name
-        );
-    }
-
-    let mut links = match expected_tip.as_deref() {
-        Some(tip) => read_mesh_links(repo, &gix::ObjectId::from_hex(tip.as_bytes())?)?,
-        None => Vec::new(),
-    };
-
-    for sides in &input.removes {
-        remove_mesh_link(work_dir, &mut links, &normalize_range_specs(sides.clone()))?;
-    }
-
     let anchor_sha = match input.anchor_sha {
         Some(anchor_sha) => anchor_sha,
         None => git_stdout(work_dir, ["rev-parse", "HEAD"])?,
     };
-    let mut prepared_links = Vec::with_capacity(input.adds.len());
-    for sides in input.adds {
-        let normalized_sides = normalize_side_specs(sides);
-        if mesh_contains_sides(work_dir, &links, &normalized_sides)? {
-            anyhow::bail!("mesh already contains link for pair");
+    let mut base_tip = match explicit_expected_tip.clone() {
+        Some(explicit) => Some(explicit),
+        None => resolve_ref_oid_optional(work_dir, &mesh_ref)?,
+    };
+
+    for attempt in 0..COMMIT_MESH_MAX_ATTEMPTS {
+        if base_tip.is_none() && input.adds.is_empty() {
+            anyhow::bail!(
+                "mesh `{}` does not exist; supply --link to create it",
+                input.name
+            );
         }
-        let link = build_link(work_dir, &anchor_sha, normalized_sides)?;
-        let id = Uuid::new_v4().to_string();
-        prepared_links.push((id.clone(), link));
-        links.push(id);
+
+        let mut links = match base_tip.as_deref() {
+            Some(tip) => read_mesh_links(repo, &gix::ObjectId::from_hex(tip.as_bytes())?)?,
+            None => Vec::new(),
+        };
+
+        for sides in &input.removes {
+            remove_mesh_link(work_dir, &mut links, &normalize_range_specs(sides.clone()))?;
+        }
+
+        let mut ref_updates = Vec::with_capacity(input.adds.len() + 1);
+        for sides in &input.adds {
+            let normalized_sides = normalize_side_specs(sides.clone());
+            if mesh_contains_sides(work_dir, &links, &normalized_sides)? {
+                anyhow::bail!("mesh already contains link for pair");
+            }
+            let link = build_link(work_dir, &anchor_sha, normalized_sides)?;
+            let id = Uuid::new_v4().to_string();
+            let blob_oid = write_link_blob(work_dir, &link)?;
+            ref_updates.push(RefUpdate::Create {
+                name: format!("refs/links/v1/{id}"),
+                new_oid: blob_oid,
+            });
+            links.push(id);
+        }
+
+        let mesh_commit = build_mesh_commit(
+            work_dir,
+            &input.name,
+            &input.message,
+            &links,
+            base_tip.as_deref(),
+            input.amend,
+        )?;
+        ref_updates.push(match base_tip.as_deref() {
+            Some(expected_old_oid) => RefUpdate::Update {
+                name: mesh_ref.clone(),
+                new_oid: mesh_commit,
+                expected_old_oid: expected_old_oid.to_string(),
+            },
+            None => RefUpdate::Create {
+                name: mesh_ref.clone(),
+                new_oid: mesh_commit,
+            },
+        });
+
+        run_test_hook(work_dir, "commit_mesh_before_transaction");
+
+        match apply_ref_transaction(work_dir, &ref_updates) {
+            Ok(()) => return Ok(()),
+            Err(err)
+                if explicit_expected_tip.is_none()
+                    && is_reference_transaction_conflict(&err)
+                    && attempt + 1 < COMMIT_MESH_MAX_ATTEMPTS =>
+            {
+                base_tip = resolve_ref_oid_optional(work_dir, &mesh_ref)?;
+            }
+            Err(err) => return Err(err),
+        }
     }
 
-    for (id, link) in prepared_links {
-        write_link_ref(work_dir, &id, &link)?;
-    }
-
-    write_mesh_commit(
-        work_dir,
-        &input.name,
-        &input.message,
-        &links,
-        expected_tip.as_deref(),
-        input.amend,
-    )
+    anyhow::bail!("mesh commit exceeded retry budget")
 }
 
 pub fn remove_mesh(repo: &gix::Repository, name: &str) -> Result<()> {
@@ -165,7 +210,16 @@ pub fn remove_mesh(repo: &gix::Repository, name: &str) -> Result<()> {
         .workdir()
         .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
     let mesh_ref = format!("refs/meshes/v1/{name}");
-    git_stdout(work_dir, ["update-ref", "-d", &mesh_ref])?;
+    let current_tip = resolve_ref_oid_optional(work_dir, &mesh_ref)?
+        .ok_or_else(|| anyhow!("mesh `{name}` does not exist"))?;
+    run_test_hook(work_dir, "remove_mesh_before_transaction");
+    apply_ref_transaction(
+        work_dir,
+        &[RefUpdate::Delete {
+            name: mesh_ref,
+            expected_old_oid: current_tip,
+        }],
+    )?;
     Ok(())
 }
 
@@ -182,10 +236,17 @@ pub fn rename_mesh(
     let old_ref = format!("refs/meshes/v1/{old_name}");
     let new_ref = format!("refs/meshes/v1/{new_name}");
     let commit_oid = git_stdout(work_dir, ["rev-parse", &old_ref])?;
-    git_stdout(work_dir, ["update-ref", &new_ref, &commit_oid])?;
+    let mut updates = vec![RefUpdate::Create {
+        name: new_ref,
+        new_oid: commit_oid.clone(),
+    }];
     if !keep {
-        git_stdout(work_dir, ["update-ref", "-d", &old_ref])?;
+        updates.push(RefUpdate::Delete {
+            name: old_ref,
+            expected_old_oid: commit_oid,
+        });
     }
+    apply_ref_transaction(work_dir, &updates)?;
     Ok(())
 }
 
@@ -202,7 +263,7 @@ pub fn restore_mesh(repo: &gix::Repository, name: &str, commit_ish: &str) -> Res
         commit_ish.to_string()
     };
     let commit_oid = git_stdout(work_dir, ["rev-parse", &revision])?;
-    let current_tip = git_stdout(work_dir, ["rev-parse", &mesh_ref]).ok();
+    let current_tip = resolve_ref_oid_optional(work_dir, &mesh_ref)?;
     let tree_oid = git_stdout(work_dir, ["show", "-s", "--format=%T", &commit_oid])?;
     let message = git_stdout(work_dir, ["show", "-s", "--format=%B", &commit_oid])?;
 
@@ -218,21 +279,21 @@ pub fn restore_mesh(repo: &gix::Repository, name: &str, commit_ish: &str) -> Res
     }
 
     let restored_commit = git_stdout_with_identity(work_dir, args.iter().map(String::as_str))?;
-    match current_tip.as_deref() {
-        Some(parent) => git_stdout(
-            work_dir,
-            ["update-ref", &mesh_ref, &restored_commit, parent],
-        )?,
-        None => git_stdout(
-            work_dir,
-            [
-                "update-ref",
-                &mesh_ref,
-                &restored_commit,
-                "0000000000000000000000000000000000000000",
-            ],
-        )?,
-    };
+    run_test_hook(work_dir, "restore_mesh_before_transaction");
+    apply_ref_transaction(
+        work_dir,
+        &[match current_tip {
+            Some(parent) => RefUpdate::Update {
+                name: mesh_ref,
+                new_oid: restored_commit,
+                expected_old_oid: parent,
+            },
+            None => RefUpdate::Create {
+                name: mesh_ref,
+                new_oid: restored_commit,
+            },
+        }],
+    )?;
     Ok(())
 }
 
@@ -593,17 +654,12 @@ pub fn read_mesh_links(_repo: &gix::Repository, _commit_id: &gix::ObjectId) -> R
     git_show_file_lines(work_dir, &_commit_id.to_string(), "links")
 }
 
-fn write_link_ref(work_dir: &Path, id: &str, link: &Link) -> Result<()> {
-    let blob_oid = git_with_input(
+fn write_link_blob(work_dir: &Path, link: &Link) -> Result<String> {
+    git_with_input(
         work_dir,
         ["hash-object", "-w", "--stdin"],
         &serialize_link(link),
-    )?;
-    git_stdout(
-        work_dir,
-        ["update-ref", &format!("refs/links/v1/{id}"), &blob_oid],
-    )?;
-    Ok(())
+    )
 }
 
 fn resolve_mesh_revision(work_dir: &Path, name: &str, commit_ish: Option<&str>) -> Result<String> {
@@ -626,6 +682,21 @@ fn read_link_from_ref(work_dir: &Path, id: &str) -> Result<Link> {
     let link_oid = git_stdout(work_dir, ["rev-parse", &format!("refs/links/v1/{id}")])?;
     let link_text = git_stdout(work_dir, ["cat-file", "-p", &link_oid])?;
     parse_link(&link_text)
+}
+
+fn resolve_ref_oid_optional(work_dir: &Path, ref_name: &str) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .current_dir(work_dir)
+        .args(["rev-parse", "--verify", "--quiet", ref_name])
+        .output()?;
+    match output.status.code() {
+        Some(0) => Ok(Some(String::from_utf8(output.stdout)?.trim().to_string())),
+        Some(1) => Ok(None),
+        _ => anyhow::bail!(
+            "git command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    }
 }
 
 fn orphaned_side(anchored: &LinkSide) -> SideResolved {
@@ -1202,14 +1273,14 @@ fn serialize_links_file(links: &[String]) -> String {
     links_text
 }
 
-fn write_mesh_commit(
+fn build_mesh_commit(
     work_dir: &Path,
-    name: &str,
+    _name: &str,
     message: &str,
     links: &[String],
     expected_tip: Option<&str>,
     amend: bool,
-) -> Result<()> {
+) -> Result<String> {
     let links_text = serialize_links_file(links);
 
     let links_blob = git_with_input(work_dir, ["hash-object", "-w", "--stdin"], &links_text)?;
@@ -1219,7 +1290,6 @@ fn write_mesh_commit(
         &format!("100644 blob {links_blob}\tlinks\n"),
     )?;
 
-    let mesh_ref = format!("refs/meshes/v1/{name}");
     let parents = match (amend, expected_tip) {
         (true, Some(tip)) => git_stdout(work_dir, ["show", "-s", "--format=%P", tip])?
             .split_whitespace()
@@ -1241,20 +1311,86 @@ fn write_mesh_commit(
         args.push(parent);
     }
 
-    let commit_oid = git_stdout_with_identity(work_dir, args.iter().map(String::as_str))?;
-    match expected_tip {
-        Some(tip) => git_stdout(work_dir, ["update-ref", &mesh_ref, &commit_oid, tip])?,
-        None => git_stdout(
-            work_dir,
-            [
-                "update-ref",
-                &mesh_ref,
-                &commit_oid,
-                "0000000000000000000000000000000000000000",
-            ],
-        )?,
-    };
+    git_stdout_with_identity(work_dir, args.iter().map(String::as_str))
+}
+
+enum RefUpdate {
+    Create {
+        name: String,
+        new_oid: String,
+    },
+    Update {
+        name: String,
+        new_oid: String,
+        expected_old_oid: String,
+    },
+    Delete {
+        name: String,
+        expected_old_oid: String,
+    },
+}
+
+fn apply_ref_transaction(work_dir: &Path, updates: &[RefUpdate]) -> Result<()> {
+    let mut input = String::from("start\n");
+    for update in updates {
+        match update {
+            RefUpdate::Create { name, new_oid } => {
+                input.push_str(&format!("create {name} {new_oid}\n"));
+            }
+            RefUpdate::Update {
+                name,
+                new_oid,
+                expected_old_oid,
+            } => {
+                input.push_str(&format!("update {name} {new_oid} {expected_old_oid}\n"));
+            }
+            RefUpdate::Delete {
+                name,
+                expected_old_oid,
+            } => {
+                input.push_str(&format!("delete {name} {expected_old_oid}\n"));
+            }
+        }
+    }
+    input.push_str("prepare\ncommit\n");
+    git_with_input(work_dir, ["update-ref", "--stdin"], &input)?;
     Ok(())
+}
+
+fn is_reference_transaction_conflict(err: &anyhow::Error) -> bool {
+    let message = err.to_string();
+    message.contains("cannot lock ref")
+        || message.contains("reference already exists")
+        || message.contains("is at ")
+        || message.contains("expected ")
+}
+
+fn run_test_hook(work_dir: &Path, hook_name: &str) {
+    let Ok(config) = std::env::var("GIT_MESH_TEST_HOOK") else {
+        return;
+    };
+    let mut parts = config.splitn(3, ':');
+    let Some(expected_hook) = parts.next() else {
+        return;
+    };
+    let remaining = parts.next();
+    let command = parts.next();
+    if expected_hook != hook_name || remaining != Some("once") {
+        return;
+    }
+    let seen = TEST_HOOKS_RUN.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut seen = seen.lock().expect("test hook mutex poisoned");
+    if !seen.insert(config.clone()) {
+        return;
+    }
+    drop(seen);
+    if let Some(command) = command {
+        let _ = Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(work_dir)
+            .output();
+    }
 }
 
 fn ensure_sync_refspecs(work_dir: &Path, remote: &str) -> Result<()> {

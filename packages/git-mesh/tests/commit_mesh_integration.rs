@@ -297,6 +297,7 @@ fn test_commit_mesh_canonicalizes_links_file_on_write() -> Result<()> {
 #[test]
 fn test_commit_mesh_validation_failure_does_not_update_mesh_ref() -> Result<()> {
     let test_repo = TestRepo::new()?;
+    let link_refs_before = test_repo.list_refs("refs/links/v1")?;
     let result = commit_mesh(
         &test_repo.repo,
         commit_input(
@@ -315,6 +316,7 @@ fn test_commit_mesh_validation_failure_does_not_update_mesh_ref() -> Result<()> 
 
     assert!(result.is_err());
     assert!(test_repo.read_ref("refs/meshes/v1/my_mesh").is_err());
+    assert_eq!(test_repo.list_refs("refs/links/v1")?, link_refs_before);
     Ok(())
 }
 
@@ -358,5 +360,51 @@ fn test_commit_mesh_stale_expected_tip_fails_with_no_ref_update() -> Result<()> 
 
     assert!(result.is_err());
     assert_eq!(test_repo.read_ref("refs/meshes/v1/my_mesh")?, current_tip);
+    Ok(())
+}
+
+#[test]
+fn test_commit_mesh_retries_implicit_tip_race_without_partial_link_refs() -> Result<()> {
+    let test_repo = TestRepo::new()?;
+    commit_mesh(
+        &test_repo.repo,
+        commit_input(
+            "my_mesh",
+            vec![[side_spec("file1.txt", 1, 5), side_spec("file2.txt", 10, 15)]],
+            vec![],
+            "Initial state",
+        ),
+    )?;
+
+    let link_refs_before = test_repo.list_refs("refs/links/v1")?;
+    let hook_command = "git hash-object -w --stdin <<'EOF' >/dev/null\nfile3-link\nEOF\nblob=$(git rev-parse --verify HEAD:file3.txt)\nblob2=$(git rev-parse --verify HEAD:file4.txt)\nlink_blob=$(printf 'anchor %s\\ncreated 2026-01-01T00:00:00Z\\nside 1 5 %s same-commit true\\tfile3.txt\\nside 10 15 %s same-commit true\\tfile4.txt\\n' \"$(git rev-parse HEAD)\" \"$blob\" \"$blob2\" | git hash-object -w --stdin)\ngit update-ref refs/links/v1/raced-link \"$link_blob\"\nlinks_blob=$(printf 'raced-link\\n' | git hash-object -w --stdin)\ntree=$(printf '100644 blob %s\\tlinks\\n' \"$links_blob\" | git mktree)\ncommit=$(GIT_AUTHOR_NAME='Test User' GIT_AUTHOR_EMAIL='test@example.com' GIT_COMMITTER_NAME='Test User' GIT_COMMITTER_EMAIL='test@example.com' git commit-tree \"$tree\" -p \"$(git rev-parse refs/meshes/v1/my_mesh)\" -m 'Raced state')\ngit update-ref refs/meshes/v1/my_mesh \"$commit\"";
+    unsafe {
+        std::env::set_var(
+            "GIT_MESH_TEST_HOOK",
+            format!("commit_mesh_before_transaction:once:{hook_command}"),
+        );
+    }
+
+    let result = commit_mesh(
+        &test_repo.repo,
+        commit_input(
+            "my_mesh",
+            vec![[side_spec("file1.txt", 2, 6), side_spec("file2.txt", 10, 15)]],
+            vec![],
+            "Retried state",
+        ),
+    );
+
+    unsafe {
+        std::env::remove_var("GIT_MESH_TEST_HOOK");
+    }
+    result?;
+
+    let mesh = show_mesh(&test_repo.repo, "my_mesh")?;
+    assert_eq!(mesh.message, "Retried state");
+    assert_eq!(mesh.links.len(), 2);
+    let link_refs_after = test_repo.list_refs("refs/links/v1")?;
+    assert_eq!(link_refs_after.len(), link_refs_before.len() + 2);
+    assert!(test_repo.ref_exists("refs/links/v1/raced-link"));
     Ok(())
 }
