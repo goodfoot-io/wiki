@@ -2,10 +2,10 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Arg, ArgAction, Command, value_parser};
 use git_mesh::{
     CommitInput, CopyDetection, CulpritCommit, LinkResolved, LinkStatus, MeshCommitInfo,
-    MeshResolved, MeshStored, RangeSpec, SideSpec, StoredLink, commit_mesh,
+    MeshResolved, MeshStored, RangeSpec, SideSpec, StoredLink, commit_mesh, fetch_mesh_refs,
     is_ancestor_commit, list_mesh_names, mesh_commit_info, mesh_commit_info_at, mesh_log,
-    read_mesh_at, remove_mesh, rename_mesh, resolve_commit_ish, restore_mesh, show_mesh,
-    stale_mesh,
+    push_mesh_refs, read_mesh_at, remove_mesh, rename_mesh, resolve_commit_ish, restore_mesh,
+    show_mesh, stale_mesh,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -119,6 +119,20 @@ fn run() -> Result<i32> {
             let commit_ish = sub_matches.get_one::<String>("commit-ish").unwrap();
             restore_mesh(&repo, name, commit_ish)?;
             println!("restored refs/meshes/v1/{name} from {commit_ish}");
+        }
+        Some(("fetch", sub_matches)) => {
+            let remote = fetch_mesh_refs(
+                &repo,
+                sub_matches.get_one::<String>("remote").map(String::as_str),
+            )?;
+            println!("fetched mesh refs from {remote}");
+        }
+        Some(("push", sub_matches)) => {
+            let remote = push_mesh_refs(
+                &repo,
+                sub_matches.get_one::<String>("remote").map(String::as_str),
+            )?;
+            println!("pushed mesh refs to {remote}");
         }
         None => {
             if let Some(name) = matches.get_one::<String>("name") {
@@ -265,6 +279,16 @@ fn cli() -> Command {
                         .required(true)
                         .value_name("COMMIT_ISH"),
                 ),
+        )
+        .subcommand(
+            Command::new("fetch")
+                .about("Fetch mesh refs from a remote")
+                .arg(Arg::new("remote").required(false).value_name("REMOTE")),
+        )
+        .subcommand(
+            Command::new("push")
+                .about("Push mesh refs to a remote")
+                .arg(Arg::new("remote").required(false).value_name("REMOTE")),
         )
 }
 

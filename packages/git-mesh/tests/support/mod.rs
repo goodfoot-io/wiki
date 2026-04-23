@@ -6,9 +6,60 @@ use git_mesh::RangeSpec;
 use std::fs;
 use std::process::{Command, Output, Stdio};
 
+pub struct BareRepo {
+    pub dir: tempfile::TempDir,
+}
+
 pub struct TestRepo {
     pub repo: gix::Repository,
     pub dir: tempfile::TempDir,
+}
+
+impl BareRepo {
+    pub fn new() -> Result<Self> {
+        let dir = tempfile::tempdir()?;
+        let output = Command::new("git")
+            .arg("init")
+            .arg("--bare")
+            .arg(dir.path())
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "git init --bare failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(Self { dir })
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        self.dir.path()
+    }
+
+    pub fn run_git<I, S>(&self, args: I) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let output = Command::new("git")
+            .current_dir(self.dir.path())
+            .args(args.into_iter().map(|arg| arg.as_ref().to_string()))
+            .output()?;
+        TestRepo::ensure_success(output, "git command failed")
+    }
+
+    pub fn git_output<I, S>(&self, args: I) -> Result<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let output = self.run_git(args)?;
+        Ok(String::from_utf8(output.stdout)?.trim().to_string())
+    }
+
+    pub fn set_head(&self, branch: &str) -> Result<()> {
+        self.git_output(["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")])?;
+        Ok(())
+    }
 }
 
 impl TestRepo {
@@ -37,6 +88,22 @@ impl TestRepo {
         test_repo.commit_all("initial commit")?;
 
         Ok(test_repo)
+    }
+
+    pub fn clone_from(path: &std::path::Path) -> Result<Self> {
+        let dir = tempfile::tempdir()?;
+        let output = Command::new("git")
+            .arg("clone")
+            .arg(path)
+            .arg(dir.path())
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "git clone failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let repo = gix::open(dir.path())?;
+        Ok(Self { repo, dir })
     }
 
     pub fn write_file(&self, path: &str, content: &str) -> Result<()> {
@@ -139,6 +206,34 @@ impl TestRepo {
 
     pub fn head_sha(&self) -> Result<String> {
         self.git_output(["rev-parse", "HEAD"])
+    }
+
+    pub fn add_remote(&self, name: &str, path: &std::path::Path) -> Result<()> {
+        self.run_git(["remote", "add", name, &path.to_string_lossy()])?;
+        Ok(())
+    }
+
+    pub fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        self.run_git(["config", key, value])?;
+        Ok(())
+    }
+
+    pub fn config_get(&self, key: &str) -> Result<String> {
+        self.git_output(["config", "--get", key])
+    }
+
+    pub fn config_get_all(&self, key: &str) -> Result<Vec<String>> {
+        let output = self.git(["config", "--get-all", key]).output()?;
+        match output.status.code() {
+            Some(0) => {}
+            Some(1) => return Ok(Vec::new()),
+            _ => return Err(anyhow!("git command failed: {}", String::from_utf8_lossy(&output.stderr))),
+        }
+        Ok(String::from_utf8(output.stdout)?
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect())
     }
 
     pub fn write_blob(&self, content: &str) -> Result<String> {
