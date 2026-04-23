@@ -58,7 +58,8 @@ pub struct MeshStored {
     pub links: Vec<StoredLink>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum LinkStatus {
     Fresh,
     Moved,

@@ -296,4 +296,12 @@ impl TestRepo {
         }
         String::from_utf8(output.stderr).map_err(Into::into)
     }
+
+    pub fn mesh_output<I, S>(&self, args: I) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.run_mesh(args)
+    }
 }

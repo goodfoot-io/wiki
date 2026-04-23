@@ -2,26 +2,48 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Arg, ArgAction, Command, value_parser};
 use git_mesh::{
     CommitInput, CopyDetection, LinkResolved, LinkStatus, Mesh, MeshCommitInfo, MeshResolved,
-    RangeSpec, SideSpec, commit_mesh, list_mesh_names, mesh_commit_info, remove_mesh, rename_mesh,
-    restore_mesh, show_mesh, stale_mesh,
+    RangeSpec, SideSpec, commit_mesh, is_ancestor_commit, list_mesh_names, mesh_commit_info,
+    remove_mesh, rename_mesh, resolve_commit_ish, restore_mesh, show_mesh, stale_mesh,
 };
+use serde::Serialize;
 
 fn main() {
-    if let Err(error) = run() {
-        eprintln!("error: {error:#}");
-        std::process::exit(2);
+    match run() {
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            std::process::exit(2);
+        }
     }
 }
 
-fn run() -> Result<()> {
+fn run() -> Result<i32> {
     let matches = cli().get_matches();
     let repo = gix::discover(".").context("not inside a git repository")?;
 
     match matches.subcommand() {
         Some(("stale", sub_matches)) => {
-            let name = sub_matches.get_one::<String>("name").unwrap();
-            let resolved = stale_mesh(&repo, name)?;
-            print_stale(&resolved, &mesh_commit_info(&repo, name)?)?;
+            let format = parse_stale_format(
+                sub_matches
+                    .get_one::<String>("format")
+                    .map(String::as_str)
+                    .unwrap_or("human"),
+            )?;
+            let since = sub_matches
+                .get_one::<String>("since")
+                .map(|value| resolve_commit_ish(&repo, value))
+                .transpose()?;
+            let reports = load_stale_reports(&repo, sub_matches.get_one::<String>("name"), since.as_deref())?;
+
+            match format {
+                StaleFormat::Human => print_human_stale(&reports)?,
+                StaleFormat::Porcelain => print_porcelain_stale(&reports),
+                StaleFormat::Json => print_json_stale(&reports)?,
+            }
+
+            if sub_matches.get_flag("exit-code") && reports_have_stale(&reports) {
+                return Ok(1);
+            }
         }
         Some(("commit", sub_matches)) => {
             let name = sub_matches.get_one::<String>("name").unwrap();
@@ -102,7 +124,7 @@ fn run() -> Result<()> {
         Some((command, _)) => return Err(anyhow!("unsupported subcommand `{command}`")),
     }
 
-    Ok(())
+    Ok(0)
 }
 
 fn cli() -> Command {
@@ -118,7 +140,20 @@ fn cli() -> Command {
         .subcommand(
             Command::new("stale")
                 .about("Resolve and report drift for a mesh")
-                .arg(Arg::new("name").required(true).value_name("NAME")),
+                .arg(Arg::new("name").required(false).value_name("NAME"))
+                .arg(
+                    Arg::new("format")
+                        .long("format")
+                        .value_name("FMT")
+                        .default_value("human")
+                        .value_parser(["human", "porcelain", "json"]),
+                )
+                .arg(
+                    Arg::new("exit-code")
+                        .long("exit-code")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(Arg::new("since").long("since").value_name("COMMIT_ISH")),
         )
         .subcommand(
             Command::new("commit")
@@ -225,6 +260,76 @@ fn print_mesh(mesh: &Mesh, info: &MeshCommitInfo) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StaleFormat {
+    Human,
+    Porcelain,
+    Json,
+}
+
+#[derive(Clone, Debug)]
+struct StaleMeshReport {
+    mesh: MeshResolved,
+    info: MeshCommitInfo,
+}
+
+fn parse_stale_format(value: &str) -> Result<StaleFormat> {
+    match value {
+        "human" => Ok(StaleFormat::Human),
+        "porcelain" => Ok(StaleFormat::Porcelain),
+        "json" => Ok(StaleFormat::Json),
+        _ => Err(anyhow!("invalid stale format `{value}`")),
+    }
+}
+
+fn load_stale_reports(
+    repo: &gix::Repository,
+    name: Option<&String>,
+    since: Option<&str>,
+) -> Result<Vec<StaleMeshReport>> {
+    let mut names = match name {
+        Some(name) => vec![name.clone()],
+        None => list_mesh_names(repo)?,
+    };
+    names.sort();
+
+    let mut reports = Vec::with_capacity(names.len());
+    for mesh_name in names {
+        let mut mesh = stale_mesh(repo, &mesh_name)?;
+        if let Some(since) = since {
+            let mut filtered = Vec::with_capacity(mesh.links.len());
+            for link in mesh.links {
+                if is_ancestor_commit(repo, since, &link.anchor_sha)? {
+                    filtered.push(link);
+                }
+            }
+            mesh.links = filtered;
+        }
+        reports.push(StaleMeshReport {
+            info: mesh_commit_info(repo, &mesh_name)?,
+            mesh,
+        });
+    }
+
+    reports.sort_by_key(|report| {
+        (
+            std::cmp::Reverse(highest_status(&report.mesh)),
+            report.mesh.name.clone(),
+        )
+    });
+    Ok(reports)
+}
+
+fn print_human_stale(reports: &[StaleMeshReport]) -> Result<()> {
+    for (index, report) in reports.iter().enumerate() {
+        if index > 0 {
+            println!();
+        }
+        print_stale(&report.mesh, &report.info)?;
+    }
+    Ok(())
+}
+
 fn print_stale(mesh: &MeshResolved, info: &MeshCommitInfo) -> Result<()> {
     println!("mesh {}", mesh.name);
     println!("commit {}", info.commit_oid);
@@ -261,6 +366,101 @@ fn print_stale(mesh: &MeshResolved, info: &MeshCommitInfo) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn print_porcelain_stale(reports: &[StaleMeshReport]) {
+    for report in reports {
+        for link in sorted_links(&report.mesh) {
+            let anchored_pair = format_resolved_pair(&link).expect("format pair");
+            let current_pair = format_current_pair(&link);
+            println!(
+                "mesh={}\tcommit={}\tstatus={}\tanchor={}\tpair={}\tcurrentPair={}\tlinkId={}",
+                report.mesh.name,
+                report.info.commit_oid,
+                format_status(link.status),
+                link.anchor_sha,
+                anchored_pair,
+                current_pair,
+                link.link_id
+            );
+        }
+    }
+}
+
+fn print_json_stale(reports: &[StaleMeshReport]) -> Result<()> {
+    #[derive(Serialize)]
+    struct JsonSide {
+        status: LinkStatus,
+        anchored: String,
+        current: Option<String>,
+    }
+
+    #[derive(Serialize)]
+    struct JsonLink {
+        id: String,
+        status: LinkStatus,
+        anchor_sha: String,
+        pair: String,
+        current_pair: String,
+        sides: [JsonSide; 2],
+    }
+
+    #[derive(Serialize)]
+    struct JsonMesh<'a> {
+        name: &'a str,
+        commit_oid: &'a str,
+        stale_count: usize,
+        link_count: usize,
+        links: Vec<JsonLink>,
+    }
+
+    #[derive(Serialize)]
+    struct JsonReport<'a> {
+        version: u32,
+        meshes: Vec<JsonMesh<'a>>,
+    }
+
+    let payload = JsonReport {
+        version: 1,
+        meshes: reports
+            .iter()
+            .map(|report| JsonMesh {
+                name: &report.mesh.name,
+                commit_oid: &report.info.commit_oid,
+                stale_count: report
+                    .mesh
+                    .links
+                    .iter()
+                    .filter(|link| link.status != LinkStatus::Fresh)
+                    .count(),
+                link_count: report.mesh.links.len(),
+                links: sorted_links(&report.mesh)
+                    .into_iter()
+                    .map(|link| JsonLink {
+                        id: link.link_id.clone(),
+                        status: link.status,
+                        anchor_sha: link.anchor_sha.clone(),
+                        pair: format_resolved_pair(&link).expect("format pair"),
+                        current_pair: format_current_pair(&link),
+                        sides: [
+                            JsonSide {
+                                status: link.sides[0].status,
+                                anchored: format_side_anchored(&link.sides[0]),
+                                current: link.sides[0].current.as_ref().map(format_current_location),
+                            },
+                            JsonSide {
+                                status: link.sides[1].status,
+                                anchored: format_side_anchored(&link.sides[1]),
+                                current: link.sides[1].current.as_ref().map(format_current_location),
+                            },
+                        ],
+                    })
+                    .collect(),
+            })
+            .collect(),
+    };
+    println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }
 
@@ -368,11 +568,7 @@ fn format_resolved_pair(link: &LinkResolved) -> Result<String> {
 }
 
 fn format_side_summary(side: &git_mesh::SideResolved) -> String {
-    let anchored = format_range_spec(&RangeSpec {
-        path: side.anchored.path.clone(),
-        start: side.anchored.start,
-        end: side.anchored.end,
-    });
+    let anchored = format_side_anchored(side);
 
     match &side.current {
         Some(current)
@@ -388,6 +584,30 @@ fn format_side_summary(side: &git_mesh::SideResolved) -> String {
 
 fn format_current_location(location: &git_mesh::LinkLocation) -> String {
     format!("{}#L{}-L{}", location.path, location.start, location.end)
+}
+
+fn format_side_anchored(side: &git_mesh::SideResolved) -> String {
+    format_range_spec(&RangeSpec {
+        path: side.anchored.path.clone(),
+        start: side.anchored.start,
+        end: side.anchored.end,
+    })
+}
+
+fn format_current_pair(link: &LinkResolved) -> String {
+    format!(
+        "{}:{}",
+        link.sides[0]
+            .current
+            .as_ref()
+            .map(format_current_location)
+            .unwrap_or_else(|| format_side_anchored(&link.sides[0])),
+        link.sides[1]
+            .current
+            .as_ref()
+            .map(format_current_location)
+            .unwrap_or_else(|| format_side_anchored(&link.sides[1]))
+    )
 }
 
 fn format_range_spec(range: &RangeSpec) -> String {
@@ -419,4 +639,30 @@ fn status_rank(status: LinkStatus) -> u8 {
         LinkStatus::Moved => 1,
         LinkStatus::Fresh => 0,
     }
+}
+
+fn highest_status(mesh: &MeshResolved) -> u8 {
+    mesh.links
+        .iter()
+        .map(|link| status_rank(link.status))
+        .max()
+        .unwrap_or(0)
+}
+
+fn sorted_links(mesh: &MeshResolved) -> Vec<LinkResolved> {
+    let mut links = mesh.links.clone();
+    links.sort_by_key(|link| {
+        (
+            std::cmp::Reverse(status_rank(link.status)),
+            format_resolved_pair(link).unwrap_or_default(),
+            link.link_id.clone(),
+        )
+    });
+    links
+}
+
+fn reports_have_stale(reports: &[StaleMeshReport]) -> bool {
+    reports
+        .iter()
+        .any(|report| report.mesh.links.iter().any(|link| link.status != LinkStatus::Fresh))
 }

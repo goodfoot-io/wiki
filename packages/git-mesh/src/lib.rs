@@ -274,6 +274,28 @@ pub fn mesh_commit_info(repo: &gix::Repository, name: &str) -> Result<MeshCommit
     })
 }
 
+pub fn resolve_commit_ish(repo: &gix::Repository, commit_ish: &str) -> Result<String> {
+    let work_dir = repo
+        .workdir()
+        .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
+    git_stdout(work_dir, ["rev-parse", commit_ish])
+}
+
+pub fn is_ancestor_commit(repo: &gix::Repository, ancestor: &str, descendant: &str) -> Result<bool> {
+    let work_dir = repo
+        .workdir()
+        .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
+    let status = Command::new("git")
+        .current_dir(work_dir)
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .status()?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => anyhow::bail!("git merge-base --is-ancestor failed"),
+    }
+}
+
 pub fn read_link(repo: &gix::Repository, id: &str) -> Result<Link> {
     let work_dir = repo
         .workdir()
