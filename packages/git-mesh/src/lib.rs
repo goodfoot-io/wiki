@@ -575,52 +575,125 @@ pub fn serialize_link(link: &Link) -> String {
     )
 }
 
-pub fn parse_link(_text: &str) -> Result<Link> {
-    let mut anchor_sha = None;
-    let mut created_at = None;
-    let mut sides = Vec::with_capacity(2);
+pub fn parse_link(text: &str) -> Result<Link> {
+    // §4.1 on-disk format:
+    //   anchor <sha>
+    //   created <iso-8601>
+    //   side <start> <end> <blob> <copy-detection> <ignore-whitespace>\t<path>
+    //   side <start> <end> <blob> <copy-detection> <ignore-whitespace>\t<path>
+    //
+    // - Trailing newline, no blank lines.
+    // - Headers are `key SP value\n`. Unknown headers are tolerated (additive
+    //   extensions). The two `side` lines are sorted on write.
+    anyhow::ensure!(
+        text.ends_with('\n'),
+        "link blob must end with a trailing newline"
+    );
+    anyhow::ensure!(!text.is_empty(), "link blob must not be empty");
 
-    for line in _text.lines() {
+    let mut anchor_sha: Option<String> = None;
+    let mut created_at: Option<String> = None;
+    let mut sides: Vec<LinkSide> = Vec::with_capacity(2);
+    let mut seen_side = false;
+
+    for (idx, line) in text.lines().enumerate() {
+        anyhow::ensure!(
+            !line.is_empty(),
+            "link blob must not contain blank lines (line {})",
+            idx + 1
+        );
+
         if let Some(rest) = line.strip_prefix("anchor ") {
+            anyhow::ensure!(
+                !seen_side,
+                "`anchor` header must precede `side` lines (line {})",
+                idx + 1
+            );
+            anyhow::ensure!(
+                anchor_sha.is_none(),
+                "duplicate `anchor` header (line {})",
+                idx + 1
+            );
+            anyhow::ensure!(
+                !rest.is_empty(),
+                "`anchor` header has empty value (line {})",
+                idx + 1
+            );
             anchor_sha = Some(rest.to_string());
             continue;
         }
         if let Some(rest) = line.strip_prefix("created ") {
+            anyhow::ensure!(
+                !seen_side,
+                "`created` header must precede `side` lines (line {})",
+                idx + 1
+            );
+            anyhow::ensure!(
+                created_at.is_none(),
+                "duplicate `created` header (line {})",
+                idx + 1
+            );
+            anyhow::ensure!(
+                !rest.is_empty(),
+                "`created` header has empty value (line {})",
+                idx + 1
+            );
             created_at = Some(rest.to_string());
             continue;
         }
         if let Some(rest) = line.strip_prefix("side ") {
+            seen_side = true;
+            anyhow::ensure!(
+                sides.len() < 2,
+                "link must contain exactly two `side` lines (line {})",
+                idx + 1
+            );
             let (meta, path) = rest
                 .split_once('\t')
-                .ok_or_else(|| anyhow!("invalid side line"))?;
-            let mut parts = meta.split_whitespace();
-            let start = parts
-                .next()
-                .ok_or_else(|| anyhow!("missing side start"))?
-                .parse()?;
-            let end = parts
-                .next()
-                .ok_or_else(|| anyhow!("missing side end"))?
-                .parse()?;
-            let blob = parts
-                .next()
-                .ok_or_else(|| anyhow!("missing side blob"))?
-                .to_string();
-            let copy_detection = match parts
-                .next()
-                .ok_or_else(|| anyhow!("missing copy detection"))?
-            {
+                .ok_or_else(|| anyhow!("`side` line is missing TAB before path (line {})", idx + 1))?;
+            anyhow::ensure!(
+                !path.is_empty(),
+                "`side` line has empty path (line {})",
+                idx + 1
+            );
+            let fields: Vec<&str> = meta.split(' ').collect();
+            anyhow::ensure!(
+                fields.len() == 5,
+                "`side` line must have exactly 5 space-separated fields before TAB (line {})",
+                idx + 1
+            );
+            let start: u32 = fields[0]
+                .parse()
+                .map_err(|_| anyhow!("invalid side start `{}` (line {})", fields[0], idx + 1))?;
+            let end: u32 = fields[1]
+                .parse()
+                .map_err(|_| anyhow!("invalid side end `{}` (line {})", fields[1], idx + 1))?;
+            let blob = fields[2].to_string();
+            anyhow::ensure!(
+                !blob.is_empty(),
+                "`side` line has empty blob (line {})",
+                idx + 1
+            );
+            let copy_detection = match fields[3] {
                 "off" => CopyDetection::Off,
                 "same-commit" => CopyDetection::SameCommit,
                 "any-file-in-commit" => CopyDetection::AnyFileInCommit,
                 "any-file-in-repo" => CopyDetection::AnyFileInRepo,
-                _ => anyhow::bail!("invalid copy detection"),
+                other => anyhow::bail!(
+                    "invalid copy detection `{}` (line {})",
+                    other,
+                    idx + 1
+                ),
             };
-            let ignore_whitespace = parts
-                .next()
-                .ok_or_else(|| anyhow!("missing ignore_whitespace"))?
-                .parse()?;
-            anyhow::ensure!(parts.next().is_none(), "unexpected side fields");
+            let ignore_whitespace = match fields[4] {
+                "true" => true,
+                "false" => false,
+                other => anyhow::bail!(
+                    "invalid ignore_whitespace `{}` (line {})",
+                    other,
+                    idx + 1
+                ),
+            };
 
             sides.push(LinkSide {
                 path: path.to_string(),
@@ -630,19 +703,35 @@ pub fn parse_link(_text: &str) -> Result<Link> {
                 copy_detection,
                 ignore_whitespace,
             });
+            continue;
         }
+        // Unknown headers are tolerated so additive extensions don't break v1
+        // readers. Reject lines that don't match the `key SP value` shape at
+        // all, though — those aren't extension headers, they're corruption.
+        anyhow::ensure!(
+            line.split_once(' ').is_some_and(|(k, _)| !k.is_empty()),
+            "malformed line `{}` (line {})",
+            line,
+            idx + 1
+        );
     }
 
-    anyhow::ensure!(sides.len() == 2, "link must contain exactly two sides");
-    sides.sort();
+    anyhow::ensure!(
+        sides.len() == 2,
+        "link must contain exactly two `side` lines (found {})",
+        sides.len()
+    );
 
+    // Writers must canonicalize, but tolerate mis-ordered input from older
+    // blobs by re-sorting on read.
+    sides.sort();
     let [left, right]: [LinkSide; 2] = sides
         .try_into()
         .map_err(|_| anyhow!("link must contain exactly two sides"))?;
 
     Ok(Link {
-        anchor_sha: anchor_sha.ok_or_else(|| anyhow!("missing anchor"))?,
-        created_at: created_at.ok_or_else(|| anyhow!("missing created timestamp"))?,
+        anchor_sha: anchor_sha.ok_or_else(|| anyhow!("missing `anchor` header"))?,
+        created_at: created_at.ok_or_else(|| anyhow!("missing `created` header"))?,
         sides: [left, right],
     })
 }
@@ -680,7 +769,10 @@ fn resolve_mesh_revision(work_dir: &Path, name: &str, commit_ish: Option<&str>) 
 
 fn read_link_from_ref(work_dir: &Path, id: &str) -> Result<Link> {
     let link_oid = git_stdout(work_dir, ["rev-parse", &format!("refs/links/v1/{id}")])?;
-    let link_text = git_stdout(work_dir, ["cat-file", "-p", &link_oid])?;
+    // §4.1 requires a trailing newline on the stored blob. `git_stdout`
+    // trims output, so use the raw variant here to feed `parse_link` the
+    // exact on-disk bytes and let its invariants run.
+    let link_text = git_stdout_raw(work_dir, ["cat-file", "-p", &link_oid])?;
     parse_link(&link_text)
 }
 
@@ -1441,6 +1533,26 @@ where
         String::from_utf8_lossy(&output.stderr)
     );
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+/// Like [`git_stdout`], but returns the process stdout without trimming.
+/// Use this when the exact byte layout matters — e.g. when feeding a stored
+/// object to a parser that enforces §4.1 trailing-newline invariants.
+fn git_stdout_raw<I, S>(work_dir: &std::path::Path, args: I) -> Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let output = Command::new("git")
+        .current_dir(work_dir)
+        .args(args.into_iter().map(|arg| arg.as_ref().to_string()))
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8(output.stdout)?)
 }
 
 fn git_stdout_optional<I, S>(work_dir: &Path, args: I) -> Result<Option<String>>
