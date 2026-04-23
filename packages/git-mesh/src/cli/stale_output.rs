@@ -6,7 +6,7 @@ use crate::cli::{
 use anyhow::{Result, anyhow};
 use git_mesh::{
     is_ancestor_commit, list_mesh_names, mesh_commit_info, read_git_text, resolve_commit_ish,
-    stale_mesh, CulpritCommit, LinkStatus, MeshCommitInfo, MeshResolved,
+    stale_mesh, CulpritCommit, LinkResolved, LinkStatus, MeshCommitInfo, MeshResolved,
 };
 use serde::Serialize;
 use std::fs;
@@ -207,91 +207,142 @@ pub(crate) fn print_porcelain_stale(reports: &[StaleMeshReport]) {
     }
 }
 
+/// Emit `--format=json` output in the shape pinned by
+/// docs/git-mesh.md §10.4: each mesh report is a versioned object
+/// `{"version": 1, "mesh", "commit", "links": [...]}` and each link entry
+/// mirrors the LSP `Diagnostic` shape (`severity`, `range`, `message`,
+/// `code`, `data.culprit`, `data.reconcile_command`) so editor plugins can
+/// surface it directly as squiggles + quick-fixes. With a single `<name>`
+/// the top level is one such object; with no name the output is a JSON
+/// array of them (worst-first, matching the human output's ordering).
 pub(crate) fn print_json_stale(reports: &[StaleMeshReport]) -> Result<()> {
     #[derive(Serialize)]
-    struct JsonSide {
-        status: LinkStatus,
-        anchored: String,
-        current: Option<String>,
-        culprit: Option<CulpritCommit>,
-    }
-
-    #[derive(Serialize)]
-    struct JsonLink {
-        id: String,
-        status: LinkStatus,
-        anchor_sha: String,
-        pair: String,
-        current_pair: String,
-        reconcile_command: String,
-        sides: [JsonSide; 2],
-    }
-
-    #[derive(Serialize)]
     struct JsonMesh<'a> {
-        name: &'a str,
-        commit_oid: &'a str,
+        version: u32,
+        mesh: &'a str,
+        commit: &'a str,
         stale_count: usize,
         link_count: usize,
-        links: Vec<JsonLink>,
+        links: Vec<serde_json::Value>,
     }
 
-    #[derive(Serialize)]
-    struct JsonReport<'a> {
-        version: u32,
-        meshes: Vec<JsonMesh<'a>>,
-    }
+    let payloads: Vec<JsonMesh> = reports
+        .iter()
+        .map(|report| JsonMesh {
+            version: 1,
+            mesh: &report.mesh.name,
+            commit: &report.info.commit_oid,
+            stale_count: report
+                .mesh
+                .links
+                .iter()
+                .filter(|link| link.status != LinkStatus::Fresh)
+                .count(),
+            link_count: report.mesh.links.len(),
+            links: sorted_links(&report.mesh)
+                .into_iter()
+                .map(link_to_diagnostic)
+                .collect(),
+        })
+        .collect();
 
-    let payload = JsonReport {
-        version: 1,
-        meshes: reports
-            .iter()
-            .map(|report| JsonMesh {
-                name: &report.mesh.name,
-                commit_oid: &report.info.commit_oid,
-                stale_count: report
-                    .mesh
-                    .links
-                    .iter()
-                    .filter(|link| link.status != LinkStatus::Fresh)
-                    .count(),
-                link_count: report.mesh.links.len(),
-                links: sorted_links(&report.mesh)
-                    .into_iter()
-                    .map(|link| JsonLink {
-                        id: link.link_id.clone(),
-                        status: link.status,
-                        anchor_sha: link.anchor_sha.clone(),
-                        pair: format_resolved_pair(&link).expect("format pair"),
-                        current_pair: format_current_pair(&link),
-                        reconcile_command: link.reconcile_command.clone(),
-                        sides: [
-                            JsonSide {
-                                status: link.sides[0].status,
-                                anchored: format_side_anchored(&link.sides[0]),
-                                current: link.sides[0]
-                                    .current
-                                    .as_ref()
-                                    .map(format_current_location),
-                                culprit: link.sides[0].culprit.clone(),
-                            },
-                            JsonSide {
-                                status: link.sides[1].status,
-                                anchored: format_side_anchored(&link.sides[1]),
-                                current: link.sides[1]
-                                    .current
-                                    .as_ref()
-                                    .map(format_current_location),
-                                culprit: link.sides[1].culprit.clone(),
-                            },
-                        ],
-                    })
-                    .collect(),
-            })
-            .collect(),
+    let rendered = if payloads.len() == 1 {
+        serde_json::to_string_pretty(&payloads[0])?
+    } else {
+        serde_json::to_string_pretty(&payloads)?
     };
-    println!("{}", serde_json::to_string_pretty(&payload)?);
+    println!("{rendered}");
     Ok(())
+}
+
+/// Pick the LSP `DiagnosticSeverity` integer (1=Error, 2=Warning, 3=Info,
+/// 4=Hint) for a `LinkStatus`. Worst statuses (`ORPHANED`, `MISSING`,
+/// `REWRITTEN`) map to Error; `MODIFIED` to Warning; `MOVED` to Info;
+/// `FRESH` to Hint. This matches §10.4's intent that editors surface
+/// non-fresh links as actionable diagnostics.
+fn severity_for(status: LinkStatus) -> u8 {
+    match status {
+        LinkStatus::Orphaned | LinkStatus::Missing | LinkStatus::Rewritten => 1,
+        LinkStatus::Modified => 2,
+        LinkStatus::Moved => 3,
+        LinkStatus::Fresh => 4,
+    }
+}
+
+/// Build an LSP `Range` from a 1-based inclusive git-mesh line range. LSP
+/// positions are 0-based and ranges are end-exclusive, so a mesh range
+/// `L<start>-L<end>` becomes lines `[start-1, end)` spanning the full
+/// character width of each line.
+fn lsp_range(start: u32, end: u32) -> LspRange {
+    LspRange {
+        start: Position {
+            line: start.saturating_sub(1),
+            character: 0,
+        },
+        end: Position {
+            line: end,
+            character: 0,
+        },
+    }
+}
+
+#[derive(Serialize)]
+struct Position {
+    line: u32,
+    character: u32,
+}
+
+#[derive(Serialize)]
+struct LspRange {
+    start: Position,
+    end: Position,
+}
+
+fn side_diagnostic(side: &git_mesh::SideResolved) -> serde_json::Value {
+    let location = side.current.as_ref().unwrap_or(&side.anchored);
+    serde_json::json!({
+        "path": location.path,
+        "range": lsp_range(location.start, location.end),
+        "status": side.status,
+        "culprit": side.culprit,
+    })
+}
+
+fn link_to_diagnostic(link: LinkResolved) -> serde_json::Value {
+    let primary = link.sides[0]
+        .current
+        .as_ref()
+        .unwrap_or(&link.sides[0].anchored);
+    let message = format!(
+        "{} {} \u{2192} {}",
+        format_status(link.status),
+        format_resolved_pair(&link).unwrap_or_default(),
+        format_current_pair(&link)
+    );
+    let culprit = link
+        .sides
+        .iter()
+        .find_map(|side| side.culprit.clone());
+
+    serde_json::json!({
+        "severity": severity_for(link.status),
+        "range": lsp_range(primary.start, primary.end),
+        "message": message,
+        "code": format_status(link.status),
+        "source": "git-mesh",
+        "data": {
+            "link_id": link.link_id,
+            "anchor_sha": link.anchor_sha,
+            "pair": format_resolved_pair(&link).unwrap_or_default(),
+            "current_pair": format_current_pair(&link),
+            "reconcile_command": link.reconcile_command,
+            "sides": [
+                side_diagnostic(&link.sides[0]),
+                side_diagnostic(&link.sides[1]),
+            ],
+            "culprit": culprit,
+        },
+    })
 }
 
 pub(crate) fn print_junit_stale(reports: &[StaleMeshReport]) -> Result<()> {

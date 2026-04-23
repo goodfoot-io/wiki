@@ -34,20 +34,36 @@ fn cli_stale_supports_exit_code_and_machine_formats() -> Result<()> {
     assert!(porcelain.contains("pair=file1.txt#L1-L5:file2.txt#L10-L15"));
     assert!(porcelain.contains("currentPair=file1.txt#L2-L6:file2.txt#L10-L15"));
 
+    // With a single `<name>`, the top level is the per-mesh diagnostic
+    // object shape prescribed by docs/git-mesh.md §10.4.
     let json = test_repo.mesh_stdout(["stale", "my-mesh", "--format=json"])?;
     let payload: Value = serde_json::from_str(&json)?;
     assert_eq!(payload["version"], 1);
-    assert_eq!(payload["meshes"][0]["name"], "my-mesh");
-    assert_eq!(payload["meshes"][0]["stale_count"], 1);
+    assert_eq!(payload["mesh"], "my-mesh");
+    assert!(payload["commit"].is_string());
+    assert_eq!(payload["stale_count"], 1);
+    let link = &payload["links"][0];
+    // LSP Diagnostic shape: severity, range, message, code, data.*
+    assert_eq!(link["severity"], 3); // MOVED -> Info
+    assert_eq!(link["code"], "MOVED");
+    assert_eq!(link["source"], "git-mesh");
+    assert!(link["message"].as_str().unwrap().contains("MOVED"));
+    // Range mirrors the current primary side (file1.txt L2-L6 → lines 1..6).
+    assert_eq!(link["range"]["start"]["line"], 1);
+    assert_eq!(link["range"]["start"]["character"], 0);
+    assert_eq!(link["range"]["end"]["line"], 6);
+    assert_eq!(link["range"]["end"]["character"], 0);
     assert_eq!(
-        payload["meshes"][0]["links"][0]["pair"],
+        link["data"]["pair"],
         "file1.txt#L1-L5:file2.txt#L10-L15"
     );
     assert_eq!(
-        payload["meshes"][0]["links"][0]["current_pair"],
+        link["data"]["current_pair"],
         "file1.txt#L2-L6:file2.txt#L10-L15"
     );
-    assert_eq!(payload["meshes"][0]["links"][0]["status"], "MOVED");
+    assert!(link["data"]["reconcile_command"].is_string());
+    assert!(link["data"]["link_id"].is_string());
+    assert_eq!(link["data"]["sides"][0]["status"], "MOVED");
 
     let junit = test_repo.mesh_stdout(["stale", "my-mesh", "--format=junit"])?;
     assert!(junit.contains("<testsuite name=\"git-mesh stale\""));
@@ -101,13 +117,30 @@ fn cli_stale_without_name_scans_all_meshes_and_since_filters_links() -> Result<(
     let filtered_old =
         test_repo.mesh_stdout(["stale", "old-mesh", "--format=json", "--since", &since])?;
     let payload: Value = serde_json::from_str(&filtered_old)?;
-    assert_eq!(payload["meshes"][0]["name"], "old-mesh");
-    assert_eq!(payload["meshes"][0]["link_count"], 0);
+    assert_eq!(payload["mesh"], "old-mesh");
+    assert_eq!(payload["link_count"], 0);
 
     let unfiltered_old =
         test_repo.mesh_stdout(["stale", "old-mesh", "--format=json", "--since", &before])?;
     let payload: Value = serde_json::from_str(&unfiltered_old)?;
-    assert_eq!(payload["meshes"][0]["link_count"], 1);
+    assert_eq!(payload["link_count"], 1);
+
+    // With no `<name>`, multiple meshes scan produces an array of the
+    // same per-mesh objects.
+    let scan_all_json = test_repo.mesh_stdout(["stale", "--format=json"])?;
+    let payload: Value = serde_json::from_str(&scan_all_json)?;
+    let array = payload.as_array().expect("array of mesh reports");
+    assert_eq!(array.len(), 2);
+    let names: Vec<&str> = array
+        .iter()
+        .map(|entry| entry["mesh"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"old-mesh"));
+    assert!(names.contains(&"new-mesh"));
+    for entry in array {
+        assert_eq!(entry["version"], 1);
+        assert!(entry["commit"].is_string());
+    }
 
     Ok(())
 }

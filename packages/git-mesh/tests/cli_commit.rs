@@ -98,7 +98,8 @@ fn cli_commit_supports_message_file_edit_and_no_ignore_whitespace() -> Result<()
 
     let stale = test_repo.mesh_stdout(["stale", "strict-whitespace", "--format=json"])?;
     let payload: Value = serde_json::from_str(&stale)?;
-    assert_eq!(payload["meshes"][0]["links"][0]["status"], "MODIFIED");
+    // §10.4 LSP-Diagnostic shape: `code` carries the status token.
+    assert_eq!(payload["links"][0]["code"], "MODIFIED");
 
     Ok(())
 }

@@ -62,12 +62,13 @@ fn cli_stale_includes_culprit_and_reconcile_data() -> Result<()> {
 
     let json = test_repo.mesh_stdout(["stale", "my-mesh", "--format=json"])?;
     let payload: Value = serde_json::from_str(&json)?;
+    // §10.4: LSP Diagnostic shape — reconcile and culprit live under `data`.
     assert_eq!(
-        payload["meshes"][0]["links"][0]["reconcile_command"],
+        payload["links"][0]["data"]["reconcile_command"],
         "git mesh commit my-mesh --unlink file1.txt#L1-L5:file2.txt#L10-L15 --link file1.txt#L1-L5:file2.txt#L10-L15 -m \"...\""
     );
     assert_eq!(
-        payload["meshes"][0]["links"][0]["sides"][0]["culprit"]["summary"],
+        payload["links"][0]["data"]["sides"][0]["culprit"]["summary"],
         "modify file1"
     );
 
