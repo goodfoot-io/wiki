@@ -1,12 +1,14 @@
 use anyhow::{Context, Result, anyhow};
 use clap::{Arg, ArgAction, Command, value_parser};
 use git_mesh::{
-    CommitInput, CopyDetection, CulpritCommit, LinkResolved, LinkStatus, Mesh, MeshCommitInfo,
-    MeshResolved, RangeSpec, SideSpec, commit_mesh, is_ancestor_commit, list_mesh_names,
-    mesh_commit_info, remove_mesh, rename_mesh, resolve_commit_ish, restore_mesh, show_mesh,
+    CommitInput, CopyDetection, CulpritCommit, LinkResolved, LinkStatus, MeshCommitInfo,
+    MeshResolved, MeshStored, RangeSpec, SideSpec, StoredLink, commit_mesh,
+    is_ancestor_commit, list_mesh_names, mesh_commit_info, mesh_commit_info_at, mesh_log,
+    read_mesh_at, remove_mesh, rename_mesh, resolve_commit_ish, restore_mesh, show_mesh,
     stale_mesh,
 };
 use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn main() {
     match run() {
@@ -120,8 +122,24 @@ fn run() -> Result<i32> {
         }
         None => {
             if let Some(name) = matches.get_one::<String>("name") {
-                let mesh = show_mesh(&repo, name)?;
-                print_mesh(&mesh, &mesh_commit_info(&repo, name)?);
+                if let Some(revision_range) = matches.get_one::<String>("diff") {
+                    print_mesh_diff(&repo, name, revision_range)?;
+                } else if matches.get_flag("log") {
+                    let limit = matches.get_one::<usize>("limit").copied();
+                    print_mesh_log(&repo, name, matches.get_flag("oneline"), limit)?;
+                } else {
+                    let at = matches.get_one::<String>("at").map(String::as_str);
+                    let mesh = read_mesh_at(&repo, name, at)?;
+                    let info = mesh_commit_info_at(&repo, name, at)?;
+                    print_mesh(
+                        &mesh,
+                        &info,
+                        PrintOptions {
+                            oneline: matches.get_flag("oneline"),
+                            no_abbrev: matches.get_flag("no-abbrev"),
+                        },
+                    );
+                }
             } else {
                 print_mesh_list(&repo)?;
             }
@@ -141,6 +159,21 @@ fn cli() -> Command {
             Arg::new("name")
                 .value_name("NAME")
                 .help("Show the named mesh"),
+        )
+        .arg(Arg::new("at").long("at").value_name("COMMIT_ISH"))
+        .arg(Arg::new("log").long("log").action(ArgAction::SetTrue))
+        .arg(Arg::new("diff").long("diff").value_name("REV..REV"))
+        .arg(Arg::new("oneline").long("oneline").action(ArgAction::SetTrue))
+        .arg(
+            Arg::new("no-abbrev")
+                .long("no-abbrev")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("limit")
+                .long("limit")
+                .value_name("N")
+                .value_parser(value_parser!(usize)),
         )
         .subcommand(
             Command::new("stale")
@@ -251,18 +284,112 @@ fn print_mesh_list(repo: &gix::Repository) -> Result<()> {
     Ok(())
 }
 
-fn print_mesh(mesh: &Mesh, info: &MeshCommitInfo) {
+#[derive(Clone, Copy)]
+struct PrintOptions {
+    oneline: bool,
+    no_abbrev: bool,
+}
+
+fn print_mesh(mesh: &MeshStored, info: &MeshCommitInfo, options: PrintOptions) {
+    if options.oneline {
+        println!(
+            "{} {} {}",
+            maybe_abbreviate(&info.commit_oid, options.no_abbrev),
+            mesh.name,
+            info.summary
+        );
+        for link in stored_links_sorted(&mesh.links) {
+            println!("{} {}", format_link_pair(link), maybe_abbreviate(&link.anchor_sha, options.no_abbrev));
+        }
+        return;
+    }
+
     println!("mesh {}", mesh.name);
-    println!("commit {}", info.commit_oid);
+    println!("commit {}", maybe_abbreviate(&info.commit_oid, options.no_abbrev));
     println!("Author: {} <{}>", info.author_name, info.author_email);
     println!("Date:   {}", info.author_date);
     println!();
     print_indented_message(&mesh.message);
     println!();
     println!("Links ({}):", mesh.links.len());
-    for link in &mesh.links {
-        println!("    {link}");
+    for link in stored_links_sorted(&mesh.links) {
+        println!(
+            "    {} @ {}",
+            format_link_pair(link),
+            maybe_abbreviate(&link.anchor_sha, options.no_abbrev)
+        );
     }
+}
+
+fn print_mesh_log(
+    repo: &gix::Repository,
+    name: &str,
+    oneline: bool,
+    limit: Option<usize>,
+) -> Result<()> {
+    let entries = mesh_log(repo, name, limit)?;
+    for info in entries {
+        if oneline {
+            println!("{} {}", abbreviate_oid(&info.commit_oid), info.summary);
+        } else {
+            println!("commit {}", info.commit_oid);
+            println!("Author: {} <{}>", info.author_name, info.author_email);
+            println!("Date:   {}", info.author_date);
+            println!();
+            print_indented_message(&info.summary);
+            println!();
+        }
+    }
+    Ok(())
+}
+
+fn print_mesh_diff(repo: &gix::Repository, name: &str, revision_range: &str) -> Result<()> {
+    let (left_rev, right_rev) = revision_range
+        .split_once("..")
+        .ok_or_else(|| anyhow!("invalid diff range `{revision_range}`; expected <rev>..<rev>"))?;
+    anyhow::ensure!(
+        !left_rev.is_empty() && !right_rev.is_empty(),
+        "invalid diff range `{revision_range}`; expected <rev>..<rev>"
+    );
+
+    let left = read_mesh_at(repo, name, Some(left_rev))?;
+    let right = read_mesh_at(repo, name, Some(right_rev))?;
+    let left_info = mesh_commit_info_at(repo, name, Some(left_rev))?;
+    let right_info = mesh_commit_info_at(repo, name, Some(right_rev))?;
+
+    let left_links = index_links_by_pair(&left.links);
+    let right_links = index_links_by_pair(&right.links);
+    let all_pairs: BTreeSet<_> = left_links
+        .keys()
+        .cloned()
+        .chain(right_links.keys().cloned())
+        .collect();
+
+    println!("mesh {}", name);
+    println!("diff {}..{}", left_info.commit_oid, right_info.commit_oid);
+    println!();
+
+    for pair in all_pairs {
+        match (left_links.get(&pair), right_links.get(&pair)) {
+            (None, Some(link)) => {
+                println!("+ {} @ {}", pair, abbreviate_oid(&link.anchor_sha));
+            }
+            (Some(link), None) => {
+                println!("- {} @ {}", pair, abbreviate_oid(&link.anchor_sha));
+            }
+            (Some(left_link), Some(right_link)) if left_link.anchor_sha != right_link.anchor_sha => {
+                println!(
+                    "~ {} @ {} -> {}",
+                    pair,
+                    abbreviate_oid(&left_link.anchor_sha),
+                    abbreviate_oid(&right_link.anchor_sha)
+                );
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -651,6 +778,38 @@ fn format_current_pair(link: &LinkResolved) -> String {
 
 fn format_range_spec(range: &RangeSpec) -> String {
     format!("{}#L{}-L{}", range.path, range.start, range.end)
+}
+
+fn format_stored_side(side: &git_mesh::LinkSide) -> String {
+    format_range_spec(&RangeSpec {
+        path: side.path.clone(),
+        start: side.start,
+        end: side.end,
+    })
+}
+
+fn format_link_pair(link: &StoredLink) -> String {
+    format!(
+        "{}:{}",
+        format_stored_side(&link.sides[0]),
+        format_stored_side(&link.sides[1])
+    )
+}
+
+fn stored_links_sorted(links: &[StoredLink]) -> Vec<&StoredLink> {
+    let mut ordered = links.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|link| (format_link_pair(link), link.anchor_sha.clone(), link.id.clone()));
+    ordered
+}
+
+fn index_links_by_pair(links: &[StoredLink]) -> BTreeMap<String, &StoredLink> {
+    links.iter()
+        .map(|link| (format_link_pair(link), link))
+        .collect()
+}
+
+fn maybe_abbreviate(oid: &str, no_abbrev: bool) -> &str {
+    if no_abbrev { oid } else { abbreviate_oid(oid) }
 }
 
 fn abbreviate_oid(oid: &str) -> &str {

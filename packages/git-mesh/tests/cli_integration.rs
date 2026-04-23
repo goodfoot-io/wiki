@@ -32,6 +32,12 @@ fn cli_lists_and_shows_meshes() -> Result<()> {
     assert!(show.contains("mesh alpha"));
     assert!(show.contains("Alpha subject"));
     assert!(show.contains("Links (1):"));
+    assert!(show.contains("file1.txt#L1-L5:file2.txt#L10-L15 @"));
+    assert!(!show.contains("full-link"));
+
+    let show_oneline = test_repo.mesh_stdout(["alpha", "--oneline"])?;
+    assert!(show_oneline.contains("alpha Alpha subject"));
+    assert!(show_oneline.contains("file1.txt#L1-L5:file2.txt#L10-L15"));
 
     Ok(())
 }
@@ -279,6 +285,51 @@ fn cli_rm_mv_and_restore_work() -> Result<()> {
     test_repo.mesh_stdout(["rm", "mesh-b"])?;
     let deleted_err = test_repo.mesh_stderr(["mesh-b"])?;
     assert!(deleted_err.contains("error:"));
+
+    Ok(())
+}
+
+#[test]
+fn cli_show_supports_at_log_diff_and_no_abbrev() -> Result<()> {
+    let test_repo = TestRepo::new()?;
+    test_repo.mesh_stdout([
+        "commit",
+        "mesh-history",
+        "--link",
+        "file1.txt#L1-L5:file2.txt#L10-L15",
+        "-m",
+        "First state",
+    ])?;
+    test_repo.mesh_stdout([
+        "commit",
+        "mesh-history",
+        "--link",
+        "file3.txt#L1-L5:file4.txt#L10-L15",
+        "-m",
+        "Second state",
+    ])?;
+
+    let historical = test_repo.mesh_stdout(["mesh-history", "--at", "HEAD~1"])?;
+    assert!(historical.contains("First state"));
+    assert!(!historical.contains("file3.txt#L1-L5:file4.txt#L10-L15"));
+
+    let no_abbrev = test_repo.mesh_stdout(["mesh-history", "--no-abbrev"])?;
+    let head_commit = test_repo.read_ref("refs/meshes/v1/mesh-history")?;
+    assert!(no_abbrev.contains(&format!("commit {head_commit}")));
+
+    let log = test_repo.mesh_stdout(["mesh-history", "--log", "--limit", "1"])?;
+    assert!(log.contains(&head_commit));
+    assert!(log.contains("Second state"));
+    assert!(!log.contains("First state"));
+
+    let log_oneline = test_repo.mesh_stdout(["mesh-history", "--log", "--oneline"])?;
+    assert!(log_oneline.contains("Second state"));
+    assert!(log_oneline.contains("First state"));
+
+    let diff = test_repo.mesh_stdout(["mesh-history", "--diff", "HEAD~1..HEAD"])?;
+    assert!(diff.contains("diff "));
+    assert!(diff.contains("+ file3.txt#L1-L5:file4.txt#L10-L15 @"));
+    assert!(!diff.contains("- file1.txt#L1-L5:file2.txt#L10-L15 @"));
 
     Ok(())
 }

@@ -1,7 +1,7 @@
 mod support;
 
 use anyhow::Result;
-use git_mesh::{Link, LinkSide, RangeSpec, parse_link, read_mesh, serialize_link};
+use git_mesh::{Link, LinkSide, RangeSpec, parse_link, read_mesh, read_mesh_at, serialize_link};
 
 use support::TestRepo;
 
@@ -73,6 +73,38 @@ fn test_read_mesh_returns_canonical_link_order() -> Result<()> {
             .collect::<Vec<_>>(),
         vec![second_link_id.as_str(), first_link_id.as_str()]
     );
+
+    Ok(())
+}
+
+#[test]
+fn test_read_mesh_at_reads_historical_mesh_state() -> Result<()> {
+    let mut test_repo = TestRepo::new()?;
+    let (first_link_id, _, _) = test_repo.create_link_fixture(
+        "first-link",
+        [range_spec("file1.txt", 1, 2), range_spec("file2.txt", 3, 4)],
+    )?;
+    let (second_link_id, _, _) = test_repo.create_link_fixture(
+        "second-link",
+        [range_spec("file3.txt", 1, 2), range_spec("file4.txt", 3, 4)],
+    )?;
+
+    test_repo.create_mesh_fixture("history_mesh", "First state", &[&first_link_id])?;
+    test_repo.create_mesh_fixture(
+        "history_mesh",
+        "Second state",
+        &[&first_link_id, &second_link_id],
+    )?;
+
+    let historical = read_mesh_at(&test_repo.repo, "history_mesh", Some("HEAD~1"))?;
+    let current = read_mesh(&test_repo.repo, "history_mesh")?;
+
+    assert_eq!(historical.message, "First state");
+    assert_eq!(historical.links.len(), 1);
+    assert_eq!(historical.links[0].id, first_link_id);
+
+    assert_eq!(current.message, "Second state");
+    assert_eq!(current.links.len(), 2);
 
     Ok(())
 }

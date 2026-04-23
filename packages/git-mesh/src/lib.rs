@@ -223,10 +223,14 @@ pub fn restore_mesh(repo: &gix::Repository, name: &str, commit_ish: &str) -> Res
 }
 
 pub fn show_mesh(repo: &gix::Repository, name: &str) -> Result<Mesh> {
+    show_mesh_at(repo, name, None)
+}
+
+pub fn show_mesh_at(repo: &gix::Repository, name: &str, commit_ish: Option<&str>) -> Result<Mesh> {
     let work_dir = repo
         .workdir()
         .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
-    let commit_oid = git_stdout(work_dir, ["rev-parse", &format!("refs/meshes/v1/{name}")])?;
+    let commit_oid = resolve_mesh_revision(work_dir, name, commit_ish)?;
     let message = git_stdout(work_dir, ["show", "-s", "--format=%B", &commit_oid])?;
     let links = git_show_file_lines(work_dir, &commit_oid, "links")?;
 
@@ -258,19 +262,29 @@ pub fn list_mesh_names(repo: &gix::Repository) -> Result<Vec<String>> {
 }
 
 pub fn mesh_commit_info(repo: &gix::Repository, name: &str) -> Result<MeshCommitInfo> {
+    mesh_commit_info_at(repo, name, None)
+}
+
+pub fn mesh_commit_info_at(
+    repo: &gix::Repository,
+    name: &str,
+    commit_ish: Option<&str>,
+) -> Result<MeshCommitInfo> {
     let work_dir = repo
         .workdir()
         .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
-    let commit_oid = git_stdout(work_dir, ["rev-parse", &format!("refs/meshes/v1/{name}")])?;
+    let commit_oid = resolve_mesh_revision(work_dir, name, commit_ish)?;
     let author_name = git_stdout(work_dir, ["show", "-s", "--format=%an", &commit_oid])?;
     let author_email = git_stdout(work_dir, ["show", "-s", "--format=%ae", &commit_oid])?;
     let author_date = git_stdout(work_dir, ["show", "-s", "--format=%aD", &commit_oid])?;
+    let summary = git_stdout(work_dir, ["show", "-s", "--format=%s", &commit_oid])?;
 
     Ok(MeshCommitInfo {
         commit_oid,
         author_name,
         author_email,
         author_date,
+        summary,
     })
 }
 
@@ -308,7 +322,11 @@ pub fn read_link(repo: &gix::Repository, id: &str) -> Result<Link> {
 }
 
 pub fn read_mesh(repo: &gix::Repository, name: &str) -> Result<MeshStored> {
-    let mesh = show_mesh(repo, name)?;
+    read_mesh_at(repo, name, None)
+}
+
+pub fn read_mesh_at(repo: &gix::Repository, name: &str, commit_ish: Option<&str>) -> Result<MeshStored> {
+    let mesh = show_mesh_at(repo, name, commit_ish)?;
     let mut links = Vec::with_capacity(mesh.links.len());
 
     for id in mesh.links {
@@ -325,6 +343,28 @@ pub fn read_mesh(repo: &gix::Repository, name: &str) -> Result<MeshStored> {
         message: mesh.message,
         links,
     })
+}
+
+pub fn mesh_log(
+    repo: &gix::Repository,
+    name: &str,
+    limit: Option<usize>,
+) -> Result<Vec<MeshCommitInfo>> {
+    let work_dir = repo
+        .workdir()
+        .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
+    let mut args = vec!["rev-list".to_string()];
+    if let Some(limit) = limit {
+        args.push(format!("--max-count={limit}"));
+    }
+    args.push(format!("refs/meshes/v1/{name}"));
+
+    let commits = git_stdout(work_dir, args.iter().map(String::as_str))?;
+    commits
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|commit_oid| mesh_commit_info_at(repo, name, Some(commit_oid)))
+        .collect()
 }
 
 pub fn stale_mesh(repo: &gix::Repository, name: &str) -> Result<MeshResolved> {
@@ -509,6 +549,22 @@ fn write_link_ref(work_dir: &Path, id: &str, link: &Link) -> Result<()> {
         ["update-ref", &format!("refs/links/v1/{id}"), &blob_oid],
     )?;
     Ok(())
+}
+
+fn resolve_mesh_revision(work_dir: &Path, name: &str, commit_ish: Option<&str>) -> Result<String> {
+    let mesh_ref = format!("refs/meshes/v1/{name}");
+    let revision = match commit_ish {
+        None => mesh_ref,
+        Some("HEAD") => mesh_ref,
+        Some(value) => {
+            if let Some(suffix) = value.strip_prefix("HEAD") {
+                format!("{mesh_ref}{suffix}")
+            } else {
+                value.to_string()
+            }
+        }
+    };
+    git_stdout(work_dir, ["rev-parse", &revision])
 }
 
 fn read_link_from_ref(work_dir: &Path, id: &str) -> Result<Link> {
