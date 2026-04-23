@@ -1,7 +1,7 @@
 # Git Mesh
 
-A two-tier system for attaching tracked, updatable metadata to portions of
-code in a git repository. Data lives in git's object database under custom
+A system for attaching tracked, updatable metadata to portions of code
+in a git repository. Data lives in git's object database under custom
 refs — nothing is written to the working tree, and the system has no
 sidecar database.
 
@@ -9,70 +9,74 @@ sidecar database.
 
 There are exactly two primitives:
 
-- **Link** — an immutable anchor to an exact range of bytes in a file at a
-  specific commit. Links are content-addressed, shared, and cheap.
-- **Mesh** — a mutable, commit-backed record that groups a set of Link
+- **Range** — an immutable anchor to an exact set of lines in a file at
+  a specific commit. Ranges are content-addressed, shared, and cheap.
+- **Mesh** — a mutable, commit-backed record that groups a set of Range
   references together under a free-text message. Meshes are how humans
   name and describe the relationships between anchored ranges, and they
   evolve over time as the code evolves.
 
-Staleness — whether a Link's anchored bytes still exist somewhere in the
-current tree, and whether a Mesh's members are collectively up-to-date —
-is **always computed**, never stored. The repo's history is the only
-source of truth; the stored records are minimal.
+Staleness — whether a Range's anchored bytes still exist somewhere in
+the current tree — is **always computed**, never stored. The repo's
+history is the only source of truth; the stored records are minimal.
 
 ## 2. Concepts
 
-### 2.1 Link
+### 2.1 Range
 
-A Link is an association between **two** line ranges, both anchored at
-the same commit. The Link carries one `anchor_sha`; each side carries
-its own `(path, range, blob)`. Given a Link, the tool can independently
-ask each side:
+A Range is an anchor to a single line range in a file, captured at a
+specific commit. The Range carries one `anchor_sha`, one `path`, and
+the `(start, end, blob)` of the anchored lines. Given a Range, the tool
+can ask:
 
 - *Where is this range now?* — `git log -L` walks forward from the
-  shared anchor commit, following the range through diff hunks, renames,
-  and copies.
+  anchor commit, following the range through diff hunks, renames, and
+  copies.
 - *Is the content still the same?* — extract the anchored bytes from the
-  side's anchor blob; extract the bytes at the resolved location;
-  compare.
+  anchor blob; extract the bytes at the resolved location; compare.
 
-A Link's status is the worse of its two sides. Links are immutable:
-once written, the ref points at its blob forever (or until deleted).
+Ranges are immutable: once written, the ref points at its blob forever
+(or until deleted).
 
 ### 2.2 Mesh
 
-A Mesh is a named set of Link references plus a free-text message. It
-expresses "these anchored ranges belong together, and here is why." A
-Mesh has exactly three pieces of state:
+A Mesh is a named set of Range references plus a free-text message. It
+expresses "these anchored ranges belong together, and here is why." All
+ranges in a mesh participate in a single named relationship — the mesh
+name carries the semantic intent. There are no stored pairwise
+associations between ranges; if two independent relationships need
+tracking, that is two meshes.
+
+A Mesh has exactly four pieces of state:
 
 - **name** — the identity of the Mesh, carried by the ref name
   (`refs/meshes/v1/<name>`). Mirrors branches: the name *is* the mesh,
   and git's ref machinery handles collisions, renames, atomic updates,
   and sync.
-- **links** — a sorted, deduplicated set of Link ids. Each id names a
-  Link currently considered part of the relationship. Stored as one
+- **ranges** — a sorted, deduplicated set of Range ids. Each id names a
+  Range currently considered part of the relationship. Stored as one
   line per id in a single file inside the Mesh commit's tree.
+- **config** — resolver options (`copy-detection`, `ignore-whitespace`)
+  that apply to all ranges in the mesh. Stored as a `config` file in
+  the Mesh commit's tree. Syncs with the mesh.
 - **message** — a git-commit-message-style string describing the
   relationship. This *is* the commit's message; it is not duplicated
   anywhere in the tree.
 
 A Mesh is mutable: edits write new commits on the Mesh's ref; the parent
-chain records every past state. Per-edit history (which Link was added,
-removed, or swapped in for another) is recovered by diffing a commit's
-tree against its parent; it is not denormalized into the stored record.
+chain records every past state. Per-edit history (which Range was added
+or removed) is recovered by diffing a commit's tree against its parent;
+it is not denormalized into the stored record.
 
 ### 2.3 Staleness
 
-Staleness is a per-Link property, always computed on query:
+Staleness is a per-Range property, always computed on query:
 
-- **Side status** — for each side: byte equality (modulo
-  `ignore_whitespace`) between the anchored bytes and the bytes at the
-  resolved location.
-- **Link status** — the worse of its two side statuses.
+- **Range status** — byte equality (modulo the mesh's `ignore_whitespace`
+  setting) between the anchored bytes and the bytes at the resolved location.
 - **Mesh** has no single aggregate status. `status`/`show` report each
-  Link's status individually; callers that want a one-line summary
-  decide their own aggregation rule (e.g. "any Link not `Fresh`" →
+  Range's status individually; callers that want a one-line summary
+  decide their own aggregation rule (e.g. "any Range not `Fresh`" →
   needs attention).
 
 The stored records never carry status fields. Every query recomputes
@@ -83,32 +87,31 @@ against HEAD, so the answer always matches the repo as it is now.
 ### 3.1 Ref layout
 
 ```
-refs/links/v1/<linkId>     →   blob      →   Link record (text)
-refs/meshes/v1/<name>      →   commit    →   tree  →  links  (text file)
+refs/ranges/v1/<rangeId>   →   blob      →   Range record (text)
+refs/meshes/v1/<name>      →   commit    →   tree  →  ranges  (text file)
                                    │
                                    └── parent: previous Mesh commit (or none)
 ```
 
-- Link refs point directly at a content-addressed text blob in a
-  commit-object-style format (see §4.1). Identical Link payloads share
-  a blob in the object database automatically.
-- Mesh refs are named by the user. The commit's tree contains one
-  file, `links`, with one Link id per line. The commit's **message**
-  is the Mesh's message — no duplication in the tree. The commit's
-  parent pointers form the Mesh's edit history.
+- Range refs point directly at a content-addressed text blob. Identical
+  Range payloads share a blob in the object database automatically.
+- Mesh refs are named by the user. The commit's tree contains two files,
+  `ranges` and `config`. The commit's **message** is the Mesh's message
+  — no duplication in the tree. The commit's parent pointers form the
+  Mesh's edit history.
 
 ### 3.2 Versioned namespace
 
-The `v1` segment encodes the schema version of the stored JSON. A reader
-can enumerate only shapes it understands (`git for-each-ref refs/links/v1/`,
-likewise for meshes) without opening any blob. Refspecs can filter by
-version. A future breaking change introduces `refs/links/v2/*` and
-`refs/meshes/v2/*`; v1 records remain readable under their own namespace
-indefinitely. There is no implicit migration.
+The `v1` segment encodes the schema version of the stored records. A
+reader can enumerate only shapes it understands (`git for-each-ref
+refs/ranges/v1/`, likewise for meshes) without opening any blob.
+Refspecs can filter by version. A future breaking change introduces
+`refs/ranges/v2/*` and `refs/meshes/v2/*`; v1 records remain readable
+under their own namespace indefinitely. There is no implicit migration.
 
 ### 3.3 Why these git objects
 
-- **Link → blob (text).** Immutable, content-addressed, dedup-friendly.
+- **Range → blob (text).** Immutable, content-addressed, dedup-friendly.
   Writing is `git hash-object -w`; the id lives in the ref name. The
   on-disk format mirrors git's own commit/tag header style — `key SP
   value\n` lines, TAB-separated paths — so it's readable, compact, and
@@ -117,20 +120,95 @@ indefinitely. There is no implicit migration.
   git branches are; the same primitive gives edit history for free,
   captures author/date per edit, carries the Mesh's message as the
   commit message, and supports real three-way merges when two branches
-  edit the same Mesh concurrently. The user-facing name is the ref
-  name, just like a branch.
+  edit the same Mesh concurrently. The user-facing name is the ref name,
+  just like a branch.
 
-### 3.4 Name and id format
+### 3.4 File index
 
-Both `<linkId>` and `<name>` must be ref-legal path components: no
+`.git/mesh/file-index` is a local, non-synced lookup table analogous to
+git's pack index (`.git/objects/pack/*.idx`). It is a derived artifact
+built from the authoritative `refs/ranges/v1/*` and `refs/meshes/v1/*`
+objects; if absent or corrupt, the tool regenerates it by scanning
+those refs. It is never pushed or fetched.
+
+**Purpose.** Editor plugins and other tools that need to answer "which
+meshes reference this file?" at file-open time cannot afford to walk
+every mesh ref and resolve every UUID on demand. The file index provides
+an O(log n) lookup path without changing the authoritative storage model.
+
+**Format** (text, one entry per line, TAB-separated, sorted by
+`(path, start)`):
+
+```
+# mesh-index v1
+server/routes.ts	frontend-backend-sync	<range-uuid>	13	34	e0f92a3b
+server/schema.ts	frontend-backend-sync	<range-uuid>	20	27	e0f92a3b
+src/Button.tsx	auth-flow	<range-uuid>	12	20	4a1b2c3d
+src/Button.tsx	frontend-backend-sync	<range-uuid>	42	50	e0f92a3b
+src/types.ts	frontend-backend-sync	<range-uuid>	8	15	e0f92a3b
+```
+
+Fields: `<path> TAB <mesh-name> TAB <range-id> TAB <start> TAB <end> TAB <anchor-sha>`
+
+- **TAB after path.** Paths may contain spaces; every other field is
+  space-free. Consistent with the TAB convention used in Range blobs.
+- **Sorted by `(path, start)`.** A reader looking up a file can binary-
+  search or `grep ^<path>\t`. Ranges within a file appear in line order,
+  so adjacent entries are adjacent in the index.
+- **`anchor-sha`** (abbreviated) is included so an editor can display
+  "anchored at `e0f92a3b`" in hover text without a second lookup.
+- **No status.** Status requires running the resolver and is not stored
+  in the index. Editor plugins call `git mesh stale` when they need it.
+- **Version header.** The `# mesh-index v1` first line lets a reader
+  detect a format change and regenerate rather than misparse.
+
+**Lifecycle.**
+
+- Written (full rewrite) after every successful `git mesh commit` and
+  `git mesh fetch`.
+- Generated lazily on first read if absent.
+- Full rewrite only — no partial patching. The file is small enough
+  (one line per range across all meshes) that a full rewrite is cheaper
+  than a diff-and-patch.
+- `git mesh doctor` reports a missing or unparseable index and offers
+  to regenerate it.
+
+**`git mesh ls` — file-based lookup.**
+
+`git mesh ls` reads the file index directly. Three forms:
+
+```
+git mesh ls                           # all files that have any range (like git ls-files)
+git mesh ls <path>                    # all ranges in all meshes referencing <path>
+git mesh ls <path>#L<start>-L<end>    # ranges whose line range overlaps the query range
+```
+
+The line-range form uses **overlap** semantics: any range `[a, b]` where
+`a ≤ end` and `b ≥ start` is included. This is what an editor needs —
+"show me everything touching these lines."
+
+Output (one entry per range, columns aligned):
+
+```
+frontend-backend-sync  src/Button.tsx#L42-L50  e0f92a3b
+auth-flow              src/Button.tsx#L12-L20  4a1b2c3d
+```
+
+Columns: mesh name, range address, abbreviated anchor sha. Supports
+`--format` for scripting, consistent with the rest of the CLI. Reads
+never run the resolver; status is not shown.
+
+### 3.5 Name and id format
+
+Both `<rangeId>` and `<name>` must be ref-legal path components: no
 slashes, no whitespace, no control characters, and not a leading `-`.
 
-- `<linkId>` is always a UUID. Link refs are internal; users never see
+- `<rangeId>` is always a UUID. Range refs are internal; users never see
   or type them.
-- `<name>` is user-chosen on `create`. It is the Mesh's only identity,
-  and the same name cannot be used by two Meshes (ref-level collision,
-  caught by `update-ref` CAS). Names follow the same rules git applies
-  to branch names.
+- `<name>` is user-chosen on first write. It is the Mesh's only
+  identity, and the same name cannot be used by two Meshes (ref-level
+  collision, caught by `update-ref` CAS). Names follow the same rules
+  git applies to branch names.
 
 ## 4. Data shapes
 
@@ -139,73 +217,56 @@ defaults are applied at creation time so stored records fully
 self-describe their resolver behaviour. JSON field names are camelCase
 (via `serde(rename_all = "camelCase")`); Rust fields are snake_case.
 
-### 4.1 Link
+### 4.1 Range
 
 **On-disk format** (commit-object-style text, stored as the blob at
-`refs/links/v1/<linkId>`):
+`refs/ranges/v1/<rangeId>`):
 
 ```
 anchor <sha>
 created <iso-8601>
-side <start> <end> <blob> <copy-detection> <ignore-whitespace>\t<path>
-side <start> <end> <blob> <copy-detection> <ignore-whitespace>\t<path>
+range <start> <end> <blob>\t<path>
 ```
 
 - Headers are `key SP value\n`. Unknown headers are tolerated (future
   additive extensions don't break v1 readers).
-- Each `side` line carries six space-separated fields, then a `\t`, then
-  the path. Paths may contain spaces; no other field may, so the TAB
-  unambiguously terminates the field block — the same dodge git uses
+- The `range` line carries three space-separated fields, then a `\t`,
+  then the path. Paths may contain spaces; no other field may, so the
+  TAB unambiguously terminates the field block — the same dodge git uses
   in tree entries.
-- The two `side` lines are sorted on write so the pair is effectively
-  unordered.
+- Resolver options (`copy-detection`, `ignore-whitespace`) are
+  mesh-level settings stored in the mesh commit's tree (see §4.3),
+  not per-range fields.
 - Trailing newline; no blank lines.
 
-Typical size is ~150 bytes.
+Typical size is ~80 bytes.
 
 **Rust types** (ser/de is a hand-written parser, not serde-JSON):
 
 ```rust
-use serde::{Deserialize, Serialize};
-
-/// In-memory representation of the Link record stored at
-/// refs/links/v1/<linkId>. The id itself is the ref name suffix and is
-/// not repeated in the blob.
+/// In-memory representation of the Range record stored at
+/// refs/ranges/v1/<rangeId>. The id itself is the ref name suffix and
+/// is not repeated in the blob.
 #[derive(Clone, Debug)]
-pub struct Link {
-    /// Commit both sides were anchored to at creation.
+pub struct Range {
+    /// Commit this range was anchored to at creation.
     pub anchor_sha: String,
     /// ISO-8601 creation timestamp.
     pub created_at: String,
-    /// The two anchored ranges this Link associates. Canonicalized on
-    /// write by sorting so the pair is effectively unordered.
-    pub sides: [LinkSide; 2],
-}
-
-/// One anchored range. The anchor commit is shared across both sides
-/// of the Link; each side carries its own path, range, blob, and
-/// per-side resolver options.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct LinkSide {
     /// File path at the anchor commit.
     pub path: String,
     /// 1-based, inclusive line range.
     pub start: u32,
     pub end: u32,
-    /// Blob OID of `path` at the Link's `anchor_sha`. Freezes the
-    /// exact anchored bytes and keeps the side verifiable even if
-    /// `anchor_sha` becomes unreachable.
+    /// Blob OID of `path` at `anchor_sha`. Freezes the exact anchored
+    /// bytes and keeps the range verifiable even if `anchor_sha` becomes
+    /// unreachable.
     pub blob: String,
-    /// How aggressively `git log -L` follows the range across files
-    /// when resolving this side's current location.
-    pub copy_detection: CopyDetection,
-    /// Whether whitespace-only differences count as a content change.
-    pub ignore_whitespace: bool,
 }
 
-/// -C levels for `git log -L` copy detection. Serialized as the
-/// kebab-case variant name: `off`, `same-commit`, `any-file-in-commit`,
-/// `any-file-in-repo`.
+/// -C levels for `git log -L` copy detection. Stored in mesh config,
+/// not in the range record. Serialized as the kebab-case variant name:
+/// `off`, `same-commit`, `any-file-in-commit`, `any-file-in-repo`.
 ///
 /// * `Off`              — no -C
 /// * `SameCommit`       — -C       (copies from files modified in the same commit)
@@ -219,25 +280,31 @@ pub enum CopyDetection {
     AnyFileInRepo,
 }
 
+pub struct MeshConfig {
+    pub copy_detection: CopyDetection,
+    pub ignore_whitespace: bool,
+}
+
 pub const DEFAULT_COPY_DETECTION: CopyDetection = CopyDetection::SameCommit;
-pub const DEFAULT_IGNORE_WHITESPACE: bool = true;
+pub const DEFAULT_IGNORE_WHITESPACE: bool = false;
 ```
 
 ### 4.2 Mesh
 
-**On-disk shape.** A Mesh is a commit whose tree contains a single
-file, `links`, and whose commit message is the Mesh's message. No
-`mesh.json`, no tree-level message duplication.
+**On-disk shape.** A Mesh is a commit whose tree contains two files,
+`ranges` and `config`, and whose commit message is the Mesh's message.
+No `mesh.json`, no tree-level message duplication.
 
 ```
 refs/meshes/v1/<name>
 └── commit
     ├── message: "<subject>\n\n<body>"   ← the Mesh's message
     └── tree
-        └── links                        ← text file, one Link id per line
+        ├── ranges                       ← text file, one Range id per line
+        └── config                       ← text file, key-value resolver options
 ```
 
-The `links` file:
+The `ranges` file:
 
 ```
 0a1b2c3d4e5f...
@@ -245,52 +312,88 @@ The `links` file:
 8e9f0a1b2c3d...
 ```
 
-- One Link id per line.
-- Sorted ascending; duplicates removed on write.
+- One Range id per line.
+- Sorted by the referenced Range's `(path, start, end)` ascending. The
+  canonical order is semantic (matches how ranges are displayed
+  everywhere else in the UI), not lexicographic on the id. Writers
+  resolve each id's Range record to produce the key. No dedup step is
+  needed: the `(path, start, end)` uniqueness invariant (§4.2) means two
+  identical ids can't both be present, and two distinct ids can't share
+  the same location.
 - Trailing newline; no blank lines.
 
-**Rust types** (assembled on read from the commit and the `links` blob;
-serialized back the same way on write):
+The `config` file:
+
+```
+copy-detection same-commit
+ignore-whitespace false
+```
+
+- One `key SP value` per line.
+- Written on every mesh commit. Defaults are written explicitly so the
+  stored record is fully self-describing.
+- Syncs with the mesh — config history is visible in `git log -p`.
+
+**Rust types** (assembled on read from the commit, `ranges`, and `config`
+blobs; serialized back the same way on write):
 
 ```rust
 #[derive(Clone, Debug)]
 pub struct Mesh {
     /// The Mesh's name (ref suffix; the identity).
     pub name: String,
-    /// Active Link ids. Canonical order: sorted ascending; deduped.
-    pub links: Vec<String>,
+    /// Active Range ids. Canonical order: sorted by the referenced
+    /// Range's `(path, start, end)` ascending. Uniqueness is enforced
+    /// by the `(path, start, end)` invariant, not by a dedup pass.
+    pub ranges: Vec<String>,
     /// The commit's message.
     pub message: String,
+    /// Resolver options for all ranges in this mesh.
+    pub config: MeshConfig,
 }
 ```
 
-All addressing data lives in the Link blobs that `links` points at; the
-Mesh commit itself stores only the pointers (in the tree) and the
-message (on the commit).
+All addressing data lives in the Range blobs that `ranges` points at;
+the Mesh commit itself stores the range pointers, the config, and the
+message.
 
-**Invariant:** within a single Mesh, no two Links may share the same
-unordered pair of sides (by `(path, start, end)`; `anchor_sha` is not
-part of the key). Writes that would violate this error out. This lets
-every command address a Link by its pair of ranges alone — no sha
-suffix, no disambiguation step.
+**Invariant:** within a single Mesh, no two Ranges may share the same
+`(path, start, end)`. Writes that would violate this error out. This
+lets every command address a Range by its location alone — no id suffix,
+no disambiguation step.
 
-### 4.3 Computed views
+Overlaps (e.g. `L40-L50` and `L45-L55` in the same file) are **allowed**.
+They have distinct `(path, start, end)` keys, so they address cleanly;
+the resolver tracks each independently. Overlap carries no semantic in
+the tool — two overlapping ranges in a mesh simply mean the user chose
+to anchor two related spans that happen to share lines.
+
+### 4.3 Mesh config
+
+Resolver options for a mesh are stored in the `config` file of the mesh
+commit's tree. All ranges in the mesh inherit these settings. Config is
+staged and committed alongside range changes — it is not local-only state.
+
+| Key | Values | Default |
+|---|---|---|
+| `copy-detection` | `off`, `same-commit`, `any-file-in-commit`, `any-file-in-repo` | `same-commit` |
+| `ignore-whitespace` | `true`, `false` | `false` |
+
+### 4.4 Computed views
 
 ```rust
 /// Declaration order is best → worst; `Ord` derives a total order so
 /// callers that want a one-line summary can reduce via `.max()`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum LinkStatus {
-    Fresh,      // content unchanged since anchor
-    Moved,      // location changed (rename / line shift), bytes identical
-    Modified,   // content partially changed
-    Rewritten,  // majority of the range rewritten
-    Missing,    // range no longer locatable
-    Orphaned,   // anchor commit no longer reachable
+pub enum RangeStatus {
+    Fresh,     // content unchanged since anchor
+    Moved,     // location changed (rename / line shift), bytes identical
+    Changed,   // content differs from anchored bytes (partial or total)
+    Orphaned,  // anchor commit no longer reachable
 }
 
 #[derive(Clone, Debug)]
-pub struct LinkLocation {
+pub struct RangeLocation {
     pub path: String,
     pub start: u32,
     pub end: u32,
@@ -298,29 +401,22 @@ pub struct LinkLocation {
 }
 
 #[derive(Clone, Debug)]
-pub struct SideResolved {
-    pub anchored: LinkLocation,
-    pub current: Option<LinkLocation>,
-    pub status: LinkStatus,
-}
-
-#[derive(Clone, Debug)]
-pub struct LinkResolved {
-    pub link_id: String,
+pub struct RangeResolved {
+    pub range_id: String,
     pub anchor_sha: String,
-    pub sides: [SideResolved; 2],
-    /// Worse of the two side statuses.
-    pub status: LinkStatus,
+    pub anchored: RangeLocation,
+    pub current: Option<RangeLocation>,
+    pub status: RangeStatus,
 }
 
 #[derive(Clone, Debug)]
 pub struct MeshResolved {
     pub name: String,
     pub message: String,
-    /// One resolved entry per Link id in the Mesh, in the Mesh's
+    /// One resolved entry per Range id in the Mesh, in the Mesh's
     /// stored order. Each carries its own status; the Mesh does not
     /// aggregate them.
-    pub links: Vec<LinkResolved>,
+    pub ranges: Vec<RangeResolved>,
 }
 ```
 
@@ -328,38 +424,40 @@ pub struct MeshResolved {
 
 ### 5.1 Locate
 
-The resolver runs once per side, independently:
+The resolver runs once per range, using the mesh's `copy-detection` and
+`ignore-whitespace` settings from the `config` file in the mesh commit's tree:
 
 ```
 git log -L <start>,<end>:<path> [--follow -M -C...] <anchor_sha>..HEAD
 ```
 
-`git log -L` is git's line-range history walker. It performs the diff-hunk
-arithmetic, handles renames when `--follow` / `-M` are on, and detects
-copies per the side's `copy_detection` setting. Output is the current
-`(path, start, end)` plus the blob OID of the file at HEAD for that side.
+`git log -L` is git's line-range history walker. It performs the
+diff-hunk arithmetic, handles renames when `--follow` / `-M` are on,
+and detects copies per the mesh's `copy-detection` setting. Output is
+the current `(path, start, end)` plus the blob OID of the file at HEAD.
 
 If the walker reports the range as deleted at some commit with no
-surviving successor under the configured copy detection, that side's
-status is `Missing`.
+surviving successor under the configured copy detection, the range's
+current location is `None` and its status is `Changed` — the full
+removal is surfaced as a diff against `/dev/null`.
 
 ### 5.2 Compare
 
-Per side, anchored bytes and current bytes are extracted from their
-blobs:
+Anchored bytes and current bytes are extracted from their blobs:
 
 ```
 git cat-file -p <blob> | sed -n '<start>,<end>p'
 ```
 
-Equality (byte-for-byte, or normalized if `ignore_whitespace` is true)
-determines that side's status. The Link's status is the worse of the
-two side statuses.
+Equality (byte-for-byte, or normalized if the mesh's `ignore-whitespace`
+is `true`) determines the range's status. If the location changed but bytes are
+identical, the status is `Moved`. If the bytes differ in any way —
+whether one line or all lines — the status is `Changed`.
 
-Rich status — which lines changed, which commit rewrote them — is
-produced by the reporter running `git blame -w -C` over the resolved
-range; blame options there are internal to the reporter and not part
-of the Link's stored shape.
+Rich status — which lines changed, which commit introduced the change —
+is produced by the reporter running `git blame -w -C` over the resolved
+range; blame options are internal to the reporter and not part of the
+stored shape.
 
 ### 5.3 Status values
 
@@ -367,439 +465,442 @@ of the Link's stored shape.
 |---|---|
 | `FRESH` | Current bytes equal anchored bytes. |
 | `MOVED` | Bytes equal; `(path, start, end)` changed. |
-| `MODIFIED` | Some lines in the range were rewritten; most survive. |
-| `REWRITTEN` | Most lines in the range were rewritten. |
-| `MISSING` | No surviving location under the configured copy detection. |
-| `ORPHANED` | `anchorSha` is not reachable from any ref. |
+| `CHANGED` | Anchored bytes differ from current bytes, including complete deletion. |
+| `ORPHANED` | `anchor_sha` is not reachable from any ref. |
 
-The MODIFIED / REWRITTEN threshold is a tool-level policy (for example,
-"majority rewritten" = more than half the lines changed) and not stored
-per Link.
+`CHANGED` covers any range whose anchored bytes differ from current
+bytes, including complete deletion. The diff output conveys the degree
+of change directly; no threshold policy is needed.
 
 ### 5.4 Mesh reporting
 
-A Mesh does not have a single status. `status`/`show` emit the per-Link
-status for each Link in the Mesh; the declaration order of `LinkStatus`
-(`Fresh` < `Moved` < `Modified` < `Rewritten` < `Missing` < `Orphaned`)
-is provided purely as a convention so callers that need a summary can
-apply their own "worst wins" reduction.
+A Mesh does not have a single status. `status`/`show` emit the per-Range
+status for each Range in the Mesh. The declaration order of `RangeStatus`
+(`Fresh` < `Moved` < `Changed` < `Orphaned`) is provided as a convention
+so callers that need a summary can apply their own "worst wins" reduction.
 
 ## 6. Operations
 
-Examples use [`gix`](https://docs.rs/gix/latest/gix/) (gitoxide) rather
-than shelling out to `git`. A `&gix::Repository` obtained from
-`gix::open(".")` or `gix::discover(".")` is threaded through the write
-functions. Errors are surfaced via `anyhow::Result` for brevity;
-production code should use dedicated error types.
+All writes are atomic. Range writes are a blob write + reference update.
+Mesh writes are a blob write (`ranges`), a blob write (`config`), a tree
+write, a commit write (whose message is the Mesh's message) with the
+prior Mesh tip as parent, and a reference update with an expected
+previous value (compare-and-swap). If the CAS fails because another
+client advanced the Mesh concurrently, the caller retries with the new
+tip as parent.
 
-All writes are atomic. Link writes are a blob write + reference
-update. Mesh writes are a blob write (the `links` file), a tree write,
-a commit write (whose message is the Mesh's message) with the prior
-Mesh tip as parent, and a reference update with an expected previous
-value (compare-and-swap). If the CAS fails because another client
-advanced the Mesh concurrently, the caller retries with the new tip
-as parent.
+### 6.1 Create a Range
 
-### 6.1 Create a Link
+At `git mesh commit` time, each staged `add` is resolved into a Range
+record and written to `refs/ranges/v1/<id>`. Different adds in the same
+staging area can target different commits (see §6.3).
 
-```rust
-use anyhow::{anyhow, Result};
-use chrono::Utc;
-use gix::refs::transaction::PreviousValue;
-use uuid::Uuid;
+1. Determine the anchor SHA: if the staged `add` line carries a trailing
+   sha (explicit `--at` at stage time), use it; otherwise, resolve to
+   the current HEAD — so the post-commit hook anchors to the source
+   commit that just landed, not a stale pre-commit HEAD.
+2. Look up `path` in the anchor commit's tree; error if not found.
+3. Validate that `start` and `end` are within the file's line count.
+4. Record the blob OID of `path` at the anchor commit.
+5. Serialize the `Range` record in the format described in §4.1.
+6. Write the serialized text as a git blob (`git hash-object -w`).
+7. Create `refs/ranges/v1/<uuid>` pointing at that blob
+   (`update-ref`, fail if already exists).
 
-pub struct CreateLinkInput {
-    pub sides: [SideSpec; 2],
-    pub anchor_sha: Option<String>,      // default: HEAD; shared by both sides
-    pub id: Option<String>,              // default: Uuid::new_v4()
-}
-
-pub struct SideSpec {
-    pub path: String,
-    pub start: u32,
-    pub end: u32,
-    pub copy_detection: Option<CopyDetection>,
-    pub ignore_whitespace: Option<bool>,
-}
-
-pub fn create_link(repo: &gix::Repository, input: CreateLinkInput)
-    -> Result<(String, Link)>
-{
-    let anchor_sha = repo
-        .rev_parse_single(input.anchor_sha.as_deref().unwrap_or("HEAD"))?
-        .detach();
-
-    let [a, b] = input.sides;
-    let side_a = build_side(repo, a, &anchor_sha)?;
-    let side_b = build_side(repo, b, &anchor_sha)?;
-    let mut pair = [side_a, side_b];
-    pair.sort();   // canonicalize so the pair is effectively unordered
-
-    let link = Link {
-        anchor_sha: anchor_sha.to_string(),
-        created_at: Utc::now().to_rfc3339(),
-        sides: pair,
-    };
-
-    let id       = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let text     = serialize_link(&link);
-    let blob_oid = repo.write_blob(text.as_bytes())?.detach();
-
-    // Create the ref; fail if it already exists (ids are UUIDs, collisions
-    // would only arise from retried writes on content-identical blobs).
-    repo.reference(
-        format!("refs/links/v1/{id}"),
-        blob_oid,
-        PreviousValue::MustNotExist,
-        format!("create link {id}"),
-    )?;
-    Ok((id, link))
-}
-
-/// Emit the on-disk commit-object-style format described in §4.1.
-fn serialize_link(link: &Link) -> String {
-    use std::fmt::Write;
-    let mut out = String::new();
-    writeln!(out, "anchor {}", link.anchor_sha).unwrap();
-    writeln!(out, "created {}", link.created_at).unwrap();
-    for s in &link.sides {
-        writeln!(out, "side {} {} {} {} {}\t{}",
-                 s.start, s.end, s.blob,
-                 copy_detection_str(s.copy_detection), s.ignore_whitespace,
-                 s.path).unwrap();
-    }
-    out
-}
-
-fn build_side(
-    repo: &gix::Repository,
-    spec: SideSpec,
-    anchor_sha: &gix::ObjectId,
-) -> Result<LinkSide> {
-    let blob = resolve_blob(repo, anchor_sha, &spec.path, spec.start, spec.end)?;
-    Ok(LinkSide {
-        path: spec.path,
-        start: spec.start,
-        end: spec.end,
-        blob: blob.to_string(),
-        copy_detection: spec.copy_detection.unwrap_or(DEFAULT_COPY_DETECTION),
-        ignore_whitespace: spec.ignore_whitespace.unwrap_or(DEFAULT_IGNORE_WHITESPACE),
-    })
-}
-
-/// Resolve the blob OID of `path` at `anchor_sha`, after validating the
-/// requested line range fits within the file.
-fn resolve_blob(
-    repo: &gix::Repository,
-    anchor_sha: &gix::ObjectId,
-    path: &str,
-    start: u32,
-    end: u32,
-) -> Result<gix::ObjectId> {
-    let commit = repo.find_commit(*anchor_sha)?;
-    let tree   = commit.tree()?;
-    let entry  = tree
-        .lookup_entry_by_path(path)?
-        .ok_or_else(|| anyhow!("{path} not found at {anchor_sha}"))?;
-    let blob   = repo.find_blob(entry.id())?;
-    let lines  = blob.data.iter().filter(|&&b| b == b'\n').count() as u32 + 1;
-    if start < 1 || end < start || end > lines {
-        return Err(anyhow!("range {start}-{end} out of bounds for {path} ({lines} lines)"));
-    }
-    Ok(entry.id().detach())
-}
-```
+Range ids are UUIDs. The ref must not already exist; collisions would
+only arise from retried writes on content-identical blobs, which are
+safe to ignore.
 
 ### 6.2 Commit a change to a Mesh
 
-All writes — create, add, remove, reconcile, reword — are one function.
-The CLI presents them as `git mesh commit <name>` with `--link`,
-`--unlink`, `-m`, and `--amend`. Multiple `adds` and `removes` are
-allowed in one call and land in a single git commit.
+`git mesh commit` reads the staging area, validates all operations, then
+writes a single mesh commit:
 
-```rust
-use anyhow::{anyhow, Result};
-use gix::refs::transaction::PreviousValue;
+**Validation (pure, no writes):**
 
-pub struct CommitInput {
-    pub name: String,
-    /// Links to add. Each becomes a new two-sided Link.
-    pub adds: Vec<[SideSpec; 2]>,
-    /// Links to remove, by their pair of anchored ranges.
-    pub removes: Vec<[RangeSpec; 2]>,
-    /// Commit message. Also becomes the Mesh's message going forward.
-    pub message: String,
-    /// Shared anchor for all adds. Default: HEAD.
-    pub anchor_sha: Option<String>,
-    /// Reword the tip commit instead of appending a new one. Requires
-    /// `adds` and `removes` to be empty.
-    pub amend: bool,
-}
+1. Verify the mesh name is not reserved.
+2. Load the current `ranges` list from the existing mesh commit, or
+   start with an empty list for a new mesh.
+3. For each staged `remove`: confirm `(path, start, end)` exists in the
+   current list; error with the offending range if not.
+4. For each staged `add`: confirm `(path, start, end)` does not collide
+   with the post-remove list; error with the offending range if it does.
+5. Verify the staging area has at least one meaningful change — an
+   `add`, a `remove`, a `config` line that actually changes a value, or
+   a staged `.msg`. Error if nothing is staged. A `config` line whose
+   value equals the current committed value is a no-op and does not
+   satisfy this check.
 
-pub fn commit_mesh(repo: &gix::Repository, input: CommitInput) -> Result<()> {
-    let ref_name = format!("refs/meshes/v1/{}", input.name);
-    let parent   = repo.try_find_reference(&ref_name)?
-        .map(|mut r| r.peel_to_id_in_place()).transpose()?
-        .map(|id| id.detach());
+The remove-then-add ordering means a re-anchor (stage `rm X`, then
+`add X` at a new commit) is always valid — the pair is absent at the
+moment the add is validated.
 
-    // On --amend, no structural change is allowed.
-    if input.amend && (!input.adds.is_empty() || !input.removes.is_empty()) {
-        return Err(anyhow!("--amend is incompatible with --link/--unlink"));
-    }
-    // On a fresh mesh (no parent) with no adds, there's nothing to create.
-    if parent.is_none() && input.adds.is_empty() {
-        return Err(anyhow!("mesh `{}` does not exist; supply --link to create it",
-                           input.name));
-    }
+**Write (after validation passes):**
 
-    let mut links = match parent {
-        Some(ref p) => read_mesh_links(repo, p)?,
-        None        => Vec::new(),
-    };
+1. Resolve each staged `add` into a Range record and write it to
+   `refs/ranges/v1/<uuid>` (see §6.1).
+2. Apply removes: drop the matching Range ids from the list.
+3. Apply adds: append the new Range ids.
+4. Sort the list by `(path, start, end)`. No dedup step is needed —
+   validation in steps 3–4 above already enforces uniqueness.
+5. Write the `ranges` blob (one id per line) and the `config` blob
+   (final staged config values merged with the previous committed
+   config).
+6. Write a tree containing both blobs.
+7. Write a commit with the tree and the prior mesh tip as parent (none
+   for a new mesh). The commit message is the staged `.msg` contents if
+   present; otherwise it is reused verbatim from the parent commit —
+   the relationship description survives across range-only or
+   config-only edits without forcing the user to retype it. A first
+   commit on a new mesh must have a staged message (no parent to
+   inherit from); error out in validation if absent.
+8. Atomically update `refs/meshes/v1/<name>` via CAS; retry if another
+   client advanced the tip concurrently.
+9. Delete all `.git/mesh/staging/<name>*` files.
 
-    // Removes first, so a reconcile ({unlink A, link A'}) can land.
-    for pair in &input.removes {
-        let id = find_link_by_pair(repo, &links, pair)?;
-        links.retain(|l| l != &id);
-    }
+**Errors.** A single invalid operation aborts the call before any object
+is written. All-or-nothing.
 
-    let anchor_sha = repo
-        .rev_parse_single(input.anchor_sha.as_deref().unwrap_or("HEAD"))?
-        .detach();
-    for sides in input.adds {
-        let (id, _) = create_link(repo, CreateLinkInput {
-            sides,
-            anchor_sha: Some(anchor_sha.to_string()),
-            id: None,
-        })?;
-        ensure_pair_unique(repo, &links, &id)?;   // enforce Mesh invariant
-        links.push(id);
-    }
+### 6.3 Staging area
 
-    write_mesh(
-        repo,
-        &input.name,
-        &sort_and_dedupe(links),
-        &normalize_message(&input.message),
-        parent,
-        input.amend,
-    )
-}
+`git mesh add` and `git mesh rm` do not write mesh commits directly.
+They accumulate operations in a staging area at
+`.git/mesh/staging/<name>`. `git mesh commit` resolves and finalizes.
+
+**On-disk format:**
+
+Files under `.git/mesh/staging/` per mesh:
+
+- `<name>` — pending operations, one per line.
+- `<name>.msg` — the staged message, set via `git mesh message`. Read
+  verbatim at commit time. Supports multi-line messages.
+
+  Interactive form: `git mesh message <name>` with no flags opens
+  `$EDITOR` on a pre-populated template — matching `git commit`, `git
+  tag -a`, and `git notes add`. The template is picked in this order:
+  1. The current `.msg` if one is already staged (repeated invocations
+     are idempotent; you pick up where you left off).
+  2. Otherwise the parent mesh commit's message, if the mesh exists
+     (consistent with the §6.2 "inherit from parent" default).
+  3. Otherwise a blank buffer with a commented-out hint (first commit
+     on a new mesh).
+
+  Saving the editor with an empty buffer aborts without modifying
+  staging, matching `git commit`.
+- `<name>.<N>` — full file bytes captured at `git mesh add` time for the
+  `add` operation on line `N` of the operations file. Source depends on
+  whether `--at` was passed: for the default case (no `--at`, anchor
+  resolves at commit time to the new HEAD), bytes are read from the
+  working tree — this is the "what's about to be committed" snapshot.
+  For explicit `--at <commit-ish>`, bytes are extracted from the anchor
+  commit's blob. One sidecar file per `add` line; no sidecar for
+  `remove` or `config` lines.
+
+**Operation format:**
+
+```
+add <path>#L<start>-L<end> [<anchor-sha>]
+remove <path>#L<start>-L<end>
+config <key> <value>
 ```
 
-The `write_mesh` helper builds the tree (a single `links` file with one
-id per line), writes a commit using the message, and atomically updates
-`refs/meshes/v1/<name>` via CAS:
+- `add` lines record the range address followed by an *optional* anchor
+  SHA:
+  - **No trailing sha** (the common case): no `--at` was passed. The
+    anchor is resolved at commit time to the current HEAD — this is what
+    lets the post-commit hook anchor to the commit that *just* landed,
+    not the HEAD that existed at stage time. Sidecar bytes come from the
+    working tree.
+  - **Trailing sha present**: `--at <commit-ish>` was passed. The anchor
+    is resolved and frozen at stage time so later ref motion can't
+    silently re-target. Sidecar bytes come from the anchor commit's blob.
 
-```rust
-use gix::objs::{tree, Commit, Tree};
+  The path-then-sha order keeps the eye on the common case (the range
+  location). When present, the trailing sha is a parseable suffix because
+  anchor SHAs contain no whitespace. The
+  full file bytes are stored in the corresponding `<name>.<N>` sidecar
+  file, extracted from the anchor commit's blob at the time `git mesh
+  add` was run. The line number `N` is the 1-based index of the `add`
+  line in the operations file, providing a stable, unique key per staged
+  add.
+- `remove` lines carry only the range; no bytes stored (removes are
+  matched by `(path, start, end)`, not validated against current bytes).
+- `config` lines set a mesh-level resolver option. Last write wins per
+  key; at commit time the final value for each key is written into the
+  mesh commit's `config` file, replacing the previous committed value.
 
-fn write_mesh(
-    repo: &gix::Repository,
-    name: &str,
-    links: &[String],
-    message: &str,
-    expected_parent: Option<gix::ObjectId>,
-    amend: bool,
-) -> Result<()> {
-    // links file: one id per line, sorted/deduped, trailing newline.
-    let mut file = String::new();
-    for id in links {
-        file.push_str(id);
-        file.push('\n');
-    }
-    let links_blob = repo.write_blob(file.as_bytes())?.detach();
+```
+# .git/mesh/staging/frontend-backend-sync       (operations file)
+add src/Button.tsx#L42-L50                      (line 1 — anchor = HEAD at commit time)
+add server/routes.ts#L13-L34                    (line 2 — anchor = HEAD at commit time)
+remove src/old.ts#L1-L10                        (line 3 — no sidecar)
+config copy-detection any-file-in-commit        (line 4 — no sidecar)
 
-    // tree: a single entry `links` pointing at the blob.
-    let tree_obj = Tree {
-        entries: vec![tree::Entry {
-            mode: tree::EntryKind::Blob.into(),
-            filename: "links".into(),
-            oid: links_blob,
-        }],
-    };
-    let tree_id = repo.write_object(&tree_obj)?.detach();
+# .git/mesh/staging/frontend-backend-sync.1     (bytes of src/Button.tsx at add time)
+# .git/mesh/staging/frontend-backend-sync.2     (bytes of server/routes.ts at add time)
 
-    // --amend reuses the tip's parent; otherwise the tip itself is the parent.
-    let new_parents: Vec<gix::ObjectId> = match (amend, expected_parent) {
-        (true, Some(tip)) => repo.find_commit(tip)?.parent_ids()
-            .map(|id| id.detach())
-            .collect(),
-        (true, None) => Vec::new(),
-        (false, Some(tip)) => vec![tip],
-        (false, None) => Vec::new(),
-    };
+# .git/mesh/staging/frontend-backend-sync.msg
+ABC-123: front-end components reflect back-end endpoints
 
-    let (author, committer) = (repo.author()??, repo.committer()??);
-    let commit = Commit {
-        tree: tree_id,
-        parents: new_parents.into(),
-        author: author.into(),
-        committer: committer.into(),
-        encoding: None,
-        message: message.into(),
-        extra_headers: Vec::new(),
-    };
-    let commit_id = repo.write_object(&commit)?.detach();
-
-    let ref_name = format!("refs/meshes/v1/{name}");
-    let previous = match expected_parent {
-        Some(p) => PreviousValue::MustExistAndMatch(p.into()),
-        None    => PreviousValue::MustNotExist,
-    };
-    repo.reference(ref_name, commit_id, previous, format!("mesh commit"))?;
-    Ok(())
-}
-
-/// Read a Mesh commit's `links` file into an ordered list of Link ids.
-fn read_mesh_links(repo: &gix::Repository, commit_id: &gix::ObjectId)
-    -> Result<Vec<String>>
-{
-    let commit = repo.find_commit(*commit_id)?;
-    let tree   = commit.tree()?;
-    let entry  = tree
-        .lookup_entry_by_path("links")?
-        .ok_or_else(|| anyhow!("mesh commit {commit_id} has no `links` file"))?;
-    let blob   = repo.find_blob(entry.id())?;
-    let text   = std::str::from_utf8(&blob.data)?;
-    Ok(text.lines().map(str::to_owned).collect())
-}
-
-/// Load each candidate Link blob; return the id whose unordered pair
-/// of side ranges equals `pair`. The Mesh invariant guarantees at most
-/// one match.
-fn find_link_by_pair(
-    repo: &gix::Repository,
-    link_ids: &[String],
-    pair: &[RangeSpec; 2],
-) -> Result<String> {
-    let needle = canonical_pair(pair);
-    for id in link_ids {
-        let link = read_link(repo, id)?;
-        let have = canonical_pair(&[
-            RangeSpec { path: link.sides[0].path.clone(),
-                        start: link.sides[0].start, end: link.sides[0].end },
-            RangeSpec { path: link.sides[1].path.clone(),
-                        start: link.sides[1].start, end: link.sides[1].end },
-        ]);
-        if have == needle {
-            return Ok(id.clone());
-        }
-    }
-    Err(anyhow!("no Link matching {}:{}",
-                format_range(&pair[0]), format_range(&pair[1])))
-}
-
-/// Resolve `refs/links/v1/<id>` to its blob and parse it.
-fn read_link(repo: &gix::Repository, id: &str) -> Result<Link> {
-    let mut r = repo.find_reference(&format!("refs/links/v1/{id}"))?;
-    let oid   = r.peel_to_id_in_place()?.detach();
-    let blob  = repo.find_blob(oid)?;
-    parse_link(std::str::from_utf8(&blob.data)?)
-}
-
-fn canonical_pair(pair: &[RangeSpec; 2]) -> [RangeSpec; 2] {
-    let mut p = pair.clone();
-    p.sort();
-    p
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RangeSpec {
-    pub path: String,
-    pub start: u32,
-    pub end: u32,
-}
+Owner: team-billing
 ```
 
-**Errors and atomicity.** `commit_mesh` validates the entire intended
-change before writing any objects; a single invalid flag aborts the
-call with no side effects.
+Transient local state — follows git's convention for working files
+(`.git/rebase-merge/`, etc.). Does not sync. `git mesh commit` and
+`git mesh restore` delete all `<name>*` files under
+`.git/mesh/staging/` when clearing the staging area.
 
-- **`--link <pair>` where the Mesh already contains that pair** —
-  error. The `--unlink <pair> --link <pair>` idiom is the only path
-  that adds a Link with a currently-present pair, and works because
-  removes are applied before adds (so the pair is absent at the
-  moment the add is validated). Re-anchoring a still-valid pair at
-  HEAD is this idiom's intended use.
-- **`--unlink <pair>` where the Mesh does not contain that pair** —
-  error with the same message shape.
-- **`--amend` combined with `--link` or `--unlink`** — error;
-  `--amend` is reword-only.
-- **Empty invocation** (no `--link`, `--unlink`, `--amend`) — error.
+**Validation against the working tree.** `git mesh status <name>` and a
+pre-commit hook compare staged ranges against the current working tree
+*only for adds with no trailing sha* (the common case, where the sidecar
+was snapped from the working tree at stage time). For such adds, the
+tool extracts the range bytes from the `<name>.<N>` sidecar file and
+compares them against the same byte range read directly from the file
+on disk. If the bytes differ, the working tree changed between `git
+mesh add` and the pending source commit — the user is alerted so they
+can re-stage or amend.
 
-Validation ordering (pure, no writes): verify the name isn't reserved;
-verify `--amend` preconditions; load the current `links`; for each
-`--unlink`, confirm the pair exists; for each `--link`, confirm the
-pair does not collide with the post-remove set. If any check fails,
-return with a specific error naming the offending pair and (for
-collisions) pointing at the re-anchor idiom. Only after validation
-passes does the function call `hash-object`, `mktree`, `commit-tree`,
-and `update-ref`.
+For adds with an explicit anchor (trailing sha from `--at`), the
+"drift from working tree" concept isn't meaningful — the anchor is a
+different tree — so these adds are skipped by the drift check. Their
+correctness is guaranteed at commit time by the anchor-blob integrity
+check below.
 
-**Composing the common workflows** on top of `commit_mesh`:
+Error format (working tree check):
 
-| CLI shape                                                | `adds`    | `removes` | `amend` |
-|----------------------------------------------------------|-----------|-----------|---------|
-| `git mesh commit NAME --link A:B -m "..."` (fresh)       | `[A:B]`   | `[]`      | `false` |
-| `git mesh commit NAME --link C:D -m "..."`               | `[C:D]`   | `[]`      | `false` |
-| `git mesh commit NAME --unlink A:B -m "..."`             | `[]`      | `[A:B]`   | `false` |
-| `git mesh commit NAME --unlink A:B --link A':B' -m "..."`| `[A':B']` | `[A:B]`   | `false` |
-| `git mesh commit NAME --amend -m "..."`                  | `[]`      | `[]`      | `true`  |
+```
+warning: staged range has uncommitted changes
 
-### 6.3 Show and stale
+--- <path>#L<start>-L<end> (staged)
++++ <path>#L<start>-L<end> (working tree)
+@@ ... @@
+  <unified diff of the affected range>
+```
+
+**Suggested pre-commit hook** (installed at `.git/hooks/pre-commit`):
+
+```bash
+#!/bin/sh
+git mesh status --check
+```
+
+`git mesh status --check` exits non-zero if any staged range differs
+from the working tree, printing the diff for each affected range. The
+pre-commit hook surfaces this before the source commit lands, giving the
+developer a chance to update the staged range or amend the working tree
+change.
+
+**Validation at commit time.** For each staged `add` at line `N`:
+
+- **No trailing sha (default case).** Resolve the anchor to HEAD at
+  commit time. Extract the range bytes from HEAD's blob at `path` and
+  compare to the `<name>.<N>` sidecar (which snapped the working tree
+  at stage time). A mismatch means the working tree changed between
+  `git mesh add` and the source commit landing — abort and report
+  drift; the user should re-stage or amend. Fail closed.
+- **Trailing sha (explicit `--at`).** Verify the anchor SHA is still
+  reachable and the file at `path` in the anchor tree still contains
+  the recorded `(start, end)` line range. Compare the anchor-blob bytes
+  to the sidecar — this should match tautologically; a mismatch
+  indicates sidecar corruption.
+
+This is a second line of defence behind the pre-commit drift check
+(§6.3); the commit-time check is authoritative.
+
+Error format (commit time):
+
+```
+error: staged mesh '<name>' is stale
+
+--- <path>#L<start>-L<end> (staged)
++++ <path>#L<start'>-L<end'> (HEAD)
+@@ ... @@
+  <unified diff of the affected range>
+```
+
+### 6.4 Status
+
+`git mesh status <name>` reports the pending staging area state alongside
+the committed mesh state. Fast — no resolver, no `git log -L`, no network.
+Analogous to `git status`.
+
+Ranges with no staged operations are not shown. Working tree drift for
+each staged add is detected by comparing the `<name>.<N>` sidecar bytes
+against the file on disk.
+
+**Default output.**
+
+```
+mesh frontend-backend-sync
+commit e0f92a3b8c1d0f5e6a7b2c4d9e1f0a3b8c1d0f5e
+Author: John Wehr <john@example.com>
+Date:   Wed Apr 22 11:14:03 2026 +0000
+
+    ABC-123: front-end components reflect back-end endpoints
+
+Staged changes:
+
+  add     src/Button.tsx#L42-L50
+  add     server/routes.ts#L13-L34
+  remove  src/old.ts#L1-L10
+  config  copy-detection any-file-in-commit
+
+Staged message:
+
+  ABC-123: front-end components reflect back-end endpoints
+
+Working tree drift:
+
+  src/Button.tsx#L42-L50
+
+--- src/Button.tsx#L42-L50 (staged)
++++ src/Button.tsx#L42-L50 (working tree)
+@@ -42,3 +42,4 @@
+  const x = 1;
++const y = 2;
+```
+
+**Output conventions.**
+
+- **Mesh header** mirrors `git mesh <name>` — commit metadata and
+  message from the current tip.
+- **Staged changes** lists each pending operation in order: `add`,
+  `remove`, and `config` lines from the operations file.
+- **Staged message** shown only if a `.msg` file is present.
+- **Working tree drift** shown only for staged adds where the sidecar
+  bytes differ from the file on disk. Flat diff, no indentation,
+  matching `git diff` output directly.
+
+`git mesh status --check` suppresses human output and exits non-zero if
+any staged range differs from the working tree. Used by the pre-commit
+hook.
+
+### 6.5 Show and stale
 
 Two read operations with different costs:
 
 - **`show(name)`** — read-only and fast. Loads `refs/meshes/v1/<name>`,
-  the `links` blob from the commit's tree, and each referenced Link
-  blob. Returns the Mesh's stored state as-is: commit metadata,
-  message, and per-Link `(anchor_sha, sides)` tuples. No resolver, no
+  the `ranges` blob from the commit's tree, and each referenced Range
+  blob. Returns the Mesh's stored state as-is: commit metadata, message,
+  and per-Range `(anchor_sha, path, start, end, blob)`. No resolver, no
   `git log -L`, no byte comparison. This is what `git mesh <name>`
   invokes.
-- **`stale(name)`** — runs the resolver for every Link and produces a
-  `MeshResolved` with per-Link, per-side status. Exposed as
-  `git mesh stale <name>`. Computationally heavier; users invoke it
-  when they want the drift picture, not just the list.
+- **`stale(name)`** — runs the resolver for every Range and produces a
+  `MeshResolved` with per-Range status. Exposed as `git mesh stale
+  <name>`. Computationally heavier; users invoke it when they want the
+  drift picture, not just the list.
 
 Neither has side effects; the stored Mesh is never modified.
 
-### 6.4 History and revert
+### 6.6 History and revert
 
 - **History:** `git log refs/meshes/v1/<name>` walks every prior state
-  of the Mesh. `git log -p` shows the `links` diff per edit; each
+  of the Mesh. `git log -p` shows the `ranges` diff per edit; each
   commit's message is the Mesh's message at that point.
-- **Revert:** `git update-ref refs/meshes/v1/<name> <older-commit>`
-  rolls the Mesh back to a prior state. The rolled-over commits remain
-  in the object database and are reachable via `git reflog`.
+- **Revert:** `git mesh revert <name> <commit-ish>` rolls the Mesh
+  forward to the state at `<commit-ish>` by writing a new commit whose
+  tree matches it. History is never rewritten; the restoration is a
+  normal fast-forward append.
 
-### 6.5 Structural operations
+### 6.7 Doctor
 
-These mirror git's own file-level commands (`git rm`, `git mv`,
-`git restore`) and are surfaced as subcommands rather than as flags on
-the name form — consistent with git's convention for destructive or
-ref-shape-changing operations.
+`git mesh doctor` audits the local mesh setup for misconfiguration and
+reports actionable findings. It is scoped to setup problems — hooks,
+refspecs, stray staging state, and reachability — not range drift
+(`git mesh stale` owns that axis). Checks include:
 
-- **`git mesh rm <name>`** — delete the Mesh's ref:
+- **Missing post-commit hook.** Detects the absence of a `post-commit`
+  hook that auto-commits pending staged meshes after a source commit.
+  Prints the suggested hook and the install path.
+
+  **Suggested post-commit hook** (installed at `.git/hooks/post-commit`):
+
+  ```bash
+  #!/bin/sh
+  git mesh commit
+  ```
+
+  With no `<name>`, `git mesh commit` commits every mesh that has a
+  non-empty staging area. The command itself is defensive about git
+  operations that replay commits: it no-ops when any of
+  `.git/rebase-merge/`, `.git/rebase-apply/`, `.git/CHERRY_PICK_HEAD`,
+  `.git/REVERT_HEAD`, or `.git/MERGE_HEAD` is present. This keeps the
+  hook safe to leave installed — mid-rebase `post-commit` firings
+  don't anchor ranges to transient intermediate commits.
+
+- **Missing pre-commit hook.** Detects the absence of a `pre-commit`
+  hook that checks staged ranges for working tree drift before a source
+  commit lands.
+
+  **Suggested pre-commit hook** (installed at `.git/hooks/pre-commit`):
+
+  ```bash
+  #!/bin/sh
+  git mesh status --check
+  ```
+
+- **Stale or corrupt staging area files.** Checks
+  `.git/mesh/staging/` for malformed operation lines, missing sidecar
+  files, and orphaned sidecar files (sidecar with no corresponding `add`
+  line). Warns on each finding with the file and line number.
+
+- **Missing refspec configuration.** Scans `git config remote.*.fetch`
+  and `remote.*.push` for each remote. If `refs/ranges/*` or
+  `refs/meshes/*` are absent from both directions on a remote the user
+  has likely pushed to, reports the remote and prints the refspec
+  lines that would be auto-added on the next `git mesh push`.
+
+- **Orphan range references.** Walks every `refs/meshes/v1/*`, reads
+  its `ranges` blob, and confirms each referenced Range id exists at
+  `refs/ranges/v1/<id>`. Reports each mesh that references a missing
+  Range id, with the id and the suggested remediation (`git mesh
+  fetch` if the range lives on a remote; otherwise `git mesh rm` +
+  re-anchor). Does not run the resolver — this is a reachability
+  check, not a staleness check.
+
+- **Missing or corrupt file index.** Checks that `.git/mesh/file-index`
+  exists, has a `# mesh-index v1` header, and is parseable. If not,
+  reports the problem and regenerates the index immediately. This is
+  the one doctor check that self-heals rather than just reporting.
+
+- **Dangling range refs.** Enumerates `refs/ranges/v1/*` and reports
+  range refs not referenced by any mesh. These are usually harmless
+  (pending `git gc`) but can indicate a failed write or a mesh that
+  was force-deleted without `git gc` since; the doctor just surfaces
+  them so the user can decide.
+
+### 6.8 Structural operations
+
+These mirror git's own file-level commands and are surfaced as
+subcommands rather than flags — consistent with git's convention for
+destructive or ref-shape-changing operations.
+
+- **`git mesh delete <name>`** — delete the Mesh's ref:
   `git update-ref -d refs/meshes/v1/<name>`. Reachable commits stay in
   the object database until `git gc` collects them; the ref is gone
   immediately.
 - **`git mesh mv <old> <new>`** — rename:
   `git update-ref refs/meshes/v1/<new> <commit>` followed by
-  `git update-ref -d refs/meshes/v1/<old>`, both atomic. Analogous to
-  `git branch -m`. If you want an alias, leave both refs in place —
-  the tool exposes `git mesh mv --keep <old> <new>` as a convenience
-  that omits the delete step.
-- **`git mesh restore <name> <commit-ish>`** — roll the Mesh forward
-  to the state at `<commit-ish>` by writing a new commit whose tree
-  matches it. History is never rewritten; the restoration is a normal
-  fast-forward. Equivalent in intent to `git restore --source=<rev>`
-  for files.
-- **Delete a Link blob** is never done directly; Links are referenced
+  `git update-ref -d refs/meshes/v1/<old>`, both atomic.
+- **`git mesh restore <name>`** — clear the staging area for `<name>`:
+  deletes all `.git/mesh/staging/<name>*` files (operations file, `.msg`,
+  and all `.<N>` sidecar files). Analogous to `git restore --staged` on
+  all files.
+- **Delete a Range blob** is never done directly; Ranges are referenced
   by Mesh commits and tracked by git's reachability. Once no Mesh
-  references a Link, `git gc` collects its blob. If a Mesh somehow
-  references a missing Link id (e.g. a partial clone), the resolver
-  reports that Link as `ORPHANED`.
+  references a Range, `git gc` collects its blob. If a Mesh somehow
+  references a missing Range id (e.g. a partial clone), the resolver
+  reports that Range as `ORPHANED`.
+
+**Orphan handling (graceful degradation).** A Range is `ORPHANED` when
+its `anchor_sha` is unreachable from any ref, the Range blob itself is
+missing, or the anchor's `path` blob has been gc'd. In every case the
+resolver cannot materialize anchored bytes, so no diff is produced. The
+Range remains in the Mesh; read operations still list it with status
+`ORPHANED` and a short hint (`anchor <short-sha> unreachable — try
+\`git fetch\` or check for a force-push`). The user recovers manually
+by staging `rm` + `add` to re-anchor at a known commit. Orphans never
+abort a read; `git mesh <name>` and `git mesh stale` always succeed.
 
 ## 7. Sync
 
@@ -807,14 +908,15 @@ ref-shape-changing operations.
 
 ```ini
 [remote "origin"]
-    fetch = +refs/links/*:refs/links/*
-    push  = +refs/links/*:refs/links/*
+    fetch = +refs/ranges/*:refs/ranges/*
+    push  = +refs/ranges/*:refs/ranges/*
     fetch = +refs/meshes/*:refs/meshes/*
     push  = +refs/meshes/*:refs/meshes/*
 ```
 
-The `*` matches every schema version. To pin a client to a single version,
-narrow the refspec to `refs/links/v1/*` and `refs/meshes/v1/*`.
+The `*` matches every schema version. To pin a client to a single
+version, narrow the refspec to `refs/ranges/v1/*` and
+`refs/meshes/v1/*`.
 
 Refspecs are configured **lazily**: the first `fetch` or `push` that
 touches a remote adds missing refspec lines idempotently via
@@ -822,11 +924,11 @@ touches a remote adds missing refspec lines idempotently via
 
 ### 7.2 Remote visibility
 
-Most hosts (GitHub, GitLab, Bitbucket) accept arbitrary `refs/*` namespaces
-over the normal git protocol, but their web UIs do not render them. Use
-`git ls-remote origin 'refs/meshes/*'` to list them. Branch-protection
-rules do not apply to custom refs; the tool's write path is the integrity
-boundary.
+Most hosts (GitHub, GitLab, Bitbucket) accept arbitrary `refs/*`
+namespaces over the normal git protocol, but their web UIs do not render
+them. Use `git ls-remote origin 'refs/meshes/*'` to list them.
+Branch-protection rules do not apply to custom refs; the tool's write
+path is the integrity boundary.
 
 ## 8. Merge semantics
 
@@ -834,32 +936,36 @@ boundary.
 
 Two clients both edit the same Mesh on different local branches. Each
 produces a new Mesh commit whose parent is the shared tip. First push
-wins; the second push to `refs/meshes/v1/<id>` is rejected as
+wins; the second push to `refs/meshes/v1/<name>` is rejected as
 non-fast-forward, identical to a branch.
 
 ### 8.2 Three-way merge
 
 `git merge` (or `git merge-tree` for headless resolution) performs the
-standard three-way merge on the Mesh commits. Because the `links` file
-is canonicalized — sorted, deduplicated, one id per line, trailing
-newline — independent edits produce non-conflicting diffs. The
-message lives on the commit object, so message edits are a normal
+standard three-way merge on the Mesh commits. The `ranges` file is
+canonicalized — sorted by `(path, start, end)`, one id per line,
+trailing newline, uniqueness enforced at write time rather than by a
+dedup pass — so independent edits in different files merge cleanly.
+Concurrent adds in the *same* file at adjacent lines can still produce
+textual conflicts even though the range ids are distinct; these are
+trivial to resolve (take both) and git's merge driver surfaces them
+with a normal three-way markup. The message
+lives on the commit object, so message edits are a normal
 commit-message merge. Conflicts arise exactly when two branches
 disagree on the same piece of state:
 
-- Two branches reconciled the same side of the same Link to different
-  new ranges (producing different replacement Link ids).
+- Two branches re-anchored the same range to different new locations
+  (producing different replacement Range ids).
 - Two branches edited the message to different text.
-- Two branches added distinct new Links (usually clean; the merge
+- Two branches added distinct new Ranges (usually clean; the merge
   interleaves them into the sorted list).
 
 ### 8.3 Resolving
 
-The merge commit's tree (its `links` file) and message record the
+The merge commit's tree (its `ranges` file) and message record the
 resolution. Downstream readers see the same state. Since the prior
 commits remain in history, no data is lost; a reverted decision can be
-reinstated by checking out the
-earlier commit and re-applying.
+reinstated by checking out the earlier commit and re-applying.
 
 ## 9. Repository visibility
 
@@ -887,7 +993,7 @@ There is no git config that silently excludes a custom namespace from
 - To drop ref-name decoration noise:
   `git config log.excludeDecoration refs/meshes/*`.
 
-Link refs point at blobs, not commits, so no `--log`-family command
+Range refs point at blobs, not commits, so no `--log`-family command
 traverses them regardless of flags.
 
 ## 10. CLI reference
@@ -902,90 +1008,103 @@ git mesh <subcommand> [<args>]          # everything else
 
 ### 10.2 Commands
 
-Reads are the bare `<name>` form. Writes go through `git mesh commit`
-(analogous to `git commit`: one invocation = one commit, create or
-update). Destructive and structural operations are their own verbs,
-mirroring `git rm` / `git mv` / `git restore`.
-
 ```
 Reading
   git mesh                              # list every mesh (like `git branch`)
+  git mesh ls                           # list all files that have any mesh range
+  git mesh ls <path>                    # list all ranges in all meshes for this file
+  git mesh ls <path>#L<start>-L<end>    # list ranges overlapping this line range
   git mesh <name>                       # show the mesh (like `git show`)
-  git mesh <name> --oneline             # one line per Link, no commit header
+  git mesh <name> --oneline             # one line per Range, no commit header
   git mesh <name> --format=<fmt>        # format-string override
   git mesh <name> --no-abbrev           # full 40-char shas
   git mesh <name> --at <commit-ish>     # show state at a past revision
   git mesh <name> --log [--oneline] [--limit <n>]
-  git mesh <name> --diff <rev>..<rev>   # compare two states
-  git mesh stale <name>                 # run the resolver, report drift
+  git mesh stale [<name>]               # run the resolver, report drift
 
-Writing (one invocation = one commit; creates the mesh on first write)
-  git mesh commit <name>
-    [--link <rangeA>:<rangeB>] ...      # add a Link
-    [--unlink <rangeA>:<rangeB>] ...    # remove a Link
-    [--copy-detection off|same-commit|any-file-in-commit|any-file-in-repo]
-    [--ignore-whitespace / --no-ignore-whitespace]
-    [--at <commit-ish>]                 # default: HEAD; applies to new Links
-    [--amend]                           # reword the tip commit instead
-    (-m <msg> | -F <file> | --edit)
+Staging (write to staging area; no mesh commit yet)
+  git mesh add <name> <range>...        # stage ranges to add
+    [--at <commit-ish>]                 # anchor SHA for every range in this invocation
+                                        # (default: HEAD; resolved eagerly and frozen
+                                        #  into the staging entry)
+  git mesh rm <name> <range>...         # stage ranges to remove
+  git mesh message <name>               # set the staged message
+    [-m <msg> | -F <file> | --edit]
+                                        # bare form opens $EDITOR on a
+                                        # pre-populated template; saving
+                                        # empty aborts without changes
+
+Committing (resolve staged operations and write a mesh commit)
+  git mesh commit [<name>]              # commit all staged meshes, or just <name>
 
 Structural
-  git mesh rm <name>                    # delete the mesh's ref
-  git mesh mv <old> <new>               # rename
-  git mesh restore <name> <commit-ish>  # fast-forward to a past state
+  git mesh restore <name>               # clear the staging area
+  git mesh revert <name> <commit-ish>   # fast-forward to a past state
                                         # (new commit whose tree matches
                                         #  <commit-ish>; no history rewrite)
+  git mesh delete <name>                # delete the mesh's ref entirely
+  git mesh mv <old> <new>               # rename
+
+Configuration
+  git mesh config <name>                # list committed config; staged overrides marked
+  git mesh config <name> <key>          # print the committed value of <key>
+  git mesh config <name> <key> <value>  # stage a mesh-level resolver option
+  git mesh config <name> --unset <key>  # stage a reset to the built-in default
 
 Maintenance
   git mesh fetch [<remote>]
   git mesh push  [<remote>]             # auto-configures refspec on first run
   git mesh doctor
+  git mesh status <name>                # show staging area state (see §6.4)
+  git mesh status --check               # exit non-zero if any staged range has drifted
 ```
 
-**Semantics of a single `commit` invocation:**
+**Staging workflow.** `git mesh add`, `git mesh rm`, and `git mesh message`
+write to the staging area; `git mesh commit` resolves and finalizes. This
+mirrors git's own `git add` / `git commit` separation. Multiple add and rm
+invocations accumulate in the staging area; one `git mesh commit` lands
+them all in a single mesh commit. With no `<name>`, `git mesh commit`
+commits every mesh that has a non-empty staging area — this is how the
+post-commit hook works.
 
-- *Create:* `git mesh commit <name> --link <pair> -m "..."` on a name
-  that doesn't yet exist. Any combination of `--link` / `--unlink` is
-  accepted; the first commit is the one that creates the ref.
-- *Add/remove scope:* `--link` and `--unlink` are equal citizens. Use
-  either or both in one invocation.
-- *Reconcile drift:* one `--unlink` paired with one `--link` in the
-  same invocation — the old Link goes, the new one arrives, one commit.
-- *Re-anchor:* `--unlink X:Y --link X:Y` (same pair on both flags)
-  removes the existing Link and adds a fresh one at HEAD with the
-  same ranges. This is the only legitimate way to add a pair the
-  Mesh already contains.
-- *Reword:* `--amend -m "..."` with no `--link`/`--unlink`.
-- *Empty commits are an error:* `git mesh commit <name>` with no
-  `--link`, `--unlink`, or `--amend` does nothing.
-- *Collision errors are atomic:* `--link <pair>` on a pair the Mesh
-  already contains errors before any object is written. Same for
-  `--unlink <pair>` when the pair isn't present. All-or-nothing.
+**Semantics of `git mesh commit`:**
+
+- *Create:* first commit on a fresh name creates the ref.
+- *Re-anchor:* `git mesh rm <name> <range>` then
+  `git mesh add <name> <range>` (same location) removes the existing
+  Range and adds a fresh one anchored at `--at` (default HEAD). This is
+  the only legitimate way to re-add a currently-present `(path, start, end)`.
+- *Empty staging area is an error:* `git mesh commit` with nothing
+  staged does nothing.
+- *Config-only or message-only commits are allowed.* A staged config
+  change or a staged message alone produces a new mesh commit; the
+  unchanged pieces (ranges, unchanged config keys, and — if no `.msg`
+  is staged — the commit message) are inherited from the parent. This
+  is how a typo in the relationship description is fixed without
+  touching ranges: `git mesh message <name> -m "…"` followed by `git
+  mesh commit <name>`.
+- *First commit on a new mesh requires a message.* There is no parent
+  to inherit from; `git mesh commit` errors until `git mesh message` or
+  an equivalent flag has supplied one.
+- *Collision errors are atomic:* an add that duplicates an existing
+  `(path, start, end)` errors before any object is written. All-or-nothing.
 
 **Reserved names.** Mesh names cannot collide with subcommands:
-`commit`, `rm`, `mv`, `restore`, `stale`, `fetch`, `push`, `doctor`,
-`log`, `help`. Using any of these as a `<name>` errors at create time.
+`add`, `rm`, `commit`, `message`, `restore`, `revert`, `delete`, `mv`,
+`stale`, `fetch`, `push`, `doctor`, `log`, `config`, `status`, `ls`,
+`help`.
 
-### 10.3 Range and Link syntax
+### 10.3 Range syntax
 
 ```
 Range      <path>#L<start>-L<end>
            e.g. src/Button.tsx#L42-L50
-
-Link pair  <rangeA>:<rangeB>
-           e.g. src/Button.tsx#L42-L50:server/routes.ts#L13-L34
 ```
 
-- A **range** picks one anchored line range. The `#L<start>-L<end>`
-  form matches GitHub's URL-fragment convention, so a range pasted
-  from a browser URL works verbatim.
-- A **Link pair** is two ranges joined by `:`. Used with `--link` and
-  `--unlink` — these are the only forms that name a whole Link.
-
-Within a Mesh, every Link has a unique unordered pair of sides (by
-range), so a pair always identifies exactly one Link. There is no
-single-range form for addressing a Link; a removal is always expressed
-as `--unlink <rangeA>:<rangeB>`.
+- The `#L<start>-L<end>` form matches GitHub's URL-fragment convention,
+  so a range pasted from a browser URL works verbatim.
+- Within a Mesh, every Range has a unique `(path, start, end)`, so a
+  range address always identifies exactly one Range.
 
 ### 10.4 Read output format
 
@@ -1002,49 +1121,61 @@ Date:   <commit date>
 
     <body>
 
-Links (<N>):
-    <short-sha>  <rangeA>:<rangeB>
-    <short-sha>  <rangeA>:<rangeB>
+Ranges (<N>):
+    <short-sha>  <path>#L<start>-L<end>
+    <short-sha>  <path>#L<start>-L<end>
     ...
 ```
 
 - **Header line** is `mesh <name>`, mirroring `git show`'s `commit <sha>`.
 - **`commit`, `Author`, `Date`** are taken from the Mesh's tip commit
-  object. Full sha by default for `commit`; abbreviated for Link shas.
+  object. Full sha by default for `commit`; abbreviated for Range shas.
 - **Message** is indented four spaces, the same rendering `git show`
-  uses. Subject, blank line, body, trailers — all as written.
-- **Links section** is `<anchor-sha> <rangeA>:<rangeB>`, one per line.
-  The `<rangeA>:<rangeB>` portion is exactly the syntax accepted by
-  `--unlink`, so a line of output pastes directly into an edit. Order
-  is the Mesh's canonical (sorted) order; stable across runs.
-- `--oneline` drops the header and prints only the Links section body
-  (one Link per line). `--format=<fmt>` takes a git-log-style format
-  string. `--no-abbrev` shows full 40-char shas.
+  uses.
+- **Ranges section** lists `<anchor-sha> <path>#L<start>-L<end>`, one
+  per line. Order is the Mesh's canonical (sorted) order; stable across
+  runs.
+- `--oneline` drops the header and prints only the Ranges section body.
+  `--no-abbrev` shows full 40-char shas.
+- `--format=<fmt>` accepts the same format-string vocabulary as `git log
+  --pretty=format:` — `%H`, `%h`, `%an`, `%ae`, `%at`, `%ai`, `%s`, `%b`,
+  `%B`, `%n`, `%%`, `%C(color)` etc. — since the mesh *is* a commit, so
+  every commit-scoped placeholder works verbatim. Mesh-specific data is
+  exposed via `git for-each-ref`-style tokens: `%(ranges)` (one
+  `<short-sha>  <path>#L<start>-L<end>` per line in canonical order),
+  `%(ranges:count)` (integer), `%(config:<key>)` (the committed value
+  of a config key). Unknown placeholders are left literal, matching
+  git's behavior. No mesh-specific preset (`--pretty=short` etc. apply
+  as in `git log`).
 
 #### `git mesh stale`
 
-`git mesh stale` is designed to be the daily-use command and
-CI-friendly from day one. It resolves each Link in a Mesh, reports
-drift per side with culprit-commit attribution, and emits a
-ready-to-paste reconcile command under every stale finding.
+`git mesh stale` resolves each Range in a Mesh and reports drift with
+culprit-commit attribution.
 
 **Staleness rule.** Any status other than `FRESH` is stale. `MOVED`
-counts — if a range shifted, a human should at least glance at it
-even though the bytes are identical. No gradation flag; one rule.
+counts — if a range shifted, a human should at least glance at it even
+though the bytes are identical. No gradation flag; one rule.
 
 **Synopsis.**
 
 ```
 git mesh stale [<name>]
     [--format=human|porcelain|json|junit|github-actions]
-    [--exit-code]                   # non-zero if any Link is not FRESH
+    [--no-exit-code]                # force exit 0 even with findings
     [--oneline | --stat | --patch]  # detail level
-    [--since <commit-ish>]          # only Links anchored at or after this commit
+    [--since <commit-ish>]          # only Ranges anchored at or after this commit
 ```
 
 With `<name>`, reports one Mesh. Without, reports every Mesh in the
 repo, worst-first. Reads are purely local; users run `git mesh fetch`
 first if they want remote state.
+
+`--since <commit-ish>` filters by anchor age: only Ranges whose
+`anchor_sha` is in the revision range `<commit-ish>..HEAD` are
+considered. Ranges anchored before `<commit-ish>` are skipped
+entirely, not reported as `FRESH`. Useful in CI for "report drift
+introduced on this branch" — point `--since` at the merge-base.
 
 **Default (human) output.**
 
@@ -1054,49 +1185,62 @@ commit e0f92a3b8c1d0f5e6a7b2c4d9e1f0a3b8c1d0f5e
 Author: John Wehr <john@example.com>
 Date:   Wed Apr 22 11:14:03 2026 +0000
 
-    ABC-123: front-end components reflect these back-end endpoints
+    ABC-123: front-end components reflect back-end endpoints
 
-2 stale of 3 links:
+3 stale of 5 ranges:
 
-  MODIFIED   63d239a4  src/Button.tsx#L42-L50:server/routes.ts#L13-L34
-             ├─ FRESH     src/Button.tsx#L42-L50
-             └─ MODIFIED  server/routes.ts#L13-L34 → L15-L36  (3/22 lines rewritten)
-                caused by 4e8b2c1a refactor: extract session helper  (2 days ago)
+Orphaned ranges:
 
-             reconcile with:
-               git mesh commit frontend-backend-sync \
-                   --unlink src/Button.tsx#L42-L50:server/routes.ts#L13-L34 \
-                   --link   src/Button.tsx#L42-L50:server/routes.ts#L15-L36 \
-                   -m "..."
+  src/auth.ts#L1-L20
+  anchor e3f4a5b6 is unreachable — run `git fetch` or check for a force-push
 
-  MOVED      a1b2c3d4  src/types.ts#L8-L15:server/schema.ts#L20-L27
-             └─ MOVED     server/schema.ts#L20-L27 → L24-L31  (file unchanged, lines shifted)
+Changed ranges:
 
-  FRESH      9e8f7d6c  src/Form.tsx#L12-L40:server/validate.ts#L5-L22
+  server/routes.ts#L13-L34
+  caused by 4e8b2c1a refactor: extract session helper  (2 days ago)
+
+--- server/routes.ts#L13-L34 (anchored)
++++ server/routes.ts#L15-L36 (HEAD)
+@@ -13,5 +15,6 @@
+  function handleClick(event) {
+-    const session = getSession();
++    const session = getSession(event.target);
+  }
+
+  src/old.ts#L1-L10
+  caused by 7f1a2b3c refactor: remove legacy code  (1 week ago)
+
+--- src/old.ts#L1-L10 (anchored)
++++ /dev/null
+@@ -1,10 +0,0 @@
+-function legacyHandler() {
+-    res.send(deprecated());
+-}
+
+Moved ranges:
+
+  server/schema.ts#L20-L27 → server/schema.ts#L24-L31
 ```
 
 **Output conventions.**
 
-- **Summary line first** (`N stale of M links`), mirroring `git status`'s
+- **Summary line first** (`N stale of M ranges`), mirroring `git status`'s
   header-then-body cadence.
-- **Grouped by status, worst-first:** `ORPHANED` → `MISSING` →
-  `REWRITTEN` → `MODIFIED` → `MOVED` → `FRESH`.
-- **Per-side tree** (`├─` / `└─`) so a one-sided drift is visually
-  distinct from a two-sided one.
-- **Culprit commit attribution** on `MODIFIED` / `REWRITTEN` sides: the
-  short sha and subject of the commit that introduced the drift, found
-  via `git log -L`. Not shown on `MOVED` — there's no meaningful culprit
-  for a pure location shift.
-- **Ready-to-paste reconcile command** under every stale Link. Reading
-  `stale` always lands on an actionable next step.
-- **Pasteable `<rangeA>:<rangeB>`** — the exact syntax `--unlink`
-  accepts, so any line is copyable without edit.
+- **Grouped by status, worst-first:** `Orphaned ranges` → `Changed ranges`
+  → `Moved ranges`. Fresh ranges are not shown.
+- **Flat diffs** — no indentation, matching `git diff` output directly.
+- **Culprit commit attribution** on `Changed` ranges: the short sha and
+  subject of the commit that introduced the drift, found via `git log -L`.
+  Not shown on `Moved` — there is no meaningful culprit for a pure
+  location shift.
+- **Deletion is a diff** — a range that no longer exists is shown as a
+  removal against `/dev/null`, not a special case.
 
-**Exit codes.**
+**Exit codes.** Fail-closed by default: CI that runs `git mesh stale`
+gates on cleanliness without remembering a flag.
 
-- `0` — no stale Links in scope, or `--exit-code` not passed.
-- `1` — at least one Link is not `FRESH`; only returned when
-  `--exit-code` is passed.
+- `0` — no stale Ranges in scope, or `--no-exit-code` was passed.
+- `1` — at least one Range is not `FRESH` (default behavior).
 - `2` — tool error (missing repo, corrupt ref, etc.). Distinct from `1`
   so CI can tell "should fail the build" from "tool is broken."
 
@@ -1105,10 +1249,10 @@ Date:   Wed Apr 22 11:14:03 2026 +0000
 - **`--format=porcelain`** — stable one-line-per-finding schema for
   shell pipelines.
 - **`--format=json`** — versioned from v1: `{"version": 1, "mesh",
-  "commit", "links": [...]}`. Each Link entry mirrors the LSP
+  "commit", "ranges": [...]}`. Each Range entry mirrors the LSP
   `Diagnostic` shape (`severity`, `range`, `message`, `code`,
-  `data.culprit`, `data.reconcile_command`), so editor plugins consume
-  it directly and surface squiggles + quick-fixes.
+  `data.culprit`), so editor plugins consume it directly and surface
+  squiggles.
 - **`--format=junit`** — generic CI integration.
 - **`--format=github-actions`** — `::warning file=<path>,line=<n>::<msg>`
   annotations that land on the offending line in PR reviews.
@@ -1117,15 +1261,13 @@ Date:   Wed Apr 22 11:14:03 2026 +0000
 
 1. **Exit-code discipline + `--format=porcelain` and `--format=json`.**
    Without these, no automation can use the command. Ship with v1.
-2. **Per-side breakdown + culprit attribution.** Turns "something is
-   wrong" into "here's what and here's why."
-3. **Ready-to-paste reconcile command** under each stale finding.
-   Closes the feedback loop; the user never reconstructs flags by hand.
-4. **`--format=github-actions`, `--format=junit`, `--since`.** Additive
+2. **Culprit attribution.** Turns "something is wrong" into "here's what
+   and here's why."
+3. **`--format=github-actions`, `--format=junit`, `--since`.** Additive
    CI ergonomics once the core is solid.
 
-Status tokens are the `LinkStatus` enum values from §4.3 (`FRESH`,
-`MOVED`, `MODIFIED`, `REWRITTEN`, `MISSING`, `ORPHANED`).
+Status tokens are the `RangeStatus` enum values from §4.4 (`FRESH`,
+`MOVED`, `CHANGED`, `ORPHANED`).
 
 ### 10.5 Config
 
@@ -1136,26 +1278,55 @@ mesh.defaultRemote  string, default "origin". Used by `git mesh fetch`
                     and `git mesh push` when no remote is supplied.
 ```
 
+Per-mesh resolver options (`copy-detection`, `ignore-whitespace`) are
+staged via `git mesh config <name> <key> <value>` and committed with
+the next `git mesh commit`. They are stored in the mesh commit's
+`config` file (see §4.3) and sync with the mesh.
+
+Read forms mirror `git config`:
+
+- `git mesh config <name>` lists every committed key/value for the
+  mesh. Any staged override is shown on a separate line prefixed with
+  `*` and suffixed ` (staged)`, matching `git status`'s convention of
+  reporting committed-vs-pending separately.
+- `git mesh config <name> <key>` prints the committed value of `<key>`
+  alone (suitable for scripting). Unknown keys exit non-zero.
+- `git mesh config <name> --unset <key>` stages a reset: on the next
+  `git mesh commit`, `<key>` is rewritten to its built-in default in
+  the committed `config` blob. (The tool always writes every default
+  explicitly per §4.3, so "unset" means "restore the default value,"
+  not "omit the line.")
+
+Reads never touch the staging area beyond inspection and never
+produce a commit.
+
 **Reads never touch the network.** `git mesh <name>`, `git mesh stale`,
-`git mesh --log`, and every other read operation work entirely against
-local object storage. To incorporate remote updates, run
-`git mesh fetch` explicitly — the same discipline git applies to
-`git log`, `git show`, `git status`, and `git blame`.
+and every other read operation work entirely against local object
+storage. To incorporate remote updates, run `git mesh fetch` explicitly
+— the same discipline git applies to `git log`, `git show`, `git
+status`, and `git blame`.
 
 ### 10.6 Examples
 
 ```
-# Create: `git mesh commit` on a fresh name creates the ref. All Links
-# share the same anchor commit (HEAD by default).
-$ git mesh commit frontend-backend-sync \
-      --link src/Button.tsx#L42-L50:server/routes.ts#L13-L34 \
-      --link src/types.ts#L8-L15:server/schema.ts#L20-L27 \
-      -m "ABC-123: front-end components reflect these back-end endpoints
+# Stage ranges — no commit yet
+$ git mesh add frontend-backend-sync \
+      src/Button.tsx#L42-L50 \
+      server/routes.ts#L13-L34 \
+      src/types.ts#L8-L15 \
+      server/schema.ts#L20-L27
+
+# Set the message separately
+$ git mesh message frontend-backend-sync -m "ABC-123: front-end components reflect these back-end endpoints
 
 Owner: team-billing"
+
+# Commit: adds without --at resolve their anchor to HEAD at this moment;
+# writes the mesh commit, clears the staging area
+$ git mesh commit frontend-backend-sync
 created refs/meshes/v1/frontend-backend-sync
 
-# Show: fast read, no resolver. Header + message + Link list with anchor shas.
+# Show: fast read, no resolver. Header + message + Range list with anchor shas.
 $ git mesh frontend-backend-sync
 mesh frontend-backend-sync
 commit e0f92a3b8c1d0f5e6a7b2c4d9e1f0a3b8c1d0f5e
@@ -1166,73 +1337,83 @@ Date:   Wed Apr 22 11:14:03 2026 +0000
 
     Owner: team-billing
 
-Links (2):
-    63d239a4  src/Button.tsx#L42-L50:server/routes.ts#L13-L34
-    63d239a4  src/types.ts#L8-L15:server/schema.ts#L20-L27
+Ranges (4):
+    63d239a4  server/routes.ts#L13-L34
+    63d239a4  server/schema.ts#L20-L27
+    63d239a4  src/Button.tsx#L42-L50
+    63d239a4  src/types.ts#L8-L15
 
-# Stale: runs the resolver for every Link. Slower; shows drift.
-$ git mesh stale frontend-backend-sync
-mesh frontend-backend-sync
-commit e0f92a3b...
-...
-
-Links (2):
-    MODIFIED   63d239a4  src/Button.tsx#L42-L50:server/routes.ts#L13-L34
-        FRESH      src/Button.tsx#L42-L50
-        MODIFIED   server/routes.ts#L13-L34 → L15-L36  (3/22 lines rewritten)
-    FRESH      63d239a4  src/types.ts#L8-L15:server/schema.ts#L20-L27
-
-# Reconcile a drifted Link = --unlink the old pair, --link the new pair,
-# one commit. The unchanged side is repeated verbatim.
-$ git mesh commit frontend-backend-sync \
-      --unlink src/Button.tsx#L42-L50:server/routes.ts#L13-L34 \
-      --link   src/Button.tsx#L42-L50:server/routes.ts#L15-L36 \
-      -m "routes.ts refactor"
-
+# Stale: runs the resolver for every Range. Shows drift.
 $ git mesh stale frontend-backend-sync
 ...
-Links (2):
-    FRESH  a1b2c3d4  src/Button.tsx#L42-L50:server/routes.ts#L15-L36
-    FRESH  63d239a4  src/types.ts#L8-L15:server/schema.ts#L20-L27
 
-# Grow scope = another --link.
-$ git mesh commit frontend-backend-sync \
-      --link src/Form.tsx#L12-L40:server/validate.ts#L5-L22 \
-      -m "track form validation too"
+# Reconcile a drifted Range: remove old location, add new location.
+$ git mesh rm frontend-backend-sync server/routes.ts#L13-L34
+$ git mesh add frontend-backend-sync server/routes.ts#L15-L36
+$ git mesh message frontend-backend-sync -m "routes.ts refactor"
+$ git mesh commit frontend-backend-sync
 
-# Reword the tip commit (does not change links).
-$ git mesh commit frontend-backend-sync --amend -m "ABC-123: front/back sync (rev 2)"
+# Stage a config change and commit it with the next mesh commit
+$ git mesh config frontend-backend-sync copy-detection any-file-in-commit
+$ git mesh commit frontend-backend-sync
+
+# Anchor a newly added range against a specific commit rather than HEAD
+# (time-travel: --at is per-add, resolved and frozen at stage time)
+$ git mesh add frontend-backend-sync --at HEAD~1 src/legacy.ts#L1-L20
+$ git mesh commit frontend-backend-sync
 
 # Publish. Refspec is configured automatically on first push.
 $ git mesh push
-configuring refs/{links,meshes}/* on origin... done
-pushed 1 mesh, 4 links
+configuring refs/{ranges,meshes}/* on origin... done
+pushed 1 mesh, 4 ranges
+
+# Automatic commit via post-commit hook (see §6.3)
+$ git mesh add frontend-backend-sync \
+      src/Button.tsx#L42-L50 \
+      server/routes.ts#L13-L34
+$ git mesh message frontend-backend-sync -m "ABC-123: wire Button to routes"
+$ git commit -m "ABC-123: wire Button to routes"
+# post-commit hook fires `git mesh commit` for all staged meshes
 ```
 
 ## 11. Appendix: why these primitives
 
-- **Links are blobs because they are immutable and content-addressed.**
+- **Ranges are blobs because they are immutable and content-addressed.**
   Two identical anchors share storage automatically. The ref is a stable
-  name for a piece of immutable content; "editing" a Link means creating
-  a new one.
+  name for a piece of immutable content; "editing" a Range means
+  creating a new one.
 - **Meshes are commits because they are mutable with history.** A commit
   ref (name + parent chain) is exactly the shape git uses for branches,
   and the same primitive gives edit history, per-edit author/date/message,
   and native three-way merges for concurrent edits — all without any
   custom merge logic.
+- **A Mesh is a set of ranges, not pairs.** The relationship is named by
+  the mesh; no pairwise structure needs to be stored or maintained. If
+  two independent relationships need tracking, that is two meshes.
 - **A Mesh's name is the ref name, branch-style.** No separate
-  name-to-id mapping, no UUID indirection. Renames, aliases, collision
-  detection, and sync all reuse git's existing ref machinery.
+  name-to-id mapping, no UUID indirection. Renames, collision
+  detection, and sync all reuse git's existing ref machinery. Aliases
+  are deliberately not offered — two refs pointing at the same commit
+  diverge the moment either is edited, so "alias" would be misleading.
 - **On-disk records are commit-object-style text, not JSON.** Header
   lines for structured fields, TAB before any field that may contain
-  spaces (paths). Typical Link is ~150 bytes; a Mesh's message is
-  stored once as the commit message rather than duplicated into the
-  tree.
+  spaces (paths). Typical Range is ~80 bytes; a Mesh's message is
+  stored once as the commit message rather than duplicated into the tree.
+- **Mesh config is stored in the commit tree, not as local state.** It
+  syncs with the mesh and its history is visible in `git log -p`.
+  Config changes are staged and committed like range changes (last
+  write wins per key within the staging area, then the committed
+  `config` blob reflects the final values).
 - **Staleness is computed, not stored, because the repo is the only
-  authoritative source of whether content has changed.** A cached
-  status field would either lag the truth or require eager invalidation
-  on every commit; resolving on demand costs a few cheap git plumbing
-  calls per member and is always correct.
+  authoritative source of whether content has changed.** A cached status
+  field would either lag the truth or require eager invalidation on every
+  commit; resolving on demand costs a few cheap git plumbing calls per
+  member and is always correct.
+- **`CHANGED` replaces `MODIFIED`, `REWRITTEN`, and `MISSING`.** The
+  degree of change and whether a range was deleted are both conveyed
+  directly by the diff output. Threshold-based classifications
+  (`MODIFIED` vs `REWRITTEN`) encode policy in the status rather than
+  leaving it to the reader.
 - **Versioned ref namespaces (`v1`) are used instead of a payload
   `version` field so schema recognition happens at the ref level, not
   the blob level.** Readers can enumerate and filter by shape without
