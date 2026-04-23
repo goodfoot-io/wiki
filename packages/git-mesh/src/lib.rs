@@ -2,7 +2,6 @@ pub mod types;
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use std::fs;
 use std::path::Path;
 use std::process::Command;
 pub use types::*;
@@ -189,7 +188,34 @@ pub fn restore_mesh(repo: &gix::Repository, name: &str, commit_ish: &str) -> Res
         commit_ish.to_string()
     };
     let commit_oid = git_stdout(work_dir, ["rev-parse", &revision])?;
-    git_stdout(work_dir, ["update-ref", &mesh_ref, &commit_oid])?;
+    let current_tip = git_stdout(work_dir, ["rev-parse", &mesh_ref]).ok();
+    let tree_oid = git_stdout(work_dir, ["show", "-s", "--format=%T", &commit_oid])?;
+    let message = git_stdout(work_dir, ["show", "-s", "--format=%B", &commit_oid])?;
+
+    let mut args = vec![
+        "commit-tree".to_string(),
+        tree_oid,
+        "-m".to_string(),
+        message,
+    ];
+    if let Some(parent) = current_tip.as_deref() {
+        args.push("-p".to_string());
+        args.push(parent.to_string());
+    }
+
+    let restored_commit = git_stdout_with_identity(work_dir, args.iter().map(String::as_str))?;
+    match current_tip.as_deref() {
+        Some(parent) => git_stdout(work_dir, ["update-ref", &mesh_ref, &restored_commit, parent])?,
+        None => git_stdout(
+            work_dir,
+            [
+                "update-ref",
+                &mesh_ref,
+                &restored_commit,
+                "0000000000000000000000000000000000000000",
+            ],
+        )?,
+    };
     Ok(())
 }
 
@@ -235,19 +261,27 @@ pub fn read_mesh(repo: &gix::Repository, name: &str) -> Result<MeshStored> {
     })
 }
 
-pub fn stale_mesh(_repo: &gix::Repository, _name: &str) -> Result<MeshResolved> {
-    let work_dir = _repo
+pub fn stale_mesh(repo: &gix::Repository, name: &str) -> Result<MeshResolved> {
+    let work_dir = repo
         .workdir()
         .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
-    let mesh = read_mesh(_repo, _name)?;
+    let mesh = read_mesh(repo, name)?;
     let mut links = Vec::with_capacity(mesh.links.len());
 
     for stored_link in mesh.links {
         let link_id = stored_link.id;
-        let sides = [
-            resolve_side(work_dir, &stored_link.sides[0])?,
-            resolve_side(work_dir, &stored_link.sides[1])?,
-        ];
+        let anchor_reachable = is_commit_reachable_from_any_ref(work_dir, &stored_link.anchor_sha)?;
+        let sides = if anchor_reachable {
+            [
+                resolve_side(work_dir, &stored_link.anchor_sha, &stored_link.sides[0])?,
+                resolve_side(work_dir, &stored_link.anchor_sha, &stored_link.sides[1])?,
+            ]
+        } else {
+            [
+                orphaned_side(&stored_link.sides[0]),
+                orphaned_side(&stored_link.sides[1]),
+            ]
+        };
         let status = overall_status(&sides);
 
         links.push(LinkResolved {
@@ -383,76 +417,70 @@ fn read_link_from_ref(work_dir: &Path, id: &str) -> Result<Link> {
     parse_link(&link_text)
 }
 
-fn resolve_side(work_dir: &Path, anchored: &LinkSide) -> Result<SideResolved> {
+fn orphaned_side(anchored: &LinkSide) -> SideResolved {
+    SideResolved {
+        anchored: LinkLocation {
+            path: anchored.path.clone(),
+            start: anchored.start,
+            end: anchored.end,
+            blob: anchored.blob.clone(),
+        },
+        current: None,
+        status: LinkStatus::Orphaned,
+    }
+}
+
+fn resolve_side(work_dir: &Path, anchor_sha: &str, anchored: &LinkSide) -> Result<SideResolved> {
     let anchored_location = LinkLocation {
         path: anchored.path.clone(),
         start: anchored.start,
         end: anchored.end,
         blob: anchored.blob.clone(),
     };
-    let path = work_dir.join(&anchored.path);
-    if !path.exists() {
-        return Ok(SideResolved {
-            anchored: anchored_location,
-            current: None,
-            status: LinkStatus::Missing,
-        });
-    }
-
-    let content = fs::read_to_string(&path)?;
-    let current_blob = git_stdout(work_dir, ["hash-object", &anchored.path])?;
-    let lines: Vec<&str> = content.lines().collect();
     let anchored_lines: Vec<String> = git_stdout(work_dir, ["cat-file", "-p", &anchored.blob])?
         .lines()
         .map(str::to_string)
         .collect();
     let anchored_slice = &anchored_lines[(anchored.start as usize - 1)..(anchored.end as usize)];
 
-    if let Some(current_slice) = slice_lines(&lines, anchored.start, anchored.end)
-        && lines_match(current_slice, anchored_slice, anchored.ignore_whitespace)
-    {
+    let Some(location) = resolve_side_location(work_dir, anchor_sha, anchored)? else {
         return Ok(SideResolved {
             anchored: anchored_location,
-            current: Some(LinkLocation {
-                path: anchored.path.clone(),
-                start: anchored.start,
-                end: anchored.end,
-                blob: current_blob,
-            }),
-            status: LinkStatus::Fresh,
+            current: None,
+            status: LinkStatus::Missing,
         });
-    }
+    };
 
-    if let Some(start) = find_matching_block(&lines, anchored_slice, anchored.ignore_whitespace) {
+    let content = git_stdout(work_dir, ["cat-file", "-p", &location.blob])?;
+    let lines: Vec<&str> = content.lines().collect();
+    let Some(current_slice) = slice_lines(&lines, location.start, location.end) else {
         return Ok(SideResolved {
             anchored: anchored_location,
-            current: Some(LinkLocation {
-                path: anchored.path.clone(),
-                start,
-                end: start + (anchored.end - anchored.start),
-                blob: current_blob,
-            }),
-            status: LinkStatus::Moved,
+            current: Some(location),
+            status: LinkStatus::Missing,
         });
-    }
+    };
 
-    let status = match slice_lines(&lines, anchored.start, anchored.end) {
-        Some(current_slice)
-            if similarity_score(current_slice, anchored_slice, anchored.ignore_whitespace) > 0 =>
+    let status = if lines_match(current_slice, anchored_slice, anchored.ignore_whitespace) {
+        if location.path == anchored.path
+            && location.start == anchored.start
+            && location.end == anchored.end
         {
-            LinkStatus::Modified
+            LinkStatus::Fresh
+        } else {
+            LinkStatus::Moved
         }
-        _ => LinkStatus::Rewritten,
+    } else if similarity_score(current_slice, anchored_slice, anchored.ignore_whitespace) * 2
+        >= anchored_slice.len()
+    {
+        LinkStatus::Modified
+    } else {
+        LinkStatus::Rewritten
     };
 
     Ok(SideResolved {
         anchored: anchored_location,
-        current: Some(LinkLocation {
-            path: anchored.path.clone(),
-            start: anchored.start.min(lines.len() as u32),
-            end: anchored.end.min(lines.len() as u32),
-            blob: current_blob,
-        }),
+        current: Some(location),
         status,
     })
 }
@@ -460,7 +488,11 @@ fn resolve_side(work_dir: &Path, anchored: &LinkSide) -> Result<SideResolved> {
 fn slice_lines<'a>(lines: &'a [&'a str], start: u32, end: u32) -> Option<&'a [&'a str]> {
     let start_index = start.checked_sub(1)? as usize;
     let end_index = end as usize;
-    (end_index <= lines.len()).then_some(&lines[start_index..end_index])
+    if start_index <= end_index && end_index <= lines.len() {
+        Some(&lines[start_index..end_index])
+    } else {
+        None
+    }
 }
 
 fn lines_match(current: &[&str], anchored: &[String], ignore_whitespace: bool) -> bool {
@@ -468,25 +500,6 @@ fn lines_match(current: &[&str], anchored: &[String], ignore_whitespace: bool) -
         && current.iter().zip(anchored.iter()).all(|(left, right)| {
             normalize_line(left, ignore_whitespace) == normalize_line(right, ignore_whitespace)
         })
-}
-
-fn find_matching_block(
-    lines: &[&str],
-    anchored: &[String],
-    ignore_whitespace: bool,
-) -> Option<u32> {
-    let width = anchored.len();
-    if width == 0 || width > lines.len() {
-        return None;
-    }
-
-    for start in 0..=(lines.len() - width) {
-        if lines_match(&lines[start..start + width], anchored, ignore_whitespace) {
-            return Some(start as u32 + 1);
-        }
-    }
-
-    None
 }
 
 fn similarity_score(current: &[&str], anchored: &[String], ignore_whitespace: bool) -> usize {
@@ -514,6 +527,206 @@ fn normalize_line(line: &str, ignore_whitespace: bool) -> String {
     } else {
         normalized
     }
+}
+
+#[derive(Clone, Debug)]
+struct TrackedLocation {
+    path: String,
+    start: u32,
+    end: u32,
+}
+
+fn resolve_side_location(
+    work_dir: &Path,
+    anchor_sha: &str,
+    anchored: &LinkSide,
+) -> Result<Option<LinkLocation>> {
+    let head_sha = git_stdout(work_dir, ["rev-parse", "HEAD"])?;
+    let commits = git_stdout(
+        work_dir,
+        ["rev-list", "--ancestry-path", "--reverse", &format!("{anchor_sha}..{head_sha}")],
+    )?;
+    let mut location = TrackedLocation {
+        path: anchored.path.clone(),
+        start: anchored.start,
+        end: anchored.end,
+    };
+    let mut parent = anchor_sha.to_string();
+
+    for commit in commits.lines().filter(|line| !line.is_empty()) {
+        let Some(next_location) = advance_location(work_dir, &parent, commit, &location, anchored)?
+        else {
+            return Ok(None);
+        };
+        location = next_location;
+        parent = commit.to_string();
+    }
+
+    let blob = git_stdout(work_dir, ["rev-parse", &format!("HEAD:{}", location.path)]).ok();
+    Ok(blob.map(|blob| LinkLocation {
+        path: location.path,
+        start: location.start,
+        end: location.end,
+        blob,
+    }))
+}
+
+fn advance_location(
+    work_dir: &Path,
+    parent: &str,
+    commit: &str,
+    location: &TrackedLocation,
+    anchored: &LinkSide,
+) -> Result<Option<TrackedLocation>> {
+    let next_path = resolve_path_change(work_dir, parent, commit, &location.path, anchored.copy_detection)?;
+    let mut next = TrackedLocation {
+        path: next_path.clone(),
+        start: location.start,
+        end: location.end,
+    };
+    if next_path == location.path {
+        apply_hunks_to_range(work_dir, parent, commit, &mut next)?;
+    }
+    Ok(Some(next))
+}
+
+fn resolve_path_change(
+    work_dir: &Path,
+    parent: &str,
+    commit: &str,
+    path: &str,
+    copy_detection: CopyDetection,
+) -> Result<String> {
+    let mut args = vec![
+        "diff-tree".to_string(),
+        "--no-commit-id".to_string(),
+        "--name-status".to_string(),
+        "-r".to_string(),
+        "-M".to_string(),
+    ];
+    args.extend(copy_detection_args(copy_detection).into_iter().map(str::to_string));
+    args.push(parent.to_string());
+    args.push(commit.to_string());
+
+    let output = git_stdout(work_dir, args.iter().map(String::as_str))?;
+    let mut copied_target = None;
+
+    for line in output.lines().filter(|line| !line.is_empty()) {
+        let mut parts = line.split('\t');
+        let status = parts.next().unwrap_or_default();
+        match status.chars().next() {
+            Some('R') | Some('C') => {
+                let Some(from) = parts.next() else { continue };
+                let Some(to) = parts.next() else { continue };
+                if from == path {
+                    return Ok(to.to_string());
+                }
+                if status.starts_with('C') && copied_target.is_none() && to == path {
+                    copied_target = Some(to.to_string());
+                }
+            }
+            Some('D') => {
+                if parts.next() == Some(path) {
+                    return Ok(path.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(copied_target.unwrap_or_else(|| path.to_string()))
+}
+
+fn copy_detection_args(copy_detection: CopyDetection) -> Vec<&'static str> {
+    match copy_detection {
+        CopyDetection::Off => Vec::new(),
+        CopyDetection::SameCommit => vec!["-C"],
+        CopyDetection::AnyFileInCommit => vec!["-C", "-C"],
+        CopyDetection::AnyFileInRepo => vec!["-C", "-C", "-C"],
+    }
+}
+
+fn apply_hunks_to_range(
+    work_dir: &Path,
+    parent: &str,
+    commit: &str,
+    location: &mut TrackedLocation,
+) -> Result<()> {
+    let output = git_stdout(
+        work_dir,
+        [
+            "diff",
+            "-U0",
+            parent,
+            commit,
+            "--",
+            &location.path,
+        ],
+    )
+    .unwrap_or_default();
+
+    for line in output.lines() {
+        let Some(rest) = line.strip_prefix("@@ -") else {
+            continue;
+        };
+        let Some((old_part, new_rest)) = rest.split_once(" +") else {
+            continue;
+        };
+        let Some((new_part, _)) = new_rest.split_once(" @@") else {
+            continue;
+        };
+        let (old_start, old_count) = parse_hunk_range(old_part)?;
+        let (new_start, new_count) = parse_hunk_range(new_part)?;
+        adjust_range(location, old_start, old_count, new_start, new_count);
+    }
+
+    Ok(())
+}
+
+fn parse_hunk_range(text: &str) -> Result<(u32, u32)> {
+    let (start, count) = match text.split_once(',') {
+        Some((start, count)) => (start.parse()?, count.parse()?),
+        None => (text.parse()?, 1),
+    };
+    Ok((start, count))
+}
+
+fn adjust_range(location: &mut TrackedLocation, old_start: u32, old_count: u32, new_start: u32, new_count: u32) {
+    let old_end = old_start.saturating_add(old_count);
+    let current_len = location.end.saturating_sub(location.start) + 1;
+    let delta = new_count as i64 - old_count as i64;
+
+    if old_end <= location.start {
+        location.start = shift_line(location.start, delta);
+        location.end = shift_line(location.end, delta);
+        return;
+    }
+
+    if old_start > location.end {
+        return;
+    }
+
+    location.start = location.start.min(new_start);
+    let updated_end = location.end as i64 + delta;
+    location.end = updated_end.max(location.start as i64) as u32;
+    if location.end < location.start {
+        location.end = location.start;
+    }
+    if location.end < location.start + current_len.saturating_sub(1) {
+        location.end = location.start + current_len.saturating_sub(1);
+    }
+}
+
+fn shift_line(line: u32, delta: i64) -> u32 {
+    (line as i64 + delta).max(1) as u32
+}
+
+fn is_commit_reachable_from_any_ref(work_dir: &Path, commit: &str) -> Result<bool> {
+    let output = git_stdout(
+        work_dir,
+        ["for-each-ref", "--format=%(refname)", "--contains", commit, "refs"],
+    )?;
+    Ok(output.lines().any(|line| !line.is_empty()))
 }
 
 fn overall_status(sides: &[SideResolved; 2]) -> LinkStatus {

@@ -75,9 +75,20 @@ fn test_structural_restore() -> Result<()> {
         "Updated mesh state",
         &[&first_link_id, &second_link_id],
     )?;
-    assert_ne!(test_repo.read_ref("refs/meshes/v1/my_mesh")?, first_commit);
+    let previous_tip = test_repo.read_ref("refs/meshes/v1/my_mesh")?;
+    assert_ne!(previous_tip, first_commit);
     restore_mesh(&test_repo.repo, "my_mesh", "HEAD~1")?;
+    let restored_tip = test_repo.read_ref("refs/meshes/v1/my_mesh")?;
     let mesh = show_mesh(&test_repo.repo, "my_mesh")?;
     assert_eq!(mesh.name, "my_mesh");
+    assert_eq!(mesh.links, vec![first_link_id.clone()]);
+    assert_eq!(mesh.message, "Original mesh state");
+    assert_ne!(restored_tip, first_commit);
+    assert_ne!(restored_tip, previous_tip);
+    assert_eq!(test_repo.commit_parents(&restored_tip)?, vec![previous_tip]);
+    assert_eq!(
+        test_repo.git_output(["show", "-s", "--format=%T", &restored_tip])?,
+        test_repo.git_output(["show", "-s", "--format=%T", &first_commit])?
+    );
     Ok(())
 }

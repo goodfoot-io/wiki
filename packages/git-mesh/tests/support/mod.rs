@@ -236,4 +236,25 @@ impl TestRepo {
         self.repo = gix::open(self.dir.path())?;
         Ok(())
     }
+
+    pub fn rename_file(&mut self, from: &str, to: &str) -> Result<()> {
+        fs::rename(self.dir.path().join(from), self.dir.path().join(to))?;
+        self.repo = gix::open(self.dir.path())?;
+        Ok(())
+    }
+
+    pub fn copy_file(&mut self, from: &str, to: &str) -> Result<()> {
+        if let Some(parent) = self.dir.path().join(to).parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(self.dir.path().join(from), self.dir.path().join(to))?;
+        self.repo = gix::open(self.dir.path())?;
+        Ok(())
+    }
+
+    pub fn delete_ref(&mut self, name: &str) -> Result<()> {
+        self.git_output(["update-ref", "-d", name])?;
+        self.repo = gix::open(self.dir.path())?;
+        Ok(())
+    }
 }
