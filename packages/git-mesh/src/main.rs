@@ -375,27 +375,18 @@ struct PrintOptions {
 
 fn print_mesh(mesh: &MeshStored, info: &MeshCommitInfo, options: PrintOptions) {
     if options.oneline {
-        println!(
-            "{} {} {}",
-            maybe_abbreviate(&info.commit_oid, options.no_abbrev),
-            mesh.name,
-            info.summary
-        );
         for link in stored_links_sorted(&mesh.links) {
             println!(
-                "{} {}",
-                format_link_pair(link),
-                maybe_abbreviate(&link.anchor_sha, options.no_abbrev)
+                "{}  {}",
+                maybe_abbreviate(&link.anchor_sha, options.no_abbrev),
+                format_link_pair(link)
             );
         }
         return;
     }
 
     println!("mesh {}", mesh.name);
-    println!(
-        "commit {}",
-        maybe_abbreviate(&info.commit_oid, options.no_abbrev)
-    );
+    println!("commit {}", info.commit_oid);
     println!("Author: {} <{}>", info.author_name, info.author_email);
     println!("Date:   {}", info.author_date);
     println!();
@@ -404,9 +395,9 @@ fn print_mesh(mesh: &MeshStored, info: &MeshCommitInfo, options: PrintOptions) {
     println!("Links ({}):", mesh.links.len());
     for link in stored_links_sorted(&mesh.links) {
         println!(
-            "    {} @ {}",
-            format_link_pair(link),
-            maybe_abbreviate(&link.anchor_sha, options.no_abbrev)
+            "    {}  {}",
+            maybe_abbreviate(&link.anchor_sha, options.no_abbrev),
+            format_link_pair(link)
         );
     }
 }
@@ -1149,9 +1140,9 @@ fn format_links_block(mesh: &MeshStored, no_abbrev: bool) -> String {
         .into_iter()
         .map(|link| {
             format!(
-                "{} @ {}",
-                format_link_pair(link),
-                maybe_abbreviate(&link.anchor_sha, no_abbrev)
+                "{}  {}",
+                maybe_abbreviate(&link.anchor_sha, no_abbrev),
+                format_link_pair(link)
             )
         })
         .collect::<Vec<_>>()
