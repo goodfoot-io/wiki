@@ -61,3 +61,45 @@ fn cli_rejects_reserved_names() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn cli_rejects_ref_illegal_names() -> Result<()> {
+    let test_repo = TestRepo::new()?;
+
+    for (name, needle) in [
+        ("foo/bar", "must not contain `/`"),
+        ("foo bar", "whitespace"),
+        (".foo", "start with `.`"),
+        ("foo.lock", "`.lock`"),
+        ("foo..bar", "`..`"),
+        ("foo:bar", "`:`"),
+        ("foo~bar", "`~`"),
+        ("foo^bar", "`^`"),
+        ("foo?bar", "`?`"),
+        ("foo*bar", "`*`"),
+        ("foo[bar", "`[`"),
+        ("foo@{0}", "`@{`"),
+        ("@", "`@`"),
+    ] {
+        let stderr = test_repo.mesh_stderr([
+            "commit",
+            name,
+            "--link",
+            "file1.txt#L1-L5:file2.txt#L10-L15",
+            "-m",
+            "bad",
+        ])?;
+        assert!(
+            stderr.contains(needle),
+            "commit `{name}` stderr = `{stderr}` missing `{needle}`"
+        );
+
+        let mv_stderr = test_repo.mesh_stderr(["mv", "missing", name])?;
+        assert!(
+            mv_stderr.contains(needle),
+            "mv `{name}` stderr = `{mv_stderr}` missing `{needle}`"
+        );
+    }
+
+    Ok(())
+}
