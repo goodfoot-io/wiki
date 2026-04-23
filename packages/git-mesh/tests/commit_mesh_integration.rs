@@ -408,3 +408,144 @@ fn test_commit_mesh_retries_implicit_tip_race_without_partial_link_refs() -> Res
     assert!(test_repo.ref_exists("refs/links/v1/raced-link"));
     Ok(())
 }
+
+#[test]
+fn test_commit_mesh_empty_invocation_message_mentions_flags() -> Result<()> {
+    let test_repo = TestRepo::new()?;
+    let err = commit_mesh(
+        &test_repo.repo,
+        commit_input("my_mesh", vec![], vec![], "nothing"),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("--link") && err.contains("--unlink") && err.contains("--amend"),
+        "expected empty-invocation error to cite --link/--unlink/--amend, got: {err}"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_commit_mesh_amend_with_link_error_mentions_reword_only() -> Result<()> {
+    let test_repo = TestRepo::new()?;
+    let result = commit_mesh(
+        &test_repo.repo,
+        CommitInput {
+            name: "my_mesh".to_string(),
+            adds: vec![[side_spec("file1.txt", 1, 5), side_spec("file2.txt", 10, 15)]],
+            removes: vec![],
+            message: "x".to_string(),
+            anchor_sha: None,
+            expected_tip: None,
+            amend: true,
+        },
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("--amend") && err.contains("reword"),
+        "expected --amend/reword error, got: {err}"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_commit_mesh_duplicate_link_error_points_at_reanchor_idiom() -> Result<()> {
+    let test_repo = TestRepo::new()?;
+    let sides = [side_spec("file1.txt", 1, 5), side_spec("file2.txt", 10, 15)];
+    commit_mesh(
+        &test_repo.repo,
+        commit_input("my_mesh", vec![sides.clone()], vec![], "first"),
+    )?;
+    let err = commit_mesh(
+        &test_repo.repo,
+        commit_input("my_mesh", vec![sides], vec![], "dup"),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("file1.txt#L1-L5:file2.txt#L10-L15"),
+        "expected pair in error, got: {err}"
+    );
+    assert!(
+        err.contains("--unlink") && err.contains("--link") && err.contains("re-anchor"),
+        "expected re-anchor idiom in error, got: {err}"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_commit_mesh_missing_unlink_pair_error_names_pair() -> Result<()> {
+    let test_repo = TestRepo::new()?;
+    // Prime mesh with an unrelated link so --unlink runs against a real tip.
+    commit_mesh(
+        &test_repo.repo,
+        commit_input(
+            "my_mesh",
+            vec![[side_spec("file3.txt", 1, 5), side_spec("file4.txt", 10, 15)]],
+            vec![],
+            "seed",
+        ),
+    )?;
+    let err = commit_mesh(
+        &test_repo.repo,
+        commit_input(
+            "my_mesh",
+            vec![],
+            vec![[range_spec("file1.txt", 1, 5), range_spec("file2.txt", 10, 15)]],
+            "rm",
+        ),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("file1.txt#L1-L5:file2.txt#L10-L15"),
+        "expected pair in error, got: {err}"
+    );
+    assert!(err.contains("--unlink"), "expected --unlink label, got: {err}");
+    Ok(())
+}
+
+#[test]
+fn test_commit_mesh_validation_does_not_write_link_refs_when_later_add_fails() -> Result<()> {
+    let test_repo = TestRepo::new()?;
+    // Seed the mesh with pair P1.
+    let p1 = [side_spec("file1.txt", 1, 5), side_spec("file2.txt", 10, 15)];
+    commit_mesh(
+        &test_repo.repo,
+        commit_input("my_mesh", vec![p1.clone()], vec![], "seed"),
+    )?;
+    let link_refs_before = test_repo.list_refs("refs/links/v1")?;
+
+    // Attempt to add a new pair P2 and a duplicate-of-existing pair P1 in
+    // one invocation. P2 is valid in isolation; P1 must fail. The whole
+    // invocation must be rejected with no new link refs written.
+    let p2 = [side_spec("a.txt", 1, 2), side_spec("b.txt", 3, 4)];
+    let result = commit_mesh(
+        &test_repo.repo,
+        commit_input("my_mesh", vec![p2, p1], vec![], "two adds"),
+    );
+    assert!(result.is_err());
+    let link_refs_after = test_repo.list_refs("refs/links/v1")?;
+    assert_eq!(
+        link_refs_after, link_refs_before,
+        "no link refs should be created when validation fails; got {link_refs_after:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_commit_mesh_intra_invocation_duplicate_link_rejected() -> Result<()> {
+    let test_repo = TestRepo::new()?;
+    let sides = [side_spec("file1.txt", 1, 5), side_spec("file2.txt", 10, 15)];
+    let err = commit_mesh(
+        &test_repo.repo,
+        commit_input("my_mesh", vec![sides.clone(), sides], vec![], "dup"),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("more than once") || err.contains("appears"),
+        "expected intra-invocation duplicate error, got: {err}"
+    );
+    Ok(())
+}

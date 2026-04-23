@@ -19,7 +19,24 @@ const COMMIT_MESH_MAX_ATTEMPTS: usize = 8;
 static TEST_HOOKS_RUN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 pub fn commit_mesh(repo: &gix::Repository, input: CommitInput) -> Result<()> {
+    // ----------------------------------------------------------------
+    // Phase 1: static validation (no repo reads beyond rev-parse, no writes).
+    // Per §6.2, every check that does not depend on the mesh's current tip
+    // runs before any `hash-object` / `mktree` / `commit-tree` / `update-ref`.
+    // ----------------------------------------------------------------
     validate_mesh_name(&input.name)?;
+
+    if input.amend && (!input.adds.is_empty() || !input.removes.is_empty()) {
+        anyhow::bail!(
+            "--amend is reword-only and cannot be combined with --link or --unlink"
+        );
+    }
+    if !input.amend && input.adds.is_empty() && input.removes.is_empty() {
+        anyhow::bail!(
+            "nothing to commit: supply --link, --unlink, or --amend -m <msg>"
+        );
+    }
+
     let work_dir = repo
         .workdir()
         .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
@@ -29,46 +46,96 @@ pub fn commit_mesh(repo: &gix::Repository, input: CommitInput) -> Result<()> {
         None => None,
     };
 
-    if input.amend && (!input.adds.is_empty() || !input.removes.is_empty()) {
-        anyhow::bail!("amend does not accept link changes");
-    }
-
-    if !input.amend && input.adds.is_empty() && input.removes.is_empty() {
-        anyhow::bail!("mesh commit must add or remove at least one link");
-    }
     let anchor_sha = match input.anchor_sha {
         Some(anchor_sha) => anchor_sha,
         None => git_stdout(work_dir, ["rev-parse", "HEAD"])?,
     };
+
+    // Pre-normalize adds and removes once so retry attempts reuse the
+    // result and error messages can cite the pre-sort pair unchanged.
+    let normalized_adds: Vec<[SideSpec; 2]> = input
+        .adds
+        .iter()
+        .cloned()
+        .map(normalize_side_specs)
+        .collect();
+    let normalized_removes: Vec<[RangeSpec; 2]> = input
+        .removes
+        .iter()
+        .cloned()
+        .map(normalize_range_specs)
+        .collect();
+
     let mut base_tip = match explicit_expected_tip.clone() {
         Some(explicit) => Some(explicit),
         None => resolve_ref_oid_optional(work_dir, &mesh_ref)?,
     };
 
     for attempt in 0..COMMIT_MESH_MAX_ATTEMPTS {
-        if base_tip.is_none() && input.adds.is_empty() {
+        if base_tip.is_none() && normalized_adds.is_empty() {
             anyhow::bail!(
                 "mesh `{}` does not exist; supply --link to create it",
                 input.name
             );
         }
 
-        let mut links = match base_tip.as_deref() {
+        let starting_links = match base_tip.as_deref() {
             Some(tip) => read_mesh_links(repo, &gix::ObjectId::from_hex(tip.as_bytes())?)?,
             None => Vec::new(),
         };
 
-        for sides in &input.removes {
-            remove_mesh_link(work_dir, &mut links, &normalize_range_specs(sides.clone()))?;
+        // ------------------------------------------------------------
+        // Phase 2: state-dependent validation against the observed tip.
+        // Simulate removes, then validate adds against the post-remove
+        // set. No objects are written in this phase.
+        // ------------------------------------------------------------
+        let mut links = starting_links.clone();
+        for sides in &normalized_removes {
+            let Some(index) = find_mesh_link_index(work_dir, &links, sides)? else {
+                anyhow::bail!(
+                    "--unlink: mesh `{}` does not contain link {}",
+                    input.name,
+                    format_pair(&sides[0], &sides[1])
+                );
+            };
+            links.remove(index);
+        }
+        for (index, sides) in normalized_adds.iter().enumerate() {
+            if mesh_contains_sides(work_dir, &links, sides)? {
+                let pair = format_pair_from_sides(&sides[0], &sides[1]);
+                anyhow::bail!(
+                    "--link: mesh `{}` already contains link {pair}; \
+                     use `--unlink {pair} --link {pair}` to re-anchor at HEAD",
+                    input.name
+                );
+            }
+            // Intra-invocation duplicate --link detection: two --link flags
+            // naming the same pair in one call must error before any write.
+            for earlier in &normalized_adds[..index] {
+                if side_specs_match(earlier, sides) {
+                    let pair = format_pair_from_sides(&sides[0], &sides[1]);
+                    anyhow::bail!(
+                        "--link: pair {pair} appears more than once in this invocation"
+                    );
+                }
+            }
         }
 
-        let mut ref_updates = Vec::with_capacity(input.adds.len() + 1);
-        for sides in &input.adds {
-            let normalized_sides = normalize_side_specs(sides.clone());
-            if mesh_contains_sides(work_dir, &links, &normalized_sides)? {
-                anyhow::bail!("mesh already contains link for pair");
-            }
-            let link = build_link(work_dir, &anchor_sha, normalized_sides)?;
+        // ------------------------------------------------------------
+        // Phase 3: build objects. All validation has passed; now write.
+        // ------------------------------------------------------------
+        let mut links = starting_links.clone();
+        for sides in &normalized_removes {
+            // Unwrap is safe: phase 2 just proved every remove target exists
+            // against this same observed tip.
+            let index = find_mesh_link_index(work_dir, &links, sides)?
+                .expect("validated in phase 2");
+            links.remove(index);
+        }
+
+        let mut ref_updates = Vec::with_capacity(normalized_adds.len() + 1);
+        for sides in &normalized_adds {
+            let link = build_link(work_dir, &anchor_sha, sides.clone())?;
             let id = Uuid::new_v4().to_string();
             let blob_oid = write_link_blob(work_dir, &link)?;
             ref_updates.push(RefUpdate::Create {
@@ -116,16 +183,24 @@ pub fn commit_mesh(repo: &gix::Repository, input: CommitInput) -> Result<()> {
     anyhow::bail!("mesh commit exceeded retry budget")
 }
 
-fn remove_mesh_link(
-    work_dir: &Path,
-    links: &mut Vec<String>,
-    sides: &[RangeSpec; 2],
-) -> Result<()> {
-    let Some(index) = find_mesh_link_index(work_dir, links, sides)? else {
-        anyhow::bail!("mesh does not contain link for pair");
-    };
-    links.remove(index);
-    Ok(())
+fn format_pair(a: &RangeSpec, b: &RangeSpec) -> String {
+    format!(
+        "{}#L{}-L{}:{}#L{}-L{}",
+        a.path, a.start, a.end, b.path, b.start, b.end
+    )
+}
+
+fn format_pair_from_sides(a: &SideSpec, b: &SideSpec) -> String {
+    format!(
+        "{}#L{}-L{}:{}#L{}-L{}",
+        a.path, a.start, a.end, b.path, b.start, b.end
+    )
+}
+
+fn side_specs_match(a: &[SideSpec; 2], b: &[SideSpec; 2]) -> bool {
+    a.iter().zip(b.iter()).all(|(x, y)| {
+        x.path == y.path && x.start == y.start && x.end == y.end
+    })
 }
 
 fn find_mesh_link_index(
