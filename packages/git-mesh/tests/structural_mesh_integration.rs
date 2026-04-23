@@ -17,7 +17,7 @@ fn seed(repo: &TestRepo, name: &str, msg: &str) -> Result<String> {
 }
 
 #[test]
-#[ignore]
+
 fn delete_mesh_removes_ref() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "kill-me", "seed")?;
@@ -27,7 +27,7 @@ fn delete_mesh_removes_ref() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn delete_missing_mesh_errors() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let err = delete_mesh(&repo.gix_repo()?, "absent").unwrap_err();
@@ -36,7 +36,7 @@ fn delete_missing_mesh_errors() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn rename_mesh_atomic() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "old-name", "seed")?;
@@ -47,7 +47,7 @@ fn rename_mesh_atomic() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn rename_mesh_rejects_existing_target() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "a", "seed")?;
@@ -58,7 +58,7 @@ fn rename_mesh_rejects_existing_target() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn rename_mesh_rejects_reserved_name() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "ok", "seed")?;
@@ -68,7 +68,7 @@ fn rename_mesh_rejects_reserved_name() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn restore_mesh_clears_staging() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -82,7 +82,7 @@ fn restore_mesh_clears_staging() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn revert_mesh_fast_forwards_to_past_tree() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -100,7 +100,7 @@ fn revert_mesh_fast_forwards_to_past_tree() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn list_mesh_names_reflects_delete() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "a", "seed")?;

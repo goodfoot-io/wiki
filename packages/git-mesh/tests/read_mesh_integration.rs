@@ -21,7 +21,7 @@ fn seed_two_meshes(repo: &TestRepo) -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn list_mesh_names_is_sorted() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed_two_meshes(&repo)?;
@@ -31,7 +31,7 @@ fn list_mesh_names_is_sorted() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn list_mesh_names_empty_repo() -> Result<()> {
     let repo = TestRepo::seeded()?;
     assert!(list_mesh_names(&repo.gix_repo()?)?.is_empty());
@@ -39,7 +39,7 @@ fn list_mesh_names_empty_repo() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn read_mesh_returns_tip_state() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed_two_meshes(&repo)?;
@@ -51,7 +51,7 @@ fn read_mesh_returns_tip_state() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn read_mesh_missing_errors() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let err = read_mesh(&repo.gix_repo()?, "ghost").unwrap_err();
@@ -60,7 +60,7 @@ fn read_mesh_missing_errors() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn show_mesh_is_read_mesh_alias() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed_two_meshes(&repo)?;
@@ -70,7 +70,7 @@ fn show_mesh_is_read_mesh_alias() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn read_mesh_at_walks_history() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -88,7 +88,7 @@ fn read_mesh_at_walks_history() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn mesh_commit_info_fields_populated() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed_two_meshes(&repo)?;
@@ -101,7 +101,7 @@ fn mesh_commit_info_fields_populated() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn mesh_commit_info_at_past_commit() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -117,7 +117,7 @@ fn mesh_commit_info_at_past_commit() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn mesh_log_newest_first() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -135,7 +135,7 @@ fn mesh_log_newest_first() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn mesh_log_respects_limit() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -150,7 +150,7 @@ fn mesh_log_respects_limit() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn resolve_commit_ish_returns_oid_on_ancestor() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;

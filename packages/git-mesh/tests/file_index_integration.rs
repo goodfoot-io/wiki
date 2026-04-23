@@ -22,7 +22,7 @@ fn seed_two_meshes(repo: &TestRepo) -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn rebuild_index_creates_file() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed_two_meshes(&repo)?;
@@ -32,7 +32,7 @@ fn rebuild_index_creates_file() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn read_index_returns_all_entries_sorted() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed_two_meshes(&repo)?;
@@ -46,7 +46,7 @@ fn read_index_returns_all_entries_sorted() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn ls_all_matches_read_index() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed_two_meshes(&repo)?;
@@ -57,7 +57,7 @@ fn ls_all_matches_read_index() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn ls_by_path_filters() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed_two_meshes(&repo)?;
@@ -68,7 +68,7 @@ fn ls_by_path_filters() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn ls_by_path_range_overlap_inclusive() -> Result<()> {
     // §3.4: overlap rule is a <= end && b >= start.
     let repo = TestRepo::seeded()?;
@@ -82,7 +82,7 @@ fn ls_by_path_range_overlap_inclusive() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn ls_by_path_range_boundary_is_inclusive() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed_two_meshes(&repo)?;
@@ -92,7 +92,7 @@ fn ls_by_path_range_boundary_is_inclusive() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn read_index_regenerates_when_absent() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed_two_meshes(&repo)?;
@@ -105,7 +105,7 @@ fn read_index_regenerates_when_absent() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn read_index_regenerates_on_wrong_header() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed_two_meshes(&repo)?;

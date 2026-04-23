@@ -14,7 +14,7 @@ fn seed(repo: &TestRepo, name: &str) -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn restore_clears_staging() -> Result<()> {
     let repo = TestRepo::seeded()?;
     repo.mesh_stdout(["add", "m", "file1.txt#L1-L5"])?;
@@ -25,7 +25,7 @@ fn restore_clears_staging() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn revert_creates_new_tip() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "rev")?;
@@ -40,7 +40,7 @@ fn revert_creates_new_tip() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn delete_removes_ref() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "gone")?;
@@ -50,7 +50,7 @@ fn delete_removes_ref() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn mv_renames_ref() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "oldn")?;
@@ -61,7 +61,7 @@ fn mv_renames_ref() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn mv_rejects_reserved_name() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "oldn")?;
@@ -71,7 +71,7 @@ fn mv_rejects_reserved_name() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn every_reserved_name_rejected_on_create() -> Result<()> {
     // §10.2 reserved list.
     let repo = TestRepo::seeded()?;
@@ -83,7 +83,7 @@ fn every_reserved_name_rejected_on_create() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn doctor_runs_clean_on_fresh_repo() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let out = repo.run_mesh(["doctor"])?;
@@ -92,7 +92,7 @@ fn doctor_runs_clean_on_fresh_repo() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn doctor_flags_missing_refspec() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let bare = BareRepo::new()?;

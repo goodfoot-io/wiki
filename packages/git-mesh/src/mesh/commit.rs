@@ -1,31 +1,215 @@
 //! Mesh commit pipeline — §6.1, §6.2.
 
-use crate::Result;
+use crate::git::{
+    apply_ref_transaction, git_stdout, git_stdout_with_identity, git_with_input,
+    resolve_ref_oid_optional, work_dir, RefUpdate,
+};
+use crate::mesh::read::{parse_config_blob, serialize_config_blob};
+use crate::range::{create_range, read_range};
+use crate::staging::{self, StagedConfig, Staging};
+use crate::types::{Mesh, MeshConfig};
+use crate::validation::validate_mesh_name;
+use crate::{Error, Result};
+use std::path::Path;
 
-/// Commit the staged operations for `name`. Full pipeline:
-///
-/// 1. Validate the mesh name (§10.2 reserved list).
-/// 2. Load current mesh state (or empty for a new mesh).
-/// 3. Validate every staged `remove` has a target.
-/// 4. Validate every staged `add` doesn't collide post-remove.
-/// 5. Reject if nothing meaningful is staged — a no-op `config` line
-///    does not count (§6.2 step 5, `Error::StagingEmpty`).
-/// 6. For each staged `add`: resolve anchor (HEAD at commit time when
-///    no trailing sha; explicit sha otherwise), run the drift check
-///    (§6.3 "Validation at commit time"), write the range blob, create
-///    `refs/ranges/v1/<uuid>`.
-/// 7. Apply removes then adds, sort by `(path, start, end)`, write the
-///    `ranges` and `config` blobs, write the tree, write the commit
-///    with the prior tip as parent. Message source: staged `.msg` if
-///    present, else parent commit message. First commit with no staged
-///    message is `Error::MessageRequired`.
-/// 8. CAS-update `refs/meshes/v1/<name>`; retry if another client
-///    advanced the tip concurrently.
-/// 9. Delete every `.git/mesh/staging/<name>*` file.
-/// 10. Rebuild `.git/mesh/file-index` (§3.4).
-///
-/// All-or-nothing. A single invalid op aborts before any object is
-/// written. Returns the new mesh commit's OID.
-pub fn commit_mesh(_repo: &gix::Repository, _name: &str) -> Result<String> {
-    todo!("mesh::commit::commit_mesh — §6.1, §6.2")
+fn mesh_ref(name: &str) -> String {
+    format!("refs/meshes/v1/{name}")
+}
+
+pub fn commit_mesh(repo: &gix::Repository, name: &str) -> Result<String> {
+    validate_mesh_name(name)?;
+    let wd = work_dir(repo)?;
+    let staging = staging::read_staging(repo, name)?;
+
+    let mesh_ref = mesh_ref(name);
+    let base_tip = resolve_ref_oid_optional(wd, &mesh_ref)?;
+
+    // Load current state (if any).
+    let (range_ids, base_config, base_message) = match base_tip.as_deref() {
+        Some(tip) => {
+            let m = super::read::read_mesh_at(repo, name, Some(tip))?;
+            (m.ranges, m.config, Some(m.message))
+        }
+        None => (Vec::new(), MeshConfig {
+            copy_detection: crate::types::DEFAULT_COPY_DETECTION,
+            ignore_whitespace: crate::types::DEFAULT_IGNORE_WHITESPACE,
+        }, None),
+    };
+
+    // Early: intra-staging duplicate-location detection.
+    for (i, a) in staging.adds.iter().enumerate() {
+        for b in &staging.adds[..i] {
+            if a.path == b.path && a.start == b.start && a.end == b.end {
+                return Err(Error::DuplicateRangeLocation {
+                    path: a.path.clone(),
+                    start: a.start,
+                    end: a.end,
+                });
+            }
+        }
+    }
+
+    // Validate removes exist and adds don't collide post-remove. Work on a
+    // materialized snapshot `(range_id, path, start, end)` triples.
+    let mut snapshots: Vec<(String, String, u32, u32)> = Vec::with_capacity(range_ids.len());
+    for id in &range_ids {
+        let r = read_range(repo, id)?;
+        snapshots.push((id.clone(), r.path, r.start, r.end));
+    }
+    for rem in &staging.removes {
+        let idx = snapshots
+            .iter()
+            .position(|(_, p, s, e)| p == &rem.path && *s == rem.start && *e == rem.end)
+            .ok_or_else(|| Error::RangeNotInMesh {
+                path: rem.path.clone(),
+                start: rem.start,
+                end: rem.end,
+            })?;
+        snapshots.remove(idx);
+    }
+    for a in &staging.adds {
+        if snapshots
+            .iter()
+            .any(|(_, p, s, e)| p == &a.path && *s == a.start && *e == a.end)
+        {
+            return Err(Error::DuplicateRangeLocation {
+                path: a.path.clone(),
+                start: a.start,
+                end: a.end,
+            });
+        }
+    }
+
+    // Resolve final config: baseline <- staged (last-write-wins).
+    let mut new_config = base_config;
+    let (new_cd, new_iw) = staging::resolve_staged_config(
+        &staging,
+        (base_config.copy_detection, base_config.ignore_whitespace),
+    );
+    new_config.copy_detection = new_cd;
+    new_config.ignore_whitespace = new_iw;
+
+    let config_changed = new_config != base_config;
+    let meaningful_adds = !staging.adds.is_empty();
+    let meaningful_removes = !staging.removes.is_empty();
+    let meaningful_message = staging.message.is_some();
+
+    if !meaningful_adds && !meaningful_removes && !config_changed && !meaningful_message {
+        if staging.configs.is_empty() && staging.adds.is_empty() && staging.removes.is_empty() {
+            return Err(Error::StagingEmpty(name.into()));
+        }
+        // Only staged configs, none changed value: ConfigNoOp.
+        if let Some(first) = staging.configs.first() {
+            let (key, value) = match first {
+                StagedConfig::CopyDetection(cd) => (
+                    "copy-detection",
+                    staging::serialize_copy_detection(*cd).to_string(),
+                ),
+                StagedConfig::IgnoreWhitespace(b) => ("ignore-whitespace", b.to_string()),
+            };
+            return Err(Error::ConfigNoOp {
+                key: key.into(),
+                value,
+            });
+        }
+        return Err(Error::StagingEmpty(name.into()));
+    }
+
+    // Determine the commit message.
+    let message = match (&staging.message, &base_message) {
+        (Some(m), _) => m.clone(),
+        (None, Some(prior)) => prior.clone(),
+        (None, None) => return Err(Error::MessageRequired(name.into())),
+    };
+
+    // Drift check and range creation for staged adds. All-or-nothing:
+    // create range refs for each add; on any failure propagate.
+    let head_sha = git_stdout(wd, ["rev-parse", "HEAD"])?;
+    let mut new_range_ids: Vec<String> = Vec::new();
+    // Pre-validate every add against its resolved anchor (prevent partial
+    // writes) BEFORE creating any range refs.
+    for a in &staging.adds {
+        let anchor = a.anchor.clone().unwrap_or_else(|| head_sha.clone());
+        // Confirm the path is present at the anchor; fail closed before any write.
+        let _ = crate::git::path_blob_at(repo, &anchor, &a.path)?;
+        let blob = crate::git::path_blob_at(repo, &anchor, &a.path)?;
+        let line_count = crate::git::blob_line_count(repo, &blob)?;
+        if a.start < 1 || a.end < a.start || a.end > line_count {
+            return Err(Error::InvalidRange {
+                start: a.start,
+                end: a.end,
+            });
+        }
+    }
+    for a in &staging.adds {
+        let anchor = a.anchor.clone().unwrap_or_else(|| head_sha.clone());
+        let id = create_range(repo, &anchor, &a.path, a.start, a.end)?;
+        new_range_ids.push(id);
+    }
+
+    // Combine ranges and canonicalize by (path, start, end).
+    let mut combined: Vec<(String, String, u32, u32)> = snapshots.clone();
+    for id in &new_range_ids {
+        let r = read_range(repo, id)?;
+        combined.push((id.clone(), r.path, r.start, r.end));
+    }
+    combined.sort_by(|a, b| (a.1.as_str(), a.2, a.3).cmp(&(b.1.as_str(), b.2, b.3)));
+    let final_ids: Vec<String> = combined.iter().map(|(id, _, _, _)| id.clone()).collect();
+
+    // Build tree: `ranges` blob + `config` blob.
+    let ranges_text: String = {
+        let mut s = String::new();
+        for id in &final_ids {
+            s.push_str(id);
+            s.push('\n');
+        }
+        s
+    };
+    let ranges_blob = git_with_input(wd, ["hash-object", "-w", "--stdin"], &ranges_text)?;
+    let config_text = serialize_config_blob(&new_config);
+    let config_blob = git_with_input(wd, ["hash-object", "-w", "--stdin"], &config_text)?;
+    let tree_input = format!(
+        "100644 blob {config_blob}\tconfig\n100644 blob {ranges_blob}\tranges\n"
+    );
+    let tree_oid = git_with_input(wd, ["mktree"], &tree_input)?;
+
+    // Commit.
+    let mut args = vec![
+        "commit-tree".to_string(),
+        tree_oid,
+        "-m".to_string(),
+        message,
+    ];
+    if let Some(parent) = base_tip.as_deref() {
+        args.push("-p".to_string());
+        args.push(parent.to_string());
+    }
+    let new_commit = git_stdout_with_identity(wd, args.iter().map(String::as_str))?;
+
+    // CAS update of mesh ref.
+    let update = match base_tip.as_deref() {
+        Some(prev) => RefUpdate::Update {
+            name: mesh_ref.clone(),
+            new_oid: new_commit.clone(),
+            expected_old_oid: prev.to_string(),
+        },
+        None => RefUpdate::Create {
+            name: mesh_ref.clone(),
+            new_oid: new_commit.clone(),
+        },
+    };
+    apply_ref_transaction(wd, &[update])?;
+
+    // Clear staging on success.
+    let _ = staging::clear_staging(repo, name);
+    // Rebuild file index.
+    let _ = crate::file_index::rebuild_index(repo);
+
+    Ok(new_commit)
+}
+
+// Silence unused-import warnings when the above is refactored.
+#[allow(dead_code)]
+fn _unused(_: &Mesh, _: &Path, _: &Staging, _: fn(&str) -> Result<MeshConfig>) {
+    let _ = parse_config_blob;
 }

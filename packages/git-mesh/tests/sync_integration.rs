@@ -10,7 +10,7 @@ use git_mesh::{
 use support::{BareRepo, TestRepo};
 
 #[test]
-#[ignore]
+
 fn default_remote_falls_back_to_origin() -> Result<()> {
     let repo = TestRepo::seeded()?;
     assert_eq!(default_remote(&repo.gix_repo()?)?, "origin");
@@ -18,7 +18,7 @@ fn default_remote_falls_back_to_origin() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn default_remote_honours_config_override() -> Result<()> {
     let repo = TestRepo::seeded()?;
     repo.run_git(["config", "mesh.defaultRemote", "upstream"])?;
@@ -27,7 +27,7 @@ fn default_remote_honours_config_override() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn ensure_refspec_configured_adds_both_refspecs() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let bare = BareRepo::new()?;
@@ -40,7 +40,7 @@ fn ensure_refspec_configured_adds_both_refspecs() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn ensure_refspec_configured_is_idempotent() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let bare = BareRepo::new()?;
@@ -55,7 +55,7 @@ fn ensure_refspec_configured_is_idempotent() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn ensure_refspec_errors_on_missing_remote() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let err = ensure_refspec_configured(&repo.gix_repo()?, "absent").unwrap_err();
@@ -64,7 +64,7 @@ fn ensure_refspec_errors_on_missing_remote() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn push_bootstraps_refspec_on_first_call() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let bare = BareRepo::new()?;
@@ -85,7 +85,7 @@ fn push_bootstraps_refspec_on_first_call() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn fetch_round_trips_from_upstream() -> Result<()> {
     // Push from one clone, fetch into a second. Round-trips mesh and
     // range refs via the configured refspecs.

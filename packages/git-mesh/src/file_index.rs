@@ -1,16 +1,14 @@
 //! `.git/mesh/file-index` — derived lookup table (§3.4).
-//!
-//! Not synced, regenerated if absent. Lines are TAB-separated, sorted
-//! by `(path, start)`:
-//!
-//! ```text
-//! # mesh-index v1
-//! <path>\t<mesh-name>\t<range-id>\t<start>\t<end>\t<anchor-sha-short>
-//! ```
 
-use crate::Result;
+use crate::git::work_dir;
+use crate::mesh::read::{list_mesh_names, read_mesh};
+use crate::range::read_range;
+use crate::{Error, Result};
+use std::fs;
+use std::path::PathBuf;
 
-/// One parsed entry in the file index.
+const HEADER: &str = "# mesh-index v1";
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct IndexEntry {
     pub path: String,
@@ -21,36 +19,113 @@ pub struct IndexEntry {
     pub anchor_short: String,
 }
 
-/// Rebuild the file index from scratch by scanning every
-/// `refs/meshes/v1/*` ref and resolving its Range ids. Full rewrite;
-/// no diff-and-patch. Called after every successful commit / fetch (§3.4).
-pub fn rebuild_index(_repo: &gix::Repository) -> Result<()> {
-    todo!("file_index::rebuild_index — §3.4")
+fn index_path(repo: &gix::Repository) -> Result<PathBuf> {
+    let wd = work_dir(repo)?;
+    Ok(wd.join(".git").join("mesh").join("file-index"))
 }
 
-/// Read and parse the file index. Regenerates it if absent or if the
-/// header is wrong (§3.4 lifecycle).
-pub fn read_index(_repo: &gix::Repository) -> Result<Vec<IndexEntry>> {
-    todo!("file_index::read_index")
+fn short(sha: &str) -> String {
+    sha[..sha.len().min(8)].to_string()
 }
 
-/// `git mesh ls` — all files that have any range (§3.4).
-pub fn ls_all(_repo: &gix::Repository) -> Result<Vec<IndexEntry>> {
-    todo!("file_index::ls_all")
+pub fn rebuild_index(repo: &gix::Repository) -> Result<()> {
+    let entries = collect_entries(repo)?;
+    write_index(repo, &entries)
 }
 
-/// `git mesh ls <path>` — all ranges in all meshes referencing `path`.
-pub fn ls_by_path(_repo: &gix::Repository, _path: &str) -> Result<Vec<IndexEntry>> {
-    todo!("file_index::ls_by_path")
+fn write_index(repo: &gix::Repository, entries: &[IndexEntry]) -> Result<()> {
+    let p = index_path(repo)?;
+    fs::create_dir_all(p.parent().unwrap())?;
+    let mut out = String::from(HEADER);
+    out.push('\n');
+    for e in entries {
+        out.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            e.path, e.mesh_name, e.range_id, e.start, e.end, e.anchor_short
+        ));
+    }
+    fs::write(p, out)?;
+    Ok(())
 }
 
-/// `git mesh ls <path>#L<s>-L<e>` — ranges whose `[a, b]` overlaps
-/// `[start, end]` (i.e. `a <= end && b >= start`). (§3.4 overlap rule.)
+fn collect_entries(repo: &gix::Repository) -> Result<Vec<IndexEntry>> {
+    let mut out = Vec::new();
+    for name in list_mesh_names(repo)? {
+        let mesh = read_mesh(repo, &name)?;
+        for id in mesh.ranges {
+            let r = read_range(repo, &id)?;
+            out.push(IndexEntry {
+                path: r.path,
+                mesh_name: name.clone(),
+                range_id: id,
+                start: r.start,
+                end: r.end,
+                anchor_short: short(&r.anchor_sha),
+            });
+        }
+    }
+    out.sort_by(|a, b| {
+        (a.path.as_str(), a.start, a.end, a.mesh_name.as_str(), a.range_id.as_str())
+            .cmp(&(b.path.as_str(), b.start, b.end, b.mesh_name.as_str(), b.range_id.as_str()))
+    });
+    Ok(out)
+}
+
+pub fn read_index(repo: &gix::Repository) -> Result<Vec<IndexEntry>> {
+    let p = index_path(repo)?;
+    let regenerate = !p.exists() || {
+        let text = fs::read_to_string(&p).unwrap_or_default();
+        !text.starts_with(HEADER)
+    };
+    if regenerate {
+        let entries = collect_entries(repo)?;
+        write_index(repo, &entries)?;
+        return Ok(entries);
+    }
+    let text = fs::read_to_string(&p)?;
+    let mut entries = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if i == 0 {
+            continue;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() != 6 {
+            return Err(Error::Parse(format!("malformed file-index line `{line}`")));
+        }
+        entries.push(IndexEntry {
+            path: fields[0].into(),
+            mesh_name: fields[1].into(),
+            range_id: fields[2].into(),
+            start: fields[3].parse().map_err(|_| Error::Parse("bad start".into()))?,
+            end: fields[4].parse().map_err(|_| Error::Parse("bad end".into()))?,
+            anchor_short: fields[5].into(),
+        });
+    }
+    Ok(entries)
+}
+
+pub fn ls_all(repo: &gix::Repository) -> Result<Vec<IndexEntry>> {
+    read_index(repo)
+}
+
+pub fn ls_by_path(repo: &gix::Repository, path: &str) -> Result<Vec<IndexEntry>> {
+    Ok(read_index(repo)?
+        .into_iter()
+        .filter(|e| e.path == path)
+        .collect())
+}
+
 pub fn ls_by_path_range(
-    _repo: &gix::Repository,
-    _path: &str,
-    _start: u32,
-    _end: u32,
+    repo: &gix::Repository,
+    path: &str,
+    start: u32,
+    end: u32,
 ) -> Result<Vec<IndexEntry>> {
-    todo!("file_index::ls_by_path_range")
+    Ok(read_index(repo)?
+        .into_iter()
+        .filter(|e| e.path == path && e.start <= end && e.end >= start)
+        .collect())
 }

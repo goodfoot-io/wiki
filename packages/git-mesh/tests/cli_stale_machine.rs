@@ -22,7 +22,7 @@ fn drift(repo: &TestRepo) -> Result<String> {
 }
 
 #[test]
-#[ignore]
+
 fn porcelain_one_line_per_finding() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "m")?;
@@ -37,7 +37,7 @@ fn porcelain_one_line_per_finding() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn porcelain_clean_is_empty() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "m")?;
@@ -48,7 +48,7 @@ fn porcelain_clean_is_empty() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn json_has_version_one() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "m")?;
@@ -61,7 +61,7 @@ fn json_has_version_one() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn json_range_entries_have_lsp_shape() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "m")?;
@@ -76,7 +76,7 @@ fn json_range_entries_have_lsp_shape() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn junit_has_testsuite_tag() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "m")?;
@@ -89,7 +89,7 @@ fn junit_has_testsuite_tag() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn github_actions_emits_warning_annotation() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "m")?;
@@ -101,7 +101,7 @@ fn github_actions_emits_warning_annotation() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn tool_error_exits_two() -> Result<()> {
     // Running outside a git repo is the canonical "tool error" (§10.4).
     let dir = tempfile::tempdir()?;
@@ -114,7 +114,7 @@ fn tool_error_exits_two() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn since_filters_by_anchor_age() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let early_anchor = repo.head_sha()?;

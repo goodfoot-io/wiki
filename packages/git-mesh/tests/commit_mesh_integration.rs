@@ -11,7 +11,7 @@ use git_mesh::{
 use support::TestRepo;
 
 #[test]
-#[ignore]
+
 fn commit_happy_path_writes_ref_and_tree() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -27,7 +27,7 @@ fn commit_happy_path_writes_ref_and_tree() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn commit_writes_ranges_sorted_by_path_start_end() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -45,7 +45,7 @@ fn commit_writes_ranges_sorted_by_path_start_end() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn commit_rejects_duplicate_location() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -58,7 +58,7 @@ fn commit_rejects_duplicate_location() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn commit_with_empty_staging_errors() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -68,7 +68,7 @@ fn commit_with_empty_staging_errors() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn first_commit_without_message_errors() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -79,7 +79,7 @@ fn first_commit_without_message_errors() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn second_commit_reuses_parent_message_when_unset() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -95,7 +95,7 @@ fn second_commit_reuses_parent_message_when_unset() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn commit_config_noop_only_is_rejected() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -115,7 +115,7 @@ fn commit_config_noop_only_is_rejected() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn remove_of_unknown_range_errors() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -129,7 +129,7 @@ fn remove_of_unknown_range_errors() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn commit_rejects_reserved_name() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -140,7 +140,7 @@ fn commit_rejects_reserved_name() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn commit_is_atomic_on_invalid_op() -> Result<()> {
     // One invalid op aborts before any object is written (§6.2 step 5/7).
     let repo = TestRepo::seeded()?;
@@ -156,7 +156,7 @@ fn commit_is_atomic_on_invalid_op() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 // TODO(slice-D): CAS retry needs a concurrent writer fixture; sketched
 // as a placeholder so the behavior stays on the TODO list.
 fn commit_retries_on_cas_conflict() -> Result<()> {

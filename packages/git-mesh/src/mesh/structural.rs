@@ -1,35 +1,87 @@
 //! Structural mesh operations — §6.8.
 
-use crate::Result;
+use crate::git::{
+    apply_ref_transaction, git_stdout, git_stdout_with_identity, resolve_ref_oid_optional,
+    work_dir, RefUpdate,
+};
+use crate::validation::validate_mesh_name;
+use crate::{Error, Result};
 
-/// `git mesh delete <name>` — `update-ref -d refs/meshes/v1/<name>`.
-/// Reachable commits remain in the object db until `git gc`.
-pub fn delete_mesh(_repo: &gix::Repository, _name: &str) -> Result<()> {
-    todo!("mesh::structural::delete_mesh — §6.8")
+fn mesh_ref(name: &str) -> String {
+    format!("refs/meshes/v1/{name}")
 }
 
-/// `git mesh mv <old> <new>` — atomic rename: create new ref at the
-/// old tip, then delete the old ref. Errors if `<new>` already exists
-/// or `<new>` is reserved.
-pub fn rename_mesh(_repo: &gix::Repository, _old: &str, _new: &str) -> Result<()> {
-    todo!("mesh::structural::rename_mesh")
+pub fn delete_mesh(repo: &gix::Repository, name: &str) -> Result<()> {
+    let wd = work_dir(repo)?;
+    let current = resolve_ref_oid_optional(wd, &mesh_ref(name))?
+        .ok_or_else(|| Error::MeshNotFound(name.into()))?;
+    apply_ref_transaction(
+        wd,
+        &[RefUpdate::Delete {
+            name: mesh_ref(name),
+            expected_old_oid: current,
+        }],
+    )
 }
 
-/// `git mesh restore <name>` — delete every
-/// `.git/mesh/staging/<name>*` file. Analogous to `git restore --staged`
-/// on all files for a single mesh (§6.8). Does not touch the ref.
-pub fn restore_mesh(_repo: &gix::Repository, _name: &str) -> Result<()> {
-    todo!("mesh::structural::restore_mesh")
+pub fn rename_mesh(repo: &gix::Repository, old: &str, new: &str) -> Result<()> {
+    validate_mesh_name(new)?;
+    let wd = work_dir(repo)?;
+    let old_ref = mesh_ref(old);
+    let new_ref = mesh_ref(new);
+    let old_oid = resolve_ref_oid_optional(wd, &old_ref)?
+        .ok_or_else(|| Error::MeshNotFound(old.into()))?;
+    if resolve_ref_oid_optional(wd, &new_ref)?.is_some() {
+        return Err(Error::MeshAlreadyExists(new.into()));
+    }
+    apply_ref_transaction(
+        wd,
+        &[
+            RefUpdate::Create {
+                name: new_ref,
+                new_oid: old_oid.clone(),
+            },
+            RefUpdate::Delete {
+                name: old_ref,
+                expected_old_oid: old_oid,
+            },
+        ],
+    )
 }
 
-/// `git mesh revert <name> <commit-ish>` — fast-forward to a past state
-/// by writing a new commit whose tree matches `<commit-ish>` with the
-/// current tip as parent. History is never rewritten (§6.6). Returns
-/// the new tip OID.
+pub fn restore_mesh(repo: &gix::Repository, name: &str) -> Result<()> {
+    // Clear staging only; do not touch the ref.
+    crate::staging::clear_staging(repo, name)
+}
+
 pub fn revert_mesh(
-    _repo: &gix::Repository,
-    _name: &str,
-    _commit_ish: &str,
+    repo: &gix::Repository,
+    name: &str,
+    commit_ish: &str,
 ) -> Result<String> {
-    todo!("mesh::structural::revert_mesh — §6.6")
+    let wd = work_dir(repo)?;
+    let ref_name = mesh_ref(name);
+    let target = super::read::resolve_commit_ish(repo, name, commit_ish)?;
+    let current = resolve_ref_oid_optional(wd, &ref_name)?
+        .ok_or_else(|| Error::MeshNotFound(name.into()))?;
+    let tree_oid = git_stdout(wd, ["show", "-s", "--format=%T", &target])?;
+    let message = git_stdout(wd, ["show", "-s", "--format=%B", &target])?;
+    let args = [
+        "commit-tree".to_string(),
+        tree_oid,
+        "-m".to_string(),
+        message,
+        "-p".to_string(),
+        current.clone(),
+    ];
+    let new_commit = git_stdout_with_identity(wd, args.iter().map(String::as_str))?;
+    apply_ref_transaction(
+        wd,
+        &[RefUpdate::Update {
+            name: ref_name,
+            new_oid: new_commit.clone(),
+            expected_old_oid: current,
+        }],
+    )?;
+    Ok(new_commit)
 }

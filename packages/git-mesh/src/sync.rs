@@ -1,27 +1,57 @@
 //! Fetch/push for mesh and range refs (§7).
 
-use crate::Result;
+use crate::git::{git_stdout, git_stdout_lines, git_stdout_optional, work_dir};
+use crate::{Error, Result};
+use std::path::Path;
 
-/// Read `mesh.defaultRemote` (default `origin`, §10.5).
-pub fn default_remote(_repo: &gix::Repository) -> Result<String> {
-    todo!("sync::default_remote — §10.5")
+const REFSPECS: [&str; 2] = [
+    "+refs/ranges/*:refs/ranges/*",
+    "+refs/meshes/*:refs/meshes/*",
+];
+
+pub fn default_remote(repo: &gix::Repository) -> Result<String> {
+    let wd = work_dir(repo)?;
+    Ok(git_stdout_optional(wd, ["config", "--get", "mesh.defaultRemote"])?
+        .unwrap_or_else(|| "origin".to_string()))
 }
 
-/// `git fetch <remote> +refs/ranges/*:refs/ranges/* +refs/meshes/*:refs/meshes/*`.
-/// Calls [`ensure_refspec_configured`] first (§7.1 lazy config).
-pub fn fetch_mesh_refs(_repo: &gix::Repository, _remote: &str) -> Result<()> {
-    todo!("sync::fetch_mesh_refs")
+pub fn fetch_mesh_refs(repo: &gix::Repository, remote: &str) -> Result<()> {
+    let wd = work_dir(repo)?;
+    ensure_refspec_configured_inner(wd, remote)?;
+    git_stdout(wd, ["fetch", remote])?;
+    Ok(())
 }
 
-/// Push mesh and range refs. Same lazy refspec bootstrap as fetch.
-pub fn push_mesh_refs(_repo: &gix::Repository, _remote: &str) -> Result<()> {
-    todo!("sync::push_mesh_refs")
+pub fn push_mesh_refs(repo: &gix::Repository, remote: &str) -> Result<()> {
+    let wd = work_dir(repo)?;
+    ensure_refspec_configured_inner(wd, remote)?;
+    git_stdout(wd, ["push", remote])?;
+    Ok(())
 }
 
-/// Ensure `remote.<remote>.fetch` and `remote.<remote>.push` each carry
-/// the mesh and range refspec lines. Idempotent via `git config --add`
-/// with a pre-check (§7.1). Fail-closed — if the remote does not exist,
-/// error out with `Error::RefspecMissing`.
-pub fn ensure_refspec_configured(_repo: &gix::Repository, _remote: &str) -> Result<()> {
-    todo!("sync::ensure_refspec_configured — §7.1")
+pub fn ensure_refspec_configured(repo: &gix::Repository, remote: &str) -> Result<()> {
+    ensure_refspec_configured_inner(work_dir(repo)?, remote)
+}
+
+fn ensure_refspec_configured_inner(wd: &Path, remote: &str) -> Result<()> {
+    // Fail-closed: remote must exist before we add config lines.
+    let url = git_stdout_optional(wd, ["config", "--get", &format!("remote.{remote}.url")])?;
+    if url.is_none() {
+        return Err(Error::RefspecMissing {
+            remote: remote.into(),
+        });
+    }
+    let fetch_key = format!("remote.{remote}.fetch");
+    let push_key = format!("remote.{remote}.push");
+    let existing_fetch = git_stdout_lines(wd, ["config", "--get-all", &fetch_key])?;
+    let existing_push = git_stdout_lines(wd, ["config", "--get-all", &push_key])?;
+    for rs in REFSPECS {
+        if !existing_fetch.iter().any(|e| e == rs) {
+            git_stdout(wd, ["config", "--add", &fetch_key, rs])?;
+        }
+        if !existing_push.iter().any(|e| e == rs) {
+            git_stdout(wd, ["config", "--add", &push_key, rs])?;
+        }
+    }
+    Ok(())
 }

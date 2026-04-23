@@ -1,10 +1,12 @@
 //! Read-only mesh operations — §6.5, §6.6, §10.4.
 
-use crate::types::Mesh;
-use crate::Result;
+use crate::git::{
+    git_show_file_lines, git_stdout, resolve_ref_oid_optional, work_dir,
+};
+use crate::types::{CopyDetection, Mesh, MeshConfig};
+use crate::{Error, Result};
+use std::path::Path;
 
-/// Commit-level metadata for a mesh tip, extracted from the commit
-/// object. Used by `git mesh <name>` and `git mesh <name> --log`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MeshCommitInfo {
     pub commit_oid: String,
@@ -15,32 +17,130 @@ pub struct MeshCommitInfo {
     pub message: String,
 }
 
-/// Enumerate every mesh name in the repo (by scanning `refs/meshes/v1/*`).
-pub fn list_mesh_names(_repo: &gix::Repository) -> Result<Vec<String>> {
-    todo!("mesh::read::list_mesh_names")
+fn mesh_ref(name: &str) -> String {
+    format!("refs/meshes/v1/{name}")
 }
 
-/// Read the mesh at its current tip (§6.5 `show`).
-pub fn read_mesh(_repo: &gix::Repository, _name: &str) -> Result<Mesh> {
-    todo!("mesh::read::read_mesh")
+pub(crate) fn resolve_mesh_revision(
+    work_dir: &Path,
+    name: &str,
+    commit_ish: Option<&str>,
+) -> Result<String> {
+    let mesh_ref = mesh_ref(name);
+    let revision = match commit_ish {
+        None => mesh_ref.clone(),
+        Some("HEAD") => mesh_ref.clone(),
+        Some(value) => {
+            if let Some(suffix) = value.strip_prefix("HEAD") {
+                format!("{mesh_ref}{suffix}")
+            } else {
+                value.to_string()
+            }
+        }
+    };
+    git_stdout(work_dir, ["rev-parse", &revision])
+        .map_err(|_| Error::MeshNotFound(name.to_string()))
 }
 
-/// Read the mesh at a specific ancestor commit. `commit_ish = None`
-/// means the current tip.
+pub fn list_mesh_names(repo: &gix::Repository) -> Result<Vec<String>> {
+    let wd = work_dir(repo)?;
+    let output = git_stdout(
+        wd,
+        [
+            "for-each-ref",
+            "--format=%(refname:strip=3)",
+            "refs/meshes/v1",
+        ],
+    )?;
+    let mut names: Vec<String> = output
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+pub fn read_mesh(repo: &gix::Repository, name: &str) -> Result<Mesh> {
+    read_mesh_at(repo, name, None)
+}
+
 pub fn read_mesh_at(
-    _repo: &gix::Repository,
-    _name: &str,
-    _commit_ish: Option<&str>,
+    repo: &gix::Repository,
+    name: &str,
+    commit_ish: Option<&str>,
 ) -> Result<Mesh> {
-    todo!("mesh::read::read_mesh_at")
+    let wd = work_dir(repo)?;
+    let commit_oid = resolve_mesh_revision(wd, name, commit_ish)?;
+    let message = git_stdout(wd, ["show", "-s", "--format=%B", &commit_oid])?;
+    let ranges = git_show_file_lines(wd, &commit_oid, "ranges").unwrap_or_default();
+    let config = read_config_blob(wd, &commit_oid).unwrap_or_else(|_| default_config());
+    Ok(Mesh {
+        name: name.to_string(),
+        ranges,
+        message,
+        config,
+    })
 }
 
-/// Alias for `read_mesh` used by the CLI's `show` dispatcher.
+fn default_config() -> MeshConfig {
+    MeshConfig {
+        copy_detection: crate::types::DEFAULT_COPY_DETECTION,
+        ignore_whitespace: crate::types::DEFAULT_IGNORE_WHITESPACE,
+    }
+}
+
+pub(crate) fn read_config_blob(work_dir: &Path, commit_oid: &str) -> Result<MeshConfig> {
+    let text = git_stdout(work_dir, ["show", &format!("{commit_oid}:config")])?;
+    parse_config_blob(&text)
+}
+
+pub(crate) fn parse_config_blob(text: &str) -> Result<MeshConfig> {
+    let mut cfg = default_config();
+    for line in text.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let (k, v) = line
+            .split_once(' ')
+            .ok_or_else(|| Error::Parse(format!("malformed config line `{line}`")))?;
+        match k {
+            "copy-detection" => {
+                cfg.copy_detection = match v {
+                    "off" => CopyDetection::Off,
+                    "same-commit" => CopyDetection::SameCommit,
+                    "any-file-in-commit" => CopyDetection::AnyFileInCommit,
+                    "any-file-in-repo" => CopyDetection::AnyFileInRepo,
+                    _ => return Err(Error::Parse(format!("invalid copy-detection `{v}`"))),
+                };
+            }
+            "ignore-whitespace" => {
+                cfg.ignore_whitespace = match v {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err(Error::Parse(format!("invalid ignore-whitespace `{v}`"))),
+                };
+            }
+            _ => {
+                // Unknown keys tolerated.
+            }
+        }
+    }
+    Ok(cfg)
+}
+
+pub(crate) fn serialize_config_blob(cfg: &MeshConfig) -> String {
+    format!(
+        "copy-detection {}\nignore-whitespace {}\n",
+        crate::staging::serialize_copy_detection(cfg.copy_detection),
+        cfg.ignore_whitespace
+    )
+}
+
 pub fn show_mesh(repo: &gix::Repository, name: &str) -> Result<Mesh> {
     read_mesh(repo, name)
 }
 
-/// Alias for `read_mesh_at` used by the CLI's `show --at <rev>`.
 pub fn show_mesh_at(
     repo: &gix::Repository,
     name: &str,
@@ -49,45 +149,66 @@ pub fn show_mesh_at(
     read_mesh_at(repo, name, commit_ish)
 }
 
-/// Commit metadata for the current tip.
-pub fn mesh_commit_info(_repo: &gix::Repository, _name: &str) -> Result<MeshCommitInfo> {
-    todo!("mesh::read::mesh_commit_info")
+pub fn mesh_commit_info(repo: &gix::Repository, name: &str) -> Result<MeshCommitInfo> {
+    mesh_commit_info_at(repo, name, None)
 }
 
-/// Commit metadata at a specific ancestor of the mesh ref.
 pub fn mesh_commit_info_at(
-    _repo: &gix::Repository,
-    _name: &str,
-    _commit_ish: Option<&str>,
+    repo: &gix::Repository,
+    name: &str,
+    commit_ish: Option<&str>,
 ) -> Result<MeshCommitInfo> {
-    todo!("mesh::read::mesh_commit_info_at")
+    let wd = work_dir(repo)?;
+    let commit_oid = resolve_mesh_revision(wd, name, commit_ish)?;
+    let author_name = git_stdout(wd, ["show", "-s", "--format=%an", &commit_oid])?;
+    let author_email = git_stdout(wd, ["show", "-s", "--format=%ae", &commit_oid])?;
+    let author_date = git_stdout(wd, ["show", "-s", "--format=%aD", &commit_oid])?;
+    let summary = git_stdout(wd, ["show", "-s", "--format=%s", &commit_oid])?;
+    let message = git_stdout(wd, ["show", "-s", "--format=%B", &commit_oid])?;
+    Ok(MeshCommitInfo {
+        commit_oid,
+        author_name,
+        author_email,
+        author_date,
+        summary,
+        message,
+    })
 }
 
-/// Walk `refs/meshes/v1/<name>` as a commit chain (§6.6). `limit = None`
-/// means no limit. Newest first.
 pub fn mesh_log(
-    _repo: &gix::Repository,
-    _name: &str,
-    _limit: Option<usize>,
+    repo: &gix::Repository,
+    name: &str,
+    limit: Option<usize>,
 ) -> Result<Vec<MeshCommitInfo>> {
-    todo!("mesh::read::mesh_log")
+    let wd = work_dir(repo)?;
+    // Validate the ref exists first.
+    resolve_ref_oid_optional(wd, &mesh_ref(name))?
+        .ok_or_else(|| Error::MeshNotFound(name.into()))?;
+    let mut args = vec!["rev-list".to_string()];
+    if let Some(limit) = limit {
+        args.push(format!("--max-count={limit}"));
+    }
+    args.push(mesh_ref(name));
+    let commits = git_stdout(wd, args.iter().map(String::as_str))?;
+    commits
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|oid| mesh_commit_info_at(repo, name, Some(oid)))
+        .collect()
 }
 
-/// True iff `ancestor` is an ancestor of the mesh's current tip (or equal).
 pub fn is_ancestor_commit(
-    _repo: &gix::Repository,
-    _name: &str,
-    _ancestor: &str,
+    repo: &gix::Repository,
+    name: &str,
+    ancestor: &str,
 ) -> Result<bool> {
-    todo!("mesh::read::is_ancestor_commit")
+    crate::git::is_ancestor(repo, ancestor, &mesh_ref(name))
 }
 
-/// Resolve a commit-ish to a concrete commit OID in the mesh ref's
-/// ancestry. Errors if the commit is not reachable from the tip.
 pub fn resolve_commit_ish(
-    _repo: &gix::Repository,
-    _name: &str,
-    _commit_ish: &str,
+    repo: &gix::Repository,
+    name: &str,
+    commit_ish: &str,
 ) -> Result<String> {
-    todo!("mesh::read::resolve_commit_ish")
+    resolve_mesh_revision(work_dir(repo)?, name, Some(commit_ish))
 }

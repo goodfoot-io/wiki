@@ -13,7 +13,7 @@ fn seed(repo: &TestRepo, name: &str) -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn push_with_missing_remote_errors() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "m")?;
@@ -23,7 +23,7 @@ fn push_with_missing_remote_errors() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn push_bootstraps_refspec_on_first_push() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let bare = BareRepo::new()?;
@@ -36,7 +36,7 @@ fn push_bootstraps_refspec_on_first_push() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn push_delivers_mesh_to_upstream() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let bare = BareRepo::new()?;
@@ -52,7 +52,7 @@ fn push_delivers_mesh_to_upstream() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn fetch_delivers_mesh_from_upstream() -> Result<()> {
     let bare = BareRepo::new()?;
     let writer = TestRepo::seeded()?;
@@ -68,7 +68,7 @@ fn fetch_delivers_mesh_from_upstream() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn fetch_uses_default_remote() -> Result<()> {
     let bare = BareRepo::new()?;
     let writer = TestRepo::seeded()?;
@@ -84,7 +84,7 @@ fn fetch_uses_default_remote() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn fetch_honors_default_remote_config() -> Result<()> {
     let bare = BareRepo::new()?;
     let writer = TestRepo::seeded()?;

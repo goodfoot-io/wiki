@@ -18,7 +18,7 @@ fn seed_mesh_with_one_range(repo: &TestRepo, name: &str) -> Result<String> {
 }
 
 #[test]
-#[ignore]
+
 fn fresh_when_nothing_changed() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed_mesh_with_one_range(&repo, "m")?;
@@ -29,7 +29,7 @@ fn fresh_when_nothing_changed() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn moved_when_only_location_shifts() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed_mesh_with_one_range(&repo, "m")?;
@@ -45,7 +45,7 @@ fn moved_when_only_location_shifts() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn changed_when_bytes_differ() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed_mesh_with_one_range(&repo, "m")?;
@@ -60,7 +60,7 @@ fn changed_when_bytes_differ() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn orphaned_when_anchor_unreachable() -> Result<()> {
     // Hard to produce cleanly without rewriting history; sketched for
     // shape. The implementation must classify unreachable anchors as
@@ -83,7 +83,7 @@ fn orphaned_when_anchor_unreachable() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn resolve_range_agrees_with_resolve_mesh() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed_mesh_with_one_range(&repo, "m")?;
@@ -95,7 +95,7 @@ fn resolve_range_agrees_with_resolve_mesh() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn culprit_commit_attribution_on_changed() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed_mesh_with_one_range(&repo, "m")?;
@@ -111,7 +111,7 @@ fn culprit_commit_attribution_on_changed() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn culprit_none_for_fresh_range() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed_mesh_with_one_range(&repo, "m")?;
@@ -122,7 +122,7 @@ fn culprit_none_for_fresh_range() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn stale_meshes_sorts_worst_first() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed_mesh_with_one_range(&repo, "clean")?;

@@ -6,7 +6,7 @@ use anyhow::Result;
 use support::TestRepo;
 
 #[test]
-#[ignore]
+
 fn cli_add_stages_range() -> Result<()> {
     let repo = TestRepo::seeded()?;
     repo.mesh_stdout(["add", "m", "file1.txt#L1-L5"])?;
@@ -17,7 +17,7 @@ fn cli_add_stages_range() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn cli_add_accepts_at_anchor() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let head = repo.head_sha()?;
@@ -26,7 +26,7 @@ fn cli_add_accepts_at_anchor() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn cli_add_rejects_bad_address() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let out = repo.run_mesh(["add", "m", "oops-no-fragment"])?;
@@ -35,7 +35,7 @@ fn cli_add_rejects_bad_address() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn cli_rm_stages_remove() -> Result<()> {
     let repo = TestRepo::seeded()?;
     repo.mesh_stdout(["add", "m", "file1.txt#L1-L5"])?;
@@ -48,7 +48,7 @@ fn cli_rm_stages_remove() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn cli_message_inline() -> Result<()> {
     let repo = TestRepo::seeded()?;
     repo.mesh_stdout(["message", "m", "-m", "Hello"])?;
@@ -58,7 +58,7 @@ fn cli_message_inline() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn cli_message_from_file() -> Result<()> {
     let repo = TestRepo::seeded()?;
     repo.write_file("msg.txt", "Subject\n\nBody\n")?;
@@ -67,7 +67,7 @@ fn cli_message_from_file() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn cli_commit_writes_ref() -> Result<()> {
     let repo = TestRepo::seeded()?;
     repo.mesh_stdout(["add", "m", "file1.txt#L1-L5"])?;
@@ -78,7 +78,7 @@ fn cli_commit_writes_ref() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn cli_commit_empty_is_error() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let out = repo.run_mesh(["commit", "empty"])?;
@@ -87,7 +87,7 @@ fn cli_commit_empty_is_error() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn cli_status_check_exit_code_clean() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let out = repo.run_mesh(["status", "--check"])?;
@@ -96,7 +96,7 @@ fn cli_status_check_exit_code_clean() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn cli_status_check_exit_code_drifty() -> Result<()> {
     let repo = TestRepo::seeded()?;
     repo.mesh_stdout(["add", "m", "file1.txt#L1-L5"])?;
@@ -111,7 +111,7 @@ fn cli_status_check_exit_code_drifty() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn cli_config_read_lists_defaults() -> Result<()> {
     let repo = TestRepo::seeded()?;
     repo.mesh_stdout(["add", "m", "file1.txt#L1-L5"])?;
@@ -124,7 +124,7 @@ fn cli_config_read_lists_defaults() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn cli_config_stage_override_shows_starred_line() -> Result<()> {
     let repo = TestRepo::seeded()?;
     repo.mesh_stdout(["add", "m", "file1.txt#L1-L5"])?;
@@ -138,7 +138,7 @@ fn cli_config_stage_override_shows_starred_line() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn cli_config_unknown_key_errors() -> Result<()> {
     let repo = TestRepo::seeded()?;
     repo.mesh_stdout(["add", "m", "file1.txt#L1-L5"])?;
@@ -150,7 +150,7 @@ fn cli_config_unknown_key_errors() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn cli_commit_reserved_name_rejected() -> Result<()> {
     let repo = TestRepo::seeded()?;
     // `stale` is on the reserved list — clap may treat it as a subcommand.

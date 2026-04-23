@@ -21,7 +21,7 @@ fn drift(repo: &TestRepo, msg: &str) -> Result<String> {
 }
 
 #[test]
-#[ignore]
+
 fn clean_exit_zero() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "m")?;
@@ -31,7 +31,7 @@ fn clean_exit_zero() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn drifty_exit_one() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "m")?;
@@ -42,7 +42,7 @@ fn drifty_exit_one() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn no_exit_code_forces_zero() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "m")?;
@@ -53,7 +53,7 @@ fn no_exit_code_forces_zero() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn human_output_has_summary_line() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "m")?;
@@ -65,7 +65,7 @@ fn human_output_has_summary_line() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn human_output_groups_changed_ranges() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "m")?;
@@ -77,7 +77,7 @@ fn human_output_groups_changed_ranges() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn oneline_suppresses_diffs() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "m")?;
@@ -89,7 +89,7 @@ fn oneline_suppresses_diffs() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn stat_shows_counts() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "m")?;
@@ -100,7 +100,7 @@ fn stat_shows_counts() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn patch_includes_unified_diff() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "m")?;
@@ -112,7 +112,7 @@ fn patch_includes_unified_diff() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn workspace_scan_without_name() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "a")?;

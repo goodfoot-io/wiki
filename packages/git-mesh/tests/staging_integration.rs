@@ -12,7 +12,7 @@ use git_mesh::{
 use support::TestRepo;
 
 #[test]
-#[ignore]
+
 fn append_add_creates_ops_and_sidecar() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -32,7 +32,7 @@ fn append_add_creates_ops_and_sidecar() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn append_add_with_explicit_anchor_records_sha() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let head = repo.head_sha()?;
@@ -44,7 +44,7 @@ fn append_add_with_explicit_anchor_records_sha() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn append_remove_records_line() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -56,7 +56,7 @@ fn append_remove_records_line() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn append_config_records_entries() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -72,7 +72,7 @@ fn append_config_records_entries() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn set_message_persists_file() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -83,7 +83,7 @@ fn set_message_persists_file() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn clear_staging_removes_all_files() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -96,7 +96,7 @@ fn clear_staging_removes_all_files() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn read_staging_empty_when_no_file() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let s = read_staging(&repo.gix_repo()?, "never-touched")?;
@@ -108,7 +108,7 @@ fn read_staging_empty_when_no_file() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn drift_check_negative_when_worktree_unchanged() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -118,7 +118,7 @@ fn drift_check_negative_when_worktree_unchanged() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn drift_check_positive_when_worktree_mutated() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;
@@ -135,7 +135,7 @@ fn drift_check_positive_when_worktree_mutated() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn drift_check_skips_explicit_anchor_adds() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let head = repo.head_sha()?;
@@ -151,7 +151,7 @@ fn drift_check_skips_explicit_anchor_adds() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn status_view_assembles_staging_and_drift() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let gix = repo.gix_repo()?;

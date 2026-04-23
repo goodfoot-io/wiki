@@ -9,7 +9,7 @@ use git_mesh::{create_range, parse_range, range_ref_path, read_range, serialize_
 use support::TestRepo;
 
 #[test]
-#[ignore]
+
 fn range_ref_path_is_canonical() {
     assert_eq!(
         range_ref_path("0123456789abcdef"),
@@ -18,7 +18,7 @@ fn range_ref_path_is_canonical() {
 }
 
 #[test]
-#[ignore]
+
 fn parse_serialize_round_trip() -> Result<()> {
     let original = Range {
         anchor_sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into(),
@@ -36,7 +36,7 @@ fn parse_serialize_round_trip() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn parse_tolerates_unknown_headers() -> Result<()> {
     let text = "anchor deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\ncreated 2026-01-01T00:00:00Z\nfuture some-value\nrange 1 10 cafebabecafebabecafebabecafebabecafebabe\tsrc/x.rs\n";
     let r = parse_range(text)?;
@@ -46,7 +46,7 @@ fn parse_tolerates_unknown_headers() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn parse_handles_paths_with_spaces() -> Result<()> {
     let text = "anchor deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\ncreated 2026-01-01T00:00:00Z\nrange 1 5 cafebabecafebabecafebabecafebabecafebabe\tsrc/a b/c d.rs\n";
     let r = parse_range(text)?;
@@ -55,7 +55,7 @@ fn parse_handles_paths_with_spaces() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn create_range_writes_blob_and_ref() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let head = repo.head_sha()?;
@@ -69,7 +69,7 @@ fn create_range_writes_blob_and_ref() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn create_range_rejects_path_not_in_tree() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let head = repo.head_sha()?;
@@ -79,7 +79,7 @@ fn create_range_rejects_path_not_in_tree() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn create_range_rejects_start_zero() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let head = repo.head_sha()?;
@@ -89,7 +89,7 @@ fn create_range_rejects_start_zero() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn create_range_rejects_end_lt_start() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let head = repo.head_sha()?;
@@ -99,7 +99,7 @@ fn create_range_rejects_end_lt_start() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn create_range_rejects_end_past_eof() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let head = repo.head_sha()?;
@@ -109,7 +109,7 @@ fn create_range_rejects_end_past_eof() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn create_range_orphan_anchor_errors() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let bogus = "0000000000000000000000000000000000000000";

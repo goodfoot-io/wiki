@@ -13,7 +13,7 @@ fn seed(repo: &TestRepo, name: &str) -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn bare_mesh_lists_all_meshes() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "alpha")?;
@@ -25,7 +25,7 @@ fn bare_mesh_lists_all_meshes() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn show_by_name_has_required_lines() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "alpha")?;
@@ -41,7 +41,7 @@ fn show_by_name_has_required_lines() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn show_oneline_drops_header() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "alpha")?;
@@ -52,7 +52,7 @@ fn show_oneline_drops_header() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn show_no_abbrev_shows_full_sha() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "alpha")?;
@@ -66,7 +66,7 @@ fn show_no_abbrev_shows_full_sha() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn show_at_walks_history() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "h")?;
@@ -82,7 +82,7 @@ fn show_at_walks_history() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn show_log_walks_newest_first() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "h")?;
@@ -97,7 +97,7 @@ fn show_log_walks_newest_first() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn show_log_limit_caps_output() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "h")?;
@@ -111,7 +111,7 @@ fn show_log_limit_caps_output() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn show_missing_mesh_errors() -> Result<()> {
     let repo = TestRepo::seeded()?;
     let out = repo.run_mesh(["ghost"])?;
@@ -120,7 +120,7 @@ fn show_missing_mesh_errors() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn ls_all_lists_every_file_with_ranges() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "m")?;
@@ -130,7 +130,7 @@ fn ls_all_lists_every_file_with_ranges() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn ls_by_path_filters() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "m")?;
@@ -141,7 +141,7 @@ fn ls_by_path_filters() -> Result<()> {
 }
 
 #[test]
-#[ignore]
+
 fn ls_by_path_range_filters() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "m")?;
