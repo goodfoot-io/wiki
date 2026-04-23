@@ -113,6 +113,18 @@ fn cli_stale_supports_exit_code_and_machine_formats() -> Result<()> {
     );
     assert_eq!(payload["meshes"][0]["links"][0]["status"], "MOVED");
 
+    let junit = test_repo.mesh_stdout(["stale", "my-mesh", "--format=junit"])?;
+    assert!(junit.contains("<testsuite name=\"git-mesh stale\""));
+    assert!(junit.contains("failures=\"1\""));
+    assert!(junit.contains(
+        "<failure message=\"MOVED file1.txt#L1-L5:file2.txt#L10-L15 -&gt; file1.txt#L2-L6:file2.txt#L10-L15\">"
+    ));
+
+    let github_actions =
+        test_repo.mesh_stdout(["stale", "my-mesh", "--format=github-actions"])?;
+    assert!(github_actions.contains("::warning file=file1.txt,line=1::"));
+    assert!(github_actions.contains("mesh my-mesh%3A MOVED"));
+
     Ok(())
 }
 
@@ -155,6 +167,38 @@ fn cli_stale_includes_culprit_and_reconcile_data() -> Result<()> {
         payload["meshes"][0]["links"][0]["sides"][0]["culprit"]["summary"],
         "modify file1"
     );
+
+    Ok(())
+}
+
+#[test]
+fn cli_stale_supports_stat_and_rejects_patch() -> Result<()> {
+    let mut test_repo = TestRepo::new()?;
+    test_repo.mesh_stdout([
+        "commit",
+        "my-mesh",
+        "--link",
+        "file1.txt#L1-L5:file2.txt#L10-L15",
+        "-m",
+        "Track ranges",
+    ])?;
+
+    test_repo.write_file(
+        "file1.txt",
+        "prefix\nline1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
+    )?;
+    test_repo.commit_all("shift file1 lines")?;
+
+    let stat = test_repo.mesh_stdout(["stale", "my-mesh", "--stat"])?;
+    assert!(stat.contains("MOVED"));
+    assert!(stat.contains(
+        "file1.txt#L1-L5:file2.txt#L10-L15 -> file1.txt#L2-L6:file2.txt#L10-L15"
+    ));
+    assert!(!stat.contains("reconcile with:"));
+    assert!(!stat.contains("├─"));
+
+    let patch_stderr = test_repo.mesh_stderr(["stale", "my-mesh", "--patch"])?;
+    assert!(patch_stderr.contains("stale detail level `--patch` is not implemented"));
 
     Ok(())
 }
@@ -346,5 +390,34 @@ fn cli_rejects_reserved_names() -> Result<()> {
         "bad",
     ])?;
     assert!(stderr.contains("mesh name `stale` is reserved"));
+
+    let mv_stderr = test_repo.mesh_stderr(["mv", "missing", "doctor"])?;
+    assert!(mv_stderr.contains("mesh name `doctor` is reserved"));
+
+    Ok(())
+}
+
+#[test]
+fn cli_doctor_reports_ok_and_broken_meshes() -> Result<()> {
+    let mut test_repo = TestRepo::new()?;
+    test_repo.mesh_stdout([
+        "commit",
+        "healthy",
+        "--link",
+        "file1.txt#L1-L5:file2.txt#L10-L15",
+        "-m",
+        "Healthy mesh",
+    ])?;
+
+    let ok = test_repo.mesh_stdout(["doctor"])?;
+    assert!(ok.contains("mesh doctor: ok"));
+
+    test_repo.create_mesh_fixture("broken", "Broken mesh", &["missing-link"])?;
+    let broken = test_repo.mesh_output(["doctor"])?;
+    assert_eq!(broken.status.code(), Some(1));
+    let stdout = String::from_utf8(broken.stdout)?;
+    assert!(stdout.contains("mesh doctor: found 1 issue(s)"));
+    assert!(stdout.contains("mesh `broken` is unreadable"));
+
     Ok(())
 }

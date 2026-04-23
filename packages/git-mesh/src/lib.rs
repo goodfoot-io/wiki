@@ -7,6 +7,18 @@ use std::process::Command;
 pub use types::*;
 use uuid::Uuid;
 
+const RESERVED_MESH_NAMES: &[&str] = &[
+    "commit", "rm", "mv", "restore", "stale", "fetch", "push", "doctor", "log", "help",
+];
+
+pub fn validate_mesh_name(name: &str) -> Result<()> {
+    anyhow::ensure!(
+        !RESERVED_MESH_NAMES.contains(&name),
+        "mesh name `{name}` is reserved"
+    );
+    Ok(())
+}
+
 pub fn create_link(repo: &gix::Repository, input: CreateLinkInput) -> Result<(String, Link)> {
     let work_dir = repo
         .workdir()
@@ -84,6 +96,7 @@ fn validate_side_range(work_dir: &std::path::Path, blob: &str, side: &SideSpec) 
 }
 
 pub fn commit_mesh(repo: &gix::Repository, input: CommitInput) -> Result<()> {
+    validate_mesh_name(&input.name)?;
     let work_dir = repo
         .workdir()
         .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
@@ -162,6 +175,7 @@ pub fn rename_mesh(
     new_name: &str,
     keep: bool,
 ) -> Result<()> {
+    validate_mesh_name(new_name)?;
     let work_dir = repo
         .workdir()
         .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;

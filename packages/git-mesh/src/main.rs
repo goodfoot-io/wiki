@@ -4,8 +4,8 @@ use git_mesh::{
     CommitInput, CopyDetection, CulpritCommit, LinkResolved, LinkStatus, MeshCommitInfo,
     MeshResolved, MeshStored, RangeSpec, SideSpec, StoredLink, commit_mesh, fetch_mesh_refs,
     is_ancestor_commit, list_mesh_names, mesh_commit_info, mesh_commit_info_at, mesh_log,
-    push_mesh_refs, read_mesh_at, remove_mesh, rename_mesh, resolve_commit_ish, restore_mesh,
-    show_mesh, stale_mesh,
+    push_mesh_refs, read_link, read_mesh_at, remove_mesh, rename_mesh, resolve_commit_ish,
+    restore_mesh, show_mesh, stale_mesh, validate_mesh_name,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,6 +26,7 @@ fn run() -> Result<i32> {
 
     match matches.subcommand() {
         Some(("stale", sub_matches)) => {
+            let detail = parse_stale_detail(sub_matches)?;
             let format = parse_stale_format(
                 sub_matches
                     .get_one::<String>("format")
@@ -42,10 +43,16 @@ fn run() -> Result<i32> {
                 since.as_deref(),
             )?;
 
+            if detail == StaleDetail::Patch {
+                return Err(anyhow!("stale detail level `--patch` is not implemented"));
+            }
+
             match format {
-                StaleFormat::Human => print_human_stale(&reports)?,
+                StaleFormat::Human => print_human_stale(&reports, detail)?,
                 StaleFormat::Porcelain => print_porcelain_stale(&reports),
                 StaleFormat::Json => print_json_stale(&reports)?,
+                StaleFormat::Junit => print_junit_stale(&reports)?,
+                StaleFormat::GitHubActions => print_github_actions_stale(&reports),
             }
 
             if sub_matches.get_flag("exit-code") && reports_have_stale(&reports) {
@@ -134,6 +141,18 @@ fn run() -> Result<i32> {
             )?;
             println!("pushed mesh refs to {remote}");
         }
+        Some(("doctor", _)) => {
+            let issues = run_doctor(&repo);
+            if issues.is_empty() {
+                println!("mesh doctor: ok");
+            } else {
+                println!("mesh doctor: found {} issue(s)", issues.len());
+                for issue in issues {
+                    println!("{issue}");
+                }
+                return Ok(1);
+            }
+        }
         None => {
             if let Some(name) = matches.get_one::<String>("name") {
                 if let Some(revision_range) = matches.get_one::<String>("diff") {
@@ -198,12 +217,36 @@ fn cli() -> Command {
                         .long("format")
                         .value_name("FMT")
                         .default_value("human")
-                        .value_parser(["human", "porcelain", "json"]),
+                        .value_parser([
+                            "human",
+                            "porcelain",
+                            "json",
+                            "junit",
+                            "github-actions",
+                        ]),
                 )
                 .arg(
                     Arg::new("exit-code")
                         .long("exit-code")
                         .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("oneline")
+                        .long("oneline")
+                        .action(ArgAction::SetTrue)
+                        .conflicts_with_all(["stat", "patch"]),
+                )
+                .arg(
+                    Arg::new("stat")
+                        .long("stat")
+                        .action(ArgAction::SetTrue)
+                        .conflicts_with_all(["oneline", "patch"]),
+                )
+                .arg(
+                    Arg::new("patch")
+                        .long("patch")
+                        .action(ArgAction::SetTrue)
+                        .conflicts_with_all(["oneline", "stat"]),
                 )
                 .arg(Arg::new("since").long("since").value_name("COMMIT_ISH")),
         )
@@ -290,6 +333,7 @@ fn cli() -> Command {
                 .about("Push mesh refs to a remote")
                 .arg(Arg::new("remote").required(false).value_name("REMOTE")),
         )
+        .subcommand(Command::new("doctor").about("Validate mesh refs and link objects"))
 }
 
 fn print_mesh_list(repo: &gix::Repository) -> Result<()> {
@@ -421,6 +465,16 @@ enum StaleFormat {
     Human,
     Porcelain,
     Json,
+    Junit,
+    GitHubActions,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StaleDetail {
+    Full,
+    Oneline,
+    Stat,
+    Patch,
 }
 
 #[derive(Clone, Debug)]
@@ -434,8 +488,23 @@ fn parse_stale_format(value: &str) -> Result<StaleFormat> {
         "human" => Ok(StaleFormat::Human),
         "porcelain" => Ok(StaleFormat::Porcelain),
         "json" => Ok(StaleFormat::Json),
+        "junit" => Ok(StaleFormat::Junit),
+        "github-actions" => Ok(StaleFormat::GitHubActions),
         _ => Err(anyhow!("invalid stale format `{value}`")),
     }
+}
+
+fn parse_stale_detail(matches: &clap::ArgMatches) -> Result<StaleDetail> {
+    let detail = if matches.get_flag("patch") {
+        StaleDetail::Patch
+    } else if matches.get_flag("stat") {
+        StaleDetail::Stat
+    } else if matches.get_flag("oneline") {
+        StaleDetail::Oneline
+    } else {
+        StaleDetail::Full
+    };
+    Ok(detail)
 }
 
 fn load_stale_reports(
@@ -476,17 +545,17 @@ fn load_stale_reports(
     Ok(reports)
 }
 
-fn print_human_stale(reports: &[StaleMeshReport]) -> Result<()> {
+fn print_human_stale(reports: &[StaleMeshReport], detail: StaleDetail) -> Result<()> {
     for (index, report) in reports.iter().enumerate() {
         if index > 0 {
             println!();
         }
-        print_stale(&report.mesh, &report.info)?;
+        print_stale(&report.mesh, &report.info, detail)?;
     }
     Ok(())
 }
 
-fn print_stale(mesh: &MeshResolved, info: &MeshCommitInfo) -> Result<()> {
+fn print_stale(mesh: &MeshResolved, info: &MeshCommitInfo, detail: StaleDetail) -> Result<()> {
     println!("mesh {}", mesh.name);
     println!("commit {}", info.commit_oid);
     println!("Author: {} <{}>", info.author_name, info.author_email);
@@ -506,30 +575,48 @@ fn print_stale(mesh: &MeshResolved, info: &MeshCommitInfo) -> Result<()> {
     links.sort_by_key(|link| std::cmp::Reverse(status_rank(link.status)));
     for link in &links {
         println!();
-        println!(
-            "  {:<10} {}  {}",
-            format_status(link.status),
-            abbreviate_oid(&link.anchor_sha),
-            format_resolved_pair(link)?
-        );
-        for (index, side) in link.sides.iter().enumerate() {
-            let branch = if index == 0 { "├─" } else { "└─" };
-            println!(
-                "             {branch} {:<10} {}",
-                format_status(side.status),
-                format_side_summary(side)
-            );
-            if let Some(culprit) = &side.culprit {
+        match detail {
+            StaleDetail::Oneline => println!(
+                "  {:<10} {}",
+                format_status(link.status),
+                format_resolved_pair(link)?
+            ),
+            StaleDetail::Stat => println!(
+                "  {:<10} {}  {} -> {}",
+                format_status(link.status),
+                abbreviate_oid(&link.anchor_sha),
+                format_resolved_pair(link)?,
+                format_current_pair(link)
+            ),
+            StaleDetail::Full | StaleDetail::Patch => {
                 println!(
-                    "                caused by {} {}",
-                    abbreviate_oid(&culprit.commit_oid),
-                    culprit.summary
+                    "  {:<10} {}  {}",
+                    format_status(link.status),
+                    abbreviate_oid(&link.anchor_sha),
+                    format_resolved_pair(link)?
                 );
+                for (index, side) in link.sides.iter().enumerate() {
+                    let branch = if index == 0 { "├─" } else { "└─" };
+                    println!(
+                        "             {branch} {:<10} {}",
+                        format_status(side.status),
+                        format_side_summary(side)
+                    );
+                    if let Some(culprit) = &side.culprit {
+                        println!(
+                            "                caused by {} {}",
+                            abbreviate_oid(&culprit.commit_oid),
+                            culprit.summary
+                        );
+                    }
+                }
+                if link.status != LinkStatus::Fresh {
+                    println!();
+                    println!("             reconcile with:");
+                    println!("               {}", link.reconcile_command);
+                }
             }
         }
-        println!();
-        println!("             reconcile with:");
-        println!("               {}", link.reconcile_command);
     }
 
     Ok(())
@@ -644,6 +731,69 @@ fn print_json_stale(reports: &[StaleMeshReport]) -> Result<()> {
     Ok(())
 }
 
+fn print_junit_stale(reports: &[StaleMeshReport]) -> Result<()> {
+    let tests = reports.iter().map(|report| report.mesh.links.len()).sum::<usize>();
+    let failures = reports
+        .iter()
+        .flat_map(|report| report.mesh.links.iter())
+        .filter(|link| link.status != LinkStatus::Fresh)
+        .count();
+
+    println!(
+        "<testsuite name=\"git-mesh stale\" tests=\"{tests}\" failures=\"{failures}\">"
+    );
+    for report in reports {
+        for link in sorted_links(&report.mesh) {
+            let pair = xml_escape(&format_resolved_pair(&link)?);
+            let name = xml_escape(&format!("{} {}", report.mesh.name, pair));
+            println!("  <testcase classname=\"{}\" name=\"{}\">", xml_escape(&report.mesh.name), name);
+            if link.status != LinkStatus::Fresh {
+                let message = xml_escape(&format!(
+                    "{} {} -> {}",
+                    format_status(link.status),
+                    format_resolved_pair(&link)?,
+                    format_current_pair(&link)
+                ));
+                println!("    <failure message=\"{message}\">");
+                println!("{}", xml_escape(&link.reconcile_command));
+                println!("    </failure>");
+            }
+            println!("  </testcase>");
+        }
+    }
+    println!("</testsuite>");
+    Ok(())
+}
+
+fn print_github_actions_stale(reports: &[StaleMeshReport]) {
+    for report in reports {
+        for link in sorted_links(&report.mesh) {
+            if link.status == LinkStatus::Fresh {
+                continue;
+            }
+            let culprit = link
+                .sides
+                .iter()
+                .find_map(|side| side.culprit.as_ref())
+                .map(|culprit| format!(" ({})", culprit.summary))
+                .unwrap_or_default();
+            let message = github_actions_escape(&format!(
+                "mesh {}: {} {} -> {}{}",
+                report.mesh.name,
+                format_status(link.status),
+                format_resolved_pair(&link).unwrap_or_default(),
+                format_current_pair(&link),
+                culprit
+            ));
+            println!(
+                "::warning file={},line={}::{message}",
+                github_actions_escape(&link.sides[0].anchored.path),
+                link.sides[0].anchored.start
+            );
+        }
+    }
+}
+
 fn print_indented_message(message: &str) {
     for line in message.lines() {
         println!("    {line}");
@@ -723,14 +873,6 @@ fn parse_copy_detection(text: &str) -> Result<CopyDetection> {
     }
 }
 
-fn validate_mesh_name(name: &str) -> Result<()> {
-    const RESERVED: &[&str] = &[
-        "commit", "rm", "mv", "restore", "stale", "fetch", "push", "doctor", "log", "help",
-    ];
-    anyhow::ensure!(!RESERVED.contains(&name), "mesh name `{name}` is reserved");
-    Ok(())
-}
-
 fn format_resolved_pair(link: &LinkResolved) -> Result<String> {
     Ok(format!(
         "{}:{}",
@@ -770,6 +912,24 @@ fn format_culprit_field(culprit: Option<&CulpritCommit>) -> String {
 
 fn shell_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\t', "\\t")
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn github_actions_escape(value: &str) -> String {
+    value
+        .replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+        .replace(':', "%3A")
+        .replace(',', "%2C")
 }
 
 fn format_current_location(location: &git_mesh::LinkLocation) -> String {
@@ -891,4 +1051,30 @@ fn reports_have_stale(reports: &[StaleMeshReport]) -> bool {
             .iter()
             .any(|link| link.status != LinkStatus::Fresh)
     })
+}
+
+fn run_doctor(repo: &gix::Repository) -> Vec<String> {
+    let mut issues = Vec::new();
+    let Ok(names) = list_mesh_names(repo) else {
+        issues.push("failed to list mesh refs".to_string());
+        return issues;
+    };
+
+    for name in names {
+        match read_mesh_at(repo, &name, None) {
+            Ok(mesh) => {
+                for link in mesh.links {
+                    if let Err(error) = read_link(repo, &link.id) {
+                        issues.push(format!(
+                            "mesh `{name}` link `{}` is unreadable: {error:#}",
+                            link.id
+                        ));
+                    }
+                }
+            }
+            Err(error) => issues.push(format!("mesh `{name}` is unreadable: {error:#}")),
+        }
+    }
+
+    issues
 }
