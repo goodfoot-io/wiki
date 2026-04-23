@@ -240,3 +240,52 @@ fn test_create_link_fails_when_ref_already_exists() -> Result<()> {
     assert_eq!(test_repo.read_ref("refs/links/v1/existing-link")?, original_oid);
     Ok(())
 }
+
+/// §4.1 — TAB is the field terminator on the on-disk `side` line and no escape
+/// is defined. Paths containing TAB, newline, or NUL are rejected at write time
+/// (fail-closed) so the blob can never be silently corrupted.
+#[test]
+fn test_create_link_rejects_path_with_control_characters() -> Result<()> {
+    let mut test_repo = TestRepo::new()?;
+    test_repo.write_file("file1.txt", "1\n2\n3\n4\n5\n")?;
+    test_repo.write_file("file2.txt", "1\n2\n3\n4\n5\n")?;
+    test_repo.commit_all("init")?;
+
+    for (label, bad_path) in [
+        ("TAB", "bad\tpath.txt"),
+        ("newline", "bad\npath.txt"),
+        ("NUL", "bad\0path.txt"),
+    ] {
+        let result = create_link(
+            &test_repo.repo,
+            CreateLinkInput {
+                sides: [
+                    SideSpec {
+                        path: bad_path.to_string(),
+                        start: 1,
+                        end: 2,
+                        copy_detection: None,
+                        ignore_whitespace: None,
+                    },
+                    SideSpec {
+                        path: "file2.txt".to_string(),
+                        start: 1,
+                        end: 2,
+                        copy_detection: None,
+                        ignore_whitespace: None,
+                    },
+                ],
+                anchor_sha: None,
+                id: None,
+            },
+        );
+        let err = result.expect_err(&format!("{label} path must be rejected"));
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(label),
+            "error for {label} should mention the character, got: {msg}"
+        );
+    }
+
+    Ok(())
+}

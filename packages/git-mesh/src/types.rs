@@ -43,6 +43,7 @@ pub struct MeshCommitInfo {
     pub author_email: String,
     pub author_date: String,
     pub summary: String,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

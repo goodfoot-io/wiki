@@ -61,6 +61,7 @@ pub fn mesh_commit_info_at(
     let author_email = git_stdout(work_dir, ["show", "-s", "--format=%ae", &commit_oid])?;
     let author_date = git_stdout(work_dir, ["show", "-s", "--format=%aD", &commit_oid])?;
     let summary = git_stdout(work_dir, ["show", "-s", "--format=%s", &commit_oid])?;
+    let message = git_stdout(work_dir, ["show", "-s", "--format=%B", &commit_oid])?;
 
     Ok(MeshCommitInfo {
         commit_oid,
@@ -68,6 +69,7 @@ pub fn mesh_commit_info_at(
         author_email,
         author_date,
         summary,
+        message,
     })
 }
 

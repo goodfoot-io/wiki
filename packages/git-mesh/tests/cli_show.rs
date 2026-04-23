@@ -40,10 +40,74 @@ fn cli_lists_and_shows_meshes() -> Result<()> {
     assert!(!show_oneline.contains("Alpha subject"));
     assert!(show_oneline.contains("  file1.txt#L1-L5:file2.txt#L10-L15"));
 
-    let formatted = test_repo.mesh_stdout(["alpha", "--format=%m %s%n%L%n%l links"])?;
+    let formatted = test_repo.mesh_stdout(["alpha", "--format=%M %s%n%L%n%l links"])?;
     assert!(formatted.contains("alpha Alpha subject"));
     assert!(formatted.contains("  file1.txt#L1-L5:file2.txt#L10-L15"));
     assert!(formatted.contains("1 links"));
+
+    // §10.2 — `%m` collides with git-log's left/right mark and is not defined
+    // for mesh output. Format strings using `%m` must be rejected.
+    let err = test_repo.mesh_stderr(["alpha", "--format=%m"])?;
+    assert!(
+        err.contains("unsupported format token `%m`"),
+        "expected rejection of `%m`, got: {err}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn cli_show_format_tokens_cover_git_log_compatible_set() -> Result<()> {
+    let test_repo = TestRepo::new()?;
+    test_repo.mesh_stdout([
+        "commit",
+        "tokens",
+        "--link",
+        "file1.txt#L1-L5:file2.txt#L10-L15",
+        "-m",
+        "Subject line\n\nBody paragraph.",
+    ])?;
+
+    let head_commit = test_repo.read_ref("refs/meshes/v1/tokens")?;
+
+    // Each git-log-compatible token round-trips the expected value.
+    let h = test_repo.mesh_stdout(["tokens", "--format=%H"])?;
+    assert_eq!(h.trim_end(), head_commit);
+
+    let abbrev = test_repo.mesh_stdout(["tokens", "--format=%h"])?;
+    assert_eq!(abbrev.trim_end().len(), 8);
+    assert!(head_commit.starts_with(abbrev.trim_end()));
+
+    let s = test_repo.mesh_stdout(["tokens", "--format=%s"])?;
+    assert_eq!(s.trim_end(), "Subject line");
+
+    let b = test_repo.mesh_stdout(["tokens", "--format=%B"])?;
+    assert!(b.contains("Subject line"));
+    assert!(b.contains("Body paragraph."));
+
+    let an = test_repo.mesh_stdout(["tokens", "--format=%an"])?;
+    assert!(!an.trim().is_empty());
+
+    let ae = test_repo.mesh_stdout(["tokens", "--format=%ae"])?;
+    assert!(ae.contains('@'));
+
+    let ad = test_repo.mesh_stdout(["tokens", "--format=%ad"])?;
+    assert!(!ad.trim().is_empty());
+
+    // Mesh-specific tokens.
+    let m = test_repo.mesh_stdout(["tokens", "--format=%M"])?;
+    assert_eq!(m.trim_end(), "tokens");
+
+    let links = test_repo.mesh_stdout(["tokens", "--format=%L"])?;
+    assert!(links.contains("file1.txt#L1-L5:file2.txt#L10-L15"));
+
+    let count = test_repo.mesh_stdout(["tokens", "--format=%l"])?;
+    assert_eq!(count.trim_end(), "1");
+
+    // Literal escape + newline.
+    let literal = test_repo.mesh_stdout(["tokens", "--format=a%%b%nc"])?;
+    assert!(literal.contains("a%b"));
+    assert!(literal.contains("\nc"));
 
     Ok(())
 }
@@ -143,11 +207,56 @@ fn cli_show_supports_at_log_diff_and_no_abbrev() -> Result<()> {
     let log_oneline = test_repo.mesh_stdout(["mesh-history", "--log", "--oneline"])?;
     assert!(log_oneline.contains("Second state"));
     assert!(log_oneline.contains("First state"));
+    // §10.2 --oneline: one line per commit, no header/body.
+    assert!(!log_oneline.contains("Author:"));
+    assert!(!log_oneline.contains("Date:"));
+    for line in log_oneline.lines().filter(|l| !l.is_empty()) {
+        assert_eq!(
+            line.matches('\n').count(),
+            0,
+            "oneline entries must not span multiple lines: {line:?}"
+        );
+    }
 
     let diff = test_repo.mesh_stdout(["mesh-history", "--diff", "HEAD~1..HEAD"])?;
     assert!(diff.contains("diff "));
     assert!(diff.contains("+ file3.txt#L1-L5:file4.txt#L10-L15 @"));
     assert!(!diff.contains("- file1.txt#L1-L5:file2.txt#L10-L15 @"));
+
+    Ok(())
+}
+
+#[test]
+fn cli_log_prints_full_commit_message_body() -> Result<()> {
+    let test_repo = TestRepo::new()?;
+    // §6.4: --log mirrors `git log refs/meshes/v1/<name>`, which prints the
+    // full commit message (subject + body) indented four spaces.
+    test_repo.mesh_stdout([
+        "commit",
+        "bodied",
+        "--link",
+        "file1.txt#L1-L5:file2.txt#L10-L15",
+        "-m",
+        "Subject here\n\nBody line one.\nBody line two.",
+    ])?;
+
+    let log = test_repo.mesh_stdout(["bodied", "--log"])?;
+    assert!(log.contains("    Subject here"));
+    assert!(
+        log.contains("    Body line one."),
+        "--log output must include body line one, got: {log}"
+    );
+    assert!(
+        log.contains("    Body line two."),
+        "--log output must include body line two, got: {log}"
+    );
+
+    let log_oneline = test_repo.mesh_stdout(["bodied", "--log", "--oneline"])?;
+    assert!(log_oneline.contains("Subject here"));
+    assert!(
+        !log_oneline.contains("Body line one."),
+        "--oneline must collapse to subject only, got: {log_oneline}"
+    );
 
     Ok(())
 }

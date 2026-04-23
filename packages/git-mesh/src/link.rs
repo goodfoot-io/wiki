@@ -11,6 +11,9 @@ pub fn create_link(repo: &gix::Repository, input: CreateLinkInput) -> Result<(St
     let work_dir = repo
         .workdir()
         .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
+    for side in &input.sides {
+        validate_side_path(&side.path)?;
+    }
     let anchor_sha = match input.anchor_sha {
         Some(anchor_sha) => anchor_sha,
         None => git_stdout(work_dir, ["rev-parse", "HEAD"])?,
@@ -26,6 +29,27 @@ pub fn create_link(repo: &gix::Repository, input: CreateLinkInput) -> Result<(St
         }],
     )?;
     Ok((id, link))
+}
+
+/// §4.1 — the serialized `side` line uses TAB as the field terminator before the
+/// path, and the blob is newline-framed. No escape mechanism is defined, so a
+/// path containing TAB, newline, or NUL would silently corrupt the on-disk
+/// format. Reject such paths at write time (fail-closed).
+pub(crate) fn validate_side_path(path: &str) -> Result<()> {
+    anyhow::ensure!(!path.is_empty(), "link side path must not be empty");
+    if let Some(bad) = path.chars().find(|c| matches!(c, '\t' | '\n' | '\0')) {
+        let label = match bad {
+            '\t' => "TAB",
+            '\n' => "newline",
+            '\0' => "NUL",
+            _ => unreachable!(),
+        };
+        anyhow::bail!(
+            "link side path `{path}` contains an unsupported control character ({label}); \
+             §4.1 uses TAB as the field terminator and does not define an escape"
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn build_link_side(

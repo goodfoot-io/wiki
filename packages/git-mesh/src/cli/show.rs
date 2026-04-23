@@ -60,6 +60,25 @@ pub(crate) fn print_mesh_format(
     format: &str,
     options: PrintOptions,
 ) -> Result<()> {
+    // §10.2: `--format=<fmt>` is a git-log-style format string.
+    //
+    // Supported tokens (all match `git log --format` semantics except `%M`/`%L`/`%l`,
+    // which are reserved for mesh-specific data in tokens that git leaves undefined
+    // at the top level):
+    //   %H   full commit sha of the mesh tip
+    //   %h   abbreviated commit sha (honors --no-abbrev)
+    //   %s   subject (first line of the mesh message)
+    //   %B   raw body (full commit message, subject + body)
+    //   %an  author name
+    //   %ae  author email
+    //   %ad  author date
+    //   %n   newline
+    //   %%   literal percent
+    //   %M   mesh name          (git-specific: `%m` is left/right mark — reserved)
+    //   %L   links block        (git-specific: undefined at top level in git-log)
+    //   %l   link count         (git-specific: undefined at top level in git-log)
+    //
+    // Any other `%X` is rejected so format strings stay explicit.
     let mut output = String::new();
     let mut chars = format.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -71,7 +90,7 @@ pub(crate) fn print_mesh_format(
         match chars.next() {
             Some('%') => output.push('%'),
             Some('n') => output.push('\n'),
-            Some('m') => output.push_str(&mesh.name),
+            Some('M') => output.push_str(&mesh.name),
             Some('H') => output.push_str(&info.commit_oid),
             Some('h') => output.push_str(maybe_abbreviate(&info.commit_oid, options.no_abbrev)),
             Some('s') => output.push_str(&info.summary),
@@ -103,6 +122,9 @@ pub(crate) fn print_mesh_log(
     oneline: bool,
     limit: Option<usize>,
 ) -> Result<()> {
+    // §6.4 / §10.2: `git mesh <name> --log` mirrors `git log refs/meshes/v1/<name>`.
+    // Default rendering shows header + full commit message (subject + body) indented
+    // four spaces, matching `git log`'s default. `--oneline` collapses to one line.
     let entries = mesh_log(repo, name, limit)?;
     for info in entries {
         if oneline {
@@ -112,7 +134,7 @@ pub(crate) fn print_mesh_log(
             println!("Author: {} <{}>", info.author_name, info.author_email);
             println!("Date:   {}", info.author_date);
             println!();
-            print_indented_message(&info.summary);
+            print_indented_message(info.message.trim_end_matches('\n'));
             println!();
         }
     }
