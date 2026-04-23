@@ -72,6 +72,9 @@ pub fn commit_mesh(repo: &gix::Repository, input: CommitInput) -> Result<()> {
     };
 
     for attempt in 0..COMMIT_MESH_MAX_ATTEMPTS {
+        if base_tip.is_none() && input.amend {
+            anyhow::bail!("--amend: no mesh tip to amend");
+        }
         if base_tip.is_none() && normalized_adds.is_empty() {
             anyhow::bail!(
                 "mesh `{}` does not exist; supply --link to create it",
@@ -230,6 +233,11 @@ fn mesh_contains_sides(work_dir: &Path, links: &[String], sides: &[SideSpec; 2])
 }
 
 fn link_matches_sides(link: &Link, sides: &[SideSpec; 2]) -> bool {
+    // Spec §4.2: the Mesh uniqueness key for a link is (path, start, end) per
+    // side only. Resolver options such as copy_detection / ignore_whitespace
+    // must not factor into collision detection — otherwise `--link` would be
+    // allowed to record two links with the same pair differing only in
+    // options, violating the invariant.
     link.sides
         .iter()
         .zip(sides.iter())
@@ -237,12 +245,6 @@ fn link_matches_sides(link: &Link, sides: &[SideSpec; 2]) -> bool {
             existing.path == candidate.path
                 && existing.start == candidate.start
                 && existing.end == candidate.end
-                && existing.copy_detection
-                    == candidate.copy_detection.unwrap_or(DEFAULT_COPY_DETECTION)
-                && existing.ignore_whitespace
-                    == candidate
-                        .ignore_whitespace
-                        .unwrap_or(DEFAULT_IGNORE_WHITESPACE)
         })
 }
 
@@ -295,7 +297,10 @@ fn build_mesh_commit(
             .split_whitespace()
             .map(str::to_string)
             .collect(),
-        (true, None) => Vec::new(),
+        // --amend requires an existing mesh tip to rewrite. Without one there
+        // is nothing to amend, and falling through would silently produce a
+        // rootless mesh commit.
+        (true, None) => anyhow::bail!("--amend: no mesh tip to amend"),
         (false, Some(tip)) => vec![tip.to_string()],
         (false, None) => Vec::new(),
     };
