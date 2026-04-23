@@ -914,11 +914,13 @@ fn parse_blame_culprit(output: &str) -> Option<(i64, CulpritCommit)> {
         }
     }
 
+    let ts = timestamp?;
     Some((
-        timestamp?,
+        ts,
         CulpritCommit {
             commit_oid,
             summary: summary.unwrap_or_default(),
+            committed_at: Some(ts),
         },
     ))
 }

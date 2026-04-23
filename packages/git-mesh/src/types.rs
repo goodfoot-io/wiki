@@ -90,6 +90,11 @@ pub struct SideResolved {
 pub struct CulpritCommit {
     pub commit_oid: String,
     pub summary: String,
+    /// Unix timestamp (committer time) of the culprit commit, used for
+    /// human-friendly relative date formatting. `None` when the underlying
+    /// blame output did not expose a committer-time field.
+    #[serde(default)]
+    pub committed_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

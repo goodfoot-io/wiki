@@ -662,16 +662,21 @@ fn print_stale(
                     abbreviate_oid(&link.anchor_sha),
                     format_resolved_pair(link)?
                 );
+                let last_index = link.sides.len().saturating_sub(1);
                 for (index, side) in link.sides.iter().enumerate() {
-                    let branch = if index == 0 { "├─" } else { "└─" };
+                    let branch = if index == last_index { "└─" } else { "├─" };
                     println!(
                         "             {branch} {:<10} {}",
                         format_status(side.status),
-                        format_side_summary(side)
+                        format_human_side_summary(repo, side)?
                     );
                     if let Some(culprit) = &side.culprit {
+                        let relative = culprit
+                            .committed_at
+                            .map(|ts| format!("  ({})", format_relative_time(ts, now_seconds())))
+                            .unwrap_or_default();
                         println!(
-                            "                caused by {} {}",
+                            "                caused by {} {}{relative}",
                             abbreviate_oid(&culprit.commit_oid),
                             culprit.summary
                         );
@@ -688,7 +693,9 @@ fn print_stale(
                 if link.status != LinkStatus::Fresh {
                     println!();
                     println!("             reconcile with:");
-                    println!("               {}", link.reconcile_command);
+                    for line in format_wrapped_reconcile(&link.reconcile_command) {
+                        println!("               {line}");
+                    }
                 }
             }
         }
@@ -1044,19 +1051,159 @@ fn format_resolved_pair(link: &LinkResolved) -> Result<String> {
     ))
 }
 
-fn format_side_summary(side: &git_mesh::SideResolved) -> String {
+/// Format the per-side summary for `git mesh stale` human output. The doc's
+/// §10.4 example uses a Unicode right arrow (`→`) between the anchored range
+/// and the current location, drops the path when it has not changed, and
+/// appends a human hint describing why the side is stale. `MOVED` gets
+/// `(file unchanged, lines shifted)`; `MODIFIED`/`REWRITTEN` get
+/// `(<changed>/<total> lines rewritten)` computed from the blob texts.
+fn format_human_side_summary(
+    repo: &gix::Repository,
+    side: &git_mesh::SideResolved,
+) -> Result<String> {
     let anchored = format_side_anchored(side);
 
-    match &side.current {
-        Some(current)
-            if current.path != side.anchored.path
-                || current.start != side.anchored.start
-                || current.end != side.anchored.end =>
-        {
-            format!("{anchored} -> {}", format_current_location(current))
+    let Some(current) = side.current.as_ref() else {
+        return Ok(anchored);
+    };
+
+    let path_changed = current.path != side.anchored.path;
+    let range_changed = current.start != side.anchored.start || current.end != side.anchored.end;
+
+    let hint = match side.status {
+        LinkStatus::Moved => Some("file unchanged, lines shifted".to_string()),
+        LinkStatus::Modified | LinkStatus::Rewritten => {
+            Some(format_rewritten_hint(repo, side, current)?)
         }
-        Some(_) | None => anchored,
+        _ => None,
+    };
+
+    // Fresh side with no movement: just the anchored range.
+    if !path_changed && !range_changed && hint.is_none() {
+        return Ok(anchored);
     }
+
+    let shifted_suffix = if path_changed {
+        Some(format_current_location(current))
+    } else if range_changed {
+        Some(format!("L{}-L{}", current.start, current.end))
+    } else {
+        None
+    };
+
+    Ok(match (shifted_suffix, hint) {
+        (Some(shifted), Some(hint)) => format!("{anchored} \u{2192} {shifted}  ({hint})"),
+        (Some(shifted), None) => format!("{anchored} \u{2192} {shifted}"),
+        (None, Some(hint)) => format!("{anchored}  ({hint})"),
+        (None, None) => anchored,
+    })
+}
+
+fn format_rewritten_hint(
+    repo: &gix::Repository,
+    side: &git_mesh::SideResolved,
+    current: &git_mesh::LinkLocation,
+) -> Result<String> {
+    let anchored_text = slice_blob_lines(
+        &read_git_text(repo, &side.anchored.blob)?,
+        side.anchored.start,
+        side.anchored.end,
+    )?;
+    let current_text = slice_blob_lines(
+        &read_git_text(repo, &current.blob)?,
+        current.start,
+        current.end,
+    )?;
+
+    let anchored_lines: Vec<&str> = anchored_text.lines().collect();
+    let current_lines: Vec<&str> = current_text.lines().collect();
+    let total = anchored_lines.len().max(current_lines.len());
+    let mut changed = 0usize;
+    for idx in 0..total {
+        let a = anchored_lines.get(idx);
+        let c = current_lines.get(idx);
+        if a != c {
+            changed += 1;
+        }
+    }
+
+    Ok(format!("{changed}/{total} lines rewritten"))
+}
+
+/// Break the single-line reconcile command into the multi-line wrapped form
+/// shown in docs/git-mesh.md §10.4: the `git mesh commit <name>` head stays on
+/// one line, and each subsequent `--unlink`, `--link`, and `-m` argument moves
+/// to its own continuation line. Continuation lines after the first are
+/// indented four spaces past `git mesh commit` to mirror the doc example.
+fn format_wrapped_reconcile(command: &str) -> Vec<String> {
+    // Split the canonical single-line reconcile command into head + per-flag
+    // segments (`--unlink ...`, `--link ...`, `-m ...`). Tokens are known to
+    // be whitespace-separated because `build_reconcile_command` emits them
+    // that way.
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for token in command.split(' ') {
+        if matches!(token, "--unlink" | "--link" | "-m") && !current.is_empty() {
+            parts.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(token);
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+
+    if parts.len() <= 1 {
+        return parts;
+    }
+
+    let mut wrapped = Vec::with_capacity(parts.len());
+    let last = parts.len() - 1;
+    for (index, part) in parts.into_iter().enumerate() {
+        if index == 0 {
+            wrapped.push(format!("{part} \\"));
+        } else if index == last {
+            wrapped.push(format!("    {part}"));
+        } else {
+            wrapped.push(format!("    {part} \\"));
+        }
+    }
+    wrapped
+}
+
+/// Render a committer timestamp as a short relative phrase matching the
+/// `(2 days ago)` style shown in docs/git-mesh.md §10.4. Future timestamps
+/// collapse to `"just now"`; precision coarsens from seconds to years as the
+/// gap widens.
+fn format_relative_time(committed_at: i64, now: i64) -> String {
+    let delta = now.saturating_sub(committed_at);
+    if delta <= 0 {
+        return "just now".to_string();
+    }
+    let (value, unit) = if delta < 60 {
+        (delta, "second")
+    } else if delta < 3_600 {
+        (delta / 60, "minute")
+    } else if delta < 86_400 {
+        (delta / 3_600, "hour")
+    } else if delta < 2_592_000 {
+        (delta / 86_400, "day")
+    } else if delta < 31_536_000 {
+        (delta / 2_592_000, "month")
+    } else {
+        (delta / 31_536_000, "year")
+    };
+    let plural = if value == 1 { "" } else { "s" };
+    format!("{value} {unit}{plural} ago")
+}
+
+fn now_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn format_culprit_field(culprit: Option<&CulpritCommit>) -> String {
