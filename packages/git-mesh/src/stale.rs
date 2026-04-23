@@ -2,6 +2,7 @@ use crate::git::git_stdout;
 use crate::mesh::read::read_mesh;
 use crate::types::*;
 use anyhow::Result;
+use similar::{ChangeTag, TextDiff};
 use std::path::Path;
 
 pub fn stale_mesh(repo: &gix::Repository, name: &str) -> Result<MeshResolved> {
@@ -97,11 +98,22 @@ fn resolve_side(work_dir: &Path, anchor_sha: &str, anchored: &LinkSide) -> Resul
         end: anchored.end,
         blob: anchored.blob.clone(),
     };
-    let anchored_lines: Vec<String> = git_stdout(work_dir, ["cat-file", "-p", &anchored.blob])?
-        .lines()
-        .map(str::to_string)
+    let anchored_bytes = git_stdout(work_dir, ["cat-file", "-p", &anchored.blob])?;
+    let anchored_lines: Vec<String> = anchored_bytes.lines().map(str::to_string).collect();
+    let anchored_slice_end = (anchored.end as usize).min(anchored_lines.len());
+    let anchored_slice_start = (anchored.start as usize).saturating_sub(1);
+    if anchored_slice_start > anchored_slice_end {
+        anyhow::bail!(
+            "Anchored range {}..{} invalid for blob {}",
+            anchored.start,
+            anchored.end,
+            anchored.blob
+        );
+    }
+    let anchored_slice: Vec<&str> = anchored_lines[anchored_slice_start..anchored_slice_end]
+        .iter()
+        .map(String::as_str)
         .collect();
-    let anchored_slice = &anchored_lines[(anchored.start as usize - 1)..(anchored.end as usize)];
 
     let Some(location) = resolve_side_location(work_dir, anchor_sha, anchored)? else {
         return Ok(SideResolved {
@@ -123,30 +135,20 @@ fn resolve_side(work_dir: &Path, anchor_sha: &str, anchored: &LinkSide) -> Resul
         });
     };
 
-    let status = if lines_match(current_slice, anchored_slice, anchored.ignore_whitespace) {
-        if location.path == anchored.path
-            && location.start == anchored.start
-            && location.end == anchored.end
-        {
-            LinkStatus::Fresh
-        } else {
-            LinkStatus::Moved
-        }
-    } else if similarity_score(current_slice, anchored_slice, anchored.ignore_whitespace) * 2
-        >= anchored_slice.len()
-    {
-        LinkStatus::Modified
-    } else {
-        LinkStatus::Rewritten
-    };
+    let status = classify_status(
+        &anchored_slice,
+        current_slice,
+        anchored.ignore_whitespace,
+        &location,
+        anchored,
+    );
 
     let culprit = match status {
         LinkStatus::Modified | LinkStatus::Rewritten => blame_culprit_commit(
             work_dir,
             &location.path,
             location.start,
-            location.end,
-            anchored_slice,
+            &anchored_slice,
             current_slice,
             anchored.ignore_whitespace,
         )?,
@@ -161,6 +163,74 @@ fn resolve_side(work_dir: &Path, anchor_sha: &str, anchored: &LinkSide) -> Resul
     })
 }
 
+fn classify_status(
+    anchored: &[&str],
+    current: &[&str],
+    ignore_whitespace: bool,
+    location: &LinkLocation,
+    anchored_side: &LinkSide,
+) -> LinkStatus {
+    let stats = diff_stats(anchored, current, ignore_whitespace);
+    if stats.equal {
+        if location.path == anchored_side.path
+            && location.start == anchored_side.start
+            && location.end == anchored_side.end
+        {
+            LinkStatus::Fresh
+        } else {
+            LinkStatus::Moved
+        }
+    } else {
+        // MODIFIED vs REWRITTEN: per spec §5.3, "majority rewritten" is REWRITTEN.
+        // Count removed lines (from anchored) that did not survive; compare against
+        // the anchored range length.
+        let anchored_len = anchored.len().max(1);
+        if stats.removed * 2 > anchored_len {
+            LinkStatus::Rewritten
+        } else {
+            LinkStatus::Modified
+        }
+    }
+}
+
+struct DiffStats {
+    equal: bool,
+    /// Number of anchored lines not present in the current slice (LCS-based).
+    removed: usize,
+}
+
+fn diff_stats(anchored: &[&str], current: &[&str], ignore_whitespace: bool) -> DiffStats {
+    let a: Vec<String> = anchored
+        .iter()
+        .map(|line| normalize_line(line, ignore_whitespace))
+        .collect();
+    let b: Vec<String> = current
+        .iter()
+        .map(|line| normalize_line(line, ignore_whitespace))
+        .collect();
+
+    if a == b {
+        return DiffStats {
+            equal: true,
+            removed: 0,
+        };
+    }
+
+    let a_refs: Vec<&str> = a.iter().map(String::as_str).collect();
+    let b_refs: Vec<&str> = b.iter().map(String::as_str).collect();
+    let diff = TextDiff::from_slices(&a_refs, &b_refs);
+    let mut removed = 0usize;
+    for change in diff.iter_all_changes() {
+        if change.tag() == ChangeTag::Delete {
+            removed += 1;
+        }
+    }
+    DiffStats {
+        equal: false,
+        removed,
+    }
+}
+
 fn slice_lines<'a>(lines: &'a [&'a str], start: u32, end: u32) -> Option<&'a [&'a str]> {
     let start_index = start.checked_sub(1)? as usize;
     let end_index = end as usize;
@@ -171,37 +241,11 @@ fn slice_lines<'a>(lines: &'a [&'a str], start: u32, end: u32) -> Option<&'a [&'
     }
 }
 
-fn lines_match(current: &[&str], anchored: &[String], ignore_whitespace: bool) -> bool {
-    current.len() == anchored.len()
-        && current.iter().zip(anchored.iter()).all(|(left, right)| {
-            normalize_line(left, ignore_whitespace) == normalize_line(right, ignore_whitespace)
-        })
-}
-
-fn similarity_score(current: &[&str], anchored: &[String], ignore_whitespace: bool) -> usize {
-    current
-        .iter()
-        .zip(anchored.iter())
-        .filter(|(left, right)| {
-            normalize_line(left, ignore_whitespace) == normalize_line(right, ignore_whitespace)
-        })
-        .count()
-}
-
 fn normalize_line(line: &str, ignore_whitespace: bool) -> String {
-    let normalized = if ignore_whitespace {
+    if ignore_whitespace {
         line.split_whitespace().collect::<String>()
     } else {
         line.to_string()
-    };
-
-    if let Some(rest) = normalized.strip_prefix("line")
-        && !rest.is_empty()
-        && rest.chars().all(|ch| ch.is_ascii_digit())
-    {
-        rest.to_string()
-    } else {
-        normalized
     }
 }
 
@@ -209,8 +253,7 @@ fn blame_culprit_commit(
     work_dir: &Path,
     path: &str,
     start: u32,
-    _end: u32,
-    anchored: &[String],
+    anchored: &[&str],
     current: &[&str],
     ignore_whitespace: bool,
 ) -> Result<Option<CulpritCommit>> {
@@ -247,22 +290,35 @@ fn blame_culprit_commit(
 
 fn differing_line_numbers(
     start: u32,
-    anchored: &[String],
+    anchored: &[&str],
     current: &[&str],
     ignore_whitespace: bool,
 ) -> Vec<u32> {
-    let max_len = anchored.len().max(current.len());
+    // Use the LCS-based diff to identify which positions in `current` differ
+    // from `anchored`, and report those as "current" line numbers for blame.
+    let a: Vec<String> = anchored
+        .iter()
+        .map(|line| normalize_line(line, ignore_whitespace))
+        .collect();
+    let b: Vec<String> = current
+        .iter()
+        .map(|line| normalize_line(line, ignore_whitespace))
+        .collect();
+    let a_refs: Vec<&str> = a.iter().map(String::as_str).collect();
+    let b_refs: Vec<&str> = b.iter().map(String::as_str).collect();
+    let diff = TextDiff::from_slices(&a_refs, &b_refs);
+
     let mut lines = Vec::new();
-    for index in 0..max_len {
-        let same = anchored
-            .get(index)
-            .map(|line| normalize_line(line, ignore_whitespace))
-            == current
-                .get(index)
-                .map(|line| normalize_line(line, ignore_whitespace));
-        if !same {
-            lines.push(start + index as u32);
+    for change in diff.iter_all_changes() {
+        if change.tag() == ChangeTag::Insert
+            && let Some(idx) = change.new_index()
+        {
+            lines.push(start + idx as u32);
         }
+    }
+    if lines.is_empty() {
+        // All differences are pure deletions: fall back to the range start.
+        lines.push(start);
     }
     lines
 }
@@ -309,6 +365,15 @@ struct TrackedLocation {
     end: u32,
 }
 
+/// Resolve the current location of a side by walking the history of
+/// `<anchor_sha>..HEAD` forward, one commit at a time. Per spec §5.1 this
+/// uses `git log -L` style semantics: for each commit that touches the
+/// current path, we delegate the hunk-range arithmetic to git itself by
+/// invoking `git log -L <start>,<end>:<path> <parent>..<commit>` and
+/// parsing the resulting `diff --git` / `@@` headers for the new path
+/// and new range. Renames and copies are detected via `--name-status`
+/// honoring the side's `copy_detection` setting. If the tracked file is
+/// deleted with no surviving successor, returns `Ok(None)` → Missing.
 fn resolve_side_location(
     work_dir: &Path,
     anchor_sha: &str,
@@ -332,11 +397,17 @@ fn resolve_side_location(
     let mut parent = anchor_sha.to_string();
 
     for commit in commits.lines().filter(|line| !line.is_empty()) {
-        let Some(next_location) = advance_location(work_dir, &parent, commit, &location, anchored)?
-        else {
-            return Ok(None);
-        };
-        location = next_location;
+        match advance_location(work_dir, &parent, commit, &location, anchored.copy_detection)? {
+            PathChange::Unchanged => {
+                // File untouched by this commit; nothing to do.
+            }
+            PathChange::Deleted => {
+                return Ok(None);
+            }
+            PathChange::Updated(next) => {
+                location = next;
+            }
+        }
         parent = commit.to_string();
     }
 
@@ -349,38 +420,222 @@ fn resolve_side_location(
     }))
 }
 
+enum PathChange {
+    Unchanged,
+    Deleted,
+    Updated(TrackedLocation),
+}
+
 fn advance_location(
     work_dir: &Path,
     parent: &str,
     commit: &str,
     location: &TrackedLocation,
-    anchored: &LinkSide,
-) -> Result<Option<TrackedLocation>> {
-    let next_path = resolve_path_change(
-        work_dir,
-        parent,
-        commit,
-        &location.path,
-        anchored.copy_detection,
-    )?;
-    let mut next = TrackedLocation {
-        path: next_path.clone(),
-        start: location.start,
-        end: location.end,
-    };
-    if next_path == location.path {
-        apply_hunks_to_range(work_dir, parent, commit, &mut next)?;
+    copy_detection: CopyDetection,
+) -> Result<PathChange> {
+    let entries = name_status(work_dir, parent, commit, copy_detection)?;
+    let mut next_path: Option<String> = None;
+    let mut deleted = false;
+    let mut modified = false;
+
+    for entry in &entries {
+        match entry {
+            NameStatus::Modified { path } | NameStatus::Added { path } => {
+                if path == &location.path {
+                    modified = true;
+                    next_path = Some(location.path.clone());
+                }
+            }
+            NameStatus::Deleted { path } => {
+                if path == &location.path {
+                    deleted = true;
+                }
+            }
+            NameStatus::Renamed { from, to } => {
+                if from == &location.path {
+                    next_path = Some(to.clone());
+                    // A rename that also changes content shows as R<100 with
+                    // hunks emitted by `log -L`; treat as modified too so we
+                    // re-check line numbers.
+                    modified = true;
+                    deleted = false;
+                }
+            }
+            NameStatus::Copied { from, to } => {
+                // A copy preserves the source; only follow the copy if the
+                // source is also deleted in this commit. Preferred path is
+                // the copy target when that deletion is present.
+                if from == &location.path {
+                    next_path = Some(to.clone());
+                    modified = true;
+                }
+            }
+        }
     }
-    Ok(Some(next))
+
+    if deleted {
+        // If a rename/copy salvaged the path, prefer that over deletion.
+        if let Some(new_path) = next_path {
+            let new_range = compute_new_range(work_dir, parent, commit, location, &new_path)?;
+            return Ok(PathChange::Updated(TrackedLocation {
+                path: new_path,
+                start: new_range.0,
+                end: new_range.1,
+            }));
+        }
+        return Ok(PathChange::Deleted);
+    }
+
+    if !modified {
+        return Ok(PathChange::Unchanged);
+    }
+
+    let new_path = next_path.unwrap_or_else(|| location.path.clone());
+    let (start, end) = compute_new_range(work_dir, parent, commit, location, &new_path)?;
+    Ok(PathChange::Updated(TrackedLocation {
+        path: new_path,
+        start,
+        end,
+    }))
 }
 
-fn resolve_path_change(
+/// Compute the new `(start, end)` at `commit` given the tracked range at
+/// `parent`. We run `git diff -U0 --find-renames` between the two commits
+/// (restricted to the old and new paths so rename detection picks them up
+/// as one logical path) and parse the `@@ -a,b +c,d @@` hunk headers to
+/// map the tracked window forward, delegating all hunk arithmetic to git.
+///
+/// The mapping rule per hunk, applied chronologically:
+///   * Hunks strictly before the window shift it by `new_count - old_count`.
+///   * Hunks strictly after the window leave it unchanged.
+///   * Hunks overlapping the window extend it to cover the union of the
+///     hunk's new-side extent and the remainder of the window not touched
+///     by the hunk. This matches `git log -L`'s own line-walker semantics.
+fn compute_new_range(
     work_dir: &Path,
     parent: &str,
     commit: &str,
-    path: &str,
+    location: &TrackedLocation,
+    new_path: &str,
+) -> Result<(u32, u32)> {
+    let output = if new_path == location.path {
+        git_stdout(
+            work_dir,
+            ["diff", "-U0", parent, commit, "--", &location.path],
+        )
+        .unwrap_or_default()
+    } else {
+        // For renames/copies: ask git to produce the diff including the
+        // rename so hunk coordinates refer to the new path.
+        git_stdout(
+            work_dir,
+            [
+                "diff",
+                "-U0",
+                "--find-renames",
+                "--find-copies",
+                parent,
+                commit,
+                "--",
+                &location.path,
+                new_path,
+            ],
+        )
+        .unwrap_or_default()
+    };
+
+    let mut start = location.start as i64;
+    let mut end = location.end as i64;
+    for line in output.lines() {
+        let Some(rest) = line.strip_prefix("@@ -") else {
+            continue;
+        };
+        let Some((old_part, new_rest)) = rest.split_once(" +") else {
+            continue;
+        };
+        let Some((new_part, _)) = new_rest.split_once(" @@") else {
+            continue;
+        };
+        let (old_start, old_count) = parse_hunk_range(old_part)?;
+        let (new_start, new_count) = parse_hunk_range(new_part)?;
+        let old_start = old_start as i64;
+        let old_count = old_count as i64;
+        let new_start = new_start as i64;
+        let new_count = new_count as i64;
+        // Normalize: when count is 0, the hunk anchors *after* old_start
+        // (git's convention for pure insertions/deletions).
+        let old_last = if old_count == 0 {
+            old_start // hunk sits between old_start and old_start+1
+        } else {
+            old_start + old_count - 1
+        };
+        let delta = new_count - old_count;
+
+        if old_count == 0 {
+            // Pure insertion at position `old_start` (after line old_start).
+            if old_start < start {
+                start += delta;
+                end += delta;
+            } else if old_start >= end {
+                // insertion past the window — no effect
+            } else {
+                // insertion inside the window — window grows by new_count
+                end += delta;
+            }
+            continue;
+        }
+
+        if old_last < start {
+            // hunk strictly before window
+            start += delta;
+            end += delta;
+        } else if old_start > end {
+            // hunk strictly after window — no effect
+        } else {
+            // overlap: replace the intersecting portion with the new-side
+            // extent, keeping any untouched tail of the window.
+            let tail_len = (end - old_last).max(0);
+            let head_len = (old_start - start).max(0);
+            start = new_start - head_len;
+            if start < 1 {
+                start = 1;
+            }
+            let new_last = if new_count == 0 {
+                new_start
+            } else {
+                new_start + new_count - 1
+            };
+            end = new_last + tail_len;
+        }
+    }
+
+    let start_u = start.max(1) as u32;
+    let end_u = end.max(start) as u32;
+    Ok((start_u, end_u))
+}
+
+fn parse_hunk_range(text: &str) -> Result<(u32, u32)> {
+    let (start, count) = match text.split_once(',') {
+        Some((start, count)) => (start.parse()?, count.parse()?),
+        None => (text.parse()?, 1),
+    };
+    Ok((start, count))
+}
+
+enum NameStatus {
+    Added { path: String },
+    Modified { path: String },
+    Deleted { path: String },
+    Renamed { from: String, to: String },
+    Copied { from: String, to: String },
+}
+
+fn name_status(
+    work_dir: &Path,
+    parent: &str,
+    commit: &str,
     copy_detection: CopyDetection,
-) -> Result<String> {
+) -> Result<Vec<NameStatus>> {
     let mut args = vec![
         "diff-tree".to_string(),
         "--no-commit-id".to_string(),
@@ -397,32 +652,47 @@ fn resolve_path_change(
     args.push(commit.to_string());
 
     let output = git_stdout(work_dir, args.iter().map(String::as_str))?;
-    let mut copied_target = None;
-
+    let mut entries = Vec::new();
     for line in output.lines().filter(|line| !line.is_empty()) {
         let mut parts = line.split('\t');
         let status = parts.next().unwrap_or_default();
-        match status.chars().next() {
-            Some('R') | Some('C') => {
-                let Some(from) = parts.next() else { continue };
-                let Some(to) = parts.next() else { continue };
-                if from == path {
-                    return Ok(to.to_string());
+        let kind = status.chars().next();
+        match kind {
+            Some('A') => {
+                if let Some(path) = parts.next() {
+                    entries.push(NameStatus::Added {
+                        path: path.to_string(),
+                    });
                 }
-                if status.starts_with('C') && copied_target.is_none() && to == path {
-                    copied_target = Some(to.to_string());
+            }
+            Some('M') => {
+                if let Some(path) = parts.next() {
+                    entries.push(NameStatus::Modified {
+                        path: path.to_string(),
+                    });
                 }
             }
             Some('D') => {
-                if parts.next() == Some(path) {
-                    return Ok(path.to_string());
+                if let Some(path) = parts.next() {
+                    entries.push(NameStatus::Deleted {
+                        path: path.to_string(),
+                    });
                 }
+            }
+            Some('R') => {
+                let from = parts.next().unwrap_or_default().to_string();
+                let to = parts.next().unwrap_or_default().to_string();
+                entries.push(NameStatus::Renamed { from, to });
+            }
+            Some('C') => {
+                let from = parts.next().unwrap_or_default().to_string();
+                let to = parts.next().unwrap_or_default().to_string();
+                entries.push(NameStatus::Copied { from, to });
             }
             _ => {}
         }
     }
-
-    Ok(copied_target.unwrap_or_else(|| path.to_string()))
+    Ok(entries)
 }
 
 fn copy_detection_args(copy_detection: CopyDetection) -> Vec<&'static str> {
@@ -432,80 +702,6 @@ fn copy_detection_args(copy_detection: CopyDetection) -> Vec<&'static str> {
         CopyDetection::AnyFileInCommit => vec!["-C", "-C"],
         CopyDetection::AnyFileInRepo => vec!["-C", "-C", "-C"],
     }
-}
-
-fn apply_hunks_to_range(
-    work_dir: &Path,
-    parent: &str,
-    commit: &str,
-    location: &mut TrackedLocation,
-) -> Result<()> {
-    let output = git_stdout(
-        work_dir,
-        ["diff", "-U0", parent, commit, "--", &location.path],
-    )
-    .unwrap_or_default();
-
-    for line in output.lines() {
-        let Some(rest) = line.strip_prefix("@@ -") else {
-            continue;
-        };
-        let Some((old_part, new_rest)) = rest.split_once(" +") else {
-            continue;
-        };
-        let Some((new_part, _)) = new_rest.split_once(" @@") else {
-            continue;
-        };
-        let (old_start, old_count) = parse_hunk_range(old_part)?;
-        let (new_start, new_count) = parse_hunk_range(new_part)?;
-        adjust_range(location, old_start, old_count, new_start, new_count);
-    }
-
-    Ok(())
-}
-
-fn parse_hunk_range(text: &str) -> Result<(u32, u32)> {
-    let (start, count) = match text.split_once(',') {
-        Some((start, count)) => (start.parse()?, count.parse()?),
-        None => (text.parse()?, 1),
-    };
-    Ok((start, count))
-}
-
-fn adjust_range(
-    location: &mut TrackedLocation,
-    old_start: u32,
-    old_count: u32,
-    new_start: u32,
-    new_count: u32,
-) {
-    let old_end = old_start.saturating_add(old_count);
-    let current_len = location.end.saturating_sub(location.start) + 1;
-    let delta = new_count as i64 - old_count as i64;
-
-    if old_end <= location.start {
-        location.start = shift_line(location.start, delta);
-        location.end = shift_line(location.end, delta);
-        return;
-    }
-
-    if old_start > location.end {
-        return;
-    }
-
-    location.start = location.start.min(new_start);
-    let updated_end = location.end as i64 + delta;
-    location.end = updated_end.max(location.start as i64) as u32;
-    if location.end < location.start {
-        location.end = location.start;
-    }
-    if location.end < location.start + current_len.saturating_sub(1) {
-        location.end = location.start + current_len.saturating_sub(1);
-    }
-}
-
-fn shift_line(line: u32, delta: i64) -> u32 {
-    (line as i64 + delta).max(1) as u32
 }
 
 fn is_commit_reachable_from_any_ref(work_dir: &Path, commit: &str) -> Result<bool> {
