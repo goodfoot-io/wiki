@@ -238,7 +238,13 @@ The `ranges` file:
 ```
 
 - One Range id per line.
-- Sorted ascending; duplicates removed on write.
+- Sorted by the referenced Range's `(path, start, end)` ascending. The
+  canonical order is semantic (matches how ranges are displayed
+  everywhere else in the UI), not lexicographic on the id. Writers
+  resolve each id's Range record to produce the key. No dedup step is
+  needed: the `(path, start, end)` uniqueness invariant (§4.2) means two
+  identical ids can't both be present, and two distinct ids can't share
+  the same location.
 - Trailing newline; no blank lines.
 
 The `config` file:
@@ -261,7 +267,9 @@ blobs; serialized back the same way on write):
 pub struct Mesh {
     /// The Mesh's name (ref suffix; the identity).
     pub name: String,
-    /// Active Range ids. Canonical order: sorted ascending; deduped.
+    /// Active Range ids. Canonical order: sorted by the referenced
+    /// Range's `(path, start, end)` ascending. Uniqueness is enforced
+    /// by the `(path, start, end)` invariant, not by a dedup pass.
     pub ranges: Vec<String>,
     /// The commit's message.
     pub message: String,
@@ -278,6 +286,12 @@ message.
 `(path, start, end)`. Writes that would violate this error out. This
 lets every command address a Range by its location alone — no id suffix,
 no disambiguation step.
+
+Overlaps (e.g. `L40-L50` and `L45-L55` in the same file) are **allowed**.
+They have distinct `(path, start, end)` keys, so they address cleanly;
+the resolver tracks each independently. Overlap carries no semantic in
+the tool — two overlapping ranges in a mesh simply mean the user chose
+to anchor two related spans that happen to share lines.
 
 ### 4.3 Mesh config
 
@@ -403,9 +417,13 @@ tip as parent.
 ### 6.1 Create a Range
 
 At `git mesh commit` time, each staged `add` is resolved into a Range
-record and written to `refs/ranges/v1/<id>`:
+record and written to `refs/ranges/v1/<id>`. Different adds in the same
+staging area can target different commits (see §6.3).
 
-1. Resolve the anchor SHA (`--at` value, default HEAD).
+1. Determine the anchor SHA: if the staged `add` line carries a trailing
+   sha (explicit `--at` at stage time), use it; otherwise, resolve to
+   the current HEAD — so the post-commit hook anchors to the source
+   commit that just landed, not a stale pre-commit HEAD.
 2. Look up `path` in the anchor commit's tree; error if not found.
 3. Validate that `start` and `end` are within the file's line count.
 4. Record the blob OID of `path` at the anchor commit.
@@ -432,7 +450,11 @@ writes a single mesh commit:
    current list; error with the offending range if not.
 4. For each staged `add`: confirm `(path, start, end)` does not collide
    with the post-remove list; error with the offending range if it does.
-5. Verify the staging area is non-empty; error if nothing is staged.
+5. Verify the staging area has at least one meaningful change — an
+   `add`, a `remove`, a `config` line that actually changes a value, or
+   a staged `.msg`. Error if nothing is staged. A `config` line whose
+   value equals the current committed value is a no-op and does not
+   satisfy this check.
 
 The remove-then-add ordering means a re-anchor (stage `rm X`, then
 `add X` at a new commit) is always valid — the pair is absent at the
@@ -444,13 +466,19 @@ moment the add is validated.
    `refs/ranges/v1/<uuid>` (see §6.1).
 2. Apply removes: drop the matching Range ids from the list.
 3. Apply adds: append the new Range ids.
-4. Sort and deduplicate the list.
+4. Sort the list by `(path, start, end)`. No dedup step is needed —
+   validation in steps 3–4 above already enforces uniqueness.
 5. Write the `ranges` blob (one id per line) and the `config` blob
    (final staged config values merged with the previous committed
    config).
 6. Write a tree containing both blobs.
-7. Write a commit with the tree, the staged message, and the prior mesh
-   tip as parent (none for a new mesh).
+7. Write a commit with the tree and the prior mesh tip as parent (none
+   for a new mesh). The commit message is the staged `.msg` contents if
+   present; otherwise it is reused verbatim from the parent commit —
+   the relationship description survives across range-only or
+   config-only edits without forcing the user to retype it. A first
+   commit on a new mesh must have a staged message (no parent to
+   inherit from); error out in validation if absent.
 8. Atomically update `refs/meshes/v1/<name>` via CAS; retry if another
    client advanced the tip concurrently.
 9. Delete all `.git/mesh/staging/<name>*` files.
@@ -471,23 +499,55 @@ Files under `.git/mesh/staging/` per mesh:
 - `<name>` — pending operations, one per line.
 - `<name>.msg` — the staged message, set via `git mesh message`. Read
   verbatim at commit time. Supports multi-line messages.
+
+  Interactive form: `git mesh message <name>` with no flags opens
+  `$EDITOR` on a pre-populated template — matching `git commit`, `git
+  tag -a`, and `git notes add`. The template is picked in this order:
+  1. The current `.msg` if one is already staged (repeated invocations
+     are idempotent; you pick up where you left off).
+  2. Otherwise the parent mesh commit's message, if the mesh exists
+     (consistent with the §6.2 "inherit from parent" default).
+  3. Otherwise a blank buffer with a commented-out hint (first commit
+     on a new mesh).
+
+  Saving the editor with an empty buffer aborts without modifying
+  staging, matching `git commit`.
 - `<name>.<N>` — full file bytes captured at `git mesh add` time for the
-  `add` operation on line `N` of the operations file. One sidecar file
-  per `add` line; no sidecar for `remove` or `config` lines.
+  `add` operation on line `N` of the operations file. Source depends on
+  whether `--at` was passed: for the default case (no `--at`, anchor
+  resolves at commit time to the new HEAD), bytes are read from the
+  working tree — this is the "what's about to be committed" snapshot.
+  For explicit `--at <commit-ish>`, bytes are extracted from the anchor
+  commit's blob. One sidecar file per `add` line; no sidecar for
+  `remove` or `config` lines.
 
 **Operation format:**
 
 ```
-add <path>#L<start>-L<end>
+add <path>#L<start>-L<end> [<anchor-sha>]
 remove <path>#L<start>-L<end>
 config <key> <value>
 ```
 
-- `add` lines record the range address only. The full file bytes are
-  stored in the corresponding `<name>.<N>` sidecar file, written from
-  the working tree at the time `git mesh add` was run. The line number
-  `N` is the 1-based index of the `add` line in the operations file,
-  providing a stable, unique key per staged add.
+- `add` lines record the range address followed by an *optional* anchor
+  SHA:
+  - **No trailing sha** (the common case): no `--at` was passed. The
+    anchor is resolved at commit time to the current HEAD — this is what
+    lets the post-commit hook anchor to the commit that *just* landed,
+    not the HEAD that existed at stage time. Sidecar bytes come from the
+    working tree.
+  - **Trailing sha present**: `--at <commit-ish>` was passed. The anchor
+    is resolved and frozen at stage time so later ref motion can't
+    silently re-target. Sidecar bytes come from the anchor commit's blob.
+
+  The path-then-sha order keeps the eye on the common case (the range
+  location). When present, the trailing sha is a parseable suffix because
+  anchor SHAs contain no whitespace. The
+  full file bytes are stored in the corresponding `<name>.<N>` sidecar
+  file, extracted from the anchor commit's blob at the time `git mesh
+  add` was run. The line number `N` is the 1-based index of the `add`
+  line in the operations file, providing a stable, unique key per staged
+  add.
 - `remove` lines carry only the range; no bytes stored (removes are
   matched by `(path, start, end)`, not validated against current bytes).
 - `config` lines set a mesh-level resolver option. Last write wins per
@@ -496,8 +556,8 @@ config <key> <value>
 
 ```
 # .git/mesh/staging/frontend-backend-sync       (operations file)
-add src/Button.tsx#L42-L50                      (line 1)
-add server/routes.ts#L13-L34                    (line 2)
+add src/Button.tsx#L42-L50                      (line 1 — anchor = HEAD at commit time)
+add server/routes.ts#L13-L34                    (line 2 — anchor = HEAD at commit time)
 remove src/old.ts#L1-L10                        (line 3 — no sidecar)
 config copy-detection any-file-in-commit        (line 4 — no sidecar)
 
@@ -516,11 +576,20 @@ Transient local state — follows git's convention for working files
 `.git/mesh/staging/` when clearing the staging area.
 
 **Validation against the working tree.** `git mesh status <name>` and a
-pre-commit hook both compare staged ranges against the current working
-tree. For each staged `add` at line `N`, the tool extracts the range
-bytes from the `<name>.<N>` sidecar file and compares them against the
-same byte range read directly from the file on disk. If the bytes
-differ, the user is alerted before `git commit` runs.
+pre-commit hook compare staged ranges against the current working tree
+*only for adds with no trailing sha* (the common case, where the sidecar
+was snapped from the working tree at stage time). For such adds, the
+tool extracts the range bytes from the `<name>.<N>` sidecar file and
+compares them against the same byte range read directly from the file
+on disk. If the bytes differ, the working tree changed between `git
+mesh add` and the pending source commit — the user is alerted so they
+can re-stage or amend.
+
+For adds with an explicit anchor (trailing sha from `--at`), the
+"drift from working tree" concept isn't meaningful — the anchor is a
+different tree — so these adds are skipped by the drift check. Their
+correctness is guaranteed at commit time by the anchor-blob integrity
+check below.
 
 Error format (working tree check):
 
@@ -546,13 +615,22 @@ pre-commit hook surfaces this before the source commit lands, giving the
 developer a chance to update the staged range or amend the working tree
 change.
 
-**Validation at commit time.** For each staged `add` at line `N`, the
-tool extracts the range bytes from the `<name>.<N>` sidecar file and
-compares them against the same byte range from the HEAD blob. If the
-bytes differ at all, the commit is aborted. Nothing is written until all
-staged ranges pass. Fail closed. This is a second line of defence — the
-pre-commit hook should catch drift first, but the commit-time check is
-authoritative.
+**Validation at commit time.** For each staged `add` at line `N`:
+
+- **No trailing sha (default case).** Resolve the anchor to HEAD at
+  commit time. Extract the range bytes from HEAD's blob at `path` and
+  compare to the `<name>.<N>` sidecar (which snapped the working tree
+  at stage time). A mismatch means the working tree changed between
+  `git mesh add` and the source commit landing — abort and report
+  drift; the user should re-stage or amend. Fail closed.
+- **Trailing sha (explicit `--at`).** Verify the anchor SHA is still
+  reachable and the file at `path` in the anchor tree still contains
+  the recorded `(start, end)` line range. Compare the anchor-blob bytes
+  to the sidecar — this should match tautologically; a mismatch
+  indicates sidecar corruption.
+
+This is a second line of defence behind the pre-commit drift check
+(§6.3); the commit-time check is authoritative.
 
 Error format (commit time):
 
@@ -651,8 +729,10 @@ Neither has side effects; the stored Mesh is never modified.
 
 ### 6.7 Doctor
 
-`git mesh doctor` audits the local mesh setup and reports actionable
-findings. Checks include:
+`git mesh doctor` audits the local mesh setup for misconfiguration and
+reports actionable findings. It is scoped to setup problems — hooks,
+refspecs, stray staging state, and reachability — not range drift
+(`git mesh stale` owns that axis). Checks include:
 
 - **Missing post-commit hook.** Detects the absence of a `post-commit`
   hook that auto-commits pending staged meshes after a source commit.
@@ -666,7 +746,12 @@ findings. Checks include:
   ```
 
   With no `<name>`, `git mesh commit` commits every mesh that has a
-  non-empty staging area.
+  non-empty staging area. The command itself is defensive about git
+  operations that replay commits: it no-ops when any of
+  `.git/rebase-merge/`, `.git/rebase-apply/`, `.git/CHERRY_PICK_HEAD`,
+  `.git/REVERT_HEAD`, or `.git/MERGE_HEAD` is present. This keeps the
+  hook safe to leave installed — mid-rebase `post-commit` firings
+  don't anchor ranges to transient intermediate commits.
 
 - **Missing pre-commit hook.** Detects the absence of a `pre-commit`
   hook that checks staged ranges for working tree drift before a source
@@ -684,6 +769,26 @@ findings. Checks include:
   files, and orphaned sidecar files (sidecar with no corresponding `add`
   line). Warns on each finding with the file and line number.
 
+- **Missing refspec configuration.** Scans `git config remote.*.fetch`
+  and `remote.*.push` for each remote. If `refs/ranges/*` or
+  `refs/meshes/*` are absent from both directions on a remote the user
+  has likely pushed to, reports the remote and prints the refspec
+  lines that would be auto-added on the next `git mesh push`.
+
+- **Orphan range references.** Walks every `refs/meshes/v1/*`, reads
+  its `ranges` blob, and confirms each referenced Range id exists at
+  `refs/ranges/v1/<id>`. Reports each mesh that references a missing
+  Range id, with the id and the suggested remediation (`git mesh
+  fetch` if the range lives on a remote; otherwise `git mesh rm` +
+  re-anchor). Does not run the resolver — this is a reachability
+  check, not a staleness check.
+
+- **Dangling range refs.** Enumerates `refs/ranges/v1/*` and reports
+  range refs not referenced by any mesh. These are usually harmless
+  (pending `git gc`) but can indicate a failed write or a mesh that
+  was force-deleted without `git gc` since; the doctor just surfaces
+  them so the user can decide.
+
 ### 6.8 Structural operations
 
 These mirror git's own file-level commands and are surfaced as
@@ -696,9 +801,7 @@ destructive or ref-shape-changing operations.
   immediately.
 - **`git mesh mv <old> <new>`** — rename:
   `git update-ref refs/meshes/v1/<new> <commit>` followed by
-  `git update-ref -d refs/meshes/v1/<old>`, both atomic. If you want an
-  alias, leave both refs in place — `git mesh mv --keep <old> <new>` is
-  a convenience that omits the delete step.
+  `git update-ref -d refs/meshes/v1/<old>`, both atomic.
 - **`git mesh restore <name>`** — clear the staging area for `<name>`:
   deletes all `.git/mesh/staging/<name>*` files (operations file, `.msg`,
   and all `.<N>` sidecar files). Analogous to `git restore --staged` on
@@ -708,6 +811,16 @@ destructive or ref-shape-changing operations.
   references a Range, `git gc` collects its blob. If a Mesh somehow
   references a missing Range id (e.g. a partial clone), the resolver
   reports that Range as `ORPHANED`.
+
+**Orphan handling (graceful degradation).** A Range is `ORPHANED` when
+its `anchor_sha` is unreachable from any ref, the Range blob itself is
+missing, or the anchor's `path` blob has been gc'd. In every case the
+resolver cannot materialize anchored bytes, so no diff is produced. The
+Range remains in the Mesh; read operations still list it with status
+`ORPHANED` and a short hint (`anchor <short-sha> unreachable — try
+\`git fetch\` or check for a force-push`). The user recovers manually
+by staging `rm` + `add` to re-anchor at a known commit. Orphans never
+abort a read; `git mesh <name>` and `git mesh stale` always succeed.
 
 ## 7. Sync
 
@@ -749,9 +862,14 @@ non-fast-forward, identical to a branch.
 ### 8.2 Three-way merge
 
 `git merge` (or `git merge-tree` for headless resolution) performs the
-standard three-way merge on the Mesh commits. Because the `ranges` file
-is canonicalized — sorted, deduplicated, one id per line, trailing
-newline — independent edits produce non-conflicting diffs. The message
+standard three-way merge on the Mesh commits. The `ranges` file is
+canonicalized — sorted by `(path, start, end)`, one id per line,
+trailing newline, uniqueness enforced at write time rather than by a
+dedup pass — so independent edits in different files merge cleanly.
+Concurrent adds in the *same* file at adjacent lines can still produce
+textual conflicts even though the range ids are distinct; these are
+trivial to resolve (take both) and git's merge driver surfaces them
+with a normal three-way markup. The message
 lives on the commit object, so message edits are a normal
 commit-message merge. Conflicts arise exactly when two branches
 disagree on the same piece of state:
@@ -819,18 +937,22 @@ Reading
   git mesh <name> --no-abbrev           # full 40-char shas
   git mesh <name> --at <commit-ish>     # show state at a past revision
   git mesh <name> --log [--oneline] [--limit <n>]
-  git mesh <name> --diff <rev>..<rev>   # compare two states
   git mesh stale [<name>]               # run the resolver, report drift
 
 Staging (write to staging area; no mesh commit yet)
   git mesh add <name> <range>...        # stage ranges to add
+    [--at <commit-ish>]                 # anchor SHA for every range in this invocation
+                                        # (default: HEAD; resolved eagerly and frozen
+                                        #  into the staging entry)
   git mesh rm <name> <range>...         # stage ranges to remove
   git mesh message <name>               # set the staged message
     [-m <msg> | -F <file> | --edit]
+                                        # bare form opens $EDITOR on a
+                                        # pre-populated template; saving
+                                        # empty aborts without changes
 
 Committing (resolve staged operations and write a mesh commit)
   git mesh commit [<name>]              # commit all staged meshes, or just <name>
-    [--at <commit-ish>]                 # resolve anchors against this commit (default: HEAD)
 
 Structural
   git mesh restore <name>               # clear the staging area
@@ -839,10 +961,12 @@ Structural
                                         #  <commit-ish>; no history rewrite)
   git mesh delete <name>                # delete the mesh's ref entirely
   git mesh mv <old> <new>               # rename
-  git mesh mv --keep <old> <new>        # alias (keep both refs)
 
 Configuration
+  git mesh config <name>                # list committed config; staged overrides marked
+  git mesh config <name> <key>          # print the committed value of <key>
   git mesh config <name> <key> <value>  # stage a mesh-level resolver option
+  git mesh config <name> --unset <key>  # stage a reset to the built-in default
 
 Maintenance
   git mesh fetch [<remote>]
@@ -867,8 +991,18 @@ post-commit hook works.
   `git mesh add <name> <range>` (same location) removes the existing
   Range and adds a fresh one anchored at `--at` (default HEAD). This is
   the only legitimate way to re-add a currently-present `(path, start, end)`.
-- *Empty staging area is an error:* `git mesh commit` with nothing staged
-  does nothing.
+- *Empty staging area is an error:* `git mesh commit` with nothing
+  staged does nothing.
+- *Config-only or message-only commits are allowed.* A staged config
+  change or a staged message alone produces a new mesh commit; the
+  unchanged pieces (ranges, unchanged config keys, and — if no `.msg`
+  is staged — the commit message) are inherited from the parent. This
+  is how a typo in the relationship description is fixed without
+  touching ranges: `git mesh message <name> -m "…"` followed by `git
+  mesh commit <name>`.
+- *First commit on a new mesh requires a message.* There is no parent
+  to inherit from; `git mesh commit` errors until `git mesh message` or
+  an equivalent flag has supplied one.
 - *Collision errors are atomic:* an add that duplicates an existing
   `(path, start, end)` errors before any object is written. All-or-nothing.
 
@@ -918,8 +1052,17 @@ Ranges (<N>):
   per line. Order is the Mesh's canonical (sorted) order; stable across
   runs.
 - `--oneline` drops the header and prints only the Ranges section body.
-  `--format=<fmt>` takes a git-log-style format string. `--no-abbrev`
-  shows full 40-char shas.
+  `--no-abbrev` shows full 40-char shas.
+- `--format=<fmt>` accepts the same format-string vocabulary as `git log
+  --pretty=format:` — `%H`, `%h`, `%an`, `%ae`, `%at`, `%ai`, `%s`, `%b`,
+  `%B`, `%n`, `%%`, `%C(color)` etc. — since the mesh *is* a commit, so
+  every commit-scoped placeholder works verbatim. Mesh-specific data is
+  exposed via `git for-each-ref`-style tokens: `%(ranges)` (one
+  `<short-sha>  <path>#L<start>-L<end>` per line in canonical order),
+  `%(ranges:count)` (integer), `%(config:<key>)` (the committed value
+  of a config key). Unknown placeholders are left literal, matching
+  git's behavior. No mesh-specific preset (`--pretty=short` etc. apply
+  as in `git log`).
 
 #### `git mesh stale`
 
@@ -935,7 +1078,7 @@ though the bytes are identical. No gradation flag; one rule.
 ```
 git mesh stale [<name>]
     [--format=human|porcelain|json|junit|github-actions]
-    [--exit-code]                   # non-zero if any Range is not FRESH
+    [--no-exit-code]                # force exit 0 even with findings
     [--oneline | --stat | --patch]  # detail level
     [--since <commit-ish>]          # only Ranges anchored at or after this commit
 ```
@@ -943,6 +1086,12 @@ git mesh stale [<name>]
 With `<name>`, reports one Mesh. Without, reports every Mesh in the
 repo, worst-first. Reads are purely local; users run `git mesh fetch`
 first if they want remote state.
+
+`--since <commit-ish>` filters by anchor age: only Ranges whose
+`anchor_sha` is in the revision range `<commit-ish>..HEAD` are
+considered. Ranges anchored before `<commit-ish>` are skipped
+entirely, not reported as `FRESH`. Useful in CI for "report drift
+introduced on this branch" — point `--since` at the merge-base.
 
 **Default (human) output.**
 
@@ -1003,11 +1152,11 @@ Moved ranges:
 - **Deletion is a diff** — a range that no longer exists is shown as a
   removal against `/dev/null`, not a special case.
 
-**Exit codes.**
+**Exit codes.** Fail-closed by default: CI that runs `git mesh stale`
+gates on cleanliness without remembering a flag.
 
-- `0` — no stale Ranges in scope, or `--exit-code` not passed.
-- `1` — at least one Range is not `FRESH`; only returned when
-  `--exit-code` is passed.
+- `0` — no stale Ranges in scope, or `--no-exit-code` was passed.
+- `1` — at least one Range is not `FRESH` (default behavior).
 - `2` — tool error (missing repo, corrupt ref, etc.). Distinct from `1`
   so CI can tell "should fail the build" from "tool is broken."
 
@@ -1047,8 +1196,25 @@ mesh.defaultRemote  string, default "origin". Used by `git mesh fetch`
 
 Per-mesh resolver options (`copy-detection`, `ignore-whitespace`) are
 staged via `git mesh config <name> <key> <value>` and committed with
-the next `git mesh commit`. They are stored in the mesh commit's `config`
-file (see §4.3) and sync with the mesh.
+the next `git mesh commit`. They are stored in the mesh commit's
+`config` file (see §4.3) and sync with the mesh.
+
+Read forms mirror `git config`:
+
+- `git mesh config <name>` lists every committed key/value for the
+  mesh. Any staged override is shown on a separate line prefixed with
+  `*` and suffixed ` (staged)`, matching `git status`'s convention of
+  reporting committed-vs-pending separately.
+- `git mesh config <name> <key>` prints the committed value of `<key>`
+  alone (suitable for scripting). Unknown keys exit non-zero.
+- `git mesh config <name> --unset <key>` stages a reset: on the next
+  `git mesh commit`, `<key>` is rewritten to its built-in default in
+  the committed `config` blob. (The tool always writes every default
+  explicitly per §4.3, so "unset" means "restore the default value,"
+  not "omit the line.")
+
+Reads never touch the staging area beyond inspection and never
+produce a commit.
 
 **Reads never touch the network.** `git mesh <name>`, `git mesh stale`,
 and every other read operation work entirely against local object
@@ -1071,7 +1237,8 @@ $ git mesh message frontend-backend-sync -m "ABC-123: front-end components refle
 
 Owner: team-billing"
 
-# Commit: resolves anchors against HEAD, writes mesh commit, clears staging
+# Commit: adds without --at resolve their anchor to HEAD at this moment;
+# writes the mesh commit, clears the staging area
 $ git mesh commit frontend-backend-sync
 created refs/meshes/v1/frontend-backend-sync
 
@@ -1087,10 +1254,10 @@ Date:   Wed Apr 22 11:14:03 2026 +0000
     Owner: team-billing
 
 Ranges (4):
-    63d239a4  src/Button.tsx#L42-L50
-    63d239a4  src/types.ts#L8-L15
     63d239a4  server/routes.ts#L13-L34
     63d239a4  server/schema.ts#L20-L27
+    63d239a4  src/Button.tsx#L42-L50
+    63d239a4  src/types.ts#L8-L15
 
 # Stale: runs the resolver for every Range. Shows drift.
 $ git mesh stale frontend-backend-sync
@@ -1106,8 +1273,10 @@ $ git mesh commit frontend-backend-sync
 $ git mesh config frontend-backend-sync copy-detection any-file-in-commit
 $ git mesh commit frontend-backend-sync
 
-# Anchor against a specific commit rather than HEAD
-$ git mesh commit frontend-backend-sync --at HEAD~1
+# Anchor a newly added range against a specific commit rather than HEAD
+# (time-travel: --at is per-add, resolved and frozen at stage time)
+$ git mesh add frontend-backend-sync --at HEAD~1 src/legacy.ts#L1-L20
+$ git mesh commit frontend-backend-sync
 
 # Publish. Refspec is configured automatically on first push.
 $ git mesh push
@@ -1138,15 +1307,19 @@ $ git commit -m "ABC-123: wire Button to routes"
   the mesh; no pairwise structure needs to be stored or maintained. If
   two independent relationships need tracking, that is two meshes.
 - **A Mesh's name is the ref name, branch-style.** No separate
-  name-to-id mapping, no UUID indirection. Renames, aliases, collision
-  detection, and sync all reuse git's existing ref machinery.
+  name-to-id mapping, no UUID indirection. Renames, collision
+  detection, and sync all reuse git's existing ref machinery. Aliases
+  are deliberately not offered — two refs pointing at the same commit
+  diverge the moment either is edited, so "alias" would be misleading.
 - **On-disk records are commit-object-style text, not JSON.** Header
   lines for structured fields, TAB before any field that may contain
   spaces (paths). Typical Range is ~80 bytes; a Mesh's message is
   stored once as the commit message rather than duplicated into the tree.
 - **Mesh config is stored in the commit tree, not as local state.** It
-  syncs with the mesh, its history is visible in `git log -p`, and it
-  is staged and committed like range changes — last write wins per key.
+  syncs with the mesh and its history is visible in `git log -p`.
+  Config changes are staged and committed like range changes (last
+  write wins per key within the staging area, then the committed
+  `config` blob reflects the final values).
 - **Staleness is computed, not stored, because the repo is the only
   authoritative source of whether content has changed.** A cached status
   field would either lag the truth or require eager invalidation on every
