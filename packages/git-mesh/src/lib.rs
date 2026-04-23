@@ -240,17 +240,17 @@ pub fn default_remote(repo: &gix::Repository) -> Result<String> {
     let work_dir = repo
         .workdir()
         .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
-    Ok(git_stdout_optional(work_dir, ["config", "--get", "mesh.defaultRemote"])?
-        .unwrap_or_else(|| "origin".to_string()))
+    Ok(
+        git_stdout_optional(work_dir, ["config", "--get", "mesh.defaultRemote"])?
+            .unwrap_or_else(|| "origin".to_string()),
+    )
 }
 
 pub fn fetch_mesh_refs(repo: &gix::Repository, remote: Option<&str>) -> Result<String> {
     let work_dir = repo
         .workdir()
         .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
-    let remote = remote
-        .map(str::to_string)
-        .unwrap_or(default_remote(repo)?);
+    let remote = remote.map(str::to_string).unwrap_or(default_remote(repo)?);
     ensure_sync_refspecs(work_dir, &remote)?;
     git_stdout(work_dir, ["fetch", &remote])?;
     Ok(remote)
@@ -260,9 +260,7 @@ pub fn push_mesh_refs(repo: &gix::Repository, remote: Option<&str>) -> Result<St
     let work_dir = repo
         .workdir()
         .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
-    let remote = remote
-        .map(str::to_string)
-        .unwrap_or(default_remote(repo)?);
+    let remote = remote.map(str::to_string).unwrap_or(default_remote(repo)?);
     ensure_sync_refspecs(work_dir, &remote)?;
     git_stdout(work_dir, ["push", &remote])?;
     Ok(remote)
@@ -341,6 +339,13 @@ pub fn resolve_commit_ish(repo: &gix::Repository, commit_ish: &str) -> Result<St
     git_stdout(work_dir, ["rev-parse", commit_ish])
 }
 
+pub fn read_git_text(repo: &gix::Repository, object: &str) -> Result<String> {
+    let work_dir = repo
+        .workdir()
+        .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
+    git_stdout(work_dir, ["cat-file", "-p", object])
+}
+
 pub fn is_ancestor_commit(
     repo: &gix::Repository,
     ancestor: &str,
@@ -371,7 +376,11 @@ pub fn read_mesh(repo: &gix::Repository, name: &str) -> Result<MeshStored> {
     read_mesh_at(repo, name, None)
 }
 
-pub fn read_mesh_at(repo: &gix::Repository, name: &str, commit_ish: Option<&str>) -> Result<MeshStored> {
+pub fn read_mesh_at(
+    repo: &gix::Repository,
+    name: &str,
+    commit_ish: Option<&str>,
+) -> Result<MeshStored> {
     let mesh = show_mesh_at(repo, name, commit_ish)?;
     let mut links = Vec::with_capacity(mesh.links.len());
 
@@ -1267,10 +1276,7 @@ fn ensure_sync_refspecs(work_dir: &Path, remote: &str) -> Result<()> {
 }
 
 fn sync_refspecs() -> [&'static str; 2] {
-    [
-        "+refs/links/*:refs/links/*",
-        "+refs/meshes/*:refs/meshes/*",
-    ]
+    ["+refs/links/*:refs/links/*", "+refs/meshes/*:refs/meshes/*"]
 }
 
 fn git_show_file_lines(work_dir: &Path, commit_oid: &str, path: &str) -> Result<Vec<String>> {
@@ -1311,7 +1317,10 @@ where
     match output.status.code() {
         Some(0) => Ok(Some(String::from_utf8(output.stdout)?.trim().to_string())),
         Some(1) => Ok(None),
-        _ => anyhow::bail!("git command failed: {}", String::from_utf8_lossy(&output.stderr)),
+        _ => anyhow::bail!(
+            "git command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
     }
 }
 

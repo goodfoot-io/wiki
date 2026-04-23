@@ -1,14 +1,16 @@
 use anyhow::{Context, Result, anyhow};
-use clap::{Arg, ArgAction, Command, value_parser};
+use clap::{Arg, ArgAction, ArgGroup, Command, value_parser};
 use git_mesh::{
     CommitInput, CopyDetection, CulpritCommit, LinkResolved, LinkStatus, MeshCommitInfo,
     MeshResolved, MeshStored, RangeSpec, SideSpec, StoredLink, commit_mesh, fetch_mesh_refs,
     is_ancestor_commit, list_mesh_names, mesh_commit_info, mesh_commit_info_at, mesh_log,
-    push_mesh_refs, read_link, read_mesh_at, remove_mesh, rename_mesh, resolve_commit_ish,
-    restore_mesh, show_mesh, stale_mesh, validate_mesh_name,
+    push_mesh_refs, read_git_text, read_link, read_mesh_at, remove_mesh, rename_mesh,
+    resolve_commit_ish, restore_mesh, show_mesh, stale_mesh, validate_mesh_name,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::process::Command as ProcessCommand;
 
 fn main() {
     match run() {
@@ -43,12 +45,8 @@ fn run() -> Result<i32> {
                 since.as_deref(),
             )?;
 
-            if detail == StaleDetail::Patch {
-                return Err(anyhow!("stale detail level `--patch` is not implemented"));
-            }
-
             match format {
-                StaleFormat::Human => print_human_stale(&reports, detail)?,
+                StaleFormat::Human => print_human_stale(&repo, &reports, detail)?,
                 StaleFormat::Porcelain => print_porcelain_stale(&reports),
                 StaleFormat::Json => print_json_stale(&reports)?,
                 StaleFormat::Junit => print_junit_stale(&reports)?,
@@ -67,8 +65,11 @@ fn run() -> Result<i32> {
                 .get_one::<String>("copy-detection")
                 .map(|value| parse_copy_detection(value))
                 .transpose()?;
-            let default_ignore_whitespace =
-                sub_matches.get_one::<bool>("ignore-whitespace").copied();
+            let default_ignore_whitespace = if sub_matches.get_flag("no-ignore-whitespace") {
+                Some(false)
+            } else {
+                Some(true)
+            };
 
             let adds = sub_matches
                 .get_many::<String>("link")
@@ -85,7 +86,7 @@ fn run() -> Result<i32> {
                 .map(|value| parse_range_pair(value))
                 .collect::<Result<Vec<_>>>()?;
 
-            let message = sub_matches.get_one::<String>("message").unwrap().clone();
+            let message = resolve_commit_message(&repo, name, sub_matches)?;
             let anchor_sha = sub_matches.get_one::<String>("anchor").cloned();
             let amend = sub_matches.get_flag("amend");
 
@@ -164,14 +165,15 @@ fn run() -> Result<i32> {
                     let at = matches.get_one::<String>("at").map(String::as_str);
                     let mesh = read_mesh_at(&repo, name, at)?;
                     let info = mesh_commit_info_at(&repo, name, at)?;
-                    print_mesh(
-                        &mesh,
-                        &info,
-                        PrintOptions {
-                            oneline: matches.get_flag("oneline"),
-                            no_abbrev: matches.get_flag("no-abbrev"),
-                        },
-                    );
+                    let options = PrintOptions {
+                        oneline: matches.get_flag("oneline"),
+                        no_abbrev: matches.get_flag("no-abbrev"),
+                    };
+                    if let Some(format) = matches.get_one::<String>("format") {
+                        print_mesh_format(&mesh, &info, format, options)?;
+                    } else {
+                        print_mesh(&mesh, &info, options);
+                    }
                 }
             } else {
                 print_mesh_list(&repo)?;
@@ -196,7 +198,18 @@ fn cli() -> Command {
         .arg(Arg::new("at").long("at").value_name("COMMIT_ISH"))
         .arg(Arg::new("log").long("log").action(ArgAction::SetTrue))
         .arg(Arg::new("diff").long("diff").value_name("REV..REV"))
-        .arg(Arg::new("oneline").long("oneline").action(ArgAction::SetTrue))
+        .arg(
+            Arg::new("oneline")
+                .long("oneline")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("format")
+                .long("format")
+                .value_name("FMT")
+                .requires("name")
+                .conflicts_with_all(["oneline", "log", "diff"]),
+        )
         .arg(
             Arg::new("no-abbrev")
                 .long("no-abbrev")
@@ -217,13 +230,7 @@ fn cli() -> Command {
                         .long("format")
                         .value_name("FMT")
                         .default_value("human")
-                        .value_parser([
-                            "human",
-                            "porcelain",
-                            "json",
-                            "junit",
-                            "github-actions",
-                        ]),
+                        .value_parser(["human", "porcelain", "json", "junit", "github-actions"]),
                 )
                 .arg(
                     Arg::new("exit-code")
@@ -253,6 +260,11 @@ fn cli() -> Command {
         .subcommand(
             Command::new("commit")
                 .about("Create or update a mesh")
+                .group(
+                    ArgGroup::new("message-source")
+                        .args(["message", "message-file", "edit"])
+                        .required(true),
+                )
                 .arg(Arg::new("name").required(true).value_name("NAME"))
                 .arg(
                     Arg::new("link")
@@ -270,9 +282,10 @@ fn cli() -> Command {
                     Arg::new("message")
                         .short('m')
                         .long("message")
-                        .required(true)
                         .value_name("MESSAGE"),
                 )
+                .arg(Arg::new("message-file").short('F').value_name("FILE"))
+                .arg(Arg::new("edit").long("edit").action(ArgAction::SetTrue))
                 .arg(Arg::new("amend").long("amend").action(ArgAction::SetTrue))
                 .arg(
                     Arg::new("anchor")
@@ -294,11 +307,13 @@ fn cli() -> Command {
                 .arg(
                     Arg::new("ignore-whitespace")
                         .long("ignore-whitespace")
-                        .action(ArgAction::Set)
-                        .default_missing_value("true")
-                        .default_value("true")
-                        .num_args(0..=1)
-                        .value_parser(value_parser!(bool)),
+                        .action(ArgAction::SetTrue)
+                        .conflicts_with("no-ignore-whitespace"),
+                )
+                .arg(
+                    Arg::new("no-ignore-whitespace")
+                        .long("no-ignore-whitespace")
+                        .action(ArgAction::SetTrue),
                 ),
         )
         .subcommand(
@@ -367,13 +382,20 @@ fn print_mesh(mesh: &MeshStored, info: &MeshCommitInfo, options: PrintOptions) {
             info.summary
         );
         for link in stored_links_sorted(&mesh.links) {
-            println!("{} {}", format_link_pair(link), maybe_abbreviate(&link.anchor_sha, options.no_abbrev));
+            println!(
+                "{} {}",
+                format_link_pair(link),
+                maybe_abbreviate(&link.anchor_sha, options.no_abbrev)
+            );
         }
         return;
     }
 
     println!("mesh {}", mesh.name);
-    println!("commit {}", maybe_abbreviate(&info.commit_oid, options.no_abbrev));
+    println!(
+        "commit {}",
+        maybe_abbreviate(&info.commit_oid, options.no_abbrev)
+    );
     println!("Author: {} <{}>", info.author_name, info.author_email);
     println!("Date:   {}", info.author_date);
     println!();
@@ -387,6 +409,49 @@ fn print_mesh(mesh: &MeshStored, info: &MeshCommitInfo, options: PrintOptions) {
             maybe_abbreviate(&link.anchor_sha, options.no_abbrev)
         );
     }
+}
+
+fn print_mesh_format(
+    mesh: &MeshStored,
+    info: &MeshCommitInfo,
+    format: &str,
+    options: PrintOptions,
+) -> Result<()> {
+    let mut output = String::new();
+    let mut chars = format.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            output.push(ch);
+            continue;
+        }
+
+        match chars.next() {
+            Some('%') => output.push('%'),
+            Some('n') => output.push('\n'),
+            Some('m') => output.push_str(&mesh.name),
+            Some('H') => output.push_str(&info.commit_oid),
+            Some('h') => output.push_str(maybe_abbreviate(&info.commit_oid, options.no_abbrev)),
+            Some('s') => output.push_str(&info.summary),
+            Some('B') => output.push_str(&mesh.message),
+            Some('a') => match chars.next() {
+                Some('n') => output.push_str(&info.author_name),
+                Some('e') => output.push_str(&info.author_email),
+                Some('d') => output.push_str(&info.author_date),
+                Some(other) => return Err(anyhow!("unsupported format token `%a{other}`")),
+                None => return Err(anyhow!("dangling format token `%a`")),
+            },
+            Some('L') => output.push_str(&format_links_block(mesh, options.no_abbrev)),
+            Some('l') => output.push_str(&mesh.links.len().to_string()),
+            Some(other) => return Err(anyhow!("unsupported format token `%{other}`")),
+            None => return Err(anyhow!("dangling trailing `%` in format string")),
+        }
+    }
+
+    print!("{output}");
+    if !output.ends_with('\n') {
+        println!();
+    }
+    Ok(())
 }
 
 fn print_mesh_log(
@@ -445,7 +510,9 @@ fn print_mesh_diff(repo: &gix::Repository, name: &str, revision_range: &str) -> 
             (Some(link), None) => {
                 println!("- {} @ {}", pair, abbreviate_oid(&link.anchor_sha));
             }
-            (Some(left_link), Some(right_link)) if left_link.anchor_sha != right_link.anchor_sha => {
+            (Some(left_link), Some(right_link))
+                if left_link.anchor_sha != right_link.anchor_sha =>
+            {
                 println!(
                     "~ {} @ {} -> {}",
                     pair,
@@ -545,17 +612,26 @@ fn load_stale_reports(
     Ok(reports)
 }
 
-fn print_human_stale(reports: &[StaleMeshReport], detail: StaleDetail) -> Result<()> {
+fn print_human_stale(
+    repo: &gix::Repository,
+    reports: &[StaleMeshReport],
+    detail: StaleDetail,
+) -> Result<()> {
     for (index, report) in reports.iter().enumerate() {
         if index > 0 {
             println!();
         }
-        print_stale(&report.mesh, &report.info, detail)?;
+        print_stale(repo, &report.mesh, &report.info, detail)?;
     }
     Ok(())
 }
 
-fn print_stale(mesh: &MeshResolved, info: &MeshCommitInfo, detail: StaleDetail) -> Result<()> {
+fn print_stale(
+    repo: &gix::Repository,
+    mesh: &MeshResolved,
+    info: &MeshCommitInfo,
+    detail: StaleDetail,
+) -> Result<()> {
     println!("mesh {}", mesh.name);
     println!("commit {}", info.commit_oid);
     println!("Author: {} <{}>", info.author_name, info.author_email);
@@ -608,6 +684,14 @@ fn print_stale(mesh: &MeshResolved, info: &MeshCommitInfo, detail: StaleDetail) 
                             abbreviate_oid(&culprit.commit_oid),
                             culprit.summary
                         );
+                    }
+                    if detail == StaleDetail::Patch
+                        && side.status != LinkStatus::Fresh
+                        && let Some(patch) = render_side_patch(repo, side)?
+                    {
+                        for line in patch.lines() {
+                            println!("                {line}");
+                        }
                     }
                 }
                 if link.status != LinkStatus::Fresh {
@@ -732,21 +816,26 @@ fn print_json_stale(reports: &[StaleMeshReport]) -> Result<()> {
 }
 
 fn print_junit_stale(reports: &[StaleMeshReport]) -> Result<()> {
-    let tests = reports.iter().map(|report| report.mesh.links.len()).sum::<usize>();
+    let tests = reports
+        .iter()
+        .map(|report| report.mesh.links.len())
+        .sum::<usize>();
     let failures = reports
         .iter()
         .flat_map(|report| report.mesh.links.iter())
         .filter(|link| link.status != LinkStatus::Fresh)
         .count();
 
-    println!(
-        "<testsuite name=\"git-mesh stale\" tests=\"{tests}\" failures=\"{failures}\">"
-    );
+    println!("<testsuite name=\"git-mesh stale\" tests=\"{tests}\" failures=\"{failures}\">");
     for report in reports {
         for link in sorted_links(&report.mesh) {
             let pair = xml_escape(&format_resolved_pair(&link)?);
             let name = xml_escape(&format!("{} {}", report.mesh.name, pair));
-            println!("  <testcase classname=\"{}\" name=\"{}\">", xml_escape(&report.mesh.name), name);
+            println!(
+                "  <testcase classname=\"{}\" name=\"{}\">",
+                xml_escape(&report.mesh.name),
+                name
+            );
             if link.status != LinkStatus::Fresh {
                 let message = xml_escape(&format!(
                     "{} {} -> {}",
@@ -861,6 +950,81 @@ fn into_side_spec(
         copy_detection,
         ignore_whitespace,
     }
+}
+
+fn resolve_commit_message(
+    repo: &gix::Repository,
+    name: &str,
+    matches: &clap::ArgMatches,
+) -> Result<String> {
+    if let Some(message) = matches.get_one::<String>("message") {
+        return Ok(message.clone());
+    }
+
+    if let Some(path) = matches.get_one::<String>("message-file") {
+        return fs::read_to_string(path)
+            .with_context(|| format!("failed to read message file `{path}`"));
+    }
+
+    if matches.get_flag("edit") {
+        let template = if matches.get_flag("amend") {
+            read_mesh_at(repo, name, None)
+                .map(|mesh| mesh.message)
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        return edit_commit_message(repo, &template);
+    }
+
+    Err(anyhow!("missing commit message"))
+}
+
+fn edit_commit_message(repo: &gix::Repository, initial: &str) -> Result<String> {
+    let work_dir = repo
+        .workdir()
+        .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
+    let path = std::env::temp_dir().join(format!("git-mesh-msg-{}.txt", uuid::Uuid::new_v4()));
+    fs::write(&path, initial)?;
+
+    let editor = std::env::var("GIT_EDITOR")
+        .or_else(|_| std::env::var("EDITOR"))
+        .or_else(|_| git_editor(work_dir))
+        .unwrap_or_else(|_| "vi".to_string());
+
+    let status = ProcessCommand::new("sh")
+        .current_dir(work_dir)
+        .arg("-lc")
+        .arg("\"$1\" \"$2\"")
+        .arg("git-mesh-editor")
+        .arg(editor)
+        .arg(
+            path.to_str()
+                .ok_or_else(|| anyhow!("message file path is not valid UTF-8"))?,
+        )
+        .status()?;
+    anyhow::ensure!(status.success(), "editor exited with status {status}");
+
+    let message = fs::read_to_string(&path)?;
+    let _ = fs::remove_file(&path);
+    anyhow::ensure!(
+        !message.trim().is_empty(),
+        "aborting commit due to empty commit message"
+    );
+    Ok(message)
+}
+
+fn git_editor(work_dir: &std::path::Path) -> Result<String> {
+    let output = ProcessCommand::new("git")
+        .current_dir(work_dir)
+        .args(["var", "GIT_EDITOR"])
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git var GIT_EDITOR failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
 fn parse_copy_detection(text: &str) -> Result<CopyDetection> {
@@ -980,14 +1144,35 @@ fn format_link_pair(link: &StoredLink) -> String {
     )
 }
 
+fn format_links_block(mesh: &MeshStored, no_abbrev: bool) -> String {
+    stored_links_sorted(&mesh.links)
+        .into_iter()
+        .map(|link| {
+            format!(
+                "{} @ {}",
+                format_link_pair(link),
+                maybe_abbreviate(&link.anchor_sha, no_abbrev)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn stored_links_sorted(links: &[StoredLink]) -> Vec<&StoredLink> {
     let mut ordered = links.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|link| (format_link_pair(link), link.anchor_sha.clone(), link.id.clone()));
+    ordered.sort_by_key(|link| {
+        (
+            format_link_pair(link),
+            link.anchor_sha.clone(),
+            link.id.clone(),
+        )
+    });
     ordered
 }
 
 fn index_links_by_pair(links: &[StoredLink]) -> BTreeMap<String, &StoredLink> {
-    links.iter()
+    links
+        .iter()
         .map(|link| (format_link_pair(link), link))
         .collect()
 }
@@ -1051,6 +1236,105 @@ fn reports_have_stale(reports: &[StaleMeshReport]) -> bool {
             .iter()
             .any(|link| link.status != LinkStatus::Fresh)
     })
+}
+
+fn render_side_patch(
+    repo: &gix::Repository,
+    side: &git_mesh::SideResolved,
+) -> Result<Option<String>> {
+    let current = match &side.current {
+        Some(current) if side.status != LinkStatus::Moved => current,
+        _ => return Ok(None),
+    };
+
+    let anchored_text = slice_blob_lines(
+        &read_git_text(repo, &side.anchored.blob)?,
+        side.anchored.start,
+        side.anchored.end,
+    )?;
+    let current_text = slice_blob_lines(
+        &read_git_text(repo, &current.blob)?,
+        current.start,
+        current.end,
+    )?;
+
+    if anchored_text == current_text {
+        return Ok(None);
+    }
+
+    let base = std::env::temp_dir().join(format!("git-mesh-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&base)?;
+    let old_path = base.join("anchored.txt");
+    let new_path = base.join("current.txt");
+    fs::write(&old_path, anchored_text)?;
+    fs::write(&new_path, current_text)?;
+
+    let output = ProcessCommand::new("git")
+        .current_dir(
+            repo.workdir()
+                .ok_or_else(|| anyhow!("Bare repositories are not supported"))?,
+        )
+        .args([
+            "diff",
+            "--no-index",
+            "--no-ext-diff",
+            "--unified=3",
+            old_path
+                .to_str()
+                .ok_or_else(|| anyhow!("temporary file path is not valid UTF-8"))?,
+            new_path
+                .to_str()
+                .ok_or_else(|| anyhow!("temporary file path is not valid UTF-8"))?,
+        ])
+        .output()?;
+
+    let _ = fs::remove_file(&old_path);
+    let _ = fs::remove_file(&new_path);
+    let _ = fs::remove_dir(&base);
+
+    match output.status.code() {
+        Some(0) => Ok(None),
+        Some(1) => Ok(Some(rewrite_patch_labels(
+            &String::from_utf8(output.stdout)?,
+            &format_side_anchored(side),
+            &format_current_location(current),
+        ))),
+        _ => Err(anyhow!(
+            "git diff --no-index failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )),
+    }
+}
+
+fn slice_blob_lines(text: &str, start: u32, end: u32) -> Result<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let start_index = start
+        .checked_sub(1)
+        .ok_or_else(|| anyhow!("range start must be at least 1"))? as usize;
+    let end_index = end as usize;
+    let slice = lines
+        .get(start_index..end_index)
+        .ok_or_else(|| anyhow!("range {start}..={end} is out of bounds"))?;
+    let mut rendered = slice.join("\n");
+    rendered.push('\n');
+    Ok(rendered)
+}
+
+fn rewrite_patch_labels(diff: &str, anchored_label: &str, current_label: &str) -> String {
+    let mut lines = diff.lines();
+    let mut rewritten = Vec::new();
+
+    if lines.next().is_some() {
+        rewritten.push(format!("--- {anchored_label}"));
+    }
+    if lines.next().is_some() {
+        rewritten.push(format!("+++ {current_label}"));
+    }
+    rewritten.extend(lines.map(str::to_string));
+
+    let mut output = rewritten.join("\n");
+    output.push('\n');
+    output
 }
 
 fn run_doctor(repo: &gix::Repository) -> Vec<String> {

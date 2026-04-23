@@ -227,7 +227,12 @@ impl TestRepo {
         match output.status.code() {
             Some(0) => {}
             Some(1) => return Ok(Vec::new()),
-            _ => return Err(anyhow!("git command failed: {}", String::from_utf8_lossy(&output.stderr))),
+            _ => {
+                return Err(anyhow!(
+                    "git command failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
         }
         Ok(String::from_utf8(output.stdout)?
             .lines()
@@ -358,10 +363,24 @@ impl TestRepo {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
+        self.run_mesh_with_env(args, std::iter::empty::<(&str, &str)>())
+    }
+
+    pub fn run_mesh_with_env<I, S, E, K, V>(&self, args: I, envs: E) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+        E: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
         let mut command = Command::new(env!("CARGO_BIN_EXE_git-mesh"));
         command.current_dir(self.dir.path());
         for arg in args {
             command.arg(arg.as_ref());
+        }
+        for (key, value) in envs {
+            command.env(key.as_ref(), value.as_ref());
         }
         command.output().map_err(Into::into)
     }
@@ -398,5 +417,22 @@ impl TestRepo {
         S: AsRef<str>,
     {
         self.run_mesh(args)
+    }
+
+    pub fn mesh_stdout_with_env<I, S, E, K, V>(&self, args: I, envs: E) -> Result<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+        E: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let output = self.run_mesh_with_env(args, envs)?;
+        anyhow::ensure!(
+            output.status.success(),
+            "git-mesh command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).map_err(Into::into)
     }
 }

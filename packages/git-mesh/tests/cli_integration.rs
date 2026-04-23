@@ -2,6 +2,7 @@ mod support;
 
 use anyhow::Result;
 use serde_json::Value;
+use std::os::unix::fs::PermissionsExt;
 use support::TestRepo;
 
 #[test]
@@ -38,6 +39,11 @@ fn cli_lists_and_shows_meshes() -> Result<()> {
     let show_oneline = test_repo.mesh_stdout(["alpha", "--oneline"])?;
     assert!(show_oneline.contains("alpha Alpha subject"));
     assert!(show_oneline.contains("file1.txt#L1-L5:file2.txt#L10-L15"));
+
+    let formatted = test_repo.mesh_stdout(["alpha", "--format=%m %s%n%L%n%l links"])?;
+    assert!(formatted.contains("alpha Alpha subject"));
+    assert!(formatted.contains("file1.txt#L1-L5:file2.txt#L10-L15 @"));
+    assert!(formatted.contains("1 links"));
 
     Ok(())
 }
@@ -120,8 +126,7 @@ fn cli_stale_supports_exit_code_and_machine_formats() -> Result<()> {
         "<failure message=\"MOVED file1.txt#L1-L5:file2.txt#L10-L15 -&gt; file1.txt#L2-L6:file2.txt#L10-L15\">"
     ));
 
-    let github_actions =
-        test_repo.mesh_stdout(["stale", "my-mesh", "--format=github-actions"])?;
+    let github_actions = test_repo.mesh_stdout(["stale", "my-mesh", "--format=github-actions"])?;
     assert!(github_actions.contains("::warning file=file1.txt,line=1::"));
     assert!(github_actions.contains("mesh my-mesh%3A MOVED"));
 
@@ -172,7 +177,7 @@ fn cli_stale_includes_culprit_and_reconcile_data() -> Result<()> {
 }
 
 #[test]
-fn cli_stale_supports_stat_and_rejects_patch() -> Result<()> {
+fn cli_stale_supports_stat_and_patch() -> Result<()> {
     let mut test_repo = TestRepo::new()?;
     test_repo.mesh_stdout([
         "commit",
@@ -185,20 +190,24 @@ fn cli_stale_supports_stat_and_rejects_patch() -> Result<()> {
 
     test_repo.write_file(
         "file1.txt",
-        "prefix\nline1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
+        "line1\nline2\nupdated\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
     )?;
-    test_repo.commit_all("shift file1 lines")?;
+    test_repo.commit_all("modify file1")?;
 
     let stat = test_repo.mesh_stdout(["stale", "my-mesh", "--stat"])?;
-    assert!(stat.contains("MOVED"));
-    assert!(stat.contains(
-        "file1.txt#L1-L5:file2.txt#L10-L15 -> file1.txt#L2-L6:file2.txt#L10-L15"
-    ));
+    assert!(stat.contains("MODIFIED"));
+    assert!(
+        stat.contains("file1.txt#L1-L5:file2.txt#L10-L15 -> file1.txt#L1-L5:file2.txt#L10-L15")
+    );
     assert!(!stat.contains("reconcile with:"));
     assert!(!stat.contains("├─"));
 
-    let patch_stderr = test_repo.mesh_stderr(["stale", "my-mesh", "--patch"])?;
-    assert!(patch_stderr.contains("stale detail level `--patch` is not implemented"));
+    let patch = test_repo.mesh_stdout(["stale", "my-mesh", "--patch"])?;
+    assert!(patch.contains("--- file1.txt#L1-L5"));
+    assert!(patch.contains("+++ file1.txt#L1-L5"));
+    assert!(patch.contains("@@"));
+    assert!(patch.contains("-line3"));
+    assert!(patch.contains("+updated"));
 
     Ok(())
 }
@@ -289,6 +298,63 @@ fn cli_commit_supports_unlink_amend_and_anchor() -> Result<()> {
 
     let amended_show = test_repo.mesh_stdout(["my-mesh"])?;
     assert!(amended_show.contains("Reworded message"));
+
+    Ok(())
+}
+
+#[test]
+fn cli_commit_supports_message_file_edit_and_no_ignore_whitespace() -> Result<()> {
+    let mut test_repo = TestRepo::new()?;
+
+    test_repo.write_file("message.txt", "Message from file\n\nBody line\n")?;
+    test_repo.mesh_stdout([
+        "commit",
+        "file-message-mesh",
+        "--link",
+        "file1.txt#L1-L5:file2.txt#L10-L15",
+        "-F",
+        "message.txt",
+    ])?;
+
+    let show = test_repo.mesh_stdout(["file-message-mesh"])?;
+    assert!(show.contains("Message from file"));
+    assert!(show.contains("Body line"));
+
+    let editor = test_repo.dir.path().join("write-editor-message.sh");
+    test_repo.write_file(
+        "write-editor-message.sh",
+        "#!/bin/sh\ncat <<'EOF' > \"$1\"\nEdited subject\n\nEdited body\nEOF\n",
+    )?;
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755))?;
+
+    test_repo.mesh_stdout_with_env(
+        ["commit", "file-message-mesh", "--amend", "--edit"],
+        [("GIT_EDITOR", editor.to_str().unwrap())],
+    )?;
+
+    let amended = test_repo.mesh_stdout(["file-message-mesh"])?;
+    assert!(amended.contains("Edited subject"));
+    assert!(amended.contains("Edited body"));
+
+    test_repo.mesh_stdout([
+        "commit",
+        "strict-whitespace",
+        "--link",
+        "file3.txt#L1-L5:file4.txt#L10-L15",
+        "--no-ignore-whitespace",
+        "-m",
+        "Track exact whitespace",
+    ])?;
+
+    test_repo.write_file(
+        "file3.txt",
+        "line1\nline2\nline 3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
+    )?;
+    test_repo.commit_all("whitespace only change")?;
+
+    let stale = test_repo.mesh_stdout(["stale", "strict-whitespace", "--format=json"])?;
+    let payload: Value = serde_json::from_str(&stale)?;
+    assert_eq!(payload["meshes"][0]["links"][0]["status"], "MODIFIED");
 
     Ok(())
 }

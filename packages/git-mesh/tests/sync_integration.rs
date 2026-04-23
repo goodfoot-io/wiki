@@ -14,7 +14,9 @@ fn mesh_push_refspecs(repo: &TestRepo, remote: &str) -> Result<Vec<String>> {
 fn mesh_only_refspecs(refspecs: &[String]) -> Vec<String> {
     refspecs
         .iter()
-        .filter(|refspec| refspec.starts_with("+refs/links/") || refspec.starts_with("+refs/meshes/"))
+        .filter(|refspec| {
+            refspec.starts_with("+refs/links/") || refspec.starts_with("+refs/meshes/")
+        })
         .cloned()
         .collect()
 }
@@ -82,7 +84,10 @@ fn sync_bootstrap_is_idempotent() -> Result<()> {
             "+refs/meshes/*:refs/meshes/*".to_string(),
         ]
     );
-    assert_eq!(mesh_only_refspecs(&first_push), mesh_only_refspecs(&first_fetch));
+    assert_eq!(
+        mesh_only_refspecs(&first_push),
+        mesh_only_refspecs(&first_fetch)
+    );
 
     Ok(())
 }
@@ -107,8 +112,15 @@ fn sync_respects_explicit_remote_override_and_default_remote_config() -> Result<
 
     repo.mesh_stdout(["push", "origin"])?;
     let mesh_tip = repo.read_ref("refs/meshes/v1/override-mesh")?;
-    assert_eq!(origin.git_output(["rev-parse", "refs/meshes/v1/override-mesh"])? , mesh_tip);
-    assert!(upstream.run_git(["rev-parse", "refs/meshes/v1/override-mesh"]).is_err());
+    assert_eq!(
+        origin.git_output(["rev-parse", "refs/meshes/v1/override-mesh"])?,
+        mesh_tip
+    );
+    assert!(
+        upstream
+            .run_git(["rev-parse", "refs/meshes/v1/override-mesh"])
+            .is_err()
+    );
 
     repo.mesh_stdout(["push"])?;
     assert_eq!(
