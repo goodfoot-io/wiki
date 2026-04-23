@@ -205,7 +205,10 @@ pub fn restore_mesh(repo: &gix::Repository, name: &str, commit_ish: &str) -> Res
 
     let restored_commit = git_stdout_with_identity(work_dir, args.iter().map(String::as_str))?;
     match current_tip.as_deref() {
-        Some(parent) => git_stdout(work_dir, ["update-ref", &mesh_ref, &restored_commit, parent])?,
+        Some(parent) => git_stdout(
+            work_dir,
+            ["update-ref", &mesh_ref, &restored_commit, parent],
+        )?,
         None => git_stdout(
             work_dir,
             [
@@ -231,6 +234,43 @@ pub fn show_mesh(repo: &gix::Repository, name: &str) -> Result<Mesh> {
         name: name.to_string(),
         links,
         message,
+    })
+}
+
+pub fn list_mesh_names(repo: &gix::Repository) -> Result<Vec<String>> {
+    let work_dir = repo
+        .workdir()
+        .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
+    let output = git_stdout(
+        work_dir,
+        [
+            "for-each-ref",
+            "--format=%(refname:strip=3)",
+            "refs/meshes/v1",
+        ],
+    )?;
+
+    Ok(output
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+pub fn mesh_commit_info(repo: &gix::Repository, name: &str) -> Result<MeshCommitInfo> {
+    let work_dir = repo
+        .workdir()
+        .ok_or_else(|| anyhow!("Bare repositories are not supported"))?;
+    let commit_oid = git_stdout(work_dir, ["rev-parse", &format!("refs/meshes/v1/{name}")])?;
+    let author_name = git_stdout(work_dir, ["show", "-s", "--format=%an", &commit_oid])?;
+    let author_email = git_stdout(work_dir, ["show", "-s", "--format=%ae", &commit_oid])?;
+    let author_date = git_stdout(work_dir, ["show", "-s", "--format=%aD", &commit_oid])?;
+
+    Ok(MeshCommitInfo {
+        commit_oid,
+        author_name,
+        author_email,
+        author_date,
     })
 }
 
@@ -544,7 +584,12 @@ fn resolve_side_location(
     let head_sha = git_stdout(work_dir, ["rev-parse", "HEAD"])?;
     let commits = git_stdout(
         work_dir,
-        ["rev-list", "--ancestry-path", "--reverse", &format!("{anchor_sha}..{head_sha}")],
+        [
+            "rev-list",
+            "--ancestry-path",
+            "--reverse",
+            &format!("{anchor_sha}..{head_sha}"),
+        ],
     )?;
     let mut location = TrackedLocation {
         path: anchored.path.clone(),
@@ -578,7 +623,13 @@ fn advance_location(
     location: &TrackedLocation,
     anchored: &LinkSide,
 ) -> Result<Option<TrackedLocation>> {
-    let next_path = resolve_path_change(work_dir, parent, commit, &location.path, anchored.copy_detection)?;
+    let next_path = resolve_path_change(
+        work_dir,
+        parent,
+        commit,
+        &location.path,
+        anchored.copy_detection,
+    )?;
     let mut next = TrackedLocation {
         path: next_path.clone(),
         start: location.start,
@@ -604,7 +655,11 @@ fn resolve_path_change(
         "-r".to_string(),
         "-M".to_string(),
     ];
-    args.extend(copy_detection_args(copy_detection).into_iter().map(str::to_string));
+    args.extend(
+        copy_detection_args(copy_detection)
+            .into_iter()
+            .map(str::to_string),
+    );
     args.push(parent.to_string());
     args.push(commit.to_string());
 
@@ -654,14 +709,7 @@ fn apply_hunks_to_range(
 ) -> Result<()> {
     let output = git_stdout(
         work_dir,
-        [
-            "diff",
-            "-U0",
-            parent,
-            commit,
-            "--",
-            &location.path,
-        ],
+        ["diff", "-U0", parent, commit, "--", &location.path],
     )
     .unwrap_or_default();
 
@@ -691,7 +739,13 @@ fn parse_hunk_range(text: &str) -> Result<(u32, u32)> {
     Ok((start, count))
 }
 
-fn adjust_range(location: &mut TrackedLocation, old_start: u32, old_count: u32, new_start: u32, new_count: u32) {
+fn adjust_range(
+    location: &mut TrackedLocation,
+    old_start: u32,
+    old_count: u32,
+    new_start: u32,
+    new_count: u32,
+) {
     let old_end = old_start.saturating_add(old_count);
     let current_len = location.end.saturating_sub(location.start) + 1;
     let delta = new_count as i64 - old_count as i64;
@@ -724,7 +778,13 @@ fn shift_line(line: u32, delta: i64) -> u32 {
 fn is_commit_reachable_from_any_ref(work_dir: &Path, commit: &str) -> Result<bool> {
     let output = git_stdout(
         work_dir,
-        ["for-each-ref", "--format=%(refname)", "--contains", commit, "refs"],
+        [
+            "for-each-ref",
+            "--format=%(refname)",
+            "--contains",
+            commit,
+            "refs",
+        ],
     )?;
     Ok(output.lines().any(|line| !line.is_empty()))
 }

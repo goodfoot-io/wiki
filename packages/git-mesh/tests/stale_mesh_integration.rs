@@ -88,7 +88,10 @@ fn test_stale_mesh_reports_modified_and_rewritten() -> Result<()> {
         ],
     )?;
     test_repo.create_mesh_fixture("modified_mesh", "Modified mesh fixture", &[&modified_id])?;
-    test_repo.write_file("file1.txt", "line1\nline2\nupdated\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n")?;
+    test_repo.write_file(
+        "file1.txt",
+        "line1\nline2\nupdated\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
+    )?;
     test_repo.commit_all("modify file1")?;
 
     let modified = stale_mesh(&test_repo.repo, "modified_mesh")?;
@@ -102,7 +105,10 @@ fn test_stale_mesh_reports_modified_and_rewritten() -> Result<()> {
         ],
     )?;
     test_repo.create_mesh_fixture("rewritten_mesh", "Rewritten mesh fixture", &[&rewritten_id])?;
-    test_repo.write_file("file3.txt", "MOD\nMOD\nMOD\nMOD\nMOD\nline6\nline7\nline8\nline9\nline10\n")?;
+    test_repo.write_file(
+        "file3.txt",
+        "MOD\nMOD\nMOD\nMOD\nMOD\nline6\nline7\nline8\nline9\nline10\n",
+    )?;
     test_repo.commit_all("rewrite file3")?;
 
     let rewritten = stale_mesh(&test_repo.repo, "rewritten_mesh")?;
@@ -164,7 +170,10 @@ fn test_stale_mesh_reports_orphaned_when_anchor_unreachable() -> Result<()> {
     )?;
     let anchor = test_repo.head_sha()?;
     test_repo.create_mesh_fixture("my_mesh", "Orphan mesh fixture", &[&link_id])?;
-    test_repo.write_file("file1.txt", "changed\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n")?;
+    test_repo.write_file(
+        "file1.txt",
+        "changed\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
+    )?;
     test_repo.commit_all("advance head")?;
     test_repo.run_git(["checkout", "--orphan", "orphaned-head"])?;
     test_repo.run_git(["reset", "--hard"])?;
@@ -176,6 +185,11 @@ fn test_stale_mesh_reports_orphaned_when_anchor_unreachable() -> Result<()> {
     let resolved = stale_mesh(&test_repo.repo, "my_mesh")?;
     assert_eq!(resolved.links[0].anchor_sha, anchor);
     assert_eq!(resolved.links[0].status, LinkStatus::Orphaned);
-    assert!(resolved.links[0].sides.iter().all(|side| side.current.is_none()));
+    assert!(
+        resolved.links[0]
+            .sides
+            .iter()
+            .all(|side| side.current.is_none())
+    );
     Ok(())
 }

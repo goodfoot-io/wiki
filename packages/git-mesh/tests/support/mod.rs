@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 #![allow(dead_code)]
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use git_mesh::RangeSpec;
 use std::fs;
 use std::process::{Command, Output, Stdio};
@@ -256,5 +256,44 @@ impl TestRepo {
         self.git_output(["update-ref", "-d", name])?;
         self.repo = gix::open(self.dir.path())?;
         Ok(())
+    }
+
+    pub fn run_mesh<I, S>(&self, args: I) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_git-mesh"));
+        command.current_dir(self.dir.path());
+        for arg in args {
+            command.arg(arg.as_ref());
+        }
+        command.output().map_err(Into::into)
+    }
+
+    pub fn mesh_stdout<I, S>(&self, args: I) -> Result<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let output = self.run_mesh(args)?;
+        anyhow::ensure!(
+            output.status.success(),
+            "git-mesh command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).map_err(Into::into)
+    }
+
+    pub fn mesh_stderr<I, S>(&self, args: I) -> Result<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let output = self.run_mesh(args)?;
+        if output.status.success() {
+            return Err(anyhow!("git-mesh command unexpectedly succeeded"));
+        }
+        String::from_utf8(output.stderr).map_err(Into::into)
     }
 }

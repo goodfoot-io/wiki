@@ -37,6 +37,14 @@ pub struct Mesh {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeshCommitInfo {
+    pub commit_oid: String,
+    pub author_name: String,
+    pub author_email: String,
+    pub author_date: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredLink {
     pub id: String,
     pub anchor_sha: String,
