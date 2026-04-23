@@ -230,6 +230,143 @@ fn cli_config_unset_stages_default() -> Result<()> {
     Ok(())
 }
 
+/// Build a POSIX-shell editor script that replaces the EDITMSG file
+/// with `content`. Returns the path to the script.
+fn make_editor_script(repo: &TestRepo, content: &str) -> Result<std::path::PathBuf> {
+    let p = repo.path().join("fake-editor.sh");
+    let body = format!("#!/bin/sh\ncat >\"$1\" <<'__MESH_EOF__'\n{content}\n__MESH_EOF__\n");
+    std::fs::write(&p, body)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&p)?.permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&p, perm)?;
+    }
+    Ok(p)
+}
+
+fn run_mesh_with_editor(
+    repo: &TestRepo,
+    editor: &std::path::Path,
+    args: &[&str],
+) -> Result<std::process::Output> {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_git-mesh"));
+    cmd.current_dir(repo.path());
+    cmd.env("EDITOR", editor);
+    cmd.env_remove("VISUAL");
+    cmd.env_remove("GIT_EDITOR");
+    for a in args {
+        cmd.arg(a);
+    }
+    Ok(cmd.output()?)
+}
+
+#[test]
+fn cli_message_edit_blank_template_new_mesh() -> Result<()> {
+    let repo = TestRepo::seeded()?;
+    let editor = make_editor_script(&repo, "Hello from editor")?;
+    let out = run_mesh_with_editor(&repo, &editor, &["message", "m", "--edit"])?;
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let status = repo.mesh_stdout(["status", "m"])?;
+    assert!(status.contains("Hello from editor"), "status={status}");
+    Ok(())
+}
+
+#[test]
+fn cli_message_edit_prepopulated_from_existing() -> Result<()> {
+    let repo = TestRepo::seeded()?;
+    repo.mesh_stdout(["message", "m", "-m", "Pre-existing text"])?;
+    // Editor appends a suffix to whatever the template was.
+    let editor_path = repo.path().join("fake-editor.sh");
+    let body = "#!/bin/sh\nprintf '%s\\n-edited' \"$(cat \"$1\")\" >\"$1\"\n";
+    std::fs::write(&editor_path, body)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&editor_path)?.permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&editor_path, perm)?;
+    }
+    let out = run_mesh_with_editor(&repo, &editor_path, &["message", "m", "--edit"])?;
+    assert!(out.status.success());
+    let status = repo.mesh_stdout(["status", "m"])?;
+    assert!(status.contains("Pre-existing text"), "status={status}");
+    assert!(status.contains("-edited"), "status={status}");
+    Ok(())
+}
+
+#[test]
+fn cli_message_edit_inherits_from_parent_commit() -> Result<()> {
+    let repo = TestRepo::seeded()?;
+    repo.mesh_stdout(["add", "m", "file1.txt#L1-L5"])?;
+    repo.mesh_stdout(["message", "m", "-m", "Parent commit message"])?;
+    repo.mesh_stdout(["commit", "m"])?;
+    // No staged .msg exists; editor should see the parent's message.
+    let editor_path = repo.path().join("fake-editor.sh");
+    let body = "#!/bin/sh\ncp \"$1\" \"$1.seen\"\ncat >\"$1\" <<'__EOF__'\nNew body\n__EOF__\n";
+    std::fs::write(&editor_path, body)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&editor_path)?.permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&editor_path, perm)?;
+    }
+    let out = run_mesh_with_editor(&repo, &editor_path, &["message", "m", "--edit"])?;
+    assert!(out.status.success());
+    // Collect the snapshot of what the editor saw.
+    let seen_path = repo
+        .path()
+        .join(".git")
+        .join("mesh")
+        .join("staging")
+        .join("m.msg.EDITMSG.seen");
+    let seen = std::fs::read_to_string(&seen_path)?;
+    assert!(
+        seen.contains("Parent commit message"),
+        "editor template was: {seen}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_message_edit_empty_buffer_aborts() -> Result<()> {
+    let repo = TestRepo::seeded()?;
+    // Editor produces only comment lines — stripped => empty => abort.
+    let editor = make_editor_script(&repo, "# only a comment\n# another")?;
+    let out = run_mesh_with_editor(&repo, &editor, &["message", "m", "--edit"])?;
+    assert!(!out.status.success(), "abort should fail");
+    let msg_path = repo
+        .path()
+        .join(".git")
+        .join("mesh")
+        .join("staging")
+        .join("m.msg");
+    assert!(!msg_path.exists(), "empty-abort must not write .msg");
+    Ok(())
+}
+
+#[test]
+fn cli_message_bare_triggers_editor() -> Result<()> {
+    // §10.2: `git mesh message <name>` with no flags = --edit.
+    let repo = TestRepo::seeded()?;
+    let editor = make_editor_script(&repo, "bare edit worked")?;
+    let out = run_mesh_with_editor(&repo, &editor, &["message", "m"])?;
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let status = repo.mesh_stdout(["status", "m"])?;
+    assert!(status.contains("bare edit worked"), "status={status}");
+    Ok(())
+}
+
 #[test]
 fn cli_config_unset_unknown_key_errors() -> Result<()> {
     let repo = TestRepo::seeded()?;

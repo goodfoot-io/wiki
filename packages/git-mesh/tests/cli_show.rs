@@ -141,6 +141,54 @@ fn ls_by_path_filters() -> Result<()> {
 }
 
 #[test]
+fn show_format_commit_placeholders() -> Result<()> {
+    let repo = TestRepo::seeded()?;
+    seed(&repo, "m")?;
+    let out = repo.mesh_stdout(["m", "--format=%s|%an"])?;
+    assert!(out.starts_with("seed|Test User"), "out={out}");
+    Ok(())
+}
+
+#[test]
+fn show_format_ranges_placeholder() -> Result<()> {
+    let repo = TestRepo::seeded()?;
+    seed(&repo, "m")?;
+    let out = repo.mesh_stdout(["m", "--format=%(ranges)"])?;
+    assert!(out.contains("file1.txt#L1-L5"), "out={out}");
+    Ok(())
+}
+
+#[test]
+fn show_format_ranges_count() -> Result<()> {
+    let repo = TestRepo::seeded()?;
+    seed(&repo, "m")?;
+    let out = repo.mesh_stdout(["m", "--format=count=%(ranges:count)"])?;
+    assert!(out.trim() == "count=1", "out={out}");
+    Ok(())
+}
+
+#[test]
+fn show_format_config_placeholder() -> Result<()> {
+    let repo = TestRepo::seeded()?;
+    seed(&repo, "m")?;
+    let out = repo.mesh_stdout(["m", "--format=cd=%(config:copy-detection)"])?;
+    assert!(out.trim() == "cd=same-commit", "out={out}");
+    // Unknown config key → empty.
+    let out = repo.mesh_stdout(["m", "--format=x=%(config:nope)y"])?;
+    assert!(out.trim() == "x=y", "out={out}");
+    Ok(())
+}
+
+#[test]
+fn show_format_combined_placeholders() -> Result<()> {
+    let repo = TestRepo::seeded()?;
+    seed(&repo, "m")?;
+    let out = repo.mesh_stdout(["m", "--format=%s has %(ranges:count) range(s)"])?;
+    assert!(out.starts_with("seed has 1 range(s)"), "out={out}");
+    Ok(())
+}
+
+#[test]
 
 fn ls_by_path_range_filters() -> Result<()> {
     let repo = TestRepo::seeded()?;

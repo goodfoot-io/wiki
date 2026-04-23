@@ -26,16 +26,78 @@ pub fn run_rm(repo: &gix::Repository, args: RmArgs) -> Result<i32> {
 }
 
 pub fn run_message(repo: &gix::Repository, args: MessageArgs) -> Result<i32> {
-    let body = if let Some(m) = args.m {
-        m
-    } else if let Some(f) = args.file {
-        std::fs::read_to_string(&f).with_context(|| format!("failed to read {f}"))?
-    } else if args.edit {
-        return Err(anyhow!("--edit not supported in headless contexts"));
+    // Per §10.2, bare `git mesh message <name>` (no flag) behaves like
+    // `--edit`. `-m` / `-F` short-circuit the editor path.
+    if let Some(m) = args.m {
+        set_message(repo, &args.name, &m)?;
+        return Ok(0);
+    }
+    if let Some(f) = args.file {
+        let body = std::fs::read_to_string(&f).with_context(|| format!("failed to read {f}"))?;
+        set_message(repo, &args.name, &body)?;
+        return Ok(0);
+    }
+    // Editor flow (--edit or bare).
+    run_message_editor(repo, &args.name)
+}
+
+fn run_message_editor(repo: &gix::Repository, name: &str) -> Result<i32> {
+    crate::validation::validate_mesh_name(name)?;
+    let wd = crate::git::work_dir(repo)?;
+    let staging_dir = wd.join(".git").join("mesh").join("staging");
+    std::fs::create_dir_all(&staging_dir)?;
+
+    // Determine template content (§6.3):
+    //   1. existing `<name>.msg` wins
+    //   2. else parent mesh commit's message
+    //   3. else blank buffer with a commented hint
+    let msg_path = staging_dir.join(format!("{name}.msg"));
+    let template: String = if msg_path.exists() {
+        std::fs::read_to_string(&msg_path)?
+    } else if let Ok(info) = crate::mesh::mesh_commit_info(repo, name) {
+        info.message
     } else {
-        return Err(anyhow!("no message source (use -m / -F / --edit)"));
+        String::from("\n# Write the relationship description. Empty message aborts.\n")
     };
-    set_message(repo, &args.name, &body)?;
+
+    let edit_path = staging_dir.join(format!("{name}.msg.EDITMSG"));
+    std::fs::write(&edit_path, &template)?;
+
+    // Resolve editor — same lookup as `git commit`.
+    let editor = std::env::var("GIT_EDITOR")
+        .ok()
+        .or_else(|| std::env::var("VISUAL").ok())
+        .or_else(|| std::env::var("EDITOR").ok())
+        .unwrap_or_else(|| "vi".to_string());
+
+    // `git commit` spawns the editor via the shell for tokenization.
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$@\"", editor = editor))
+        .arg(&editor)
+        .arg(&edit_path)
+        .status()
+        .with_context(|| format!("failed to spawn editor `{editor}`"))?;
+    if !status.success() {
+        return Err(anyhow!("editor `{editor}` exited with {status}"));
+    }
+
+    // Read + strip comment lines + trim trailing whitespace (git behavior).
+    let raw = std::fs::read_to_string(&edit_path)?;
+    let stripped = raw
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = stripped.trim_end().to_string();
+
+    // Clean up the EDITMSG scratch file regardless of outcome.
+    let _ = std::fs::remove_file(&edit_path);
+
+    if body.is_empty() {
+        return Err(anyhow!("aborting mesh message due to empty message"));
+    }
+    set_message(repo, name, &body)?;
     Ok(0)
 }
 
