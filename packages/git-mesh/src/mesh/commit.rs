@@ -147,58 +147,136 @@ pub fn commit_mesh(repo: &gix::Repository, name: &str) -> Result<String> {
         new_range_ids.push(id);
     }
 
-    // Combine ranges and canonicalize by (path, start, end).
-    let mut combined: Vec<(String, String, u32, u32)> = snapshots.clone();
-    for id in &new_range_ids {
-        let r = read_range(repo, id)?;
-        combined.push((id.clone(), r.path, r.start, r.end));
-    }
-    combined.sort_by(|a, b| (a.1.as_str(), a.2, a.3).cmp(&(b.1.as_str(), b.2, b.3)));
-    let final_ids: Vec<String> = combined.iter().map(|(id, _, _, _)| id.clone()).collect();
-
-    // Build tree: `ranges` blob + `config` blob.
-    let ranges_text: String = {
-        let mut s = String::new();
-        for id in &final_ids {
-            s.push_str(id);
-            s.push('\n');
+    // CAS retry loop (§6). Range blobs are content-addressed and already
+    // written; only the tree/commit/ref-update step needs retrying. On
+    // conflict, reload the mesh tip, re-validate post-remove collisions
+    // against the new snapshot, rebuild the tree/commit with the new
+    // parent, and retry.
+    let mut current_parent = base_tip.clone();
+    let mut current_snapshots = snapshots;
+    const MAX_RETRIES: usize = 5;
+    let new_commit: String;
+    let mut attempt: usize = 0;
+    loop {
+        // Combine ranges and canonicalize by (path, start, end).
+        let mut combined: Vec<(String, String, u32, u32)> = current_snapshots.clone();
+        for id in &new_range_ids {
+            let r = read_range(repo, id)?;
+            combined.push((id.clone(), r.path, r.start, r.end));
         }
-        s
-    };
-    let ranges_blob = git_with_input(wd, ["hash-object", "-w", "--stdin"], &ranges_text)?;
-    let config_text = serialize_config_blob(&new_config);
-    let config_blob = git_with_input(wd, ["hash-object", "-w", "--stdin"], &config_text)?;
-    let tree_input = format!(
-        "100644 blob {config_blob}\tconfig\n100644 blob {ranges_blob}\tranges\n"
-    );
-    let tree_oid = git_with_input(wd, ["mktree"], &tree_input)?;
+        combined.sort_by(|a, b| (a.1.as_str(), a.2, a.3).cmp(&(b.1.as_str(), b.2, b.3)));
+        let final_ids: Vec<String> =
+            combined.iter().map(|(id, _, _, _)| id.clone()).collect();
 
-    // Commit.
-    let mut args = vec![
-        "commit-tree".to_string(),
-        tree_oid,
-        "-m".to_string(),
-        message,
-    ];
-    if let Some(parent) = base_tip.as_deref() {
-        args.push("-p".to_string());
-        args.push(parent.to_string());
+        // Build tree: `ranges` blob + `config` blob.
+        let ranges_text: String = {
+            let mut s = String::new();
+            for id in &final_ids {
+                s.push_str(id);
+                s.push('\n');
+            }
+            s
+        };
+        let ranges_blob =
+            git_with_input(wd, ["hash-object", "-w", "--stdin"], &ranges_text)?;
+        let config_text = serialize_config_blob(&new_config);
+        let config_blob =
+            git_with_input(wd, ["hash-object", "-w", "--stdin"], &config_text)?;
+        let tree_input = format!(
+            "100644 blob {config_blob}\tconfig\n100644 blob {ranges_blob}\tranges\n"
+        );
+        let tree_oid = git_with_input(wd, ["mktree"], &tree_input)?;
+
+        // Commit.
+        let mut args = vec![
+            "commit-tree".to_string(),
+            tree_oid,
+            "-m".to_string(),
+            message.clone(),
+        ];
+        if let Some(parent) = current_parent.as_deref() {
+            args.push("-p".to_string());
+            args.push(parent.to_string());
+        }
+        let candidate = git_stdout_with_identity(wd, args.iter().map(String::as_str))?;
+
+        // Atomic CAS update.
+        let update = match current_parent.as_deref() {
+            Some(prev) => RefUpdate::Update {
+                name: mesh_ref.clone(),
+                new_oid: candidate.clone(),
+                expected_old_oid: prev.to_string(),
+            },
+            None => RefUpdate::Create {
+                name: mesh_ref.clone(),
+                new_oid: candidate.clone(),
+            },
+        };
+        match apply_ref_transaction(wd, &[update]) {
+            Ok(()) => {
+                new_commit = candidate;
+                break;
+            }
+            Err(e) => {
+                attempt += 1;
+                if attempt >= MAX_RETRIES {
+                    return Err(Error::ConcurrentUpdate {
+                        expected: current_parent.clone().unwrap_or_default(),
+                        found: resolve_ref_oid_optional(wd, &mesh_ref)?
+                            .unwrap_or_default(),
+                    });
+                }
+                // Re-read the tip. If it hasn't actually changed, the
+                // error wasn't a CAS conflict — surface it.
+                let latest = resolve_ref_oid_optional(wd, &mesh_ref)?;
+                if latest == current_parent {
+                    return Err(e);
+                }
+                current_parent = latest;
+                // Re-materialize snapshot from new tip and re-run
+                // post-remove / add collision validation.
+                let new_snapshots = match current_parent.as_deref() {
+                    Some(tip) => {
+                        let m = super::read::read_mesh_at(repo, name, Some(tip))?;
+                        let mut out = Vec::with_capacity(m.ranges.len());
+                        for id in &m.ranges {
+                            let r = read_range(repo, id)?;
+                            out.push((id.clone(), r.path, r.start, r.end));
+                        }
+                        out
+                    }
+                    None => Vec::new(),
+                };
+                let mut post = new_snapshots;
+                for rem in &staging.removes {
+                    let idx = post
+                        .iter()
+                        .position(|(_, p, s, e)| {
+                            p == &rem.path && *s == rem.start && *e == rem.end
+                        })
+                        .ok_or_else(|| Error::RangeNotInMesh {
+                            path: rem.path.clone(),
+                            start: rem.start,
+                            end: rem.end,
+                        })?;
+                    post.remove(idx);
+                }
+                for a in &staging.adds {
+                    if post
+                        .iter()
+                        .any(|(_, p, s, e)| p == &a.path && *s == a.start && *e == a.end)
+                    {
+                        return Err(Error::DuplicateRangeLocation {
+                            path: a.path.clone(),
+                            start: a.start,
+                            end: a.end,
+                        });
+                    }
+                }
+                current_snapshots = post;
+            }
+        }
     }
-    let new_commit = git_stdout_with_identity(wd, args.iter().map(String::as_str))?;
-
-    // CAS update of mesh ref.
-    let update = match base_tip.as_deref() {
-        Some(prev) => RefUpdate::Update {
-            name: mesh_ref.clone(),
-            new_oid: new_commit.clone(),
-            expected_old_oid: prev.to_string(),
-        },
-        None => RefUpdate::Create {
-            name: mesh_ref.clone(),
-            new_oid: new_commit.clone(),
-        },
-    };
-    apply_ref_transaction(wd, &[update])?;
 
     // Clear staging on success.
     let _ = staging::clear_staging(repo, name);

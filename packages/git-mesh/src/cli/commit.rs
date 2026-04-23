@@ -50,14 +50,12 @@ pub fn run_commit(repo: &gix::Repository, args: CommitArgs) -> Result<i32> {
 
 pub fn run_status(repo: &gix::Repository, args: StatusArgs) -> Result<i32> {
     if args.check {
-        // Walk every mesh with non-empty staging.
-        let names = crate::list_mesh_names(repo).unwrap_or_default();
-        let mut drifted = false;
-        // Also scan staging dir for mesh names not yet committed.
+        // Walk every mesh with non-empty staging (including meshes not
+        // yet committed).
         let wd = crate::git::work_dir(repo)?;
         let dir = wd.join(".git").join("mesh").join("staging");
         let mut candidates = std::collections::BTreeSet::new();
-        for n in names {
+        for n in crate::list_mesh_names(repo).unwrap_or_default() {
             candidates.insert(n);
         }
         if dir.exists() {
@@ -70,10 +68,21 @@ pub fn run_status(repo: &gix::Repository, args: StatusArgs) -> Result<i32> {
                 }
             }
         }
+        let mut drifted = false;
         for c in candidates {
             let sv = status_view(repo, &c)?;
             if !sv.drift.is_empty() {
                 drifted = true;
+                // Print the drift diffs for each affected range.
+                println!("Working tree drift:");
+                println!();
+                for f in &sv.drift {
+                    println!("  {}#L{}-L{}", f.path, f.start, f.end);
+                }
+                println!();
+                for f in &sv.drift {
+                    print_drift_diff(repo, &c, f)?;
+                }
             }
         }
         return Ok(if drifted { 1 } else { 0 });
@@ -82,27 +91,158 @@ pub fn run_status(repo: &gix::Repository, args: StatusArgs) -> Result<i32> {
         .name
         .ok_or_else(|| anyhow!("`git mesh status <name>` requires a name (or --check)"))?;
     let sv = status_view(repo, &name)?;
-    println!("mesh: {}", sv.name);
+
+    // Header: `mesh <name>` + commit/author/date/message, matching
+    // `git show` conventions. Skip cleanly if the mesh has no tip yet.
+    if let Ok(info) = crate::mesh::mesh_commit_info(repo, &name) {
+        println!("mesh {}", sv.name);
+        println!("commit {}", info.commit_oid);
+        println!("Author: {} <{}>", info.author_name, info.author_email);
+        println!("Date:   {}", info.author_date);
+        println!();
+        for line in info.message.lines() {
+            println!("    {line}");
+        }
+        println!();
+    } else {
+        println!("mesh {}", sv.name);
+        println!();
+    }
+
+    let has_staged = !sv.staging.adds.is_empty()
+        || !sv.staging.removes.is_empty()
+        || !sv.staging.configs.is_empty();
+    if has_staged {
+        println!("Staged changes:");
+        println!();
+        for a in &sv.staging.adds {
+            println!("  add     {}#L{}-L{}", a.path, a.start, a.end);
+        }
+        for r in &sv.staging.removes {
+            println!("  remove  {}#L{}-L{}", r.path, r.start, r.end);
+        }
+        for c in &sv.staging.configs {
+            match c {
+                StagedConfig::CopyDetection(cd) => {
+                    println!(
+                        "  config  copy-detection {}",
+                        crate::staging::serialize_copy_detection(*cd)
+                    );
+                }
+                StagedConfig::IgnoreWhitespace(b) => {
+                    println!("  config  ignore-whitespace {b}");
+                }
+            }
+        }
+        println!();
+    }
+
     if let Some(msg) = &sv.staging.message {
-        println!("message: {}", msg.trim());
+        println!("Staged message:");
+        println!();
+        for line in msg.lines() {
+            println!("  {line}");
+        }
+        println!();
     }
-    for a in &sv.staging.adds {
-        println!("add  {}#L{}-L{}", a.path, a.start, a.end);
-    }
-    for r in &sv.staging.removes {
-        println!("remove  {}#L{}-L{}", r.path, r.start, r.end);
-    }
-    for f in &sv.drift {
-        println!("drift  {}#L{}-L{}", f.path, f.start, f.end);
+
+    if !sv.drift.is_empty() {
+        println!("Working tree drift:");
+        println!();
+        for f in &sv.drift {
+            println!("  {}#L{}-L{}", f.path, f.start, f.end);
+        }
+        println!();
+        for f in &sv.drift {
+            print_drift_diff(repo, &name, f)?;
+        }
     }
     Ok(0)
+}
+
+fn print_drift_diff(
+    repo: &gix::Repository,
+    name: &str,
+    f: &crate::staging::DriftFinding,
+) -> Result<()> {
+    use similar::{ChangeTag, TextDiff};
+    // Load sidecar bytes for the staged add at `(path, start, end)`.
+    let staging = crate::staging::read_staging(repo, name)?;
+    let add = staging
+        .adds
+        .iter()
+        .find(|a| a.path == f.path && a.start == f.start && a.end == f.end);
+    let Some(add) = add else {
+        return Ok(());
+    };
+    let wd = crate::git::work_dir(repo)?;
+    let sidecar_p = wd
+        .join(".git")
+        .join("mesh")
+        .join("staging")
+        .join(format!("{name}.{}", add.line_number));
+    let sidecar = std::fs::read(&sidecar_p).unwrap_or_default();
+    let current = std::fs::read(wd.join(&f.path)).unwrap_or_default();
+    let sidecar_text = String::from_utf8_lossy(&sidecar).to_string();
+    let current_text = String::from_utf8_lossy(&current).to_string();
+    let sidecar_lines: Vec<&str> = sidecar_text.lines().collect();
+    let current_lines: Vec<&str> = current_text.lines().collect();
+    let s_lo = (f.start as usize).saturating_sub(1);
+    let s_hi = (f.end as usize).min(sidecar_lines.len());
+    let c_hi = (f.end as usize).min(current_lines.len());
+    let a_slice: Vec<String> = if s_lo <= s_hi {
+        sidecar_lines[s_lo..s_hi].iter().map(|s| s.to_string()).collect()
+    } else {
+        Vec::new()
+    };
+    let b_slice: Vec<String> = if s_lo <= c_hi {
+        current_lines[s_lo..c_hi].iter().map(|s| s.to_string()).collect()
+    } else {
+        Vec::new()
+    };
+    println!("--- {}#L{}-L{} (staged)", f.path, f.start, f.end);
+    println!("+++ {}#L{}-L{} (working tree)", f.path, f.start, f.end);
+    let a_refs: Vec<&str> = a_slice.iter().map(String::as_str).collect();
+    let b_refs: Vec<&str> = b_slice.iter().map(String::as_str).collect();
+    let diff = TextDiff::from_slices(&a_refs, &b_refs);
+    println!(
+        "@@ -{},{} +{},{} @@",
+        f.start,
+        a_slice.len(),
+        f.start,
+        b_slice.len()
+    );
+    for change in diff.iter_all_changes() {
+        let prefix = match change.tag() {
+            ChangeTag::Delete => "-",
+            ChangeTag::Insert => "+",
+            ChangeTag::Equal => " ",
+        };
+        let text = change.value();
+        let trimmed = text.strip_suffix('\n').unwrap_or(text);
+        println!("{prefix}{trimmed}");
+    }
+    println!();
+    Ok(())
 }
 
 pub fn run_config(repo: &gix::Repository, args: ConfigArgs) -> Result<i32> {
     // Read mesh config.
     let mesh = read_mesh(repo, &args.name)?;
     match (args.unset, args.key, args.value) {
-        (Some(_unset), _, _) => Err(anyhow!("--unset not supported yet")),
+        (Some(unset), _, _) => {
+            // §10.5: stage a reset to the built-in default for <key>.
+            // Defaults come from DEFAULT_COPY_DETECTION / DEFAULT_IGNORE_WHITESPACE.
+            let entry = match unset.as_str() {
+                "copy-detection" => StagedConfig::CopyDetection(crate::types::DEFAULT_COPY_DETECTION),
+                "ignore-whitespace" => {
+                    StagedConfig::IgnoreWhitespace(crate::types::DEFAULT_IGNORE_WHITESPACE)
+                }
+                other => return Err(anyhow!("unknown config key `{other}`")),
+            };
+            crate::staging::append_config(repo, &args.name, &entry)?;
+            Ok(0)
+        }
         (None, None, _) => {
             let staging = crate::staging::read_staging(repo, &args.name).unwrap_or_default();
             let (staged_cd, staged_iw) = crate::staging::resolve_staged_config(

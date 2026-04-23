@@ -112,7 +112,60 @@ fn patch_includes_unified_diff() -> Result<()> {
 }
 
 #[test]
+fn human_output_has_mesh_header_with_commit_author_date() -> Result<()> {
+    let repo = TestRepo::seeded()?;
+    seed(&repo, "m")?;
+    drift(&repo, "mutate")?;
+    let out = repo.run_mesh(["stale", "m"])?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.starts_with("mesh m\n"), "mesh header: {stdout}");
+    assert!(stdout.contains("commit "));
+    assert!(stdout.contains("Author:"));
+    assert!(stdout.contains("Date:"));
+    // Indented message.
+    assert!(stdout.contains("    seed"));
+    Ok(())
+}
 
+#[test]
+fn human_output_groups_worst_first_orphaned_changed_moved() -> Result<()> {
+    let repo = TestRepo::seeded()?;
+    seed(&repo, "m")?;
+    drift(&repo, "mutate")?;
+    let out = repo.run_mesh(["stale", "m"])?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Summary line `N stale of M ranges:`
+    assert!(stdout.contains(" stale of "));
+    // "Changed ranges:" labelled section
+    assert!(stdout.contains("Changed ranges:"));
+    // Culprit line should include "caused by <short> <subject>"
+    assert!(stdout.contains("caused by "), "culprit attribution missing: {stdout}");
+    // Flat diff (no leading 2-space indent on `---`/`+++` lines).
+    assert!(stdout.contains("--- file1.txt#L1-L5 (anchored)"));
+    assert!(stdout.contains("+++ file1.txt"));
+    Ok(())
+}
+
+#[test]
+fn human_oneline_emits_status_path_range_per_line() -> Result<()> {
+    let repo = TestRepo::seeded()?;
+    seed(&repo, "m")?;
+    drift(&repo, "mutate")?;
+    let out = repo.run_mesh(["stale", "m", "--oneline"])?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Should contain a line starting with `CHANGED` and the range.
+    assert!(
+        stdout.lines().any(|l| l.starts_with("CHANGED") && l.contains("file1.txt#L1-L5")),
+        "oneline content: {stdout}"
+    );
+    // No mesh header.
+    assert!(!stdout.contains("mesh m"));
+    // No diff bodies.
+    assert!(!stdout.contains("@@ "));
+    Ok(())
+}
+
+#[test]
 fn workspace_scan_without_name() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "a")?;

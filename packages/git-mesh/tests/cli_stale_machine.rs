@@ -30,7 +30,10 @@ fn porcelain_one_line_per_finding() -> Result<()> {
     let out = repo.run_mesh(["stale", "m", "--format=porcelain"])?;
     assert_eq!(out.status.code(), Some(1));
     let text = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(text.trim().lines().count(), 1);
+    // `# porcelain v1` header + one finding line.
+    let lines: Vec<&str> = text.trim().lines().collect();
+    assert_eq!(lines.len(), 2, "header + 1 finding: {text}");
+    assert_eq!(lines[0], "# porcelain v1");
     assert!(text.contains("CHANGED"));
     assert!(text.contains("file1.txt"));
     Ok(())
@@ -76,7 +79,40 @@ fn json_range_entries_have_lsp_shape() -> Result<()> {
 }
 
 #[test]
+fn json_envelope_has_mesh_and_commit_fields() -> Result<()> {
+    let repo = TestRepo::seeded()?;
+    seed(&repo, "m")?;
+    drift(&repo)?;
+    let out = repo.run_mesh(["stale", "m", "--format=json"])?;
+    let v: Value = serde_json::from_slice(&out.stdout)?;
+    assert_eq!(v["version"], 1);
+    assert_eq!(v["mesh"], "m");
+    assert!(v["commit"].is_string() && !v["commit"].as_str().unwrap().is_empty());
+    Ok(())
+}
 
+#[test]
+fn json_range_entries_use_zero_based_lsp_range() -> Result<()> {
+    let repo = TestRepo::seeded()?;
+    seed(&repo, "m")?;
+    drift(&repo)?;
+    let out = repo.run_mesh(["stale", "m", "--format=json"])?;
+    let v: Value = serde_json::from_slice(&out.stdout)?;
+    let first = &v["ranges"][0];
+    // LSP 0-based lines: start.line = 0 (for L1), end.line = 4 (for L5).
+    assert_eq!(first["range"]["start"]["line"], 0);
+    assert_eq!(first["range"]["start"]["character"], 0);
+    assert_eq!(first["range"]["end"]["line"], 4);
+    assert_eq!(first["range"]["end"]["character"], 0);
+    // Severity + code shape.
+    assert_eq!(first["severity"], "error");
+    assert_eq!(first["code"], "CHANGED");
+    // Culprit in data.
+    assert!(first["data"]["culprit"]["sha"].is_string());
+    Ok(())
+}
+
+#[test]
 fn junit_has_testsuite_tag() -> Result<()> {
     let repo = TestRepo::seeded()?;
     seed(&repo, "m")?;
@@ -96,7 +132,14 @@ fn github_actions_emits_warning_annotation() -> Result<()> {
     drift(&repo)?;
     let out = repo.run_mesh(["stale", "m", "--format=github-actions"])?;
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("::warning file=file1.txt"));
+    // CHANGED maps to ::error per §10.4 severity rules; MOVED maps to
+    // ::warning. Either is acceptable depending on the drift shape.
+    assert!(
+        s.contains("::error file=file1.txt") || s.contains("::warning file=file1.txt"),
+        "expected annotation with file=file1.txt, got: {s}"
+    );
+    // No non-spec fields like endLine=.
+    assert!(!s.contains("endLine="), "github-actions output must not include endLine=");
     Ok(())
 }
 

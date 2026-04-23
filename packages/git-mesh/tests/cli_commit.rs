@@ -158,3 +158,85 @@ fn cli_commit_reserved_name_rejected() -> Result<()> {
     assert!(!out.status.success());
     Ok(())
 }
+
+#[test]
+fn cli_status_header_matches_git_show_shape() -> Result<()> {
+    let repo = TestRepo::seeded()?;
+    repo.mesh_stdout(["add", "m", "file1.txt#L1-L5"])?;
+    repo.mesh_stdout(["message", "m", "-m", "Initial subject"])?;
+    repo.mesh_stdout(["commit", "m"])?;
+    // Stage a second add without committing.
+    repo.mesh_stdout(["add", "m", "file2.txt#L1-L3"])?;
+    let out = repo.mesh_stdout(["status", "m"])?;
+    assert!(out.starts_with("mesh m\n"), "header: {out}");
+    assert!(out.contains("commit "));
+    assert!(out.contains("Author:"));
+    assert!(out.contains("Date:"));
+    assert!(out.contains("    Initial subject"));
+    assert!(out.contains("Staged changes:"));
+    assert!(out.contains("  add     file2.txt#L1-L3"));
+    Ok(())
+}
+
+#[test]
+fn cli_status_shows_staged_message_and_config() -> Result<()> {
+    let repo = TestRepo::seeded()?;
+    repo.mesh_stdout(["add", "m", "file1.txt#L1-L5"])?;
+    repo.mesh_stdout(["message", "m", "-m", "seed"])?;
+    repo.mesh_stdout(["commit", "m"])?;
+    // Stage a fresh message + config on top of the committed mesh.
+    repo.mesh_stdout(["message", "m", "-m", "my staged subject"])?;
+    repo.mesh_stdout(["config", "m", "copy-detection", "off"])?;
+    let out = repo.mesh_stdout(["status", "m"])?;
+    assert!(out.contains("Staged message:"));
+    assert!(out.contains("  my staged subject"));
+    assert!(out.contains("  config  copy-detection off"));
+    Ok(())
+}
+
+#[test]
+fn cli_status_check_prints_drift_diff() -> Result<()> {
+    let repo = TestRepo::seeded()?;
+    repo.mesh_stdout(["add", "m", "file1.txt#L1-L5"])?;
+    repo.write_file(
+        "file1.txt",
+        "DRIFT\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
+    )?;
+    let out = repo.run_mesh(["status", "--check"])?;
+    assert_ne!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Working tree drift:"));
+    assert!(stdout.contains("file1.txt#L1-L5"));
+    assert!(stdout.contains("--- file1.txt#L1-L5 (staged)"));
+    assert!(stdout.contains("+++ file1.txt#L1-L5 (working tree)"));
+    assert!(stdout.contains("@@ "));
+    Ok(())
+}
+
+#[test]
+fn cli_config_unset_stages_default() -> Result<()> {
+    let repo = TestRepo::seeded()?;
+    repo.mesh_stdout(["add", "m", "file1.txt#L1-L5"])?;
+    repo.mesh_stdout(["message", "m", "-m", "seed"])?;
+    repo.mesh_stdout(["commit", "m"])?;
+    // Stage a non-default, then --unset resets to default.
+    repo.mesh_stdout(["config", "m", "ignore-whitespace", "true"])?;
+    repo.mesh_stdout(["config", "m", "--unset", "ignore-whitespace"])?;
+    let out = repo.mesh_stdout(["config", "m"])?;
+    // Final resolved staged value is `false` (default); the committed
+    // value is also `false`, so the displayed line is the un-starred
+    // default.
+    assert!(out.contains("ignore-whitespace false"));
+    Ok(())
+}
+
+#[test]
+fn cli_config_unset_unknown_key_errors() -> Result<()> {
+    let repo = TestRepo::seeded()?;
+    repo.mesh_stdout(["add", "m", "file1.txt#L1-L5"])?;
+    repo.mesh_stdout(["message", "m", "-m", "seed"])?;
+    repo.mesh_stdout(["commit", "m"])?;
+    let out = repo.run_mesh(["config", "m", "--unset", "nope"])?;
+    assert!(!out.status.success());
+    Ok(())
+}
