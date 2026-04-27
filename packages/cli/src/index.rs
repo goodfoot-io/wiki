@@ -801,6 +801,7 @@ async fn sync_core_index_inner(
             )
         })?;
 
+        let path_rel = pending.path_rel.clone();
         let title = pending.title.clone();
         let title_key = pending.title_key.clone();
         let summary = pending.summary.clone();
@@ -849,6 +850,21 @@ async fn sync_core_index_inner(
 
         for alias in pending.aliases {
             let alias_key = alias.to_lowercase();
+            let mut conflict_rows = tx
+                .query(
+                    "SELECT d.path_rel FROM lookup_keys lk JOIN documents d ON d.id = lk.document_id WHERE lk.key = ?1",
+                    params![alias_key.clone()],
+                )
+                .await
+                .into_diagnostic()
+                .wrap_err("failed to check alias conflict")?;
+            if let Some(row) = conflict_rows.next().await.into_diagnostic()? {
+                let conflict_path: String = row.get(0).into_diagnostic()?;
+                return Err(miette!(
+                    "alias `{alias}` in `{path_rel}` conflicts with existing entry in `{conflict_path}`"
+                ));
+            }
+            drop(conflict_rows);
             tx.execute(
                 "INSERT INTO lookup_keys (document_id, key, raw_text, kind) VALUES (?1, ?2, ?3, 'alias')",
                 params![document_id, alias_key.clone(), alias.clone()],
