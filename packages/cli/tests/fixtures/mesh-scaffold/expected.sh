@@ -6,7 +6,7 @@
 
 git mesh add wiki/billing/lives \
   src/notes.wiki.md \
-  ./charge.ts#L2-L7
+  src/charge.ts#L2-L7
 git mesh why wiki/billing/lives -m "Implementation lives in handleCharge."
 
 # ── wiki/billing.md ─────────────────────────────────────────────

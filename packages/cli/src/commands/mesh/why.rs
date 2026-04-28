@@ -56,7 +56,7 @@ fn re_code_placeholder_clause() -> &'static Regex {
 }
 fn re_code_placeholder_after_prep() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"(?i)\b(by|with|from|to|in|at|of|and|or|via)\s+__CODE__").unwrap())
+    R.get_or_init(|| Regex::new(r"(?i)(?-u:\b)(by|with|from|to|in|at|of|and|or|via)\s+__CODE__").unwrap())
 }
 fn re_code_placeholder_any() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
@@ -93,7 +93,7 @@ fn re_trailing_punct() -> &'static Regex {
 }
 fn re_trailing_prep() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"(?i)\b(for|to|in|at|of|by|from|with|and|or)\s*$").unwrap())
+    R.get_or_init(|| Regex::new(r"(?i)(?-u:\b)(for|to|in|at|of|by|from|with|and|or)\s*$").unwrap())
 }
 fn re_trailing_punct_dot() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
@@ -103,7 +103,7 @@ fn re_trailing_punct_dot() -> &'static Regex {
 // Rejection regexes
 fn re_starts_orphan_conj() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"^(?i)(and|or|but|nor)\b").unwrap())
+    R.get_or_init(|| Regex::new(r"^(?i)(and|or|but|nor)(?-u:\b)").unwrap())
 }
 fn re_starts_both_either() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
@@ -112,14 +112,14 @@ fn re_starts_both_either() -> &'static Regex {
 fn re_starts_temporal() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
-        Regex::new(r"^(?i)(when|while|after|before|until|once|if|unless|since)\b").unwrap()
+        Regex::new(r"^(?i)(when|while|after|before|until|once|if|unless|since)(?-u:\b)").unwrap()
     })
 }
 fn re_headless_predicate() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
         Regex::new(
-            r"^(?i)(is|are|was|were|applies|reserves|decides|builds|exports|stores|handles|manages|validates|parses|wraps|maps|tracks|owns|uses|caches|returns|emits|reads|writes|checks|runs|renders|sends|receives|creates|updates|deletes|fetches|loads|saves|generates|computes|resolves|detects|scans|enforces|processes|dispatches|routes|mounts|binds|wires|exposes|provides|accepts|listens|subscribes|publishes|registers|connects|wraps|extends|overrides|implements)\b",
+            r"^(?i)(is|are|was|were|applies|reserves|decides|builds|exports|stores|handles|manages|validates|parses|wraps|maps|tracks|owns|uses|caches|returns|emits|reads|writes|checks|runs|renders|sends|receives|creates|updates|deletes|fetches|loads|saves|generates|computes|resolves|detects|scans|enforces|processes|dispatches|routes|mounts|binds|wires|exposes|provides|accepts|listens|subscribes|publishes|registers|connects|wraps|extends|overrides|implements)(?-u:\b)",
         )
         .unwrap()
     })
@@ -138,7 +138,7 @@ fn re_path_pattern() -> &'static Regex {
 }
 fn re_path_fragment_inline() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"\b[a-z][a-z0-9_-]*/[a-z][a-z0-9_-]").unwrap())
+    R.get_or_init(|| Regex::new(r"(?-u:\b)[a-z][a-z0-9_-]*/[a-z][a-z0-9_-]").unwrap())
 }
 fn re_camel_one() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
@@ -150,11 +150,11 @@ fn re_camel_two() -> &'static Regex {
 }
 fn re_short_but() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"^(?i)\S[\w\s]{0,25}\bbut\b").unwrap())
+    R.get_or_init(|| Regex::new(r"^(?i)\S[\w\s]{0,25}(?-u:\b)but(?-u:\b)").unwrap())
 }
 fn re_both_and() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"\bboth\s+and\b").unwrap())
+    R.get_or_init(|| Regex::new(r"(?-u:\b)both\s+and(?-u:\b)").unwrap())
 }
 fn re_subj_verb_dot() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
@@ -175,19 +175,19 @@ fn re_trailing_prep_punct() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
         Regex::new(
-            r"(?i)\b(at|by|in|on|from|to|with|and|or|as|is|was|were|the|of|into|via|requiring|containing|including|using|having|being)\s*[.!?]$",
+            r"(?i)(?-u:\b)(at|by|in|on|from|to|with|and|or|as|is|was|were|the|of|into|via|requiring|containing|including|using|having|being)\s*[.!?]$",
         )
         .unwrap()
     })
 }
 fn re_trailing_gerund_dot() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"\b\w+ing[.!?]$").unwrap())
+    R.get_or_init(|| Regex::new(r"(?-u:\b)\w+ing[.!?]$").unwrap())
 }
 fn re_gerund_whitelist() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
-        Regex::new(r"\b(thing|building|setting|something|everything|anything|nothing)\b").unwrap()
+        Regex::new(r"(?-u:\b)(thing|building|setting|something|everything|anything|nothing)(?-u:\b)").unwrap()
     })
 }
 fn re_heading_label() -> &'static Regex {
@@ -213,13 +213,13 @@ fn re_table_real_chars() -> &'static Regex {
 fn re_table_trailing_prep() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
-        Regex::new(r"(?i)\b(at|by|in|on|from|to|with|and|or|as|is|was|were|the|of)\s*$").unwrap()
+        Regex::new(r"(?i)(?-u:\b)(at|by|in|on|from|to|with|and|or|as|is|was|were|the|of)\s*$").unwrap()
     })
 }
 fn re_table_starts_conj() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
-        Regex::new(r"^(?i)(and|or|but|nor|when|while|after|before|until|once)\b").unwrap()
+        Regex::new(r"^(?i)(and|or|but|nor|when|while|after|before|until|once)(?-u:\b)").unwrap()
     })
 }
 fn re_label_strip_orn() -> &'static Regex {

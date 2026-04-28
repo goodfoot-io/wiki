@@ -1,5 +1,11 @@
-//! Integration test for `wiki mesh scaffold` parity with the captured JS
-//! prototype output (`tests/fixtures/mesh-scaffold/expected.sh`).
+//! Integration test for `wiki mesh scaffold` against a captured baseline
+//! (`tests/fixtures/mesh-scaffold/expected.sh`).
+//!
+//! `expected.sh` is a Rust-output regression baseline — not a JS-oracle
+//! capture. The JS prototype had bugs (raw anchor paths, shell-unsafe why
+//! interpolation) that the Rust port deliberately diverges from; once those
+//! are fixed in Rust, the baseline is regenerated from the corrected output
+//! and locks future changes against accidental regression.
 //!
 //! The test stages the fixture wiki tree into a temporary git repo (the Rust
 //! binary requires a git root for path resolution), runs the compiled binary

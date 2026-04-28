@@ -120,10 +120,17 @@ pub fn run(globs: &[String], json: bool, repo_root: &Path) -> Result<i32> {
 
     // Shell mode: header + per-wiki-file groups.
     println!("{SHELL_HEADER}");
-    let mut by_file: std::collections::BTreeMap<String, Vec<&Mesh>> =
-        std::collections::BTreeMap::new();
+    // Group by source wiki file, preserving the order in which each wiki file
+    // first appeared in `discover_files`. Lex-sorted output (BTreeMap) would
+    // match the current fixture by accident but break diffs the moment a new
+    // file is added mid-alphabet.
+    let mut by_file: Vec<(String, Vec<&Mesh>)> = Vec::new();
     for m in &meshes {
-        by_file.entry(m.wiki_file.clone()).or_default().push(m);
+        if let Some(entry) = by_file.iter_mut().find(|(k, _)| *k == m.wiki_file) {
+            entry.1.push(m);
+        } else {
+            by_file.push((m.wiki_file.clone(), vec![m]));
+        }
     }
     for (wiki_file, entries) in by_file {
         let pad = 60usize.saturating_sub(wiki_file.len());
@@ -134,7 +141,11 @@ pub fn run(globs: &[String], json: bool, repo_root: &Path) -> Result<i32> {
             println!("git mesh add {} \\", m.name);
             println!("  {} \\", m.wiki_file);
             println!("  {}", m.anchor);
-            println!("git mesh why {} -m \"{}\"", m.name, m.why);
+            println!(
+                "git mesh why {} -m \"{}\"",
+                m.name,
+                shell_double_quote_escape(&m.why)
+            );
         }
         println!();
     }
@@ -174,7 +185,9 @@ fn read_file_meta(path: &Path) -> FileMeta {
 
 fn parse_frontmatter_field(content: &str, field: &str) -> Option<String> {
     // Only parse if the file starts with `---\n`. JS uses /^---\s*\n(?:.*\n)*?title:\s*(.+?)\s*\n/.
-    let pat = format!(r"(?m)^---\s*\n(?:.*\n)*?{field}:\s*(.+?)\s*\n");
+    // Anchor to file start (\A) so a thematic-break `---` later in the body does not
+    // match — that was the JS prototype's intent.
+    let pat = format!(r"\A---\s*\n(?:.*\n)*?{field}:\s*(.+?)\s*\n");
     let re = Regex::new(&pat).ok()?;
     let cap = re.captures(content)?;
     let raw = cap.get(1)?.as_str().trim();
@@ -320,7 +333,13 @@ fn generate_mesh(
         None => format!("wiki/{core_slug}"),
     };
 
-    let anchor = format!("{}#L{start_line}-L{end_line}", link.path);
+    // Resolve the link path against the source wiki file, then express it
+    // repo-root-relative with forward slashes. The generated `git mesh add`
+    // commands run from the repo root, so a `./bar.rs` link from
+    // `wiki/foo.md` must become `wiki/bar.rs` (or wherever it actually lives).
+    let anchor_resolved = resolve_link_path(&link.path, &input.wiki_file, repo_root);
+    let anchor_rel = path_relative_to(&anchor_resolved, repo_root);
+    let anchor = format!("{anchor_rel}#L{start_line}-L{end_line}");
 
     Mesh {
         name,
@@ -389,6 +408,25 @@ fn strip_adjacent_duplicates(s: &str) -> String {
     out.join(" ")
 }
 
+/// Escape a string for safe interpolation inside shell double-quotes.
+///
+/// Inside `"..."` bash still interprets `\`, `` ` ``, `$`, and `"` — a backtick
+/// in prose triggers command substitution at run time. We escape backslash
+/// first so subsequent escape characters we add aren't themselves doubled.
+fn shell_double_quote_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str(r"\\"),
+            '`' => out.push_str(r"\`"),
+            '$' => out.push_str(r"\$"),
+            '"' => out.push_str("\\\""),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 fn path_relative_to(path: &Path, repo_root: &Path) -> String {
     let rel = path.strip_prefix(repo_root).unwrap_or(path);
     rel.to_string_lossy().replace('\\', "/")
@@ -434,6 +472,24 @@ mod tests {
             "extension"
         );
         assert_eq!(strip_adjacent_duplicates("foo bar baz"), "foo bar baz");
+    }
+
+    #[test]
+    fn parse_frontmatter_ignores_thematic_break_in_body() {
+        // Body contains a `---` separator followed by a `title:` line — must NOT match.
+        let c = "# Heading\n\nbody text\n\n---\ntitle: Spurious\n\nmore body\n";
+        assert_eq!(parse_frontmatter_field(c, "title"), None);
+    }
+
+    #[test]
+    fn shell_double_quote_escape_handles_special_chars() {
+        // Verify all four shell-special characters are escaped (backslash first).
+        assert_eq!(shell_double_quote_escape(r#"a"b`c$d\e"#), r#"a\"b\`c\$d\\e"#);
+        // Plain text round-trips unchanged.
+        assert_eq!(
+            shell_double_quote_escape("just some prose."),
+            "just some prose."
+        );
     }
 
     #[test]

@@ -5088,6 +5088,7 @@ dependencies = [
  "gix",
  "globset",
  "ignore",
+ "indexmap",
  "miette",
  "notify",
  "pulldown-cmark",

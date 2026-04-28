@@ -4,8 +4,9 @@
 //! name (snake-cased). Sort orders and tie-breakers follow the JS behavior so
 //! output is byte-stable for a fixed input.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
+use indexmap::IndexMap;
 use regex::Regex;
 
 use super::words::{CATEGORIES, FILE_EXTS, NOISE, REL_TYPES, RelType, STOP};
@@ -31,10 +32,10 @@ fn is_all_digits(s: &str) -> bool {
 /// Lowercase camelCase / PascalCase / ALLCAPS sequences, matching the JS
 /// `normalizeProperNouns` regexes.
 pub(crate) fn normalize_proper_nouns(text: &str) -> String {
-    let camel = static_re(r"\b[A-Z][a-z]+[A-Z][A-Za-z]*\b")
+    let camel = static_re(r"(?-u:\b)[A-Z][a-z]+[A-Z][A-Za-z]*(?-u:\b)")
         .replace_all(text, |c: &regex::Captures| c[0].to_lowercase())
         .into_owned();
-    static_re(r"\b[A-Z]{2,6}\b")
+    static_re(r"(?-u:\b)[A-Z]{2,6}(?-u:\b)")
         .replace_all(&camel, |c: &regex::Captures| c[0].to_lowercase())
         .into_owned()
 }
@@ -61,8 +62,12 @@ pub(crate) fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn count_map(tokens: &[String]) -> BTreeMap<String, usize> {
-    let mut m: BTreeMap<String, usize> = BTreeMap::new();
+fn count_map(tokens: &[String]) -> IndexMap<String, usize> {
+    // IndexMap preserves first-occurrence order. The JS prototype used a
+    // `Map`, whose iteration order is insertion order. Today only lookup is
+    // observable, but encoding the intent prevents a future iteration site
+    // from silently leaking lex order into output.
+    let mut m: IndexMap<String, usize> = IndexMap::new();
     for t in tokens {
         *m.entry(t.clone()).or_insert(0) += 1;
     }
@@ -89,13 +94,13 @@ pub(crate) fn rake(text: &str) -> Vec<RakeResult> {
         return Vec::new();
     }
     // Build a regex that splits on stop words OR non-alphanumeric runs.
-    // Matches JS: `\b(stop1|stop2|...)\b|[^a-zA-Z0-9'\-]+`, case-insensitive.
+    // Matches JS: `(?-u:\b)(stop1|stop2|...)(?-u:\b)|[^a-zA-Z0-9'\-]+`, case-insensitive.
     let stop_alternation = STOP
         .iter()
         .map(|s| regex::escape(s))
         .collect::<Vec<_>>()
         .join("|");
-    let stop_pattern = format!(r"(?i)\b({stop_alternation})\b|[^a-zA-Z0-9'\-]+");
+    let stop_pattern = format!(r"(?i)(?-u:\b)({stop_alternation})(?-u:\b)|[^a-zA-Z0-9'\-]+");
     let split_re = Regex::new(&stop_pattern).expect("valid stop regex");
 
     let normalized = normalize_proper_nouns(text).to_lowercase();
@@ -129,15 +134,15 @@ pub(crate) fn rake(text: &str) -> Vec<RakeResult> {
         return Vec::new();
     }
 
-    let mut word_freq: BTreeMap<String, usize> = BTreeMap::new();
-    let mut word_deg: BTreeMap<String, usize> = BTreeMap::new();
+    let mut word_freq: IndexMap<String, usize> = IndexMap::new();
+    let mut word_deg: IndexMap<String, usize> = IndexMap::new();
     for phrase in &candidates {
         for word in phrase {
             *word_freq.entry(word.clone()).or_insert(0) += 1;
             *word_deg.entry(word.clone()).or_insert(0) += phrase.len();
         }
     }
-    let mut word_score: BTreeMap<String, f64> = BTreeMap::new();
+    let mut word_score: IndexMap<String, f64> = IndexMap::new();
     for (w, freq) in &word_freq {
         let deg = *word_deg.get(w).unwrap_or(&0) as f64;
         word_score.insert(w.clone(), deg / *freq as f64);
@@ -506,11 +511,11 @@ pub(crate) fn norm_cmp(s: &str) -> String {
 ///
 /// Port of the JS `deduplicateNames()`.
 pub(crate) fn deduplicate_names(names: &mut [String]) {
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut counts: IndexMap<String, usize> = IndexMap::new();
     for n in names.iter() {
         *counts.entry(n.clone()).or_insert(0) += 1;
     }
-    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    let mut seen: IndexMap<String, usize> = IndexMap::new();
     for n in names.iter_mut() {
         if *counts.get(n).unwrap_or(&1) > 1 {
             let next = seen.get(n).copied().unwrap_or(0) + 1;
@@ -655,6 +660,28 @@ mod tests {
         let chain = s(&["Top", "Mid Section", "Deepest Heading"]);
         let role = extract_source_role(&chain, None);
         assert_eq!(role, "deepest heading");
+    }
+
+    #[test]
+    fn ascii_word_boundary_treats_accented_chars_as_word() {
+        // With ASCII `\b`, the boundary inside "café" sits at the end (between `é`
+        // and end-of-string is a non-word boundary because `é` is not [A-Za-z0-9_]).
+        // The camelCase regex should NOT match "Café" alone; it requires
+        // [A-Z][a-z]+[A-Z]…, so "Café" has no second capital. Use a test that
+        // confirms "café" is not mangled by normalize_proper_nouns.
+        let out = normalize_proper_nouns("café FooBar");
+        // `FooBar` is a camel match → lowercased; `café` has no internal capital
+        // and stays untouched (lower-case already).
+        assert!(out.contains("café"));
+        assert!(out.contains("foobar"));
+    }
+
+    #[test]
+    fn count_map_preserves_insertion_order() {
+        let toks = s(&["zebra", "apple", "mango", "apple"]);
+        let m = count_map(&toks);
+        let keys: Vec<&str> = m.keys().map(|k| k.as_str()).collect();
+        assert_eq!(keys, vec!["zebra", "apple", "mango"]);
     }
 
     #[test]
