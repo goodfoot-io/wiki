@@ -40,7 +40,7 @@ When wiki documentation behavior changes, use this order:
 2. Update the primary user docs in [CLAUDE.md](CLAUDE.md#L83-L94&e2b1474).
 3. Update the agent workflow contract in [.claude/skills/wiki/SKILL.md](.claude/skills/wiki/SKILL.md#L73-L172&e2b1474).
 4. Update secondary references such as [Wiki CLI Advanced Usage](wiki/reference/wiki-cli-advanced-usage.md#L8-L132&e2b1474), [Wiki CLI Feedback](wiki/meta/wiki-feedback.md#L11-L21&e2b1474), and [the Gemini maintenance example](examples/githooks/scripts/gemini-wiki-gap-detection.sh#e2b1474).
-5. Run `wiki check --fix` on the touched pages so the fragment links pin and the page participates in `wiki stale`.
+5. Run `wiki check --fix` on the touched pages so the fragment links pin.
 
 ## References
 

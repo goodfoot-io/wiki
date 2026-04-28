@@ -1,6 +1,6 @@
 ---
 title: Wiki CLI Advanced Usage
-summary: Advanced wiki CLI usage including pinning, stale detection, glob targeting, and JSON output.
+summary: Advanced wiki CLI usage including glob targeting, JSON output, and stdin/path input.
 tags:
   - reference
 ---
@@ -33,8 +33,6 @@ This is useful to understand what documentation exists for a page or file before
 
 ## Keeping Fragment Links Pinned
 
-### Adding SHAs to new links
-
 Run `wiki check --fix` to automatically pin unpinned fragment links:
 
 ```bash
@@ -43,35 +41,6 @@ wiki check --fix
 ```
 
 `--fix` only touches links that have no SHA (`missing_sha`). Already-pinned links are left unchanged.
-
-### Refreshing existing SHAs
-
-Run `wiki pin` to refresh SHAs on links that already have one:
-
-```bash
-# Refresh all pinned links in the wiki to HEAD
-wiki pin
-
-# Refresh to a specific ref
-wiki pin --ref main
-```
-
-`wiki pin` only processes links that already carry a SHA. To add SHAs to new unpinned links, use `wiki check --fix`.
-
-Run `wiki stale` to find links whose referenced files have changed since the pinned SHA:
-
-```bash
-# List stale links
-wiki stale
-
-# Include a diff summary
-wiki stale --diff stat
-
-# Include the full diff
-wiki stale --diff patch
-```
-
-When `wiki stale` exits 1, run `wiki pin` to refresh the stale SHAs, then review the diffs to update the surrounding prose if the referenced code has changed.
 
 ## Stdin and Path Input
 
@@ -104,7 +73,6 @@ All commands accept explicit glob patterns instead of scanning `WIKI_DIR`:
 
 ```bash
 wiki check wiki/some-section/**/*.md
-wiki pin wiki/api/*.md
 ```
 
 ## JSON Output
@@ -113,12 +81,11 @@ Every command accepts `--format json` for scripting:
 
 ```bash
 wiki check --format json
-wiki stale --format json
 wiki list --format json
 wiki links --format json "My Page"
 ```
 
-The JSON schema mirrors the human-readable output: `check` emits a `diagnostics` array, `stale` emits a `stale` array and an `errors` array, and `list` and `links` each emit page-result arrays.
+The JSON schema mirrors the human-readable output: `check` emits a `diagnostics` array, and `list` and `links` each emit page-result arrays.
 
 ### Command-by-Command Output
 
@@ -203,34 +170,6 @@ JSON output:
 ]
 ```
 
-#### `wiki stale`
-
-Text output:
-
-```text
-`/repo/wiki/page.md:8` — `packages/cli/src/index.rs`
-Pinned `` · 2 commits behind
-Latest: `def5678` — Refactor wiki index query path
-```
-
-JSON output:
-
-```json
-{
-  "stale": [
-    {
-      "wiki_file": "/repo/wiki/page.md",
-      "source_line": 8,
-      "referenced_path": "packages/cli/src/index.rs",
-      "pinned_sha": "abc1234",
-      "commit_count": 2,
-      "latest_commit": "def5678 Refactor wiki index query path"
-    }
-  ],
-  "errors": []
-}
-```
-
 #### `wiki links [target]`
 
 Text output:
@@ -291,22 +230,6 @@ JSON output:
 ```
 
 If no wikilinks are found, text output is empty and JSON output is `[]`.
-
-#### `wiki hook --claude` / `wiki hook --codex`
-
-`wiki hook` already emits JSON. `--format json` does not change the success output.
-
-Output with or without `--format json`:
-
-```json
-{
-  "systemMessage": "# Authorization\n## wiki/security/authorization.md\nHow auth decisions are made across the system.",
-  "hookSpecificOutput": {
-    "hookEventName": "PostToolUse",
-    "additionalContext": "# Authorization\n## wiki/security/authorization.md\nHow auth decisions are made across the system."
-  }
-}
-```
 
 #### `wiki list`
 

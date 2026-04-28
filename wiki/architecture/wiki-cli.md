@@ -1,19 +1,15 @@
 ---
 title: Wiki CLI
-summary: Fragment link parsing, staleness detection, and validation pipeline for the wiki CLI tool.
+summary: Fragment link parsing, validation pipeline, and command reference for the wiki CLI tool.
 tags:
   - tooling
 ---
 
-The wiki CLI validates and maintains fragment links between wiki pages and source code. For the maintenance map of every operator-facing doc and automation prompt that should be checked when CLI behavior changes, see [[Wiki Documentation Touchpoints]].
+The wiki CLI validates and maintains fragment links between wiki pages and source code. For the maintenance map of every operator-facing doc and automation prompt that should be checked when CLI behavior changes, see [[Wiki Documentation Touchpoints]]. For the git mesh integration that replaces SHA-pinned staleness detection, see [[Wiki Mesh Integration]].
 
 ## Fragment Link Parsing
 
 The [parser](packages/cli/src/parser.rs#L6-L12&628d6f9) extracts two link types from markdown content: fragment links (`[label](path#sha-L10-L20)`) and wikilinks (`[[Title]]`). Both parsers operate on scrubbed content — code blocks, inline code, and HTML comments are blanked out before extraction to avoid false matches.
-
-## Staleness Detection
-
-The [stale command](packages/cli/src/commands/stale.rs#L41-L54) compares each pinned SHA against the current HEAD to find fragment links whose referenced files have changed. It reports the number of commits since the pin and optionally includes a diff. For performance, it caches Git operation results (commits, stats, and patches) when multiple fragment links reference the same file and SHA.
 
 ## Validation Pipeline
 
@@ -23,17 +19,9 @@ The [check command](packages/cli/src/commands/check.rs#L28-L29&628d6f9) runs a f
 
 The extract command (`packages/cli/src/commands/extract.rs`) reads arbitrary text from stdin, parses all `[[wikilink]]` references, and outputs the canonical title and summary for each resolved page. Wikilink extraction runs before any file I/O — if no wikilinks are found, the command exits immediately with no output. Unresolved wikilinks are reported to stderr and cause exit code 1.
 
-## Context Injection Hook
+## PostToolUse Hook
 
-The [hook command](packages/cli/src/commands/hook.rs) integrates the wiki with external tools like Claude Code. It processes `PostToolUse` JSON events from stdin and injects relevant wiki context into the system prompt.
-
-### Suppression Logic
-
-To avoid circularity, the hook [suppresses injection](packages/cli/src/commands/hook.rs#L33-L45) when the tool is operating on a wiki document. This is determined by checking if the file is inside the wiki directory or has a `.wiki.md` extension.
-
-### Session Deduplication
-
-To minimize prompt noise, the hook [tracks which file-path lookups have been shown](packages/cli/src/commands/hook.rs#L77-L87) in a given session. If a page that references the current file has already been injected in the current session, it is skipped. Wikilinks explicitly mentioned in tool output are always injected, regardless of the session state.
+The [hook command](packages/cli/src/commands/hook_check.rs#L16-L66) integrates the wiki with external tools like Claude Code. It processes `PostToolUse` JSON events from stdin: when a `.md` file inside the wiki directory is written or edited, it runs `wiki check` on that file and emits a JSON `systemMessage` envelope if validation errors remain, so the AI can address them immediately.
 
 ## Navigation and Discovery
 

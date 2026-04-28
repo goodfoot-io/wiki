@@ -35,7 +35,7 @@ tags:
 
 ## Fragment Links
 
-Fragment links are the change-detection mechanism. `wiki stale` compares each link's pinned SHA against HEAD — if the referenced file changed, the page is flagged for review. **This only works if a link exists.** A file referenced in prose but not linked is invisible to change detection: the documentation will silently drift as the code evolves.
+Fragment links anchor prose to specific code locations and serve as documentation coverage markers. **This only works if a link exists.** A file referenced in prose but not linked is a blind spot: the documentation can drift as the code evolves without any signal.
 
 **Every source file the documentation relies on MUST have at least one fragment link.** This includes files whose types, constants, schemas, or behaviours are described — not only files whose functions are explained in detail.
 

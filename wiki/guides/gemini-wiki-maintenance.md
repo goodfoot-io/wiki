@@ -17,7 +17,7 @@ The [example post-commit hook](examples/githooks/gemini-post-commit.sh#e2b1474) 
 
 A fail-closed lockfile under `$GIT_COMMON_DIR/wiki-maintenance.lock` ensures only one run is active at a time. Stale locks (from crashed processes) are detected by checking whether the PID is still alive.
 
-The script exits immediately (before the expensive worktree setup) if `wiki stale` reports no stale links.
+The script exits immediately (before the expensive worktree setup) if `wiki check` reports no validation errors.
 
 ## What It Does
 

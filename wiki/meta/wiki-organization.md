@@ -33,7 +33,7 @@ This repository uses two parallel systems for wiki content: a central `wiki/` di
 
 **Embed as `*.wiki.md`** when the content is primarily about a single component — its design decisions, internal constraints, or rebuild logic. Co-locating documentation with code has well-established benefits: it is found by whoever is working on the component, it is maintained by the same person who maintains the code, and it signals ownership clearly. A `DESIGN.wiki.md` file in `packages/cards/` is less likely to drift than the same content in `wiki/architecture/` because the person changing `packages/cards/` will encounter it directly.
 
-The `*.wiki.md` extension is what allows embedded pages to participate in the same wiki index, default `wiki [query]` lookup, and `wiki stale` infrastructure as centralized pages. Co-location does not mean isolation.
+The `*.wiki.md` extension is what allows embedded pages to participate in the same wiki index and default `wiki [query]` lookup as centralized pages. Co-location does not mean isolation.
 
 When writing embedded pages for single components, it is critical to maintain the Diátaxis separation of modes. Do not mix rationale, setup steps, and API typings in unstructured prose. For small components, use strict H2 headers corresponding to the modes (e.g., `## Explanation`, `## Guide`, `## Reference`). For larger components, split the embedded files by mode (e.g., `logging-design.wiki.md` for Explanation and `logging-api.wiki.md` for Reference).
 

@@ -1,6 +1,6 @@
 ---
 name: wiki
-description: You must load this if the user mentions wikis
+description: Use `wiki mesh [query]` to search. You must load this for all other wiki usage.
 ---
 
 <tools>

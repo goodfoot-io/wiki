@@ -75,16 +75,6 @@ Perf scope events measure execution time and record success/error status. They a
 | 82 | `"Serving wiki on http://0.0.0.0:{port}"` | Status message when HTTP server starts |
 | 122 | `"wiki: failed to rebuild index after file change: {error}"` | Error when file watcher detects changes but index rebuild fails |
 
-### commands/stale.rs
-
-| Line | Message | Purpose |
-|------|---------|---------|
-| 46 | JSON error object | Formatted error for stale link detection |
-| 48 | `"error: {e}"` | Error message |
-| 61 | `"warning: failed to read {path}: {e}"` | Warning when unable to read file |
-| 116-152 | Results and separators | Stale link report output (JSON or formatted text) |
-| 155 | `"error: {message}"` | Error message |
-
 ### commands/html.rs
 
 | Line | Message | Purpose |
