@@ -6,11 +6,9 @@ pub mod html;
 pub mod install;
 pub mod links;
 pub mod list;
-pub mod pin;
 pub mod refs;
 pub mod search;
 pub mod serve;
-pub mod stale;
 pub mod summary;
 
 use std::path::{Path, PathBuf};

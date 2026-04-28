@@ -19,11 +19,6 @@ fn wikilink_re() -> &'static Regex {
     })
 }
 
-fn sha_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^[0-9a-fA-F]{7,40}$").unwrap())
-}
-
 fn url_scheme_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-.]*://").unwrap())
@@ -36,20 +31,16 @@ fn url_scheme_re() -> &'static Regex {
 pub enum LinkKind {
     /// Link with a URL scheme (http://, https://, etc.)
     External,
-    /// Internal link that has a valid hex SHA pinned.
-    InternalWithSha,
-    /// Internal link with no SHA (unpinned).
-    InternalWithoutSha,
+    /// Internal link (no URL scheme).
+    Internal,
 }
 
-/// A parsed `[label](path#sha-L10-L20)` fragment link.
+/// A parsed `[label](path#L10-L20)` fragment link.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FragmentLink {
     pub kind: LinkKind,
-    /// The path portion (before `@sha`). Empty for external links.
+    /// The path portion (before `#`). For external links, the full URL.
     pub path: String,
-    /// The hex SHA, if present and valid.
-    pub sha: Option<String>,
     /// First line of the referenced range, if present.
     pub start_line: Option<u32>,
     /// Last line of the referenced range, if present.
@@ -237,7 +228,6 @@ pub fn parse_fragment_links(content: &str) -> Vec<FragmentLink> {
             results.push(FragmentLink {
                 kind: LinkKind::External,
                 path: href.to_string(),
-                sha: None,
                 start_line: None,
                 end_line: None,
                 text,
@@ -248,55 +238,17 @@ pub fn parse_fragment_links(content: &str) -> Vec<FragmentLink> {
             continue;
         }
 
-        // Split on '#' fragment first to separate path from fragment
-        let (path_and_sha, fragment) = match href.find('#') {
+        // Split on '#' to separate path from fragment (plain line range, e.g. #L10-L20)
+        let (path_part, fragment) = match href.find('#') {
             Some(idx) => (&href[..idx], Some(&href[idx + 1..])),
             None => (href as &str, None),
         };
 
-        // Extract SHA and line range from fragment. Supported formats:
-        //   #L10-L20&sha  — line range then SHA (primary format)
-        //   #sha          — SHA only, no line range
-        //   #L10-L20      — line range only, no SHA (unpinned)
-        let (hash_sha, hash_start, hash_end) = if let Some(frag) = fragment {
-            if let Some(amp_pos) = frag.find('&') {
-                let line_part = &frag[..amp_pos];
-                let sha_part = &frag[amp_pos + 1..];
-                if sha_re().is_match(sha_part) {
-                    let (s, e) = parse_line_range(Some(line_part));
-                    (Some(sha_part.to_string()), s, e)
-                } else {
-                    // '&' present but suffix is not a valid SHA — treat whole fragment as line range
-                    let (s, e) = parse_line_range(Some(frag));
-                    (None, s, e)
-                }
-            } else if sha_re().is_match(frag) {
-                // Fragment is a bare SHA with no line range
-                (Some(frag.to_string()), None, None)
-            } else {
-                // Plain line range, no SHA
-                let (s, e) = parse_line_range(Some(frag));
-                (None, s, e)
-            }
-        } else {
-            (None, None, None)
-        };
-
-        let path = path_and_sha.to_string();
-        let sha = hash_sha;
-        let start_line = hash_start;
-        let end_line = hash_end;
-
-        let kind = if sha.is_some() {
-            LinkKind::InternalWithSha
-        } else {
-            LinkKind::InternalWithoutSha
-        };
+        let (start_line, end_line) = parse_line_range(fragment);
 
         results.push(FragmentLink {
-            kind,
-            path,
-            sha,
+            kind: LinkKind::Internal,
+            path: path_part.to_string(),
             start_line,
             end_line,
             text,
@@ -398,106 +350,72 @@ mod tests {
     }
 
     #[test]
-    fn test_internal_link_with_sha_and_range() {
-        let links = parse_fragment_links("[Foo](src/foo.rs#L10-L20&abc1234)");
+    fn test_internal_link_with_range() {
+        let links = parse_fragment_links("[Foo](src/foo.rs#L10-L20)");
         assert_eq!(links.len(), 1);
         let l = &links[0];
-        assert_eq!(l.kind, LinkKind::InternalWithSha);
+        assert_eq!(l.kind, LinkKind::Internal);
         assert_eq!(l.path, "src/foo.rs");
-        assert_eq!(l.sha.as_deref(), Some("abc1234"));
         assert_eq!(l.start_line, Some(10));
         assert_eq!(l.end_line, Some(20));
         assert_eq!(l.text, "Foo");
     }
 
     #[test]
-    fn test_internal_link_with_sha_only() {
-        // SHA in fragment, no line range
-        let links = parse_fragment_links("[F](src/f.rs#abc1234)");
+    fn test_internal_link_no_fragment() {
+        let links = parse_fragment_links("[F](src/f.rs)");
         assert_eq!(links.len(), 1);
         let l = &links[0];
-        assert_eq!(l.kind, LinkKind::InternalWithSha);
+        assert_eq!(l.kind, LinkKind::Internal);
         assert_eq!(l.path, "src/f.rs");
-        assert_eq!(l.sha.as_deref(), Some("abc1234"));
         assert_eq!(l.start_line, None);
         assert_eq!(l.end_line, None);
     }
 
     #[test]
-    fn test_internal_link_without_sha() {
+    fn test_internal_link_with_line_range() {
         let links = parse_fragment_links("[Bar](src/bar.ts#L5)");
         assert_eq!(links.len(), 1);
         let l = &links[0];
-        assert_eq!(l.kind, LinkKind::InternalWithoutSha);
+        assert_eq!(l.kind, LinkKind::Internal);
         assert_eq!(l.path, "src/bar.ts");
-        assert!(l.sha.is_none());
         assert_eq!(l.start_line, Some(5));
         assert_eq!(l.end_line, None);
     }
 
     #[test]
-    fn test_scoped_package_path_with_at() {
-        // '@' in path is treated as a plain path character; SHA is in fragment
-        let links = parse_fragment_links("[pkg](node_modules/@scope/pkg/index.ts#L1-L10&deadbeef)");
+    fn test_scoped_package_path_with_range() {
+        let links = parse_fragment_links("[pkg](node_modules/@scope/pkg/index.ts#L1-L10)");
         assert_eq!(links.len(), 1);
         let l = &links[0];
-        assert_eq!(l.kind, LinkKind::InternalWithSha);
+        assert_eq!(l.kind, LinkKind::Internal);
         assert_eq!(l.path, "node_modules/@scope/pkg/index.ts");
-        assert_eq!(l.sha.as_deref(), Some("deadbeef"));
         assert_eq!(l.start_line, Some(1));
         assert_eq!(l.end_line, Some(10));
     }
 
     #[test]
-    fn test_scoped_package_path_without_sha() {
+    fn test_scoped_package_path_without_fragment() {
         let links = parse_fragment_links("[pkg](node_modules/@scope/pkg/index.ts#L5)");
         assert_eq!(links.len(), 1);
         let l = &links[0];
-        assert_eq!(l.kind, LinkKind::InternalWithoutSha);
+        assert_eq!(l.kind, LinkKind::Internal);
         assert_eq!(l.path, "node_modules/@scope/pkg/index.ts");
-        assert!(l.sha.is_none());
-    }
-
-    #[test]
-    fn test_invalid_sha_after_ampersand_treated_as_no_sha() {
-        // Non-hex chars after '&' → SHA not recognised, whole fragment treated as line range
-        let links = parse_fragment_links("[Bad](src/foo.rs#L1&not-a-sha)");
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].kind, LinkKind::InternalWithoutSha);
-        assert!(links[0].sha.is_none());
-    }
-
-    #[test]
-    fn test_sha_too_short_not_valid() {
-        // 6 hex chars is too short (minimum 7)
-        let links = parse_fragment_links("[Bad](src/foo.rs#L1&abc123)");
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].kind, LinkKind::InternalWithoutSha);
-        assert!(links[0].sha.is_none());
-    }
-
-    #[test]
-    fn test_sha_40_chars_valid() {
-        let sha = "a".repeat(40);
-        let links = parse_fragment_links(&format!("[F](src/f.rs#L1&{sha})"));
-        assert_eq!(links[0].kind, LinkKind::InternalWithSha);
-        assert_eq!(links[0].sha.as_deref(), Some(sha.as_str()));
+        assert_eq!(l.start_line, Some(5));
     }
 
     #[test]
     fn test_source_line_tracking() {
-        let content = "line one\n\n[Link](src/file.rs#L1&abc1234)\n";
+        let content = "line one\n\n[Link](src/file.rs#L1)\n";
         let links = parse_fragment_links(content);
         assert_eq!(links[0].source_line, 3);
     }
 
     #[test]
     fn test_line_range_no_fragment() {
-        // SHA only — no line range
-        let links = parse_fragment_links("[F](src/f.rs#abc1234)");
+        let links = parse_fragment_links("[F](src/f.rs)");
         assert_eq!(links[0].start_line, None);
         assert_eq!(links[0].end_line, None);
-        assert_eq!(links[0].sha.as_deref(), Some("abc1234"));
     }
 
     // ── Wikilink tests ────────────────────────────────────────────────────────
@@ -562,7 +480,7 @@ mod tests {
 
     #[test]
     fn test_multiple_links_same_content() {
-        let content = "[F1](a.rs#L1&abc1234) and [[Wiki]] and [F2](b.rs#L2&def5678)";
+        let content = "[F1](a.rs#L1) and [[Wiki]] and [F2](b.rs#L2)";
         let frags = parse_fragment_links(content);
         let wikis = parse_wikilinks(content);
         assert_eq!(frags.len(), 2);
@@ -573,7 +491,7 @@ mod tests {
 
     #[test]
     fn test_fenced_code_block_excluded() {
-        let content = "before\n```\n[Link](src/file.rs#L1&abc1234)\n```\nafter\n";
+        let content = "before\n```\n[Link](src/file.rs#L1)\n```\nafter\n";
         let links = parse_fragment_links(content);
         assert_eq!(
             links.len(),
@@ -584,21 +502,21 @@ mod tests {
 
     #[test]
     fn test_fenced_code_block_with_lang_excluded() {
-        let content = "before\n```rust\n[Link](src/file.rs#L1&abc1234)\n```\nafter\n";
+        let content = "before\n```rust\n[Link](src/file.rs#L1)\n```\nafter\n";
         let links = parse_fragment_links(content);
         assert_eq!(links.len(), 0);
     }
 
     #[test]
     fn test_tilde_fence_excluded() {
-        let content = "before\n~~~\n[Link](src/file.rs#L1&abc1234)\n~~~\nafter\n";
+        let content = "before\n~~~\n[Link](src/file.rs#L1)\n~~~\nafter\n";
         let links = parse_fragment_links(content);
         assert_eq!(links.len(), 0);
     }
 
     #[test]
     fn test_link_outside_code_block_extracted() {
-        let content = "[Before](before.rs#L1&abc1234)\n```\n[Inside](inside.rs#L1&abc1234)\n```\n[After](after.rs#L1&abc1234)\n";
+        let content = "[Before](before.rs#L1)\n```\n[Inside](inside.rs#L1)\n```\n[After](after.rs#L1)\n";
         let links = parse_fragment_links(content);
         assert_eq!(links.len(), 2);
         let paths: Vec<&str> = links.iter().map(|l| l.path.as_str()).collect();
@@ -619,7 +537,7 @@ mod tests {
 
     #[test]
     fn test_inline_code_excluded() {
-        let content = "See `[Link](src/file.rs#L1&abc1234)` for details.";
+        let content = "See `[Link](src/file.rs#L1)` for details.";
         let links = parse_fragment_links(content);
         assert_eq!(
             links.len(),
@@ -630,14 +548,14 @@ mod tests {
 
     #[test]
     fn test_double_backtick_inline_code_excluded() {
-        let content = "See ``[Link](src/file.rs#L1&abc1234)`` for details.";
+        let content = "See ``[Link](src/file.rs#L1)`` for details.";
         let links = parse_fragment_links(content);
         assert_eq!(links.len(), 0);
     }
 
     #[test]
     fn test_html_comment_excluded() {
-        let content = "<!-- [Link](src/file.rs#L1&abc1234) -->\n[Real](real.rs#L1&abc1234)";
+        let content = "<!-- [Link](src/file.rs#L1) -->\n[Real](real.rs#L1)";
         let links = parse_fragment_links(content);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].path, "real.rs");
@@ -645,7 +563,7 @@ mod tests {
 
     #[test]
     fn test_multiline_html_comment_excluded() {
-        let content = "<!--\n[Link](src/file.rs#L1&abc1234)\n-->\n[Real](real.rs#L1&abc1234)";
+        let content = "<!--\n[Link](src/file.rs#L1)\n-->\n[Real](real.rs#L1)";
         let links = parse_fragment_links(content);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].path, "real.rs");
@@ -678,7 +596,7 @@ mod tests {
     #[test]
     fn test_unclosed_html_comment_scrubbed_to_eof() {
         // Link inside an unclosed HTML comment must NOT be extracted
-        let content = "<!-- [Hidden](src/file.rs#L1&abc1234)\n[AlsoHidden](other.rs#L1&abc1234)";
+        let content = "<!-- [Hidden](src/file.rs#L1)\n[AlsoHidden](other.rs#L1)";
         let links = parse_fragment_links(content);
         assert_eq!(
             links.len(),
@@ -701,7 +619,7 @@ mod tests {
     #[test]
     fn test_utf8_multibyte_in_code_block_no_panic() {
         // Multi-byte UTF-8 (emoji) inside a fenced code block — must not panic
-        let content = "before\n```\n😀 🎉 [Link](src/file.rs#L1&abc1234)\n```\nafter\n";
+        let content = "before\n```\n😀 🎉 [Link](src/file.rs#L1)\n```\nafter\n";
         let links = parse_fragment_links(content);
         assert_eq!(
             links.len(),
@@ -713,7 +631,7 @@ mod tests {
     #[test]
     fn test_utf8_multibyte_in_html_comment_no_panic() {
         // Multi-byte UTF-8 inside an HTML comment
-        let content = "<!-- 😀 [Hidden](src/file.rs#L1&abc1234) -->\n[Real](real.rs#L1&abc1234)";
+        let content = "<!-- 😀 [Hidden](src/file.rs#L1) -->\n[Real](real.rs#L1)";
         let links = parse_fragment_links(content);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].path, "real.rs");

@@ -5,11 +5,10 @@ use miette::Result;
 use serde::Serialize;
 
 use crate::commands::discover_files;
-use crate::commands::pin::{RewriteSpec, apply_rewrites, build_fragment, write_atomic};
 use crate::frontmatter::{Frontmatter, build_index, parse_frontmatter, parse_title};
-use crate::git::{file_at_ref, latest_commit, resolve_ref};
+use crate::git::resolve_ref;
 use crate::headings::extract_headings;
-use crate::parser::{FragmentLink, LinkKind, parse_fragment_links, parse_wikilinks};
+use crate::parser::parse_wikilinks;
 
 // ── Diagnostic types ──────────────────────────────────────────────────────────
 
@@ -26,7 +25,7 @@ pub struct CheckDiagnostic {
 /// Run the check command.
 ///
 /// Returns the exit code: 0 = valid, 1 = validation errors, 2 = runtime error.
-pub fn run(globs: &[String], json: bool, fix: bool, repo_root: &Path) -> Result<i32> {
+pub fn run(globs: &[String], json: bool, repo_root: &Path) -> Result<i32> {
     let files = match discover_files(globs, repo_root) {
         Ok(f) => f,
         Err(e) => {
@@ -45,7 +44,7 @@ pub fn run(globs: &[String], json: bool, fix: bool, repo_root: &Path) -> Result<
         discover_files(&[], repo_root).unwrap_or_else(|_| files.clone())
     };
 
-    let diagnostics = match collect_for_files(&files, &index_files, fix, repo_root) {
+    let diagnostics = match collect_for_files(&files, &index_files, repo_root) {
         Ok(d) => d,
         Err(e) => {
             if json {
@@ -61,26 +60,13 @@ pub fn run(globs: &[String], json: bool, fix: bool, repo_root: &Path) -> Result<
         println!("{}", serde_json::to_string_pretty(&diagnostics).unwrap());
     } else {
         for d in &diagnostics {
-            if d.kind == "fixed" {
-                continue;
-            }
             println!("**{}** — `{}:{}`\n{}\n", d.kind, d.file, d.line, d.message);
-        }
-        if fix {
-            let changed: std::collections::HashSet<&str> = diagnostics
-                .iter()
-                .filter(|d| d.kind == "fixed")
-                .map(|d| d.file.as_str())
-                .collect();
-            if !changed.is_empty() {
-                println!("Fixed {} file(s).", changed.len());
-            }
         }
     }
 
     if diagnostics
         .iter()
-        .any(|d| d.kind != "alias_resolve" && d.kind != "fixed")
+        .any(|d| d.kind != "alias_resolve")
     {
         Ok(1)
     } else {
@@ -93,20 +79,19 @@ pub fn run(globs: &[String], json: bool, fix: bool, repo_root: &Path) -> Result<
 /// Returns `Err` only on discovery failure; validation errors are returned as
 /// diagnostics.  On discovery failure the caller should treat this as exit
 /// code 2.
-pub fn collect(globs: &[String], fix: bool, repo_root: &Path) -> Result<Vec<CheckDiagnostic>> {
+pub fn collect(globs: &[String], repo_root: &Path) -> Result<Vec<CheckDiagnostic>> {
     let files = discover_files(globs, repo_root)?;
     let index_files = if globs.is_empty() {
         files.clone()
     } else {
         discover_files(&[], repo_root).unwrap_or_else(|_| files.clone())
     };
-    collect_for_files(&files, &index_files, fix, repo_root)
+    collect_for_files(&files, &index_files, repo_root)
 }
 
 fn collect_for_files(
     files: &[PathBuf],
     index_files: &[PathBuf],
-    fix: bool,
     repo_root: &Path,
 ) -> Result<Vec<CheckDiagnostic>> {
     let mut diagnostics: Vec<CheckDiagnostic> = Vec::new();
@@ -194,120 +179,11 @@ fn collect_for_files(
     }
 
     // ── Validate links in all files (including ones that failed frontmatter) ──
-    // When --fix is active, collect (path, link) pairs for links to fix later.
-    let mut links_to_fix: Vec<(PathBuf, FragmentLink)> = Vec::new();
-
     for path in files {
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(_) => continue, // already reported above
         };
-
-        // Fragment links
-        let frag_links = parse_fragment_links(&content);
-        for link in &frag_links {
-            if link.kind == LinkKind::External {
-                continue;
-            }
-
-            let resolved_path = crate::commands::resolve_link_path(&link.path, path, repo_root);
-            let repo_relative_path = resolved_path.to_string_lossy().to_string();
-            let is_repo_relative = link.path == repo_relative_path;
-
-            if link.kind == LinkKind::InternalWithoutSha || !is_repo_relative {
-                if fix {
-                    // Defer to fix pass; do not emit a diagnostic now.
-                    links_to_fix.push((path.clone(), link.clone()));
-                } else {
-                    if link.kind == LinkKind::InternalWithoutSha {
-                        diagnostics.push(CheckDiagnostic {
-                            kind: "missing_sha".into(),
-                            file: path.display().to_string(),
-                            line: link.source_line,
-                            message: format!(
-                                "Fragment link `{}` has no pinned SHA. Run `wiki check --fix` to add one automatically.",
-                                link.path
-                            ),
-                        });
-                    }
-                    if !is_repo_relative {
-                        diagnostics.push(CheckDiagnostic {
-                            kind: "not_repo_relative".into(),
-                            file: path.display().to_string(),
-                            line: link.source_line,
-                            message: format!(
-                                "Fragment link `{}` must be relative to the repository root: `{}`. Run `wiki check --fix` to convert it.",
-                                link.path,
-                                repo_relative_path
-                            ),
-                        });
-                    }
-                }
-                if link.kind == LinkKind::InternalWithoutSha {
-                    continue;
-                }
-            }
-
-            // InternalWithSha — verify file exists at pinned SHA and check line ranges
-            let sha = link.sha.as_deref().unwrap();
-            let link_path = resolved_path.as_path();
-
-            match file_at_ref(repo_root, sha, link_path) {
-                Ok(ref_content) => {
-                    // Verify line ranges are within the file's line count
-                    if let Some(start) = link.start_line {
-                        // Lines are 1-based; L0 is invalid
-                        if start == 0 {
-                            diagnostics.push(CheckDiagnostic {
-                                kind: "line_range".into(),
-                                file: path.display().to_string(),
-                                line: link.source_line,
-                                message: format!(
-                                    "Line numbers are 1-based. Replace `L0` with `L1` in `{}`.",
-                                    link.path
-                                ),
-                            });
-                        } else {
-                            let line_count = ref_content.lines().count() as u32;
-                            let end = link.end_line.unwrap_or(start);
-                            if start > line_count || end > line_count {
-                                diagnostics.push(CheckDiagnostic {
-                                    kind: "line_range".into(),
-                                    file: path.display().to_string(),
-                                    line: link.source_line,
-                                    message: format!(
-                                        "Line range `L{start}–L{end}` exceeds `{}` at `@{sha}` ({line_count} lines). Correct the range or re-run `wiki pin` to refresh.",
-                                        link.path
-                                    ),
-                                });
-                            }
-                            if start > end {
-                                diagnostics.push(CheckDiagnostic {
-                                    kind: "line_range".into(),
-                                    file: path.display().to_string(),
-                                    line: link.source_line,
-                                    message: format!(
-                                        "Line range start (`L{start}`) must not exceed end (`L{end}`) in `{}`.",
-                                        link.path
-                                    ),
-                                });
-                            }
-                        }
-                    }
-                }
-                Err(_) => {
-                    diagnostics.push(CheckDiagnostic {
-                        kind: "missing_file".into(),
-                        file: path.display().to_string(),
-                        line: link.source_line,
-                        message: format!(
-                            "File `{}` not found at `@{sha}`. The file may have moved — re-run `wiki pin` to update the SHA.",
-                            link.path
-                        ),
-                    });
-                }
-            }
-        }
 
         // Wikilinks
         let wiki_links = parse_wikilinks(&content);
@@ -372,110 +248,6 @@ fn collect_for_files(
 
     // ── Resolve ref to check git is callable (soft check, non-fatal) ─────────
     let _ = resolve_ref(repo_root, "HEAD");
-
-    // ── Fix pass: pin missing SHAs and convert to repo-relative when --fix is active ─────────
-    if fix && !links_to_fix.is_empty() {
-        // Group links by file so we can do one atomic write per file.
-        let mut by_file: HashMap<PathBuf, Vec<FragmentLink>> = HashMap::new();
-        for (path, link) in links_to_fix {
-            by_file.entry(path).or_default().push(link);
-        }
-
-        for (path, links) in &by_file {
-            let content = match std::fs::read_to_string(path) {
-                Ok(c) => c,
-                Err(e) => {
-                    diagnostics.push(CheckDiagnostic {
-                        kind: "runtime".into(),
-                        file: path.display().to_string(),
-                        line: 0,
-                        message: format!("Could not read file for --fix: {e}"),
-                    });
-                    continue;
-                }
-            };
-
-            // Build rewrite specs for each link (resolve SHA, then build spec).
-            let mut specs: Vec<RewriteSpec> = Vec::new();
-            for link in links {
-                let resolved_path = crate::commands::resolve_link_path(&link.path, path, repo_root);
-                if !repo_root.join(&resolved_path).exists() {
-                    continue;
-                }
-                let repo_relative_path = resolved_path.to_string_lossy().to_string();
-                let is_repo_relative = link.path == repo_relative_path;
-
-                // For existing SHA, use it; otherwise find latest.
-                let sha_to_use = if let Some(existing) = &link.sha {
-                    existing.clone()
-                } else {
-                    match latest_commit(repo_root, "HEAD", &resolved_path) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            diagnostics.push(CheckDiagnostic {
-                                kind: "missing_sha".into(),
-                                file: path.display().to_string(),
-                                line: link.source_line,
-                                message: format!(
-                                    "Fragment link `{}` has no pinned SHA and could not be resolved: {e}",
-                                    link.path
-                                ),
-                            });
-                            continue;
-                        }
-                    }
-                };
-
-                specs.push(RewriteSpec {
-                    source_line: link.source_line,
-                    text: link.original_text.clone(),
-                    original_href: link.original_href.clone(),
-                    new_path: repo_relative_path.clone(),
-                    new_sha: sha_to_use.clone(),
-                    action: if link.sha.is_none() {
-                        "pinned"
-                    } else {
-                        "converted"
-                    },
-                    fragment: build_fragment(link),
-                });
-
-                if link.sha.is_none() {
-                    diagnostics.push(CheckDiagnostic {
-                        kind: "fixed".into(),
-                        file: path.display().to_string(),
-                        line: link.source_line,
-                        message: format!("Pinned `{}` to @{sha_to_use}.", link.path),
-                    });
-                }
-                if !is_repo_relative {
-                    diagnostics.push(CheckDiagnostic {
-                        kind: "fixed".into(),
-                        file: path.display().to_string(),
-                        line: link.source_line,
-                        message: format!(
-                            "Converted `{}` to repo-relative: `{}`.",
-                            link.path, repo_relative_path
-                        ),
-                    });
-                }
-            }
-
-            if !specs.is_empty() {
-                // Sort descending by source_line to preserve byte offsets.
-                specs.sort_by(|a, b| b.source_line.cmp(&a.source_line));
-                let updated_content = apply_rewrites(&content, &specs);
-                if let Err(e) = write_atomic(path, &updated_content) {
-                    diagnostics.push(CheckDiagnostic {
-                        kind: "runtime".into(),
-                        file: path.display().to_string(),
-                        line: 0,
-                        message: format!("Failed to write fixed file: {e}"),
-                    });
-                }
-            }
-        }
-    }
 
     Ok(diagnostics)
 }
@@ -549,44 +321,8 @@ mod tests {
         repo.create_file("wiki/page.md", &make_wiki_page("Page", "No links here."));
         repo.commit("add page");
 
-        let code = run(&[], false, false, repo.path()).expect("run");
+        let code = run(&[], false, repo.path()).expect("run");
         assert_eq!(code, 0);
-    }
-
-    #[test]
-    fn test_check_missing_sha_exit_1_with_pin_message() {
-        let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
-        repo.create_file("src/foo.rs", "fn foo() {}\n");
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", "[code](src/foo.rs#L1)"),
-        );
-        repo.commit("add files");
-
-        let code = run(&[], false, false, repo.path()).expect("run");
-        assert_eq!(code, 1);
-    }
-
-    #[test]
-    fn test_check_missing_sha_message_includes_pin_hint() {
-        let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
-        repo.create_file("src/foo.rs", "fn foo() {}\n");
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", "[code](src/foo.rs#L1)"),
-        );
-        repo.commit("add files");
-
-        // Capture by running with json=true
-        let files = discover_files(&[], repo.path()).expect("discover");
-        assert_eq!(files.len(), 1);
-        let content = fs::read_to_string(&files[0]).expect("read");
-        let links = parse_fragment_links(&content);
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].kind, LinkKind::InternalWithoutSha);
-        // The run function will include "wiki pin" in the message
     }
 
     #[test]
@@ -599,7 +335,7 @@ mod tests {
         );
         repo.commit("add page");
 
-        let code = run(&[], false, false, repo.path()).expect("run");
+        let code = run(&[], false, repo.path()).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -611,7 +347,7 @@ mod tests {
         repo.create_file("wiki/b.md", &make_wiki_page("Shared", ""));
         repo.commit("add pages");
 
-        let code = run(&[], false, false, repo.path()).expect("run");
+        let code = run(&[], false, repo.path()).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -622,7 +358,7 @@ mod tests {
         repo.create_file("wiki/page.md", "# Just a heading\n\nNo frontmatter.");
         repo.commit("add page");
 
-        let code = run(&[], false, false, repo.path()).expect("run");
+        let code = run(&[], false, repo.path()).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -637,7 +373,7 @@ mod tests {
         repo.create_file("wiki/source.md", &make_wiki_page("Source", "See [[tp]]."));
         repo.commit("add pages");
 
-        let code = run(&[], false, false, repo.path()).expect("run");
+        let code = run(&[], false, repo.path()).expect("run");
         // alias_resolve warnings should not cause exit 1
         assert_eq!(code, 0);
     }
@@ -656,7 +392,7 @@ mod tests {
         );
         repo.commit("add pages");
 
-        let code = run(&[], false, false, repo.path()).expect("run");
+        let code = run(&[], false, repo.path()).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -674,255 +410,8 @@ mod tests {
         );
         repo.commit("add pages");
 
-        let code = run(&[], false, false, repo.path()).expect("run");
+        let code = run(&[], false, repo.path()).expect("run");
         assert_eq!(code, 0);
-    }
-
-    #[test]
-    fn test_check_json_output_format() {
-        let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", "[code](src/foo.rs#L1)"),
-        );
-        repo.commit("add page");
-
-        // Just verify it returns 1 (has errors); JSON printing goes to stdout
-        let code = run(&[], true, false, repo.path()).expect("run");
-        assert_eq!(code, 1);
-    }
-
-    #[test]
-    fn test_check_valid_pinned_link_within_bounds() {
-        let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
-        repo.create_file("src/foo.rs", "line1\nline2\nline3\n");
-        repo.commit("add src");
-
-        // Get the SHA of the commit
-        let sha_output = Command::new("git")
-            .current_dir(repo.path())
-            .args(["rev-parse", "--short", "HEAD"])
-            .output()
-            .expect("git rev-parse");
-        let sha = String::from_utf8(sha_output.stdout)
-            .expect("utf8")
-            .trim()
-            .to_string();
-
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", &format!("[code](src/foo.rs#L1-L2&{sha})")),
-        );
-        repo.commit("add wiki");
-
-        let code = run(&[], false, false, repo.path()).expect("run");
-        assert_eq!(code, 0);
-    }
-
-    #[test]
-    fn test_check_l0_line_reference_rejected() {
-        let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
-        repo.create_file("src/foo.rs", "line1\nline2\nline3\n");
-        repo.commit("add src");
-
-        let sha_output = Command::new("git")
-            .current_dir(repo.path())
-            .args(["rev-parse", "--short", "HEAD"])
-            .output()
-            .expect("git rev-parse");
-        let sha = String::from_utf8(sha_output.stdout)
-            .expect("utf8")
-            .trim()
-            .to_string();
-
-        // L0 is invalid — lines are 1-based
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", &format!("[code](src/foo.rs#L0&{sha})")),
-        );
-        repo.commit("add wiki");
-
-        let code = run(&[], false, false, repo.path()).expect("run");
-        assert_eq!(code, 1, "L0 line reference must be rejected");
-    }
-
-    #[test]
-    fn test_check_fix_pins_unpinned_link_and_exits_0() {
-        let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
-        repo.create_file("src/foo.rs", "fn foo() {}\n");
-        repo.commit("add src");
-
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", "[code](src/foo.rs#L1)"),
-        );
-        repo.commit("add wiki");
-
-        // Without --fix this should fail.
-        let code_no_fix = run(&[], false, false, repo.path()).expect("run");
-        assert_eq!(code_no_fix, 1, "should report missing_sha without --fix");
-
-        // With --fix it should succeed and rewrite the file.
-        let code = run(&[], false, true, repo.path()).expect("run");
-        assert_eq!(code, 0, "should exit 0 after fixing");
-
-        let content = fs::read_to_string(repo.path().join("wiki/page.md")).expect("read");
-        assert!(
-            content.contains("src/foo.rs#"),
-            "expected SHA to be inserted by --fix, got: {content}"
-        );
-    }
-
-    #[test]
-    fn test_check_fix_does_not_touch_already_pinned_links() {
-        let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
-        repo.create_file("src/foo.rs", "fn foo() {}\n");
-        repo.commit("add src");
-
-        let sha_output = Command::new("git")
-            .current_dir(repo.path())
-            .args(["rev-parse", "--short", "HEAD"])
-            .output()
-            .expect("git rev-parse");
-        let sha = String::from_utf8(sha_output.stdout)
-            .expect("utf8")
-            .trim()
-            .to_string();
-
-        let original = make_wiki_page("Page", &format!("[code](src/foo.rs#L1&{sha})"));
-        repo.create_file("wiki/page.md", &original);
-        repo.commit("add wiki");
-
-        let code = run(&[], false, true, repo.path()).expect("run");
-        assert_eq!(code, 0);
-
-        // Already-pinned link must remain unchanged.
-        let content = fs::read_to_string(repo.path().join("wiki/page.md")).expect("read");
-        assert_eq!(
-            content, original,
-            "pinned link must not be modified by --fix"
-        );
-    }
-
-    #[test]
-    fn test_check_fix_emits_fixed_diagnostic() {
-        let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
-        repo.create_file("src/foo.rs", "fn foo() {}\n");
-        repo.commit("add src");
-
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", "[code](src/foo.rs#L1)"),
-        );
-        repo.commit("add wiki");
-
-        // Run --fix; the resulting file should contain a SHA.
-        let code = run(&[], false, true, repo.path()).expect("run");
-        assert_eq!(code, 0);
-
-        // Verify the file was rewritten.
-        let content = fs::read_to_string(repo.path().join("wiki/page.md")).expect("read");
-        assert!(
-            content.contains("src/foo.rs#"),
-            "file should contain pinned SHA after --fix, got: {content}"
-        );
-    }
-
-    #[test]
-    fn test_check_fix_with_backticks_in_text() {
-        let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
-        repo.create_file("src/foo.rs", "pub fn foo() {}");
-        // Link with backticks in text
-        repo.create_file(
-            "wiki/page.md",
-            "---\ntitle: Page\nsummary: Sum\n---\n[`src/foo.rs`](src/foo.rs)",
-        );
-        repo.commit("add files");
-
-        let repo_root = repo.path();
-        let code = run(&[], false, true, repo_root).expect("run fix");
-        assert_eq!(code, 0);
-
-        let content = fs::read_to_string(repo_root.join("wiki/page.md")).expect("read");
-        assert!(
-            content.contains("src/foo.rs#"),
-            "file should contain pinned SHA after --fix, got:\n{content}"
-        );
-    }
-
-    #[test]
-    fn test_check_fix_converts_to_repo_relative() {
-        let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
-        repo.create_file("src/foo.rs", "pub fn foo() {}");
-        // Link relative to markdown file (wiki/page.md) pointing to src/foo.rs
-        repo.create_file(
-            "wiki/page.md",
-            "---\ntitle: Page\nsummary: Sum\n---\n[code](../src/foo.rs)",
-        );
-        repo.commit("add files");
-
-        let repo_root = repo.path();
-
-        // Without --fix this should fail.
-        let code_no_fix = run(&[], false, false, repo_root).expect("run no fix");
-        assert_eq!(
-            code_no_fix, 1,
-            "should report not_repo_relative without --fix"
-        );
-
-        // With --fix it should succeed and rewrite the file to be repo-relative.
-        let code = run(&[], false, true, repo_root).expect("run fix");
-        assert_eq!(code, 0, "should exit 0 after fixing");
-
-        let content = fs::read_to_string(repo_root.join("wiki/page.md")).expect("read");
-        // Should contain src/foo.rs#SHA, NOT ../src/foo.rs
-        assert!(
-            content.contains("](src/foo.rs#"),
-            "expected path to be converted to repo-relative, got:\n{content}"
-        );
-    }
-
-    #[test]
-    fn test_check_fix_does_not_rewrite_missing_pinned_link_path() {
-        let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
-        repo.create_file("wiki/page.md", "placeholder\n");
-        repo.commit("add wiki");
-        let sha_output = Command::new("git")
-            .current_dir(repo.path())
-            .args(["rev-parse", "--short", "HEAD"])
-            .output()
-            .expect("git rev-parse");
-        let sha = String::from_utf8(sha_output.stdout)
-            .expect("utf8")
-            .trim()
-            .to_string();
-
-        let original = make_wiki_page(
-            "Page",
-            &format!(
-                "The [path/to/missing/file.md](path/to/missing/file.md#L73-L172&{sha}) link must not be rewritten."
-            ),
-        );
-        repo.create_file("wiki/page.md", &original);
-        repo.commit("add broken link");
-
-        let code = run(&[], false, true, repo.path()).expect("run");
-        assert_eq!(code, 1, "missing pinned link should remain an error");
-
-        let content = fs::read_to_string(repo.path().join("wiki/page.md")).expect("read");
-        assert_eq!(
-            content, original,
-            "missing pinned link path must remain unchanged by --fix"
-        );
     }
 
     #[test]
@@ -935,7 +424,7 @@ mod tests {
         repo.commit("add pages");
 
         let globs = vec!["wiki/page_a.md".to_string()];
-        let code = run(&globs, false, false, repo.path()).expect("run");
+        let code = run(&globs, false, repo.path()).expect("run");
         assert_eq!(
             code, 0,
             "wikilink to a page outside the glob must resolve against the full wiki index"
@@ -954,7 +443,7 @@ mod tests {
         repo.commit("add pages");
 
         let globs = vec!["wiki/page_a.md".to_string()];
-        let code = run(&globs, false, false, repo.path()).expect("run");
+        let code = run(&globs, false, repo.path()).expect("run");
         assert_eq!(
             code, 1,
             "a truly missing wikilink must still be reported when using a file glob"
@@ -972,7 +461,7 @@ mod tests {
         repo.commit("add pages");
 
         let globs = vec!["wiki/c.md".to_string()];
-        let diagnostics = collect(&globs, false, repo.path()).expect("collect");
+        let diagnostics = collect(&globs, repo.path()).expect("collect");
         assert!(
             diagnostics.is_empty(),
             "collision between out-of-scope pages must not appear when checking an unrelated file: {diagnostics:?}"

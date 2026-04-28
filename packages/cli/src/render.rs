@@ -8,7 +8,6 @@ use syntect::html::{ClassStyle, ClassedHTMLGenerator, css_for_theme_with_class_s
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
-use crate::git;
 use crate::headings::github_slug;
 use crate::index::WikiIndex;
 use crate::parser::{LinkKind, parse_fragment_links, scrub_non_content};
@@ -275,7 +274,7 @@ fn collect_fragment_replacements(
         .filter_map(|matched| {
             let original = &content[matched.start()..matched.end()];
             let link = parse_fragment_links(original).into_iter().next()?;
-            if link.kind != LinkKind::InternalWithSha {
+            if link.kind == LinkKind::External {
                 return None;
             }
             let replacement = match mode {
@@ -298,9 +297,9 @@ fn render_fragment_as_code_block(
     link: &crate::parser::FragmentLink,
     index: &WikiIndex,
 ) -> Option<String> {
-    let sha = link.sha.as_deref()?;
     let repo_path = Path::new(&link.path);
-    let file_content = git::file_at_ref(index.repo_root(), sha, repo_path).ok()?;
+    let file_path = index.repo_root().join(repo_path);
+    let file_content = std::fs::read_to_string(&file_path).ok()?;
     let snippet = slice_lines(&file_content, link.start_line, link.end_line)?;
     let language = infer_language(repo_path);
     Some(format!("```{language}\n{snippet}\n```"))
@@ -544,19 +543,6 @@ mod tests {
             self.git(&["commit", "-m", message]);
         }
 
-        fn head_sha(&self) -> String {
-            let output = Command::new("git")
-                .current_dir(self.dir.path())
-                .args(["rev-parse", "HEAD"])
-                .output()
-                .expect("rev-parse");
-            assert!(output.status.success());
-            String::from_utf8(output.stdout)
-                .expect("utf8")
-                .trim()
-                .to_string()
-        }
-
         fn git(&self, args: &[&str]) {
             let output = Command::new("git")
                 .current_dir(self.dir.path())
@@ -607,11 +593,10 @@ mod tests {
         );
         repo.create_file("src/lib.rs", "fn alpha() {}\nfn beta() {}\n");
         repo.commit_all("initial");
-        let sha = repo.head_sha();
 
         let index = WikiIndex::prepare(repo.path()).expect("prepare");
         let rendered = render_html(
-            &format!("[fragment](src/lib.rs#L1-L2&{sha})"),
+            "[fragment](src/lib.rs#L1-L2)",
             RenderMode::FullPage,
             &index,
         );
@@ -630,11 +615,10 @@ mod tests {
         );
         repo.create_file("src/lib.rs", "fn alpha() {}\n");
         repo.commit_all("initial");
-        let sha = repo.head_sha();
 
         let index = WikiIndex::prepare(repo.path()).expect("prepare");
         let rendered = render_html(
-            &format!("[fragment](src/lib.rs#L1-L1&{sha})"),
+            "[fragment](src/lib.rs#L1-L1)",
             RenderMode::Fragment {
                 file_base_url: Some("https://example.test/base".to_string()),
             },

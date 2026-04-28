@@ -33,14 +33,14 @@ pub fn run(input: &str, repo_root: &Path) -> Result<i32> {
     }
 
     let globs = vec![file_path.clone()];
-    let diagnostics = match check::collect(&globs, true, repo_root) {
+    let diagnostics = match check::collect(&globs, repo_root) {
         Ok(d) => d,
         Err(_) => return Ok(0), // not a wiki page or discovery failed — skip silently
     };
 
     let errors: Vec<_> = diagnostics
         .iter()
-        .filter(|d| d.kind != "fixed" && d.kind != "alias_resolve")
+        .filter(|d| d.kind != "alias_resolve")
         .collect();
 
     if errors.is_empty() {

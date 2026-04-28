@@ -29,7 +29,7 @@ enum Format {
     version = crate::version::VERSION,
     before_help = concat!("wiki ", env!("WIKI_VERSION"), "\n"),
     about = "wiki - Read and maintain wiki pages",
-    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, pin, stale, links, list, summary, extract, refs, hook, html, install, serve) are reserved and cannot be used as page titles.",
+    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, links, list, summary, extract, refs, hook, html, install, serve) are reserved and cannot be used as page titles.",
     disable_help_subcommand = true,
     disable_version_flag = true,
 )]
@@ -80,43 +80,8 @@ enum Commands {
     /// Defaults to "$WIKI_DIR/**/*.md".
     ///
     /// With --fix, auto-pins unpinned fragment links (missing_sha) by
-    /// resolving each referenced file to its latest commit SHA. Already-pinned
-    /// links are never touched; use `wiki pin` to refresh existing SHAs.
+    /// resolving each referenced file to its latest commit SHA.
     Check {
-        /// Auto-pin unpinned fragment links (missing_sha) in-place.
-        #[arg(long = "fix")]
-        fix: bool,
-
-        /// Glob patterns to match wiki pages (default: $WIKI_DIR/**/*.md)
-        #[arg(value_name = "glob")]
-        globs: Vec<String>,
-    },
-
-    /// Refresh existing fragment link SHAs to the latest commit that touched each referenced file.
-    ///
-    /// Only processes links that already have a SHA (@sha present). To add SHAs
-    /// to new unpinned links, use `wiki check --fix` instead.
-    /// --ref accepts any valid git ref (branch, tag, SHA, HEAD~3); defaults to HEAD.
-    /// Defaults to "$WIKI_DIR/**/*.md".
-    Pin {
-        /// Git ref to pin to (branch, tag, SHA, HEAD~3); defaults to HEAD
-        #[arg(long = "ref", value_name = "ref")]
-        git_ref: Option<String>,
-
-        /// Glob patterns to match wiki pages (default: $WIKI_DIR/**/*.md)
-        #[arg(value_name = "glob")]
-        globs: Vec<String>,
-    },
-
-    /// Find fragment links whose referenced files have changed since the pinned SHA.
-    ///
-    /// --diff stat includes a diffstat summary; --diff patch includes the full
-    /// diff. Defaults to "$WIKI_DIR/**/*.md".
-    Stale {
-        /// Include diff in output: stat or patch
-        #[arg(long = "diff", value_name = "stat|patch")]
-        diff_mode: Option<String>,
-
         /// Glob patterns to match wiki pages (default: $WIKI_DIR/**/*.md)
         #[arg(value_name = "glob")]
         globs: Vec<String>,
@@ -360,13 +325,7 @@ fn run(
     let started = Instant::now();
 
     let result = match command {
-        Some(Commands::Check { globs, fix }) => commands::check::run(&globs, json, fix, &repo_root),
-        Some(Commands::Pin { git_ref, globs }) => {
-            commands::pin::run(&globs, git_ref.as_deref(), json, &repo_root)
-        }
-        Some(Commands::Stale { diff_mode, globs }) => {
-            commands::stale::run(&globs, diff_mode.as_deref(), json, &repo_root)
-        }
+        Some(Commands::Check { globs }) => commands::check::run(&globs, json, &repo_root),
         Some(Commands::Links { target }) => {
             let inputs = resolve_inputs(target, read_stdin_lines)?;
             run_for_each(
@@ -493,8 +452,6 @@ fn run(
 fn command_name(command: Option<&Commands>, query: Option<&str>) -> &'static str {
     match command {
         Some(Commands::Check { .. }) => "check",
-        Some(Commands::Pin { .. }) => "pin",
-        Some(Commands::Stale { .. }) => "stale",
         Some(Commands::Links { .. }) => "links",
         Some(Commands::Extract) => "extract",
         Some(Commands::Hook { .. }) => "hook",
