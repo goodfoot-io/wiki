@@ -277,7 +277,7 @@ fn generate_mesh(
     let object_phrase =
         compute_object_phrase(&co_present, tgt_meta, &source_title_tokens, &target_role);
 
-    let prose_why = extract_prose_why(link);
+    let prose_why = extract_prose_why(&input.augmented);
 
     // Bare line-range corePhrase: substitute objectPhrase or targetRole.
     let line_range_re = Regex::new(r"^(?i)L\d+(-L?\d+)?$").expect("valid regex");
