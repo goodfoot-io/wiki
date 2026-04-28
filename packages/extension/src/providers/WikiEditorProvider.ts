@@ -178,29 +178,29 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
           // Resolve the target page URI via wiki summary.
           const targetUri = await this._resolvePageUri(message.pageName);
           if (targetUri == null) {
-            // Fallback: treat as a workspace-relative file path when the name
-            // looks like a path (e.g. [[packages/foo/bar.ts]] or
-            // [[public/plugins/runtime/skills/card/SKILL.md]]).
-            const ext = path.extname(message.pageName).toLowerCase();
-            const isFilePath = ext !== '' && message.pageName.includes('/');
-            if (isFilePath) {
-              const workspaceRoot = this._workspaceRoot();
-              if (workspaceRoot != null) {
-                const fileUri = vscode.Uri.file(path.join(workspaceRoot, message.pageName));
-                try {
-                  await vscode.workspace.fs.stat(fileUri);
-                  const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
-                  if (ext === '.md') {
-                    await vscode.commands.executeCommand('vscode.open', fileUri, viewColumn);
-                  } else {
-                    await vscode.window.showTextDocument(fileUri, { viewColumn, preview: false });
-                  }
+            // Fallback: treat as a workspace-relative file or directory path when
+            // the name looks like a path (contains a slash).
+            const workspaceRoot = this._workspaceRoot();
+            if (workspaceRoot != null && message.pageName.includes('/')) {
+              const candidateUri = vscode.Uri.file(path.join(workspaceRoot, message.pageName));
+              try {
+                const stat = await vscode.workspace.fs.stat(candidateUri);
+                if (stat.type === vscode.FileType.Directory) {
+                  await vscode.commands.executeCommand('revealInExplorer', candidateUri);
                   return;
-                } catch (err) {
-                  const isNotFound = err instanceof vscode.FileSystemError && err.code === 'FileNotFound';
-                  if (!isNotFound) {
-                    console.warn('[wiki-extension] Unexpected error checking workspace path:', fileUri.fsPath, err);
-                  }
+                }
+                const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
+                const ext = path.extname(message.pageName).toLowerCase();
+                if (ext === '.md') {
+                  await vscode.commands.executeCommand('vscode.open', candidateUri, viewColumn);
+                } else {
+                  await vscode.window.showTextDocument(candidateUri, { viewColumn, preview: false });
+                }
+                return;
+              } catch (err) {
+                const isNotFound = err instanceof vscode.FileSystemError && err.code === 'FileNotFound';
+                if (!isNotFound) {
+                  console.warn('[wiki-extension] Unexpected error checking workspace path:', candidateUri.fsPath, err);
                 }
               }
             }

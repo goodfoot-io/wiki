@@ -1,6 +1,6 @@
 {
   "name": "@goodfoot/wiki-win32-x64",
-  "version": "0.5.31",
+  "version": "0.5.32",
   "description": "Platform-specific binary for @goodfoot/wiki",
   "license": "MIT",
   "os": [

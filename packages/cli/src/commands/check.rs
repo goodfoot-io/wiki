@@ -195,6 +195,9 @@ fn collect_for_files(
             let abs = repo_root.join(&resolved);
             match std::fs::read_to_string(&abs) {
                 Err(_) => {
+                    if abs.is_dir() {
+                        continue;
+                    }
                     diagnostics.push(CheckDiagnostic {
                         kind: "missing_file".into(),
                         file: path.display().to_string(),
@@ -510,6 +513,21 @@ mod tests {
             code, 1,
             "a truly missing wikilink must still be reported when using a file glob"
         );
+    }
+
+    #[test]
+    fn test_check_directory_link_is_valid() {
+        let repo = TestRepo::new();
+        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        repo.create_file("src/lib.rs", "fn main() {}");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [src](src/) for details."),
+        );
+        repo.commit("add files");
+
+        let code = run(&[], false, repo.path()).expect("run");
+        assert_eq!(code, 0, "directory fragment links must not produce missing_file");
     }
 
     #[test]
