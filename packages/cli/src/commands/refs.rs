@@ -159,7 +159,10 @@ mod tests {
     }
 
     fn build_entries(index: &WikiIndex, page_title: &str) -> Vec<RefEntry> {
-        let page = index.resolve_page(page_title).expect("resolve").expect("page");
+        let page = index
+            .resolve_page(page_title)
+            .expect("resolve")
+            .expect("page");
         let wikilinks = parse_wikilinks(&page.content);
         let mut seen = HashSet::new();
         let mut targets = Vec::new();
@@ -227,7 +230,13 @@ mod tests {
             _ => panic!("expected resolved"),
         }
         match &entries[1] {
-            RefEntry::Resolved { wikilink, title, aliases, tags, .. } => {
+            RefEntry::Resolved {
+                wikilink,
+                title,
+                aliases,
+                tags,
+                ..
+            } => {
                 assert_eq!(wikilink, "Other Page");
                 assert_eq!(title, "Other Page");
                 assert!(aliases.is_empty());
@@ -254,7 +263,9 @@ mod tests {
         let entries = build_entries(&index, "Source");
         assert_eq!(entries.len(), 2);
         assert!(matches!(&entries[0], RefEntry::Resolved { title, .. } if title == "Known"));
-        assert!(matches!(&entries[1], RefEntry::Unresolved { wikilink, error } if wikilink == "Missing Page" && error == "not found"));
+        assert!(
+            matches!(&entries[1], RefEntry::Unresolved { wikilink, error } if wikilink == "Missing Page" && error == "not found")
+        );
     }
 
     #[test]

@@ -212,8 +212,13 @@ impl WikiIndex {
         limit: i64,
         offset: usize,
     ) -> Result<(Vec<SearchResult>, usize)> {
-        self.runtime
-            .block_on(search_weighted_async(&self.conn, &self.repo_root, query, limit, offset))
+        self.runtime.block_on(search_weighted_async(
+            &self.conn,
+            &self.repo_root,
+            query,
+            limit,
+            offset,
+        ))
     }
 
     pub fn suggest(&self, query: &str) -> Result<Vec<SearchResult>> {
@@ -227,7 +232,8 @@ impl WikiIndex {
     }
 
     pub fn list_pages(&self, tag: Option<&str>) -> Result<Vec<PageListEntry>> {
-        self.runtime.block_on(list_pages_async(&self.conn, &self.repo_root, tag))
+        self.runtime
+            .block_on(list_pages_async(&self.conn, &self.repo_root, tag))
     }
 
     pub fn links(&self, input: &str) -> Result<Vec<SearchResult>> {
@@ -251,7 +257,6 @@ impl WikiIndex {
             changed_paths,
         ))
     }
-
 }
 
 fn wiki_dir(repo_root: &Path) -> Result<PathBuf> {
@@ -379,7 +384,9 @@ impl IndexLock {
             .truncate(false)
             .open(&lock_path)
             .into_diagnostic()
-            .wrap_err_with(|| format!("failed to open index lock file at {}", lock_path.display()))?;
+            .wrap_err_with(|| {
+                format!("failed to open index lock file at {}", lock_path.display())
+            })?;
 
         let deadline = std::time::Instant::now() + Self::TOTAL_BUDGET;
         loop {
@@ -1627,7 +1634,11 @@ fn escape_like_pattern(token: &str) -> String {
         .replace('_', "\\_")
 }
 
-async fn list_pages_async(conn: &Connection, repo_root: &Path, tag: Option<&str>) -> Result<Vec<PageListEntry>> {
+async fn list_pages_async(
+    conn: &Connection,
+    repo_root: &Path,
+    tag: Option<&str>,
+) -> Result<Vec<PageListEntry>> {
     perf::scope_async_result(
         "index.list_pages",
         json!({
@@ -1992,9 +2003,8 @@ fn tokenize_terms(text: &str) -> String {
 
 fn strip_markdown_links(text: &str) -> std::borrow::Cow<'_, str> {
     static LINK_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let re = LINK_RE.get_or_init(|| {
-        regex::Regex::new(r"\[([^\]]+)\]\([^)]*\)").expect("inline link regex")
-    });
+    let re = LINK_RE
+        .get_or_init(|| regex::Regex::new(r"\[([^\]]+)\]\([^)]*\)").expect("inline link regex"));
     re.replace_all(text, "$1")
 }
 

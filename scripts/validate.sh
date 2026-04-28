@@ -4,7 +4,7 @@ set -o pipefail
 {
   yarn typecheck &&
   yarn lint &&
-  wiki check --fix &&
+  wiki check &&
   yarn test &&
   SKIP_INSTALL=1 yarn build
 } 2>&1 | tee yarn-validate-output.log

@@ -209,6 +209,24 @@ enum Commands {
         #[arg(long)]
         no_reload: bool,
     },
+
+    /// Git-mesh scaffold and mesh management subcommands.
+    Mesh {
+        #[command(subcommand)]
+        sub: MeshCmd,
+    },
+}
+
+/// Subcommands of `wiki mesh`.
+#[derive(Debug, Subcommand)]
+enum MeshCmd {
+    /// Generate a shell script of `git mesh add` / `git mesh why` commands
+    /// for every fragment link found in the wiki corpus.
+    Scaffold {
+        /// Glob patterns to match wiki pages (default: $WIKI_DIR/**/*.md)
+        #[arg(value_name = "glob")]
+        globs: Vec<String>,
+    },
 }
 
 /// Read all non-empty trimmed lines from stdin, if stdin is not an interactive terminal.
@@ -377,6 +395,9 @@ fn run(
         Some(Commands::Serve { port, no_reload }) => {
             commands::serve::run(port, no_reload, &repo_root)
         }
+        Some(Commands::Mesh { sub }) => match sub {
+            MeshCmd::Scaffold { globs } => commands::mesh::scaffold::run(&globs, json, &repo_root),
+        },
         None => match query.as_deref() {
             Some(query) => commands::search::run(query, limit, offset, json, &repo_root),
             None => {
@@ -437,6 +458,9 @@ fn command_name(command: Option<&Commands>, query: Option<&str>) -> &'static str
         Some(Commands::Html { .. }) => "html",
         Some(Commands::Install { .. }) => "install",
         Some(Commands::Serve { .. }) => "serve",
+        Some(Commands::Mesh { sub }) => match sub {
+            MeshCmd::Scaffold { .. } => "mesh-scaffold",
+        },
         None if query.is_some() => "search",
         None => "help",
     }

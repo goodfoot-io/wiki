@@ -64,10 +64,7 @@ pub fn run(globs: &[String], json: bool, repo_root: &Path) -> Result<i32> {
         }
     }
 
-    if diagnostics
-        .iter()
-        .any(|d| d.kind != "alias_resolve")
-    {
+    if diagnostics.iter().any(|d| d.kind != "alias_resolve") {
         Ok(1)
     } else {
         Ok(0)
@@ -131,8 +128,9 @@ fn collect_for_files(
                         kind: "frontmatter".into(),
                         file: path.display().to_string(),
                         line: 1,
-                        message: "Add a `---` frontmatter block. `title` and `summary` are required."
-                            .into(),
+                        message:
+                            "Add a `---` frontmatter block. `title` and `summary` are required."
+                                .into(),
                     });
                 }
             }
@@ -484,7 +482,10 @@ mod tests {
         // Regression: passing a file path must not limit the index to that file only.
         let repo = TestRepo::new();
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
-        repo.create_file("wiki/page_a.md", &make_wiki_page("Page A", "See [[Page B]]."));
+        repo.create_file(
+            "wiki/page_a.md",
+            &make_wiki_page("Page A", "See [[Page B]]."),
+        );
         repo.create_file("wiki/page_b.md", &make_wiki_page("Page B", "Target."));
         repo.commit("add pages");
 
@@ -527,7 +528,10 @@ mod tests {
         repo.commit("add files");
 
         let code = run(&[], false, repo.path()).expect("run");
-        assert_eq!(code, 0, "directory fragment links must not produce missing_file");
+        assert_eq!(
+            code, 0,
+            "directory fragment links must not produce missing_file"
+        );
     }
 
     #[test]

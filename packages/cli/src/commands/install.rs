@@ -932,8 +932,7 @@ fn print_install_header(codex_home: &Path, git_ref: &str, dry_run: bool) {
     }
     println!();
     println!("Downloading from: {SOURCE_OWNER}/{SOURCE_REPO} @ {git_ref}");
-    println!(
-        "  (git branch, tag, or commit on github.com/{SOURCE_OWNER}/{SOURCE_REPO} —");
+    println!("  (git branch, tag, or commit on github.com/{SOURCE_OWNER}/{SOURCE_REPO} —");
     println!("   the wiki content and hook scripts are fetched from this ref)");
     println!("Installing into:  {}", codex_home.display());
     println!();
@@ -961,9 +960,7 @@ fn print_planned_files(summary: Option<&InstallSummary>) {
             "  - skills/wiki/        the wiki skill + reference docs ({n} file(s), {})",
             status.label()
         ),
-        _ => println!(
-            "  - skills/wiki/        the wiki skill + reference docs"
-        ),
+        _ => println!("  - skills/wiki/        the wiki skill + reference docs"),
     }
     println!("  - .wiki-install/manifest.json");
     println!("                        bookkeeping: records this install so");
@@ -977,9 +974,7 @@ fn print_planned_files(summary: Option<&InstallSummary>) {
             "  - hooks.json          adds/updates the wiki PostToolUse hook entry ({})",
             status.label()
         ),
-        None => println!(
-            "  - hooks.json          adds/updates the wiki PostToolUse hook entry"
-        ),
+        None => println!("  - hooks.json          adds/updates the wiki PostToolUse hook entry"),
     }
     println!("                        (existing hooks in other groups are left alone)");
     match config_status {
@@ -987,9 +982,7 @@ fn print_planned_files(summary: Option<&InstallSummary>) {
             "  - config.toml         sets [features].codex_hooks = true ({})",
             status.label()
         ),
-        None => println!(
-            "  - config.toml         sets [features].codex_hooks = true"
-        ),
+        None => println!("  - config.toml         sets [features].codex_hooks = true"),
     }
     println!("                        (every other key in the file is left untouched)");
 }
@@ -1020,8 +1013,7 @@ const OPEN_VSX_URL: &str = "https://open-vsx.org/extension/goodfoot/wiki-extensi
 /// Claude Code plugin marketplace docs URL.
 const CLAUDE_DOCS_URL: &str = "https://code.claude.com/docs/en/discover-plugins";
 /// Exact command users should run to install the wiki plugin into Claude Code.
-const CLAUDE_MARKETPLACE_CMD: &str =
-    "claude plugin marketplace add goodfoot-io/wiki --scope project && claude plugin install wiki@goodfoot-wiki --scope project";
+const CLAUDE_MARKETPLACE_CMD: &str = "claude plugin marketplace add goodfoot-io/wiki --scope project && claude plugin install wiki@goodfoot-wiki --scope project";
 
 /// Footer appended after a successful `--codex` install pointing users at the
 /// VS Code / Open VSX extension listings.

@@ -5,6 +5,7 @@ pub mod html;
 pub mod install;
 pub mod links;
 pub mod list;
+pub mod mesh;
 pub mod refs;
 pub mod search;
 pub mod serve;

@@ -57,10 +57,7 @@ pub fn run(input: &str, repo_root: &Path) -> Result<i32> {
         lines.join("\n")
     );
 
-    println!(
-        "{}",
-        serde_json::json!({ "systemMessage": system_message })
-    );
+    println!("{}", serde_json::json!({ "systemMessage": system_message }));
 
     Ok(0)
 }

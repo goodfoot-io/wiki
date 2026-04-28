@@ -516,7 +516,8 @@ mod tests {
 
     #[test]
     fn test_link_outside_code_block_extracted() {
-        let content = "[Before](before.rs#L1)\n```\n[Inside](inside.rs#L1)\n```\n[After](after.rs#L1)\n";
+        let content =
+            "[Before](before.rs#L1)\n```\n[Inside](inside.rs#L1)\n```\n[After](after.rs#L1)\n";
         let links = parse_fragment_links(content);
         assert_eq!(links.len(), 2);
         let paths: Vec<&str> = links.iter().map(|l| l.path.as_str()).collect();

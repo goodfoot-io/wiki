@@ -595,11 +595,7 @@ mod tests {
         repo.commit_all("initial");
 
         let index = WikiIndex::prepare(repo.path()).expect("prepare");
-        let rendered = render_html(
-            "[fragment](src/lib.rs#L1-L2)",
-            RenderMode::FullPage,
-            &index,
-        );
+        let rendered = render_html("[fragment](src/lib.rs#L1-L2)", RenderMode::FullPage, &index);
 
         assert!(rendered.contains("alpha"));
         assert!(!rendered.contains("src/lib.rs#L"));
