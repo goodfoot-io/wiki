@@ -108,23 +108,11 @@ enum Commands {
     /// With --format json, emits [{ title, summary, file }].
     Extract,
 
-    /// Emit a PostToolUse hook JSON envelope from wikilinks found in stdin.
+    /// Run `wiki check` on the written/edited file path from a PostToolUse
+    /// event and emit a systemMessage when validation errors remain.
     ///
-    /// Reads stdin, resolves [[wikilink]] references, and wraps the summaries
-    /// in the hookSpecificOutput envelope expected by Claude Code (--claude)
-    /// or Codex (--codex). Produces no output when no wikilinks are found.
     /// Use directly as the "command" value in a PostToolUse hook definition.
-    ///
-    /// With --check, runs `wiki check --fix` on the written/edited file path
-    /// from the PostToolUse event and emits a systemMessage when errors remain.
-    Hook {
-        #[arg(long = "claude", conflicts_with_all = ["codex", "check"])]
-        claude: bool,
-        #[arg(long = "codex", conflicts_with_all = ["claude", "check"])]
-        codex: bool,
-        #[arg(long = "check", conflicts_with_all = ["claude", "codex"])]
-        check: bool,
-    },
+    Hook,
 
     /// List all wiki pages with metadata (title, aliases, tags, file path).
     ///
@@ -181,7 +169,7 @@ enum Commands {
     ///
     /// Use --codex to install the Codex integration (downloads the latest
     /// plugin assets, installs the wiki skill, and configures a PostToolUse
-    /// hook that runs `wiki hook --codex`; repeat runs update the install).
+    /// hook that runs `wiki hook`; repeat runs update the install).
     /// Use --claude to print friendly setup instructions for the Claude Code
     /// plugin marketplace — this mode is informational only and never
     /// touches the filesystem or the network.
@@ -344,22 +332,10 @@ fn run(
             let input = lines.join("\n");
             commands::extract::run(&input, json, &repo_root)
         }
-        Some(Commands::Hook { claude, codex, check }) => {
-            if check {
-                let lines = read_stdin_lines();
-                let input = lines.join("\n");
-                return commands::hook_check::run(&input, &repo_root);
-            }
-            if !claude && !codex {
-                eprintln!("error: one of --claude, --codex, or --check must be provided");
-                return Ok(2);
-            }
+        Some(Commands::Hook) => {
             let lines = read_stdin_lines();
-            if lines.is_empty() {
-                return Ok(0);
-            }
             let input = lines.join("\n");
-            commands::hook::run(&input, &repo_root)
+            commands::hook_check::run(&input, &repo_root)
         }
         Some(Commands::List { tag }) => commands::list::run(&[], tag.as_deref(), json, &repo_root),
         Some(Commands::Summary { title }) => {
@@ -454,7 +430,7 @@ fn command_name(command: Option<&Commands>, query: Option<&str>) -> &'static str
         Some(Commands::Check { .. }) => "check",
         Some(Commands::Links { .. }) => "links",
         Some(Commands::Extract) => "extract",
-        Some(Commands::Hook { .. }) => "hook",
+        Some(Commands::Hook) => "hook",
         Some(Commands::List { .. }) => "list",
         Some(Commands::Summary { .. }) => "summary",
         Some(Commands::Refs { .. }) => "refs",

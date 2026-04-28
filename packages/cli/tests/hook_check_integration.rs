@@ -1,4 +1,4 @@
-//! Regression tests for `wiki hook --check` (PostToolUse:Edit hook).
+//! Regression tests for `wiki hook` (PostToolUse:Edit hook).
 //!
 //! The hook must silently return exit 0 when given a `.md` file that is
 //! outside the wiki scope (i.e., not under `$WIKI_DIR` and not a
@@ -48,7 +48,7 @@ impl TestRepo {
 }
 
 /// A non-wiki `.md` file (not under `$WIKI_DIR`, not `*.wiki.md`) must be
-/// silently skipped: `wiki hook --check` should produce no output and exit 0.
+/// silently skipped: `wiki hook` should produce no output and exit 0.
 ///
 /// This test FAILS before the bug is fixed because `hook_check::run()` passes
 /// the file path as an explicit glob to `check::collect`, bypassing the
@@ -78,7 +78,6 @@ fn hook_check_skips_non_wiki_md_file() {
     let binary = env!("CARGO_BIN_EXE_wiki");
     let mut child = Command::new(binary)
         .arg("hook")
-        .arg("--check")
         .current_dir(repo.path())
         .env("WIKI_DIR", "wiki")
         .stdin(Stdio::piped())
@@ -106,9 +105,6 @@ fn hook_check_skips_non_wiki_md_file() {
     let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
 
     // The hook must produce no output when given a non-wiki .md file.
-    // BUG: before fix, a systemMessage JSON object is printed to stdout
-    // because the file path is passed as a glob to check::collect, which
-    // skips wiki-scope filtering and validates any .md file it finds.
     assert!(
         stdout.trim().is_empty(),
         "hook must produce no output for a non-wiki .md file, got: {stdout}"

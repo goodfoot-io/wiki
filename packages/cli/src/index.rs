@@ -252,14 +252,6 @@ impl WikiIndex {
         ))
     }
 
-    pub fn fetch_all_keywords(&self) -> Result<Vec<(String, i64)>> {
-        self.runtime.block_on(fetch_all_keywords_async(&self.conn))
-    }
-
-    pub fn fetch_pages_by_ids(&self, ids: &[i64]) -> Result<Vec<SearchResult>> {
-        self.runtime
-            .block_on(fetch_pages_by_ids_async(&self.conn, &self.repo_root, ids))
-    }
 }
 
 fn wiki_dir(repo_root: &Path) -> Result<PathBuf> {
@@ -1895,56 +1887,6 @@ async fn load_tags(conn: &Connection, document_id: i64) -> Result<Vec<String>> {
         tags.push(row_string(&row, 0)?);
     }
     Ok(tags)
-}
-
-async fn fetch_all_keywords_async(conn: &Connection) -> Result<Vec<(String, i64)>> {
-    let mut rows = conn
-        .query("SELECT keyword, document_id FROM keywords", ())
-        .await
-        .into_diagnostic()
-        .wrap_err("failed to fetch keywords")?;
-    let mut result = Vec::new();
-    while let Some(row) = next_row(&mut rows).await? {
-        let keyword: String = row.get(0usize).into_diagnostic()?;
-        let doc_id: i64 = row.get(1usize).into_diagnostic()?;
-        result.push((keyword, doc_id));
-    }
-    Ok(result)
-}
-
-async fn fetch_pages_by_ids_async(
-    conn: &Connection,
-    repo_root: &Path,
-    ids: &[i64],
-) -> Result<Vec<SearchResult>> {
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut results = Vec::new();
-    for &id in ids {
-        let mut rows = conn
-            .query(
-                "SELECT title, path_abs, summary FROM documents WHERE id = ?1",
-                params![id],
-            )
-            .await
-            .into_diagnostic()
-            .wrap_err("failed to fetch page by id")?;
-        if let Some(row) = next_row(&mut rows).await? {
-            let title: String = row.get(0usize).into_diagnostic()?;
-            let path_abs: String = row.get(1usize).into_diagnostic()?;
-            let summary: String = row.get(2usize).into_diagnostic()?;
-            let file = normalize_repo_relative_path(&path_abs, repo_root);
-            results.push(SearchResult {
-                title,
-                file,
-                summary,
-                alias: None,
-                snippets: Vec::new(),
-            });
-        }
-    }
-    Ok(results)
 }
 
 fn build_fts_query(query: &str) -> String {

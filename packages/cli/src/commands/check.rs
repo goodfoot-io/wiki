@@ -8,7 +8,7 @@ use crate::commands::discover_files;
 use crate::frontmatter::{Frontmatter, build_index, parse_frontmatter, parse_title};
 use crate::git::resolve_ref;
 use crate::headings::extract_headings;
-use crate::parser::parse_wikilinks;
+use crate::parser::{LinkKind, parse_fragment_links, parse_wikilinks};
 
 // ── Diagnostic types ──────────────────────────────────────────────────────────
 
@@ -184,6 +184,68 @@ fn collect_for_files(
             Ok(c) => c,
             Err(_) => continue, // already reported above
         };
+
+        // Fragment links — validate path existence and line range bounds
+        let frag_links = parse_fragment_links(&content);
+        for link in &frag_links {
+            if link.kind == LinkKind::External {
+                continue;
+            }
+            let resolved = crate::commands::resolve_link_path(&link.path, path, repo_root);
+            let abs = repo_root.join(&resolved);
+            match std::fs::read_to_string(&abs) {
+                Err(_) => {
+                    diagnostics.push(CheckDiagnostic {
+                        kind: "missing_file".into(),
+                        file: path.display().to_string(),
+                        line: link.source_line,
+                        message: format!(
+                            "File `{}` not found. Check the path or update the link.",
+                            link.path
+                        ),
+                    });
+                }
+                Ok(ref_content) => {
+                    if let Some(start) = link.start_line {
+                        if start == 0 {
+                            diagnostics.push(CheckDiagnostic {
+                                kind: "line_range".into(),
+                                file: path.display().to_string(),
+                                line: link.source_line,
+                                message: format!(
+                                    "Line numbers are 1-based. Replace `L0` with `L1` in `{}`.",
+                                    link.path
+                                ),
+                            });
+                        } else {
+                            let line_count = ref_content.lines().count() as u32;
+                            let end = link.end_line.unwrap_or(start);
+                            if start > line_count || end > line_count {
+                                diagnostics.push(CheckDiagnostic {
+                                    kind: "line_range".into(),
+                                    file: path.display().to_string(),
+                                    line: link.source_line,
+                                    message: format!(
+                                        "Line range `L{start}–L{end}` exceeds `{}` ({line_count} lines).",
+                                        link.path
+                                    ),
+                                });
+                            } else if start > end {
+                                diagnostics.push(CheckDiagnostic {
+                                    kind: "line_range".into(),
+                                    file: path.display().to_string(),
+                                    line: link.source_line,
+                                    message: format!(
+                                        "Line range start (`L{start}`) must not exceed end (`L{end}`) in `{}`.",
+                                        link.path
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Wikilinks
         let wiki_links = parse_wikilinks(&content);
