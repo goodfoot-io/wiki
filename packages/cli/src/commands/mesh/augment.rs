@@ -1,7 +1,6 @@
 use crate::parser::{FragmentLink, scrub_non_content};
 
 /// A `FragmentLink` augmented with surrounding text and heading context.
-#[allow(dead_code)]
 pub(crate) struct AugmentedLink {
     pub(crate) link: FragmentLink,
     /// The link's source line ± 1 line, scrubbed via `scrub_non_content`, joined with `\n`.
@@ -18,7 +17,6 @@ pub(crate) struct AugmentedLink {
 /// lines and contribute no meaningful text.  Headings that appear inside code
 /// blocks are never pushed onto the heading chain because they are blanked out
 /// by the scrubber before the chain is built.
-#[allow(dead_code)]
 pub(crate) fn augment(links: &[FragmentLink], content: &str) -> Vec<AugmentedLink> {
     let scrubbed = scrub_non_content(content);
     let scrubbed_lines: Vec<&str> = scrubbed.lines().collect();

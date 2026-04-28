@@ -2,7 +2,6 @@
 ///
 /// Ported verbatim from `scripts/mesh-scaffold-v4.mjs` `FILE_EXTS`.
 /// Sorted for `binary_search` lookup.
-#[allow(dead_code)]
 pub(crate) const FILE_EXTS: &[&str] = &[
     "bash", "cjs", "css", "env", "go", "html", "js", "json", "jsx", "md", "mdx", "mjs", "py", "rb",
     "rs", "scss", "sh", "swift", "toml", "ts", "tsx", "yaml", "yml",
@@ -12,7 +11,6 @@ pub(crate) const FILE_EXTS: &[&str] = &[
 ///
 /// Ported verbatim from `scripts/mesh-scaffold-v4.mjs` `STOP`.
 /// Sorted for `binary_search` lookup.
-#[allow(dead_code)]
 pub(crate) const STOP: &[&str] = &[
     "a",
     "above",
@@ -133,7 +131,6 @@ pub(crate) const STOP: &[&str] = &[
 ///
 /// Ported verbatim from `scripts/mesh-scaffold-v4.mjs` `NOISE`.
 /// Sorted for `binary_search` lookup.
-#[allow(dead_code)]
 pub(crate) const NOISE: &[&str] = &[
     "api",
     "app",
@@ -223,14 +220,12 @@ pub(crate) const NOISE: &[&str] = &[
 ///
 /// Ported verbatim from `scripts/mesh-scaffold-v4.mjs` `REL_TYPES`.
 /// Each variant's `words` slice is sorted for `binary_search` lookup.
-#[allow(dead_code)]
 pub(crate) struct RelType {
     pub(crate) rel_type: &'static str,
     pub(crate) threshold: usize,
     pub(crate) words: &'static [&'static str],
 }
 
-#[allow(dead_code)]
 pub(crate) const REL_TYPES: &[RelType] = &[
     RelType {
         rel_type: "contract",
@@ -317,13 +312,11 @@ pub(crate) const REL_TYPES: &[RelType] = &[
 ///
 /// Ported verbatim from `scripts/mesh-scaffold-v4.mjs` `CATEGORIES`.
 /// Each category's `words` slice is sorted for `binary_search` lookup.
-#[allow(dead_code)]
 pub(crate) struct Category {
     pub(crate) name: &'static str,
     pub(crate) words: &'static [&'static str],
 }
 
-#[allow(dead_code)]
 pub(crate) const CATEGORIES: &[Category] = &[
     Category {
         name: "billing",
