@@ -72,19 +72,24 @@ struct Cli {
 enum Commands {
     /// Validate all links and frontmatter in wiki pages.
     ///
-    /// Fragment links: pinned SHA present, referenced file exists,
-    /// line ranges within bounds. Wikilinks: target title/alias
-    /// exists (case-insensitive), unique, heading fragments
-    /// resolve. Frontmatter: title required, aliases and tags
-    /// valid, no title/alias collisions (case-insensitive).
+    /// Fragment links: referenced file exists, line ranges within bounds.
+    /// Wikilinks: target title/alias exists (case-insensitive), unique,
+    /// heading fragments resolve. Frontmatter: title required, aliases
+    /// and tags valid, no title/alias collisions (case-insensitive).
     /// Defaults to "$WIKI_DIR/**/*.md".
     ///
-    /// With --fix, auto-pins unpinned fragment links (missing_sha) by
-    /// resolving each referenced file to its latest commit SHA.
+    /// With --mesh, also verifies that every fragment link with a line
+    /// range is covered by a `git mesh` that anchors both the wiki file
+    /// and the link target.
     Check {
         /// Glob patterns to match wiki pages (default: $WIKI_DIR/**/*.md)
         #[arg(value_name = "glob")]
         globs: Vec<String>,
+        /// Additionally verify that every fragment link with a line range is
+        /// covered by a `git mesh` that anchors both the wiki file and the
+        /// link target.
+        #[arg(long)]
+        mesh: bool,
     },
 
     /// Find wiki pages that link to the given target.
@@ -331,7 +336,7 @@ fn run(
     let started = Instant::now();
 
     let result = match command {
-        Some(Commands::Check { globs }) => commands::check::run(&globs, json, &repo_root),
+        Some(Commands::Check { globs, mesh }) => commands::check::run(&globs, json, mesh, &repo_root),
         Some(Commands::Links { target }) => {
             let inputs = resolve_inputs(target, read_stdin_lines)?;
             run_for_each(

@@ -1,5 +1,6 @@
 pub mod check;
 pub mod extract;
+pub(crate) mod mesh_coverage;
 pub mod hook_check;
 pub mod html;
 pub mod install;
