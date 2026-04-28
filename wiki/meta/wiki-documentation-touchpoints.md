@@ -13,7 +13,7 @@ For the CLI architecture itself, see [[Wiki CLI]]. For the broader rules governi
 
 ## Command Behavior Source Of Truth
 
-The primary source of truth for top-level CLI behavior is the [Clap configuration and dispatch in `packages/cli/src/main.rs`](packages/cli/src/main.rs#L26-L60&e2b1474). That block defines the help text, the `query` positional argument, and the reserved subcommand set. The [top-level `run(...)` match in the same file](packages/cli/src/main.rs#L292-L374&e2b1474) is what decides that bare `wiki [query]` executes ranked lookup rather than page printing.
+The primary source of truth for top-level CLI behavior is the [Clap configuration and dispatch in `packages/cli/src/main.rs`](packages/cli/src/main.rs#L26-L60&628d6f9). That block defines the help text, the `query` positional argument, and the reserved subcommand set. The [top-level `run(...)` match in the same file](packages/cli/src/main.rs#L292-L374&628d6f9) is what decides that bare `wiki [query]` executes ranked lookup rather than page printing.
 
 ## Operator-Facing Documentation
 
@@ -36,7 +36,7 @@ The [wiki skill's maintenance reference](.claude/skills/wiki/references/maintena
 
 When wiki documentation behavior changes, use this order:
 
-1. Confirm the implementation in [CLI parsing and dispatch](packages/cli/src/main.rs#L26-L60&e2b1474) and [top-level command routing](packages/cli/src/main.rs#L292-L374&e2b1474).
+1. Confirm the implementation in [CLI parsing and dispatch](packages/cli/src/main.rs#L26-L60&628d6f9) and [top-level command routing](packages/cli/src/main.rs#L292-L374&628d6f9).
 2. Update the primary user docs in [CLAUDE.md](CLAUDE.md#L83-L94&e2b1474).
 3. Update the agent workflow contract in [.claude/skills/wiki/SKILL.md](.claude/skills/wiki/SKILL.md#L73-L172&e2b1474).
 4. Update secondary references such as [Wiki CLI Advanced Usage](wiki/reference/wiki-cli-advanced-usage.md#L8-L132&e2b1474), [Wiki CLI Feedback](wiki/meta/wiki-feedback.md#L11-L21&e2b1474), and [the Gemini maintenance example](examples/githooks/scripts/gemini-wiki-gap-detection.sh#e2b1474).
@@ -44,5 +44,5 @@ When wiki documentation behavior changes, use this order:
 
 ## References
 
-- [Wiki CLI architecture page](wiki/architecture/wiki-cli.md#L8-L54&aa22a75)
+- [Wiki CLI architecture page](wiki/architecture/wiki-cli.md#L8-L54&506212e)
 - [Wiki Organization](wiki/meta/wiki-organization.md#L9-L67&e2b1474)

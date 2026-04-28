@@ -7,11 +7,11 @@ Wikilinks are the mechanism by which wiki pages reference each other. The resolu
 
 ## Indexing and Storage
 
-When the [WikiIndex](packages/cli/src/index.rs#L173-L190&e2b1474) is constructed, it scans wiki pages to extract titles, optional aliases, and [[Wiki CLI|fragment links]]. This data is indexed in a SQLite database to support O(1) wikilink resolution and unified incoming-link discovery via the `wiki links` command.
+When the [WikiIndex](packages/cli/src/index.rs#L173-L190&ee72511) is constructed, it scans wiki pages to extract titles, optional aliases, and [[Wiki CLI|fragment links]]. This data is indexed in a SQLite database to support O(1) wikilink resolution and unified incoming-link discovery via the `wiki links` command.
 
 ## Collision Detection
 
-The [check command](packages/cli/src/commands/check.rs#L28-L29&e2b1474) validates that no two pages share the same title or alias. Title collisions would create ambiguity in wikilink resolution and break the assumption that each concept has exactly one canonical home.
+The [check command](packages/cli/src/commands/check.rs#L28-L29&628d6f9) validates that no two pages share the same title or alias. Title collisions would create ambiguity in wikilink resolution and break the assumption that each concept has exactly one canonical home.
 
 ## Wikilink Extraction and Resolution
 
