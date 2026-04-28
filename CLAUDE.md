@@ -100,3 +100,21 @@ Always focus test runs as much as possible; i.e. `yarn test path/to/example.test
 
 Run `yarn validate` from the workspace root for final validations — it typechecks, lints, tests, and builds all packages. The script merges stderr into stdout, prints `Exit code: N` at the end, and writes everything to `./yarn-validate-output.log`. **Run only `yarn validate` — do not add `2>&1`, `echo $?`, or any other wrapper.** Exit code 0 means all checks passed.
 </validation>
+
+<git-mesh>
+
+```bash
+# Stage the mesh: slug titles the subsystem; line-range anchors (`path#L<start>-L<end>`) or whole-file anchors carry the path
+git mesh add billing/checkout-request-flow \
+  web/checkout.tsx#L88-L120 \
+  api/charge.ts#L30-L76
+
+# Name the subsystem, flow, or concern the anchors collectively form, and say plainly what it does across them
+git mesh why billing/checkout-request-flow \
+  -m "Checkout request flow that carries a charge attempt from the browser to the Stripe-backed server."
+
+# The post-commit hook runs `git mesh commit`
+git commit -m "Wire checkout to charge API"
+```
+
+</git-mesh>

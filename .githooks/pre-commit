@@ -161,7 +161,7 @@ if command -v wiki &> /dev/null; then
     WIKI_STAGED=$(echo "$STAGED_FILES" | grep '\.md$' || true)
     if [ -n "$WIKI_STAGED" ]; then
         echo "Running wiki check --fix..."
-        wiki check --fix
+        wiki check
         # Re-stage any .md files that wiki check --fix modified
         WIKI_FIXED=""
         for f in $WIKI_STAGED; do
