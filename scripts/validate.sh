@@ -6,6 +6,7 @@ set -o pipefail
 # and vsce cannot follow symlinks when packaging — build only the CLI in that case.
 EXTENSION_DIST="$(dirname "$0")/../packages/extension/dist"
 if [ -L "$EXTENSION_DIST" ]; then
+  echo "validate.sh: extension dist is a symlink (worktree); building CLI only — skipping vsce packaging; tsc/lint still validated extension" >&2
   BUILD_CMD="yarn workspace @goodfoot/wiki build"
 else
   BUILD_CMD="SKIP_INSTALL=1 yarn build"

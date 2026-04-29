@@ -317,7 +317,8 @@ fn collect_for_files(
 
     // ── Mesh coverage pass (opt-in) ───────────────────────────────────────────
     if mesh {
-        diagnostics.extend(mesh_coverage::collect_mesh_diagnostics(files, repo_root));
+        let mesh_diags = mesh_coverage::collect_mesh_diagnostics(files, repo_root)?;
+        diagnostics.extend(mesh_diags);
     }
 
     Ok(diagnostics)
@@ -330,7 +331,13 @@ mod tests {
     use super::*;
     use std::fs;
     use std::process::Command;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    /// Serialize all tests that read or write PATH for `git-mesh` resolution.
+    /// Cargo's default harness is multi-threaded; without serialization, one test
+    /// stripping git-mesh from PATH races with another test that needs it.
+    static PATH_MUTEX: Mutex<()> = Mutex::new(());
 
     struct TestRepo {
         dir: TempDir,
@@ -635,8 +642,9 @@ mod tests {
 
     #[test]
     fn mesh_uncovered_link_exits_1() {
-        let repo = TestRepo::new();
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let _guard = PATH_MUTEX.lock().expect("path mutex");
+        let repo = TestRepo::new();
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
@@ -657,8 +665,9 @@ mod tests {
 
     #[test]
     fn mesh_covered_link_exits_0() {
-        let repo = TestRepo::new();
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let _guard = PATH_MUTEX.lock().expect("path mutex");
+        let repo = TestRepo::new();
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
@@ -686,8 +695,9 @@ mod tests {
 
     #[test]
     fn mesh_covers_code_but_not_wiki_file() {
-        let repo = TestRepo::new();
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let _guard = PATH_MUTEX.lock().expect("path mutex");
+        let repo = TestRepo::new();
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file("src/other.rs", "fn b() {}\n");
         repo.create_file(
@@ -715,8 +725,9 @@ mod tests {
 
     #[test]
     fn mesh_whole_file_code_anchor_covers_ranged_link() {
-        let repo = TestRepo::new();
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let _guard = PATH_MUTEX.lock().expect("path mutex");
+        let repo = TestRepo::new();
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
@@ -742,8 +753,9 @@ mod tests {
 
     #[test]
     fn mesh_range_outside_link_does_not_cover() {
-        let repo = TestRepo::new();
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let _guard = PATH_MUTEX.lock().expect("path mutex");
+        let repo = TestRepo::new();
         // Create a file with at least 20 lines
         let content: String = (1..=20).map(|i| format!("fn line_{i}() {{}}\n")).collect();
         repo.create_file("src/code.rs", &content);
@@ -825,18 +837,14 @@ mod tests {
         );
         repo.commit("add files");
 
-        // Prepend a temp dir that does NOT contain git-mesh so PATH lookup fails
+        // Hold the PATH mutex for the entire test to prevent races with other
+        // tests that resolve git-mesh from PATH.
+        let _guard = PATH_MUTEX.lock().expect("path mutex");
+
         let shim_dir = tempfile::TempDir::new().expect("shim tempdir");
         let original_path = std::env::var("PATH").unwrap_or_default();
 
-        // Temporarily override PATH by creating a shim dir with no git-mesh binary
-        // We need to set env on the process. Use a scoped env manipulation.
-        // Since tests run in the same process, we manipulate PATH for the duration.
-        // Use a mutex to avoid interference between parallel tests.
         {
-            // Build a PATH that has shim_dir first but no git-mesh there
-            // Actually, we need to REMOVE git-mesh from PATH entirely.
-            // Build PATH with only non-git-mesh-containing dirs.
             let filtered_path: String = original_path
                 .split(':')
                 .filter(|dir| {
@@ -847,11 +855,11 @@ mod tests {
                 .join(":");
             let test_path = format!("{}:{}", shim_dir.path().display(), filtered_path);
 
-            // SAFETY: single-threaded test; no other threads read PATH concurrently.
+            // SAFETY: PATH_MUTEX is held; no other test reads/writes PATH concurrently.
             unsafe { std::env::set_var("PATH", &test_path) };
             let result = collect(&[], true, repo.path());
             // Restore PATH before asserting so failures don't leak state.
-            // SAFETY: single-threaded test; no other threads read PATH concurrently.
+            // SAFETY: PATH_MUTEX is held.
             unsafe { std::env::set_var("PATH", &original_path) };
 
             let diagnostics = result.expect("collect");
@@ -883,10 +891,10 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
                 .join(":");
-            // SAFETY: single-threaded test; no other threads read PATH concurrently.
+            // SAFETY: PATH_MUTEX is held.
             unsafe { std::env::set_var("PATH", &filtered_path) };
             let code = run(&[], false, true, repo.path()).expect("run");
-            // SAFETY: single-threaded test; no other threads read PATH concurrently.
+            // SAFETY: PATH_MUTEX is held.
             unsafe { std::env::set_var("PATH", &original_path) };
             code
         };
@@ -911,7 +919,9 @@ mod tests {
 
         let (shim_dir, counter_path) = repo.install_counting_shim();
 
-        // Prepend the shim dir to PATH
+        // Hold the PATH mutex for the entire test.
+        let _guard = PATH_MUTEX.lock().expect("path mutex");
+
         let original_path = std::env::var("PATH").unwrap_or_default();
         let shim_path_str = shim_dir.path().display().to_string();
         // Filter out real git-mesh from PATH so only our shim is used
@@ -924,12 +934,12 @@ mod tests {
             .collect::<Vec<_>>()
             .join(":");
         let new_path = format!("{shim_path_str}:{filtered_path}");
-        // SAFETY: single-threaded test; no other threads read PATH concurrently.
+        // SAFETY: PATH_MUTEX is held; no other test reads/writes PATH concurrently.
         unsafe { std::env::set_var("PATH", &new_path) };
 
         let _diagnostics = collect(&[], true, repo.path()).expect("collect");
 
-        // SAFETY: single-threaded test; no other threads read PATH concurrently.
+        // SAFETY: PATH_MUTEX is held.
         unsafe { std::env::set_var("PATH", &original_path) };
 
         // Read the counter — git-mesh should have been called exactly once for the shared anchor
@@ -939,5 +949,52 @@ mod tests {
             count, 1,
             "git-mesh ls must be called exactly once for a shared (target, range) anchor, got {count}"
         );
+    }
+
+    #[test]
+    fn mesh_runtime_error_exits_2() {
+        let repo = TestRepo::new();
+        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        repo.create_file("src/code.rs", "fn a() {}\n");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [code](src/code.rs#L1-L1)."),
+        );
+        repo.commit("add files");
+
+        // Install a shim that always exits 128 with a fatal-looking stderr message.
+        let shim_dir = tempfile::TempDir::new().expect("shim tempdir");
+        let shim_path = shim_dir.path().join("git-mesh");
+        let script = "#!/bin/sh\necho 'fatal: not a git repo' >&2\nexit 128\n";
+        fs::write(&shim_path, script).expect("write shim");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))
+                .expect("chmod shim");
+        }
+
+        // Hold the PATH mutex for the entire test.
+        let _guard = PATH_MUTEX.lock().expect("path mutex");
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let shim_path_str = shim_dir.path().display().to_string();
+        let filtered_path: String = original_path
+            .split(':')
+            .filter(|dir| {
+                let gm = std::path::Path::new(dir).join("git-mesh");
+                !gm.exists()
+            })
+            .collect::<Vec<_>>()
+            .join(":");
+        let new_path = format!("{shim_path_str}:{filtered_path}");
+
+        // SAFETY: PATH_MUTEX is held; no other test reads/writes PATH concurrently.
+        unsafe { std::env::set_var("PATH", &new_path) };
+        let code = run(&[], false, true, repo.path()).expect("run");
+        // SAFETY: PATH_MUTEX is held.
+        unsafe { std::env::set_var("PATH", &original_path) };
+
+        assert_eq!(code, 2, "git-mesh non-zero exit must produce exit code 2 (runtime error)");
     }
 }
