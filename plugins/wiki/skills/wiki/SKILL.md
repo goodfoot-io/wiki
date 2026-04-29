@@ -35,9 +35,7 @@ tags:
 
 ## Fragment Links
 
-Fragment links are the change-detection mechanism. `wiki stale` compares each link's pinned SHA against HEAD — if the referenced file changed, the page is flagged for review. **This only works if a link exists.** A file referenced in prose but not linked is invisible to change detection: the documentation will silently drift as the code evolves.
-
-**Every source file the documentation relies on MUST have at least one fragment link.** This includes files whose types, constants, schemas, or behaviours are described — not only files whose functions are explained in detail.
+Fragment links are the coverage mechanism. **Every source file the documentation relies on MUST have at least one fragment link.** A file referenced in prose but not linked is invisible to mesh coverage checks: the documentation will silently drift as the code evolves.
 
 ```markdown
 The [rebuild function](packages/cards/src/rebuild.ts#L15-L45) re-indexes all card files
@@ -51,6 +49,7 @@ Heuristics:
 - Backticks in the link label (e.g. `` [`fn`](path) ``) are supported
 - Include broad context — a link that goes stale when surrounding code changes is working as intended
 - Do not add `@sha` manually — `wiki check --fix` pins unpinned links automatically
+- Run `wiki check --mesh` to verify every fragment link with a line range is covered by a `git mesh`; use `wiki mesh scaffold` to generate missing meshes
 
 When a file is relied upon but cannot be worked naturally into prose, add a **References** section at the bottom:
 
