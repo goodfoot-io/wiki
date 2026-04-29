@@ -271,7 +271,12 @@ fn parse_line_range(fragment: Option<&str>) -> (Option<u32>, Option<u32>) {
     if !frag.starts_with('L') && !frag.starts_with('l') {
         return (None, None);
     }
-    let frag = &frag[1..];
+    // Truncate at the first non-line-range character so trailing markers
+    // like `&<sha>` (e.g. `#L2-L7&f8b9169`) don't break parsing.
+    let end_idx = frag
+        .find(|c: char| !c.is_ascii_digit() && c != 'L' && c != 'l' && c != '-')
+        .unwrap_or(frag.len());
+    let frag = &frag[1..end_idx];
     if let Some(dash_pos) = frag.find('-') {
         let start_str = &frag[..dash_pos];
         let end_str = frag[dash_pos + 1..]

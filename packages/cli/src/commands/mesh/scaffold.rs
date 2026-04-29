@@ -339,6 +339,10 @@ fn generate_mesh(
     // `wiki/foo.md` must become `wiki/bar.rs` (or wherever it actually lives).
     let anchor_resolved = resolve_link_path(&link.path, &input.wiki_file, repo_root);
     let anchor_rel = path_relative_to(&anchor_resolved, repo_root);
+    // If the literal path doesn't exist in the repo, peel leading components
+    // until we find one that does — this lets wiki pages copied from another
+    // repo retain links that originally encoded a foreign repo's path prefix.
+    let anchor_rel = locate_existing_suffix(&anchor_rel, repo_root).unwrap_or(anchor_rel);
     let anchor = format!("{anchor_rel}#L{start_line}-L{end_line}");
 
     Mesh {
@@ -430,6 +434,23 @@ fn shell_double_quote_escape(s: &str) -> String {
 fn path_relative_to(path: &Path, repo_root: &Path) -> String {
     let rel = path.strip_prefix(repo_root).unwrap_or(path);
     rel.to_string_lossy().replace('\\', "/")
+}
+
+fn locate_existing_suffix(rel_path: &str, repo_root: &Path) -> Option<String> {
+    if repo_root.join(rel_path).exists() {
+        return Some(rel_path.to_string());
+    }
+    let parts: Vec<&str> = rel_path.split('/').collect();
+    for start in 1..parts.len() {
+        let candidate = parts[start..].join("/");
+        if candidate.is_empty() {
+            continue;
+        }
+        if repo_root.join(&candidate).exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
