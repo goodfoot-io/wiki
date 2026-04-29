@@ -14,7 +14,7 @@ For the design behind the integration, see [[Wiki Mesh Integration]]. For the co
 ## 1. Inventory the gap
 
 ```bash
-wiki check --mesh
+wiki check
 ```
 
 Each `mesh_uncovered` finding names the wiki file, the fragment link, and the line range that lacks a covering mesh. Skim the list before scripting anything: it tells you which subsystems will dominate the work, and it reveals duplicates (the same anchor appearing in two sections of the same page).
@@ -22,7 +22,7 @@ Each `mesh_uncovered` finding names the wiki file, the fragment link, and the li
 ## 2. Scaffold per page
 
 ```bash
-wiki mesh scaffold wiki/architecture/wiki-cli.md
+wiki scaffold wiki/architecture/wiki-cli.md
 ```
 
 The output is a shell script of `git mesh add` and `git mesh why` commands — **a starting point, not a finished artifact**. The scaffold derives:
@@ -94,7 +94,7 @@ A first-time commit fails if no `why` is staged — that's the normal flow. Erro
 ## 7. Verify
 
 ```bash
-wiki check --mesh
+wiki check
 ```
 
 Expect zero `mesh_uncovered` findings on real wiki pages. Test fixtures that intentionally exercise the uncovered code path (e.g. `packages/cli/tests/fixtures/mesh-scaffold/`) will keep showing up — leave them.

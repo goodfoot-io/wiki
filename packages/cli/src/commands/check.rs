@@ -27,7 +27,7 @@ pub struct CheckDiagnostic {
 /// Run the check command.
 ///
 /// Returns the exit code: 0 = valid, 1 = validation errors, 2 = runtime error.
-pub fn run(globs: &[String], json: bool, mesh: bool, repo_root: &Path) -> Result<i32> {
+pub fn run(globs: &[String], json: bool, repo_root: &Path) -> Result<i32> {
     let files = match discover_files(globs, repo_root) {
         Ok(f) => f,
         Err(e) => {
@@ -46,7 +46,7 @@ pub fn run(globs: &[String], json: bool, mesh: bool, repo_root: &Path) -> Result
         discover_files(&[], repo_root).unwrap_or_else(|_| files.clone())
     };
 
-    let diagnostics = match collect_for_files(&files, &index_files, mesh, repo_root) {
+    let diagnostics = match collect_for_files(&files, &index_files, repo_root) {
         Ok(d) => d,
         Err(e) => {
             if json {
@@ -78,20 +78,19 @@ pub fn run(globs: &[String], json: bool, mesh: bool, repo_root: &Path) -> Result
 /// Returns `Err` only on discovery failure; validation errors are returned as
 /// diagnostics.  On discovery failure the caller should treat this as exit
 /// code 2.
-pub fn collect(globs: &[String], mesh: bool, repo_root: &Path) -> Result<Vec<CheckDiagnostic>> {
+pub fn collect(globs: &[String], repo_root: &Path) -> Result<Vec<CheckDiagnostic>> {
     let files = discover_files(globs, repo_root)?;
     let index_files = if globs.is_empty() {
         files.clone()
     } else {
         discover_files(&[], repo_root).unwrap_or_else(|_| files.clone())
     };
-    collect_for_files(&files, &index_files, mesh, repo_root)
+    collect_for_files(&files, &index_files, repo_root)
 }
 
 fn collect_for_files(
     files: &[PathBuf],
     index_files: &[PathBuf],
-    mesh: bool,
     repo_root: &Path,
 ) -> Result<Vec<CheckDiagnostic>> {
     let mut diagnostics: Vec<CheckDiagnostic> = Vec::new();
@@ -315,11 +314,9 @@ fn collect_for_files(
     // ── Resolve ref to check git is callable (soft check, non-fatal) ─────────
     let _ = resolve_ref(repo_root, "HEAD");
 
-    // ── Mesh coverage pass (opt-in) ───────────────────────────────────────────
-    if mesh {
-        let mesh_diags = mesh_coverage::collect_mesh_diagnostics(files, repo_root)?;
-        diagnostics.extend(mesh_diags);
-    }
+    // ── Mesh coverage pass (always-on) ────────────────────────────────────────
+    let mesh_diags = mesh_coverage::collect_mesh_diagnostics(files, repo_root)?;
+    diagnostics.extend(mesh_diags);
 
     Ok(diagnostics)
 }
@@ -449,17 +446,19 @@ mod tests {
 
     #[test]
     fn test_check_valid_pages_exit_0() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
         repo.create_file("wiki/page.md", &make_wiki_page("Page", "No links here."));
         repo.commit("add page");
 
-        let code = run(&[], false, false, repo.path()).expect("run");
+        let code = run(&[], false, repo.path()).expect("run");
         assert_eq!(code, 0);
     }
 
     #[test]
     fn test_check_broken_wikilink_exit_1() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
         repo.create_file(
@@ -468,35 +467,38 @@ mod tests {
         );
         repo.commit("add page");
 
-        let code = run(&[], false, false, repo.path()).expect("run");
+        let code = run(&[], false, repo.path()).expect("run");
         assert_eq!(code, 1);
     }
 
     #[test]
     fn test_check_title_collision_exit_1() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
         repo.create_file("wiki/a.md", &make_wiki_page("Shared", ""));
         repo.create_file("wiki/b.md", &make_wiki_page("Shared", ""));
         repo.commit("add pages");
 
-        let code = run(&[], false, false, repo.path()).expect("run");
+        let code = run(&[], false, repo.path()).expect("run");
         assert_eq!(code, 1);
     }
 
     #[test]
     fn test_check_missing_frontmatter_exit_1() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
         repo.create_file("wiki/page.md", "# Just a heading\n\nNo frontmatter.");
         repo.commit("add page");
 
-        let code = run(&[], false, false, repo.path()).expect("run");
+        let code = run(&[], false, repo.path()).expect("run");
         assert_eq!(code, 1);
     }
 
     #[test]
     fn test_check_wikilink_via_alias_warns_exit_0() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
         repo.create_file(
@@ -506,13 +508,14 @@ mod tests {
         repo.create_file("wiki/source.md", &make_wiki_page("Source", "See [[tp]]."));
         repo.commit("add pages");
 
-        let code = run(&[], false, false, repo.path()).expect("run");
+        let code = run(&[], false, repo.path()).expect("run");
         // alias_resolve warnings should not cause exit 1
         assert_eq!(code, 0);
     }
 
     #[test]
     fn test_check_heading_fragment_not_found_exit_1() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
         repo.create_file(
@@ -525,12 +528,13 @@ mod tests {
         );
         repo.commit("add pages");
 
-        let code = run(&[], false, false, repo.path()).expect("run");
+        let code = run(&[], false, repo.path()).expect("run");
         assert_eq!(code, 1);
     }
 
     #[test]
     fn test_check_heading_fragment_found_exit_0() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
         repo.create_file(
@@ -543,12 +547,13 @@ mod tests {
         );
         repo.commit("add pages");
 
-        let code = run(&[], false, false, repo.path()).expect("run");
+        let code = run(&[], false, repo.path()).expect("run");
         assert_eq!(code, 0);
     }
 
     #[test]
     fn test_check_glob_resolves_wikilinks_against_full_index() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         // Regression: passing a file path must not limit the index to that file only.
         let repo = TestRepo::new();
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
@@ -560,7 +565,7 @@ mod tests {
         repo.commit("add pages");
 
         let globs = vec!["wiki/page_a.md".to_string()];
-        let code = run(&globs, false, false, repo.path()).expect("run");
+        let code = run(&globs, false, repo.path()).expect("run");
         assert_eq!(
             code, 0,
             "wikilink to a page outside the glob must resolve against the full wiki index"
@@ -569,6 +574,7 @@ mod tests {
 
     #[test]
     fn test_check_glob_still_reports_genuinely_missing_wikilinks() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
         repo.create_file(
@@ -579,7 +585,7 @@ mod tests {
         repo.commit("add pages");
 
         let globs = vec!["wiki/page_a.md".to_string()];
-        let code = run(&globs, false, false, repo.path()).expect("run");
+        let code = run(&globs, false, repo.path()).expect("run");
         assert_eq!(
             code, 1,
             "a truly missing wikilink must still be reported when using a file glob"
@@ -588,6 +594,7 @@ mod tests {
 
     #[test]
     fn test_check_directory_link_is_valid() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
         repo.create_file("src/lib.rs", "fn main() {}");
@@ -597,7 +604,7 @@ mod tests {
         );
         repo.commit("add files");
 
-        let code = run(&[], false, false, repo.path()).expect("run");
+        let code = run(&[], false, repo.path()).expect("run");
         assert_eq!(
             code, 0,
             "directory fragment links must not produce missing_file"
@@ -606,6 +613,7 @@ mod tests {
 
     #[test]
     fn test_check_glob_does_not_report_collisions_outside_scope() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         // Collisions between pages not in the glob must not appear in the output.
         let repo = TestRepo::new();
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
@@ -615,7 +623,7 @@ mod tests {
         repo.commit("add pages");
 
         let globs = vec!["wiki/c.md".to_string()];
-        let diagnostics = collect(&globs, false, repo.path()).expect("collect");
+        let diagnostics = collect(&globs, repo.path()).expect("collect");
         assert!(
             diagnostics.is_empty(),
             "collision between out-of-scope pages must not appear when checking an unrelated file: {diagnostics:?}"
@@ -625,9 +633,12 @@ mod tests {
     // ── Mesh coverage tests ───────────────────────────────────────────────────
 
     #[test]
-    fn mesh_flag_off_does_not_check_coverage() {
-        let repo = TestRepo::new();
+    fn mesh_coverage_runs_without_opt_in() {
+        // Regression: mesh coverage is always on. A wiki with an uncovered
+        // fragment link must fail `wiki check`, with no flag.
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let _guard = PATH_MUTEX.lock().expect("path mutex");
+        let repo = TestRepo::new();
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
@@ -635,9 +646,8 @@ mod tests {
         );
         repo.commit("add files");
 
-        // mesh=false: no coverage check, exit 0
-        let code = run(&[], false, false, repo.path()).expect("run");
-        assert_eq!(code, 0, "mesh flag off must not check coverage");
+        let code = run(&[], false, repo.path()).expect("run");
+        assert_eq!(code, 1, "uncovered fragment link must fail wiki check");
     }
 
     #[test]
@@ -653,13 +663,13 @@ mod tests {
         repo.commit("add files");
 
         // No mesh created — link is uncovered
-        let diagnostics = collect(&[], true, repo.path()).expect("collect");
+        let diagnostics = collect(&[], repo.path()).expect("collect");
         let mesh_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.kind == "mesh_uncovered")
             .collect();
         assert_eq!(mesh_diags.len(), 1, "expected one mesh_uncovered: {diagnostics:?}");
-        let code = run(&[], false, true, repo.path()).expect("run");
+        let code = run(&[], false, repo.path()).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -680,7 +690,7 @@ mod tests {
         repo.git_mesh(&["why", "test-mesh", "-m", "Links wiki page to code."]);
         repo.git_mesh(&["commit"]);
 
-        let diagnostics = collect(&[], true, repo.path()).expect("collect");
+        let diagnostics = collect(&[], repo.path()).expect("collect");
         let mesh_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.kind == "mesh_uncovered")
@@ -689,7 +699,7 @@ mod tests {
             mesh_diags.is_empty(),
             "covered link must not produce mesh_uncovered: {diagnostics:?}"
         );
-        let code = run(&[], false, true, repo.path()).expect("run");
+        let code = run(&[], false, repo.path()).expect("run");
         assert_eq!(code, 0);
     }
 
@@ -711,7 +721,7 @@ mod tests {
         repo.git_mesh(&["why", "test-mesh", "-m", "Code only mesh."]);
         repo.git_mesh(&["commit"]);
 
-        let diagnostics = collect(&[], true, repo.path()).expect("collect");
+        let diagnostics = collect(&[], repo.path()).expect("collect");
         let mesh_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.kind == "mesh_uncovered")
@@ -740,7 +750,7 @@ mod tests {
         repo.git_mesh(&["why", "test-mesh", "-m", "Whole-file anchor."]);
         repo.git_mesh(&["commit"]);
 
-        let diagnostics = collect(&[], true, repo.path()).expect("collect");
+        let diagnostics = collect(&[], repo.path()).expect("collect");
         let mesh_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.kind == "mesh_uncovered")
@@ -770,7 +780,7 @@ mod tests {
         repo.git_mesh(&["why", "test-mesh", "-m", "Different range."]);
         repo.git_mesh(&["commit"]);
 
-        let diagnostics = collect(&[], true, repo.path()).expect("collect");
+        let diagnostics = collect(&[], repo.path()).expect("collect");
         let mesh_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.kind == "mesh_uncovered")
@@ -784,6 +794,7 @@ mod tests {
 
     #[test]
     fn mesh_skips_links_without_line_range() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
         repo.create_file("src/code.rs", "fn a() {}\n");
@@ -794,7 +805,7 @@ mod tests {
         repo.commit("add files");
 
         // No mesh — but link has no range so it should be skipped
-        let diagnostics = collect(&[], true, repo.path()).expect("collect");
+        let diagnostics = collect(&[], repo.path()).expect("collect");
         let mesh_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.kind == "mesh_uncovered")
@@ -807,6 +818,7 @@ mod tests {
 
     #[test]
     fn mesh_skips_external_links() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
         let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
         repo.create_file(
@@ -815,7 +827,7 @@ mod tests {
         );
         repo.commit("add files");
 
-        let diagnostics = collect(&[], true, repo.path()).expect("collect");
+        let diagnostics = collect(&[], repo.path()).expect("collect");
         let mesh_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.kind == "mesh_uncovered")
@@ -857,7 +869,7 @@ mod tests {
 
             // SAFETY: PATH_MUTEX is held; no other test reads/writes PATH concurrently.
             unsafe { std::env::set_var("PATH", &test_path) };
-            let result = collect(&[], true, repo.path());
+            let result = collect(&[], repo.path());
             // Restore PATH before asserting so failures don't leak state.
             // SAFETY: PATH_MUTEX is held.
             unsafe { std::env::set_var("PATH", &original_path) };
@@ -893,7 +905,7 @@ mod tests {
                 .join(":");
             // SAFETY: PATH_MUTEX is held.
             unsafe { std::env::set_var("PATH", &filtered_path) };
-            let code = run(&[], false, true, repo.path()).expect("run");
+            let code = run(&[], false, repo.path()).expect("run");
             // SAFETY: PATH_MUTEX is held.
             unsafe { std::env::set_var("PATH", &original_path) };
             code
@@ -937,7 +949,7 @@ mod tests {
         // SAFETY: PATH_MUTEX is held; no other test reads/writes PATH concurrently.
         unsafe { std::env::set_var("PATH", &new_path) };
 
-        let _diagnostics = collect(&[], true, repo.path()).expect("collect");
+        let _diagnostics = collect(&[], repo.path()).expect("collect");
 
         // SAFETY: PATH_MUTEX is held.
         unsafe { std::env::set_var("PATH", &original_path) };
@@ -991,7 +1003,7 @@ mod tests {
 
         // SAFETY: PATH_MUTEX is held; no other test reads/writes PATH concurrently.
         unsafe { std::env::set_var("PATH", &new_path) };
-        let code = run(&[], false, true, repo.path()).expect("run");
+        let code = run(&[], false, repo.path()).expect("run");
         // SAFETY: PATH_MUTEX is held.
         unsafe { std::env::set_var("PATH", &original_path) };
 

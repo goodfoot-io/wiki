@@ -17,7 +17,7 @@ See [[Wiki Mesh Integration]] for the design rationale behind these integrations
 
 **Where:** [`mesh_coverage.rs`](packages/cli/src/commands/mesh_coverage.rs#L157-L159)
 
-**Invoked by:** `wiki check --mesh`
+**Invoked by:** `wiki check`
 
 **Purpose:** Query all mesh subsystems that include a given file anchor. Used to determine whether a fragment link (`path#Lstart-Lend`) in a wiki article has a covering mesh that also anchors the wiki file itself.
 
@@ -43,7 +43,7 @@ The line range token (`start-end`) is parsed for format validation only; range f
 
 **Where:** [`scaffold.rs`](packages/cli/src/commands/mesh/scaffold.rs#L141-L143)
 
-**Invoked by:** `wiki mesh scaffold` — emits shell script output, does **not** shell out to `git-mesh`.
+**Invoked by:** `wiki scaffold` — emits shell script output, does **not** shell out to `git-mesh`.
 
 **Purpose:** Scaffold command for adding anchors (wiki file + code file/range) to a named mesh subsystem.
 
@@ -53,7 +53,7 @@ The line range token (`start-end`) is parsed for format validation only; range f
 
 **Where:** [`scaffold.rs`](packages/cli/src/commands/mesh/scaffold.rs#L144-L148)
 
-**Invoked by:** `wiki mesh scaffold` — emits shell script output, does **not** shell out to `git-mesh`.
+**Invoked by:** `wiki scaffold` — emits shell script output, does **not** shell out to `git-mesh`.
 
 **Purpose:** Scaffold command for setting the human-readable description of a mesh subsystem.
 
@@ -63,7 +63,7 @@ The line range token (`start-end`) is parsed for format validation only; range f
 
 **Where:** [`check.rs`](packages/cli/src/commands/check.rs#L681) (also lines 712, 741, 771)
 
-**Invoked by:** Integration tests (via `repo.git_mesh(&["commit"])`) to commit staged meshes into the test repo before running `wiki check --mesh`.
+**Invoked by:** Integration tests (via `repo.git_mesh(&["commit"])`) to commit staged meshes into the test repo before running `wiki check`.
 
 **Purpose:** Not used in production code; exists only to set up fixture state for mesh coverage tests.
 
@@ -83,11 +83,11 @@ Displays full detail for a named mesh (all anchors + why text). The underlying i
 
 ### `git-mesh mv <old> <new>`
 
-Renames a mesh subsystem. (No `rename` alias exists.) Would let `wiki mesh scaffold --fix` auto-repair mesh slugs when wiki article titles change.
+Renames a mesh subsystem. (No `rename` alias exists.) Would let `wiki scaffold --fix` auto-repair mesh slugs when wiki article titles change.
 
 ### `git-mesh rm <name> <anchor>...`
 
-Staged removal of one or more anchors from a named mesh. Would let a future `wiki check --mesh --fix` mode remove anchors pointing to deleted wiki files or code regions that no longer exist.
+Staged removal of one or more anchors from a named mesh. Would let a future `wiki check --fix` mode remove anchors pointing to deleted wiki files or code regions that no longer exist.
 
 ### `git-mesh delete <name>`
 

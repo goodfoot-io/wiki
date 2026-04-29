@@ -31,7 +31,7 @@ impl MeshIndex {
             .any(|name| {
                 self.paths_by_mesh
                     .get(name)
-                    .map_or(false, |paths| paths.iter().any(|p| paths_equal(p, wiki_rel)))
+                    .is_some_and(|paths| paths.iter().any(|p| paths_equal(p, wiki_rel)))
             })
     }
 }
@@ -138,7 +138,7 @@ fn run_git_mesh_ls_all(
                 kind: "mesh_unavailable".into(),
                 file: String::new(),
                 line: 0,
-                message: "git mesh is not installed; skipped --mesh coverage check".into(),
+                message: "git mesh is required by `wiki check` but was not found on PATH. Install git-mesh and re-run; see https://github.com/goodfoot-io/git-mesh for setup.".into(),
             });
             Ok(None)
         }

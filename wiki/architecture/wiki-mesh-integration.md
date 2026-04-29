@@ -1,6 +1,6 @@
 ---
 title: Wiki Mesh Integration
-summary: Design for wiki check --mesh and wiki mesh scaffold — commands that bridge wiki fragment links with git mesh drift detection.
+summary: Design for wiki check and wiki scaffold — commands that bridge wiki fragment links with git mesh drift detection.
 tags:
   - tooling
   - git-mesh
@@ -10,27 +10,27 @@ Wiki fragment links (`[label](path#L10-L20)`) are navigation — they point at c
 
 Two commands implement this:
 
-- **`wiki check --mesh`** — validates that each fragment link has a covering mesh anchor; fails if any are missing.
-- **`wiki mesh scaffold`** — generates the `git mesh add` / `git mesh why` / `git mesh commit` commands for all fragment links not yet covered by a mesh.
+- **`wiki check`** — validates that each fragment link has a covering mesh anchor; fails if any are missing.
+- **`wiki scaffold`** — generates the `git mesh add` / `git mesh why` / `git mesh commit` commands for all fragment links not yet covered by a mesh.
 
-## wiki check --mesh
+## wiki check
 
 ```bash
-wiki check --mesh
-wiki check --mesh wiki/architecture/*.md
-wiki check --mesh "packages/auth/**/*.wiki.md"
+wiki check
+wiki check wiki/architecture/*.md
+wiki check "packages/auth/**/*.wiki.md"
 ```
 
 Extends the existing `wiki check` validation pass with a mesh coverage check. For each internal fragment link with a line range, it runs `git mesh ls <path>#L<s>-L<e> --porcelain` and verifies that at least one returned mesh also anchors the wiki file containing the link. Any uncovered link is reported as an error (non-zero exit).
 
-The `--mesh` flag is opt-in so that repositories without meshes are unaffected by default. Glob targeting follows the same rules as bare `wiki check`: omitting globs defaults to `$WIKI_DIR/**/*.md` plus `**/*.wiki.md` (with `$WIKI_DIR` defaulting to `wiki`).
+Mesh coverage is always on; `git mesh` must be installed or `wiki check` fails fast. Glob targeting follows the same rules as bare `wiki check`: omitting globs defaults to `$WIKI_DIR/**/*.md` plus `**/*.wiki.md` (with `$WIKI_DIR` defaulting to `wiki`).
 
-## wiki mesh scaffold
+## wiki scaffold
 
 ```bash
-wiki mesh scaffold
-wiki mesh scaffold wiki/architecture/*.md
-wiki mesh scaffold "packages/auth/**/*.wiki.md"
+wiki scaffold
+wiki scaffold wiki/architecture/*.md
+wiki scaffold "packages/auth/**/*.wiki.md"
 ```
 
 Scans the same file set as `wiki check` and emits shell commands to create meshes for every fragment link not yet covered. Output is printed to stdout — nothing is staged or committed.
@@ -67,7 +67,7 @@ Generated whys require author review — sentences that started with a backtick 
 Omitting globs is equivalent to:
 
 ```bash
-wiki mesh scaffold "$WIKI_DIR/**/*.md" "**/*.wiki.md"
+wiki scaffold "$WIKI_DIR/**/*.md" "**/*.wiki.md"
 ```
 
 where `$WIKI_DIR` defaults to `wiki`. This matches the default discovery behavior used by all other wiki commands (see [discover_files](packages/cli/src/commands/mod.rs#L141-L183&9b91dfb)).
@@ -76,7 +76,7 @@ where `$WIKI_DIR` defaults to `wiki`. This matches the default discovery behavio
 
 ```bash
 # 1. Generate scaffold for all uncovered links
-wiki mesh scaffold > meshes.sh
+wiki scaffold > meshes.sh
 
 # 2. Review and edit mesh names and whys in meshes.sh
 
@@ -87,7 +87,7 @@ sh meshes.sh
 git mesh commit wiki/<name>
 
 # 5. Validate coverage
-wiki check --mesh
+wiki check
 ```
 
 ## References

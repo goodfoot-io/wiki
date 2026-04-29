@@ -33,7 +33,7 @@ pub fn run(input: &str, repo_root: &Path) -> Result<i32> {
     }
 
     let globs = vec![file_path.clone()];
-    let diagnostics = match check::collect(&globs, false, repo_root) {
+    let diagnostics = match check::collect(&globs, repo_root) {
         Ok(d) => d,
         Err(_) => return Ok(0), // not a wiki page or discovery failed — skip silently
     };

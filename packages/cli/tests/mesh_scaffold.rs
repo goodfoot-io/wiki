@@ -1,4 +1,4 @@
-//! Integration test for `wiki mesh scaffold` against a captured baseline
+//! Integration test for `wiki scaffold` against a captured baseline
 //! (`tests/fixtures/mesh-scaffold/expected.sh`).
 //!
 //! `expected.sh` is a Rust-output regression baseline — not a JS-oracle
@@ -72,13 +72,13 @@ fn mesh_scaffold_byte_equal_with_expected_sh() {
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
-        .args(["mesh", "scaffold"])
+        .args(["scaffold"])
         .current_dir(tmp.path())
         .output()
         .expect("run wiki binary");
     assert!(
         output.status.success(),
-        "wiki mesh scaffold failed: stderr=\n{}",
+        "wiki scaffold failed: stderr=\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -86,7 +86,7 @@ fn mesh_scaffold_byte_equal_with_expected_sh() {
         let got = String::from_utf8_lossy(&output.stdout);
         let want = String::from_utf8_lossy(&expected);
         panic!(
-            "wiki mesh scaffold output diverged from expected.sh\n\
+            "wiki scaffold output diverged from expected.sh\n\
              --- got ---\n{got}\n--- want ---\n{want}"
         );
     }

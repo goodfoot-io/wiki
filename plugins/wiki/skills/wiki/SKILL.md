@@ -49,7 +49,7 @@ Heuristics:
 - Backticks in the link label (e.g. `` [`fn`](path) ``) are supported
 - Include broad context — a link that goes stale when surrounding code changes is working as intended
 - Do not add `@sha` manually — `wiki check --fix` pins unpinned links automatically
-- Run `wiki check --mesh` to verify every fragment link with a line range is covered by a `git mesh`; use `wiki mesh scaffold` to generate missing meshes
+- Run `wiki check` to verify every fragment link with a line range is covered by a `git mesh`; use `wiki scaffold` to generate missing meshes
 
 When a file is relied upon but cannot be worked naturally into prose, add a **References** section at the bottom:
 
@@ -153,7 +153,7 @@ wiki check "wiki/architecture/my-page.md"
 wiki check "documentation/**/*.wiki.md"
 ```
 
-Use bare `wiki check` only when changes span many pages. Optionally add `--mesh` to verify git mesh coverage (requires `git mesh` installed).
+Use bare `wiki check` only when changes span many pages. `wiki check` always verifies git mesh coverage and requires `git mesh` to be installed.
 
 For the full maintenance workflow (prose updates, backlink propagation, commit), see the maintenance reference bundled with this skill.
 
@@ -168,13 +168,11 @@ if [ -n "$WIKI_BIN" ]; then
     if [ -n "$WIKI_STAGED" ]; then
         echo "Running wiki check..."
         "$WIKI_BIN" check
-        echo "Running wiki check --mesh (informational)..."
-        "$WIKI_BIN" check --mesh || true
     fi
 fi
 ```
 
-`wiki check` blocks the commit on validation errors. `wiki check --mesh` reports uncovered fragment links without blocking — useful in repositories where mesh coverage is still being established.
+`wiki check` blocks the commit on validation errors, including uncovered mesh fragment links. `git mesh` must be installed.
 
 Activate the hook directory with:
 

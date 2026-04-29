@@ -1,6 +1,6 @@
 {
   "name": "wiki",
-  "version": "1.0.15",
+  "version": "1.0.16",
   "description": "Wiki documentation system — fragment-linked documentation with change detection, full-text search, and automated maintenance",
   "author": {
     "name": "Goodfoot Media LLC",
