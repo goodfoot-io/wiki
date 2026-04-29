@@ -942,12 +942,12 @@ mod tests {
         // SAFETY: PATH_MUTEX is held.
         unsafe { std::env::set_var("PATH", &original_path) };
 
-        // Read the counter — git-mesh should have been called exactly once for the shared anchor
+        // Read the counter — git-mesh ls should be called exactly once regardless of anchor count
         let count_str = fs::read_to_string(&counter_path).unwrap_or_else(|_| "0".to_string());
         let count: u32 = count_str.trim().parse().unwrap_or(0);
         assert_eq!(
             count, 1,
-            "git-mesh ls must be called exactly once for a shared (target, range) anchor, got {count}"
+            "git-mesh ls must be called exactly once total (bulk fetch), got {count}"
         );
     }
 

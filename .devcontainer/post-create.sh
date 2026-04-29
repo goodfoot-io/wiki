@@ -47,3 +47,8 @@ echo "X11 directory prepared for headless testing"
 echo "Configuring git hooks path..."
 git config core.hooksPath .githooks
 echo "Git hooks path set to .githooks"
+
+# Update Rust toolchain to the latest stable
+echo "Updating Rust toolchain..."
+rustup update stable
+echo "Rust toolchain updated: $(rustc --version)"

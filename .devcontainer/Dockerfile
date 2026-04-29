@@ -25,7 +25,9 @@ RUN apt update && export DEBIAN_FRONTEND=noninteractive && apt install -y less \
   dbus-x11 \
   xvfb \
   bc \
-  bat
+  bat \
+  openssh-server \
+  iproute2
 
 # Configure locale
 RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && \

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -10,22 +10,29 @@ use super::check::CheckDiagnostic;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-#[derive(Debug)]
-struct MeshRow {
-    mesh: String,
-    path: PathBuf,
+/// All mesh data fetched in a single `git-mesh ls --porcelain` call.
+struct MeshIndex {
+    /// Code anchor `(path, start, end)` → names of every mesh containing it.
+    by_anchor: HashMap<(PathBuf, u32, u32), Vec<String>>,
+    /// Mesh name → every path anchored by that mesh (any range).
+    paths_by_mesh: HashMap<String, Vec<PathBuf>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum MeshProbe {
-    Unknown,
-    Available,
-    Missing,
-}
-
-impl MeshProbe {
-    fn is_missing(&self) -> bool {
-        *self == MeshProbe::Missing
+impl MeshIndex {
+    fn is_covered(&self, code_path: &Path, start: u32, end: u32, wiki_rel: &Path) -> bool {
+        // Check exact-range anchor and the whole-file sentinel (0-0).
+        let keys: &[(PathBuf, u32, u32)] = &[
+            (code_path.to_path_buf(), start, end),
+            (code_path.to_path_buf(), 0, 0),
+        ];
+        keys.iter()
+            .filter_map(|k| self.by_anchor.get(k))
+            .flatten()
+            .any(|name| {
+                self.paths_by_mesh
+                    .get(name)
+                    .map_or(false, |paths| paths.iter().any(|p| paths_equal(p, wiki_rel)))
+            })
     }
 }
 
@@ -34,8 +41,8 @@ impl MeshProbe {
 /// Collect `mesh_uncovered` and `mesh_unavailable` diagnostics for the given
 /// wiki files.
 ///
-/// Invokes `git mesh ls --porcelain` at most once per unique
-/// `(target_path, start_line, end_line)` tuple across the entire call.
+/// Invokes `git-mesh ls --porcelain` exactly once to fetch all mesh data, then
+/// performs all coverage lookups in memory.
 ///
 /// Returns `Err` if `git-mesh` fails for any reason other than `NotFound`
 /// (which is treated as a `mesh_unavailable` diagnostic in the `Ok` vec).
@@ -44,15 +51,22 @@ pub(super) fn collect_mesh_diagnostics(
     repo_root: &Path,
 ) -> Result<Vec<CheckDiagnostic>, miette::Error> {
     let mut out: Vec<CheckDiagnostic> = Vec::new();
-    // Cache key: (repo-relative target path, start, end) → rows returned by git mesh ls
-    let mut cache: HashMap<(PathBuf, u32, u32), Vec<MeshRow>> = HashMap::new();
-    let mut probed = MeshProbe::Unknown;
+
+    let index = match run_git_mesh_ls_all(repo_root, &mut out)? {
+        None => return Ok(out), // git-mesh unavailable; mesh_unavailable diagnostic already pushed
+        Some(idx) => idx,
+    };
 
     for wiki_path in files {
         let content = match std::fs::read_to_string(wiki_path) {
             Ok(c) => c,
             Err(_) => continue,
         };
+
+        let wiki_rel = wiki_path
+            .strip_prefix(repo_root)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|_| wiki_path.clone());
 
         for link in parse_fragment_links(&content) {
             if link.kind == LinkKind::External {
@@ -70,31 +84,7 @@ pub(super) fn collect_mesh_diagnostics(
                 continue;
             }
 
-            // If git mesh is unavailable, the diagnostic has already been pushed; stop.
-            if probed.is_missing() {
-                break;
-            }
-
-            let cache_key = (target.clone(), start, end);
-            if !cache.contains_key(&cache_key) {
-                let rows = run_git_mesh_ls(repo_root, &target, start, end, &mut probed, &mut out)?;
-                cache.insert(cache_key.clone(), rows);
-            }
-            let rows = &cache[&cache_key];
-
-            // probed may have become Missing during the run above
-            if probed.is_missing() {
-                break;
-            }
-
-            let wiki_rel = wiki_path
-                .strip_prefix(repo_root)
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|_| wiki_path.clone());
-
-            let covered = is_covered(rows, &wiki_rel);
-
-            if !covered {
+            if !index.is_covered(&target, start, end, &wiki_rel) {
                 out.push(CheckDiagnostic {
                     kind: "mesh_uncovered".into(),
                     file: wiki_path.display().to_string(),
@@ -113,17 +103,6 @@ pub(super) fn collect_mesh_diagnostics(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Returns true iff some mesh in `rows` also has `wiki_rel` as an anchor.
-fn is_covered(rows: &[MeshRow], wiki_rel: &Path) -> bool {
-    // Collect all mesh names present in the rows
-    let mesh_names: HashSet<&str> = rows.iter().map(|r| r.mesh.as_str()).collect();
-    // For each mesh that covers the code anchor, check if the wiki file is also anchored
-    mesh_names.iter().any(|mesh_name| {
-        rows.iter()
-            .any(|r| r.mesh.as_str() == *mesh_name && paths_equal(&r.path, wiki_rel))
-    })
-}
-
 /// Normalize-compare two paths by components, handling leading `./`.
 fn paths_equal(a: &Path, b: &Path) -> bool {
     use std::path::Component;
@@ -138,44 +117,33 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
     a_components == b_components
 }
 
-/// Shell out to `git mesh ls <target>#L<start>-L<end> --porcelain`.
+/// Shell out to `git-mesh ls --porcelain` (no anchor) and build a `MeshIndex`.
 ///
-/// On `ErrorKind::NotFound` (git-mesh not installed): push a `mesh_unavailable`
-/// diagnostic, set `probed = Missing`, return `Ok(empty vec)`.
+/// Returns `Ok(None)` when git-mesh is not installed, having pushed a
+/// `mesh_unavailable` diagnostic into `out`.
 ///
-/// On any other OS error or non-zero exit: return `Err` so the caller treats it
-/// as a runtime/infra failure (exit code 2).
-fn run_git_mesh_ls(
+/// Returns `Err` on any other OS error or non-zero exit.
+fn run_git_mesh_ls_all(
     repo_root: &Path,
-    target: &Path,
-    start: u32,
-    end: u32,
-    probed: &mut MeshProbe,
     out: &mut Vec<CheckDiagnostic>,
-) -> Result<Vec<MeshRow>, miette::Error> {
-    let anchor = format!("{}#L{}-L{}", target.display(), start, end);
+) -> Result<Option<MeshIndex>, miette::Error> {
     let result = Command::new("git-mesh")
         .current_dir(repo_root)
-        .args(["ls", &anchor, "--porcelain"])
+        .args(["ls", "--porcelain"])
         .output();
 
     match result {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            *probed = MeshProbe::Missing;
             out.push(CheckDiagnostic {
                 kind: "mesh_unavailable".into(),
                 file: String::new(),
                 line: 0,
                 message: "git mesh is not installed; skipped --mesh coverage check".into(),
             });
-            Ok(Vec::new())
+            Ok(None)
         }
-        Err(e) => {
-            // Unexpected OS error — fatal runtime failure
-            Err(miette::miette!("git mesh ls failed: {e}"))
-        }
+        Err(e) => Err(miette::miette!("git mesh ls failed: {e}")),
         Ok(output) => {
-            *probed = MeshProbe::Available;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(miette::miette!(
@@ -185,25 +153,27 @@ fn run_git_mesh_ls(
                 ));
             }
             let stdout = String::from_utf8_lossy(&output.stdout);
-            parse_mesh_ls_output(&stdout)
+            Ok(Some(parse_mesh_ls_output(&stdout)?))
         }
     }
 }
 
-/// Parse the `--porcelain` output of `git mesh ls`.
+/// Parse the `--porcelain` output of `git mesh ls` into a `MeshIndex`.
 ///
 /// Each non-empty line: `<mesh-name>\t<path>\t<start>-<end>`
 ///
 /// The mesh name may contain tabs; the format is parsed right-to-left:
-///   1. Peel off the trailing range token (`\d+-\d+`) with `rsplitn(2, '\t')`.
-///   2. From the remainder, peel off the path with `rsplitn(2, '\t')`.
-///   3. Whatever is left is the mesh name (may contain tabs).
+///   1. Peel the range token (`\d+-\d+`) from the right.
+///   2. Peel the path from the right of the remainder.
+///   3. Whatever is left is the mesh name.
 ///
-/// The sentinel `no meshes` (single line, no tabs) maps to an empty vec.
+/// The sentinel `no meshes` maps to an empty index.
 ///
-/// Returns `Err` if a line cannot be parsed (fatal runtime error).
-fn parse_mesh_ls_output(stdout: &str) -> Result<Vec<MeshRow>, miette::Error> {
-    let mut rows = Vec::new();
+/// Returns `Err` if any line cannot be parsed (fatal runtime error).
+fn parse_mesh_ls_output(stdout: &str) -> Result<MeshIndex, miette::Error> {
+    let mut by_anchor: HashMap<(PathBuf, u32, u32), Vec<String>> = HashMap::new();
+    let mut paths_by_mesh: HashMap<String, Vec<PathBuf>> = HashMap::new();
+
     for line in stdout.lines() {
         let line = line.trim();
         if line.is_empty() || line == "no meshes" {
@@ -220,12 +190,11 @@ fn parse_mesh_ls_output(stdout: &str) -> Result<Vec<MeshRow>, miette::Error> {
                 ));
             }
         };
-        // Validate range token matches \d+-\d+
-        if !range_token_is_valid(range_token) {
-            return Err(miette::miette!(
+        let (start, end) = parse_range_token(range_token).ok_or_else(|| {
+            miette::miette!(
                 "git mesh ls: unparseable output line (invalid range token {range_token:?}): {line:?}"
-            ));
-        }
+            )
+        })?;
         // Peel the path from the right of the prefix
         let mut mid = prefix.rsplitn(2, '\t');
         let path_str = mid.next().unwrap_or("");
@@ -237,21 +206,32 @@ fn parse_mesh_ls_output(stdout: &str) -> Result<Vec<MeshRow>, miette::Error> {
                 ));
             }
         };
-        let mesh = mesh_name.to_string();
         let path = PathBuf::from(path_str);
-        let _range = range_token; // range filtering is applied server-side
-        rows.push(MeshRow { mesh, path });
+        let mesh = mesh_name.to_string();
+
+        by_anchor
+            .entry((path.clone(), start, end))
+            .or_default()
+            .push(mesh.clone());
+
+        let mesh_paths = paths_by_mesh.entry(mesh).or_default();
+        if !mesh_paths.iter().any(|p| paths_equal(p, &path)) {
+            mesh_paths.push(path);
+        }
     }
-    Ok(rows)
+
+    Ok(MeshIndex { by_anchor, paths_by_mesh })
 }
 
-/// Returns true if `token` matches `\d+-\d+`.
-fn range_token_is_valid(token: &str) -> bool {
-    if let Some((a, b)) = token.split_once('-') {
-        !a.is_empty() && !b.is_empty() && a.chars().all(|c| c.is_ascii_digit()) && b.chars().all(|c| c.is_ascii_digit())
-    } else {
-        false
+/// Parse a `\d+-\d+` range token into `(start, end)`. Returns `None` on failure.
+fn parse_range_token(token: &str) -> Option<(u32, u32)> {
+    let (a, b) = token.split_once('-')?;
+    if a.is_empty() || b.is_empty() {
+        return None;
     }
+    let start = a.parse::<u32>().ok()?;
+    let end = b.parse::<u32>().ok()?;
+    Some((start, end))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -260,44 +240,80 @@ fn range_token_is_valid(token: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn build(output: &str) -> MeshIndex {
+        parse_mesh_ls_output(output).expect("parse")
+    }
+
     #[test]
     fn parse_simple_row() {
-        let output = "my-mesh\tpkg/file.rs\t1-10\n";
-        let rows = parse_mesh_ls_output(output).expect("parse");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].mesh, "my-mesh");
-        assert_eq!(rows[0].path, PathBuf::from("pkg/file.rs"));
+        let idx = build("my-mesh\tpkg/file.rs\t1-10\n");
+        assert!(idx.is_covered(Path::new("pkg/file.rs"), 1, 10, Path::new("pkg/file.rs")));
     }
 
     #[test]
     fn parse_no_meshes_sentinel() {
-        let rows = parse_mesh_ls_output("no meshes\n").expect("parse");
-        assert!(rows.is_empty());
+        let idx = build("no meshes\n");
+        assert!(idx.by_anchor.is_empty());
+        assert!(idx.paths_by_mesh.is_empty());
     }
 
     #[test]
     fn parse_tab_bearing_mesh_slug() {
-        // mesh name contains a tab: "foo\tbar", path is "pkg/file.rs", range is "1-1"
-        let output = "foo\tbar\tpkg/file.rs\t1-1\n";
-        let rows = parse_mesh_ls_output(output).expect("parse");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].mesh, "foo\tbar");
-        assert_eq!(rows[0].path, PathBuf::from("pkg/file.rs"));
+        let idx = build("foo\tbar\tpkg/file.rs\t1-1\n");
+        assert!(idx.paths_by_mesh.contains_key("foo\tbar"));
     }
 
     #[test]
     fn parse_unparseable_line_returns_err() {
-        // A line with no tab-separated range token
-        let output = "this-has-no-tabs-at-all\n";
-        let result = parse_mesh_ls_output(output);
-        assert!(result.is_err(), "expected Err for unparseable line");
+        assert!(parse_mesh_ls_output("this-has-no-tabs-at-all\n").is_err());
     }
 
     #[test]
     fn parse_invalid_range_token_returns_err() {
-        // Looks like three parts but range is not numeric
-        let output = "my-mesh\tpkg/file.rs\tnot-a-range\n";
-        let result = parse_mesh_ls_output(output);
-        assert!(result.is_err(), "expected Err for invalid range token");
+        assert!(parse_mesh_ls_output("my-mesh\tpkg/file.rs\tnot-a-range\n").is_err());
+    }
+
+    #[test]
+    fn coverage_requires_both_anchors_in_same_mesh() {
+        // mesh-a has code + wiki; mesh-b has code only → covered
+        let idx = build(
+            "mesh-a\tsrc/code.rs\t1-10\n\
+             mesh-a\twiki/page.md\t1-1\n\
+             mesh-b\tsrc/code.rs\t1-10\n",
+        );
+        assert!(idx.is_covered(Path::new("src/code.rs"), 1, 10, Path::new("wiki/page.md")));
+    }
+
+    #[test]
+    fn coverage_fails_when_no_mesh_has_wiki_file() {
+        // mesh has code but not the wiki file
+        let idx = build("mesh-a\tsrc/code.rs\t1-10\n");
+        assert!(!idx.is_covered(Path::new("src/code.rs"), 1, 10, Path::new("wiki/page.md")));
+    }
+
+    #[test]
+    fn coverage_fails_for_wrong_range() {
+        let idx = build(
+            "mesh-a\tsrc/code.rs\t5-15\n\
+             mesh-a\twiki/page.md\t1-1\n",
+        );
+        // querying range 1-10 doesn't match the stored 5-15 (and it's not a whole-file 0-0)
+        assert!(!idx.is_covered(Path::new("src/code.rs"), 1, 10, Path::new("wiki/page.md")));
+    }
+
+    #[test]
+    fn whole_file_anchor_covers_any_range() {
+        // Whole-file anchors are stored as 0-0 by git-mesh
+        let idx = build(
+            "mesh-a\tsrc/code.rs\t0-0\n\
+             mesh-a\twiki/page.md\t1-1\n",
+        );
+        assert!(idx.is_covered(Path::new("src/code.rs"), 1, 1, Path::new("wiki/page.md")));
+        assert!(idx.is_covered(Path::new("src/code.rs"), 10, 20, Path::new("wiki/page.md")));
+    }
+
+    #[test]
+    fn paths_equal_ignores_leading_dotslash() {
+        assert!(paths_equal(Path::new("./foo/bar"), Path::new("foo/bar")));
     }
 }
