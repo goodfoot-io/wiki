@@ -157,22 +157,14 @@ fi
 STAGED_FILES=$(git diff --cached --name-only --diff-filter=d)
 
 # --- Wiki validation on staged .md files ---
-if command -v wiki &> /dev/null; then
+WIKI_BIN=$(command -v wiki || true)
+if [ -n "$WIKI_BIN" ]; then
     WIKI_STAGED=$(echo "$STAGED_FILES" | grep '\.md$' || true)
     if [ -n "$WIKI_STAGED" ]; then
-        echo "Running wiki check --fix..."
-        wiki check
-        # Re-stage any .md files that wiki check --fix modified
-        WIKI_FIXED=""
-        for f in $WIKI_STAGED; do
-            if ! git diff --quiet -- "$f" 2>/dev/null; then
-                WIKI_FIXED="$WIKI_FIXED $f"
-            fi
-        done
-        if [ -n "$WIKI_FIXED" ]; then
-            git add $WIKI_FIXED
-            echo "Re-staged wiki-fixed files:$WIKI_FIXED"
-        fi
+        echo "Running wiki check..."
+        "$WIKI_BIN" check
+        echo "Running wiki check --mesh (informational)..."
+        "$WIKI_BIN" check --mesh || true
     fi
 fi
 

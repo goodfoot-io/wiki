@@ -149,12 +149,37 @@ Read each match and add a `[[wikilink]]` where relevant. If a related page discu
 Validate only the files you changed:
 
 ```bash
-wiki check --fix "wiki/architecture/my-page.md"
-wiki check --fix "documentation/**/*.wiki.md"
+wiki check "wiki/architecture/my-page.md"
+wiki check "documentation/**/*.wiki.md"
 ```
 
-Use bare `wiki check --fix` only when changes span many pages. `check --fix` pins unpinned links and validates in a single pass — do not run `wiki check` separately afterward.
+Use bare `wiki check` only when changes span many pages. Optionally add `--mesh` to verify git mesh coverage (requires `git mesh` installed).
 
-For the full maintenance workflow (stale link triage, prose updates, backlink propagation, commit), see the maintenance reference bundled with this skill.
+For the full maintenance workflow (prose updates, backlink propagation, commit), see the maintenance reference bundled with this skill.
+
+## 6. Git Hook Setup
+
+To enforce wiki validation on every commit, add to `.githooks/pre-commit`:
+
+```bash
+WIKI_BIN=$(command -v wiki || true)
+if [ -n "$WIKI_BIN" ]; then
+    WIKI_STAGED=$(git diff --cached --name-only --diff-filter=d | grep '\.md$' || true)
+    if [ -n "$WIKI_STAGED" ]; then
+        echo "Running wiki check..."
+        "$WIKI_BIN" check
+        echo "Running wiki check --mesh (informational)..."
+        "$WIKI_BIN" check --mesh || true
+    fi
+fi
+```
+
+`wiki check` blocks the commit on validation errors. `wiki check --mesh` reports uncovered fragment links without blocking — useful in repositories where mesh coverage is still being established.
+
+Activate the hook directory with:
+
+```bash
+git config core.hooksPath .githooks
+```
 
 </instructions>

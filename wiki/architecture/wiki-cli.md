@@ -21,7 +21,7 @@ The extract command (`packages/cli/src/commands/extract.rs`) reads arbitrary tex
 
 ## PostToolUse Hook
 
-The [hook command](packages/cli/src/commands/hook_check.rs#L16-L63) integrates the wiki with external tools like Claude Code. It processes `PostToolUse` JSON events from stdin: when a `.md` file inside the wiki directory is written or edited, it runs `wiki check` on that file and emits a JSON `systemMessage` envelope if validation errors remain, so the AI can address them immediately.
+The [hook command](packages/cli/src/commands/hook_check.rs#L16-L63&ac38802) integrates the wiki with external tools like Claude Code. It processes `PostToolUse` JSON events from stdin: when a `.md` file inside the wiki directory is written or edited, it runs `wiki check` on that file and emits a JSON `systemMessage` envelope if validation errors remain, so the AI can address them immediately.
 
 ## Navigation and Discovery
 
