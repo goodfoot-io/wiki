@@ -1,6 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -12,6 +13,56 @@ struct Logger {
 }
 
 static LOGGER: OnceLock<Option<Logger>> = OnceLock::new();
+static STDERR_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub fn enable_stderr(cli_enabled: bool) {
+    STDERR_ENABLED.store(cli_enabled || env_stderr_enabled(), Ordering::Relaxed);
+}
+
+pub fn stderr_enabled() -> bool {
+    STDERR_ENABLED.load(Ordering::Relaxed)
+}
+
+fn env_stderr_enabled() -> bool {
+    match std::env::var("WIKI_PERF") {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
+pub struct Span {
+    label: String,
+    start: Option<Instant>,
+}
+
+impl Span {
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            start: stderr_enabled().then(Instant::now),
+        }
+    }
+}
+
+impl Drop for Span {
+    fn drop(&mut self) {
+        let Some(start) = self.start else {
+            return;
+        };
+        eprintln!(
+            "wiki perf: {} {:.3} ms",
+            self.label,
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+}
+
+pub fn span_for_command(command_name: &str) -> Span {
+    Span::new(format!("command.{command_name}"))
+}
 
 pub fn init(repo_root: &Path, command_name: &str, json_output: bool) {
     let _ = LOGGER.get_or_init(|| {
@@ -59,6 +110,9 @@ pub fn finish(command_name: &str, exit_code: i32, total_ms: f64, status: &str) {
 pub fn log_event(name: &str, duration_ms: f64, status: &str, meta: Value) {
     if let Some(Some(logger)) = LOGGER.get() {
         write_event(logger, name, duration_ms, status, meta);
+    }
+    if stderr_enabled() && name != "command_start" && name != "command_finish" {
+        eprintln!("wiki perf: {name} {duration_ms:.3} ms");
     }
 }
 

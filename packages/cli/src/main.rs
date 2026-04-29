@@ -42,6 +42,10 @@ struct Cli {
     #[arg(short = 'v', long = "version", action = ArgAction::SetTrue, global = true)]
     version: bool,
 
+    /// Emit per-event timings to stderr (also enabled by `WIKI_PERF=1`).
+    #[arg(long = "perf", action = ArgAction::SetTrue, global = true)]
+    perf: bool,
+
     /// Search query for the default wiki lookup.
     #[arg(value_name = "query")]
     query: Option<String>,
@@ -300,6 +304,7 @@ fn main() {
         process::exit(0);
     }
     let json = matches!(cli.format, Some(Format::Json));
+    perf::enable_stderr(cli.perf);
 
     if !json {
         miette::set_hook(Box::new(|_| {
@@ -333,6 +338,7 @@ fn run(
     let repo_root = git::repo_root()?;
     let command_name = command_name(command.as_ref(), query.as_deref());
     perf::init(&repo_root, command_name, json);
+    let _command_span = perf::span_for_command(command_name);
     let started = Instant::now();
 
     let result = match command {

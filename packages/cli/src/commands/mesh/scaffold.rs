@@ -108,7 +108,7 @@ pub fn run(globs: &[String], json: bool, repo_root: &Path) -> Result<i32> {
     // Global dedup — match JS in-place rename.
     let mut names: Vec<String> = meshes.iter().map(|m| m.name.clone()).collect();
     deduplicate_names(&mut names);
-    for (m, n) in meshes.iter_mut().zip(names.into_iter()) {
+    for (m, n) in meshes.iter_mut().zip(names) {
         m.name = n;
     }
 

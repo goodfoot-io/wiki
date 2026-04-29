@@ -59,15 +59,22 @@ impl TestRepo {
 }
 
 fn run_wiki(repo: &TestRepo, args: &[&str]) -> Output {
+    run_wiki_env(repo, args, &[])
+}
+
+fn run_wiki_env(repo: &TestRepo, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
     let _ = fs::remove_file(repo.log_path());
 
-    let output = Command::new(env!("CARGO_BIN_EXE_wiki"))
-        .current_dir(repo.path())
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_wiki"));
+    cmd.current_dir(repo.path())
         .args(args)
         .env("WIKI_DIR", "wiki")
         .env("WIKI_BACKGROUND_FTS", "0")
-        .output()
-        .expect("run wiki");
+        .env_remove("WIKI_PERF");
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().expect("run wiki");
 
     assert!(
         output.status.success() || output.status.code() == Some(1),
@@ -92,6 +99,52 @@ fn has_event(events: &[Value], name: &str) -> bool {
     events
         .iter()
         .any(|event| event["event"].as_str() == Some(name))
+}
+
+fn seed_repo() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.create_file(
+        "wiki/example.md",
+        "---\ntitle: Example\nsummary: Example summary.\n---\nBody.\n",
+    );
+    repo.commit_all("init");
+    repo
+}
+
+#[test]
+fn perf_flag_logs_timings_to_stderr() {
+    let repo = seed_repo();
+    let out = run_wiki(&repo, &["--perf", "list"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        stderr.contains("wiki perf: command.list"),
+        "expected command_finish timing in stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn perf_env_logs_timings_to_stderr() {
+    let repo = seed_repo();
+    let out = run_wiki_env(&repo, &["list"], &[("WIKI_PERF", "1")]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        stderr.contains("wiki perf: command.list"),
+        "expected command_finish timing in stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn perf_off_emits_no_stderr_timings() {
+    let repo = seed_repo();
+    let out = run_wiki(&repo, &["list"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        !stderr.contains("wiki perf:"),
+        "expected no perf timings without --perf, got: {stderr}"
+    );
 }
 
 #[test]

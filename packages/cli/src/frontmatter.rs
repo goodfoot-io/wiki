@@ -249,11 +249,9 @@ fn extract_yaml_block(content: &str) -> Option<&str> {
     // The opening fence may be followed by a newline
     let after_open = if let Some(s) = after_open.strip_prefix('\n') {
         s
-    } else if let Some(s) = after_open.strip_prefix("\r\n") {
-        s
     } else {
         // "---" must be on its own line
-        return None;
+        after_open.strip_prefix("\r\n")?
     };
 
     // Find closing "---" on its own line
