@@ -66,17 +66,23 @@ impl TestRepo {
 
     /// Run `wiki check` from `cwd_rel` (relative to repo root). Does NOT assert success.
     fn run_check_from(&self, cwd_rel: &str) -> Output {
+        self.run_check_from_with_ns(cwd_rel, None)
+    }
+
+    fn run_check_from_with_ns(&self, cwd_rel: &str, ns: Option<&str>) -> Output {
         let cwd = if cwd_rel.is_empty() {
             self.dir.path().to_path_buf()
         } else {
             self.dir.path().join(cwd_rel)
         };
-        Command::new(env!("CARGO_BIN_EXE_wiki"))
-            .current_dir(&cwd)
-            .args(["check"])
-            .env("WIKI_BACKGROUND_FTS", "0")
-            .output()
-            .expect("run wiki check")
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_wiki"));
+        cmd.current_dir(&cwd).env("WIKI_BACKGROUND_FTS", "0");
+        if let Some(n) = ns {
+            cmd.args(["-n", n, "check"]);
+        } else {
+            cmd.args(["check"]);
+        }
+        cmd.output().expect("run wiki check")
     }
 }
 
@@ -135,7 +141,7 @@ fn rule5_namespace_matches_current_wiki_is_valid() {
     );
     repo.commit("init");
 
-    let out = repo.run_check_from("wiki");
+    let out = repo.run_check_from_with_ns("wiki", Some("foo"));
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -148,7 +154,7 @@ fn rule5_namespace_matches_current_wiki_is_valid() {
     );
 }
 
-/// A `*.wiki.md` with `namespace: foo` where `foo` is a declared peer alias
+/// A `*.wiki.md` with `namespace: foo` where `foo` is another wiki in the repo
 /// → NOT a rule-5 violation.
 #[test]
 fn rule5_namespace_matches_declared_peer_is_valid() {
@@ -252,7 +258,7 @@ fn f3_same_ns_qualified_wikilink_missing_target_exits_1() {
     );
     repo.commit("init");
 
-    let out = repo.run_check_from("wiki");
+    let out = repo.run_check_from_with_ns("wiki", Some("foo"));
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -278,7 +284,7 @@ fn f3_same_ns_qualified_wikilink_existing_target_is_valid() {
     );
     repo.commit("init");
 
-    let out = repo.run_check_from("wiki");
+    let out = repo.run_check_from_with_ns("wiki", Some("foo"));
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -288,60 +294,6 @@ fn f3_same_ns_qualified_wikilink_existing_target_is_valid() {
     assert!(
         !stdout.contains("broken_wikilink"),
         "valid same-ns qualified link must not produce broken_wikilink; stdout: {stdout}"
-    );
-}
-
-// ── F7: namespace_config_invalid under -n '*' ─────────────────────────────────
-
-/// `wiki check -n '*'` where one peer namespace has a valid wiki.toml (so the
-/// root `WikiConfig::load` succeeds) but that peer's own wiki.toml declares a
-/// sub-peer with a missing `wiki.toml` (so `run_multi`'s per-namespace
-/// `WikiConfig::load` fails).
-///
-/// F7: previously `.ok()` silently swallowed the per-namespace load error,
-/// producing a green block even though rules 5/6 never ran for that namespace.
-/// After the fix, a `namespace_config_invalid` diagnostic must appear.
-#[test]
-fn f7_broken_sub_peer_emits_namespace_config_invalid() {
-    let repo = TestRepo::new();
-
-    // "bad" wiki: syntactically valid (so root load parses it), but declares
-    // a sub-peer "ghost" whose wiki.toml does not exist.
-    repo.create_file(
-        "bad/wiki.toml",
-        "namespace = \"bad\"\n[peers]\nghost = \"../ghost\"\n",
-    );
-    repo.create_file("bad/page.md", &make_wiki_page("Bad Page", "Content."));
-
-    // Root wiki lists "bad" as a peer — root load succeeds because bad/wiki.toml
-    // is syntactically valid (root load only validates peer existence, not their
-    // own sub-peers).
-    repo.create_file(
-        "wiki/wiki.toml",
-        "[peers]\nbad = \"../bad\"\n",
-    );
-    repo.create_file("wiki/page.md", &make_wiki_page("Root Page", "Hello."));
-    repo.commit("init");
-
-    // Run with -n '*' from the wiki dir
-    let cwd = repo.dir.path().join("wiki");
-    let out = Command::new(env!("CARGO_BIN_EXE_wiki"))
-        .current_dir(&cwd)
-        .args(["check", "-n", "*"])
-        .env("WIKI_BACKGROUND_FTS", "0")
-        .output()
-        .expect("run wiki check -n '*'");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-
-    assert!(
-        !out.status.success(),
-        "broken sub-peer must cause non-zero exit; stdout: {stdout}\nstderr: {stderr}"
-    );
-    let combined = format!("{stdout}{stderr}");
-    assert!(
-        combined.contains("namespace_config_invalid"),
-        "expected namespace_config_invalid in combined output; stdout: {stdout}\nstderr: {stderr}"
     );
 }
 

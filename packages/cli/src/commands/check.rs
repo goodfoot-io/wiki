@@ -202,7 +202,7 @@ pub fn collect_with_config(
 fn collect_for_files(
     files: &[PathBuf],
     index_files: &[PathBuf],
-    _wiki_root: &Path,
+    wiki_root: &Path,
     repo_root: &Path,
     wiki_config: Option<&WikiConfig>,
 ) -> Result<Vec<CheckDiagnostic>> {
@@ -431,16 +431,21 @@ fn collect_for_files(
 
     // ── Namespace rules 5 and 6 ───────────────────────────────────────────────
     if let Some(cfg) = wiki_config {
-        // Collect the set of valid namespace values: current + all peer aliases.
-        // A *.wiki.md file may declare `namespace: X` where X is either the
-        // current wiki's own namespace (if named) or any declared peer alias.
-        let current_ns = cfg.current.namespace.as_deref();
+        // The "current" namespace is the one whose root is `wiki_root`.
+        // Look it up from cfg.wikis so rules 5/6 know which wiki this run is for.
+        let canon_wiki_root = std::fs::canonicalize(wiki_root)
+            .unwrap_or_else(|_| wiki_root.to_path_buf());
+        let current_ns = cfg
+            .all()
+            .find(|w| w.root == canon_wiki_root)
+            .and_then(|w| w.namespace.as_deref());
 
-        // Lazy peer-title-index cache: alias -> HashMap<title_key, ()>.
-        // We only build a title set (not full paths) because we only need
-        // existence checks.
+        // Lazy per-namespace title-set cache for cross-namespace existence checks.
         let mut peer_title_cache: HashMap<String, Option<std::collections::HashSet<String>>> =
             HashMap::new();
+
+        let known_namespaces: Vec<&str> =
+            cfg.all().filter_map(|w| w.namespace.as_deref()).collect();
 
         for path in files {
             let content = match std::fs::read_to_string(path) {
@@ -454,21 +459,18 @@ fn collect_for_files(
                 && let Ok(Some(fm)) = parse_frontmatter(&content, path)
                 && let Some(declared_ns) = &fm.namespace
             {
-                // Valid if it matches the current wiki's own namespace
-                // or is a declared peer alias.
-                let is_current = current_ns == Some(declared_ns.as_str());
-                let is_peer = cfg.peers.contains_key(declared_ns.as_str());
-                if !is_current && !is_peer {
+                // Valid if it matches any known namespace in the repo.
+                let is_known = cfg.wikis.contains_key(declared_ns.as_str());
+                if !is_known {
                     diagnostics.push(CheckDiagnostic {
                         kind: "namespace_undeclared".into(),
                         file: path.display().to_string(),
                         line: 1,
                         message: format!(
-                            "namespace `{declared_ns}` is not declared in wiki.toml \
-                             (current namespace: {current}, declared peers: [{peers}]). \
-                             Add it to [peers] or correct the namespace value.",
+                            "namespace `{declared_ns}` is not declared by any wiki.toml in this repo \
+                             (current: {current}, known: [{known}]). Correct the namespace value or run `wiki init {declared_ns}` in the appropriate directory.",
                             current = current_ns.unwrap_or("default"),
-                            peers = cfg.peers.keys().cloned().collect::<Vec<_>>().join(", "),
+                            known = known_namespaces.join(", "),
                         ),
                     });
                 }
@@ -484,8 +486,6 @@ fn collect_for_files(
 
                 // Is the namespace the current wiki itself?
                 // [[current_ns:Article]] must validate against the current wiki's index.
-                // The regular wikilink loop skips all namespaced links, so we handle
-                // same-namespace qualified links here with an existence check.
                 if current_ns == Some(ns.as_str()) {
                     let key = wl.title.to_lowercase();
                     if !index.contains_key(&key) && !invalid_titles.contains(&key) {
@@ -502,22 +502,24 @@ fn collect_for_files(
                     continue;
                 }
 
-                // Must be a declared peer alias.
-                if !cfg.peers.contains_key(ns.as_str()) {
-                    diagnostics.push(CheckDiagnostic {
-                        kind: "cross_namespace_wikilink_unresolved".into(),
-                        file: path.display().to_string(),
-                        line: wl.source_line,
-                        message: format!(
-                            "namespace `{ns}` in `[[{ns}:{}]]` is not declared as a peer in wiki.toml.",
-                            wl.title
-                        ),
-                    });
-                    continue;
-                }
+                // Must be a known namespace in the repo.
+                let peer_info = match cfg.wikis.get(ns.as_str()) {
+                    Some(info) => info,
+                    None => {
+                        diagnostics.push(CheckDiagnostic {
+                            kind: "cross_namespace_wikilink_unresolved".into(),
+                            file: path.display().to_string(),
+                            line: wl.source_line,
+                            message: format!(
+                                "namespace `{ns}` in `[[{ns}:{}]]` is not declared by any wiki.toml in this repo.",
+                                wl.title
+                            ),
+                        });
+                        continue;
+                    }
+                };
 
-                // Peer is declared — lazily build/fetch its title set.
-                let peer_info = &cfg.peers[ns.as_str()];
+                // Lazily build/fetch the target wiki's title set.
                 let title_set = peer_title_cache.entry(ns.clone()).or_insert_with(|| {
                     build_peer_title_set(&peer_info.root, repo_root)
                 });

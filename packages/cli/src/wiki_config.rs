@@ -1,8 +1,12 @@
-//! Loading, validation, and peer resolution for `wiki.toml` files.
+//! Loading and validation for `wiki.toml` files.
 //!
-//! Each directory containing a `wiki.toml` is an independent wiki. The CLI
-//! walks up from `cwd` to find the nearest `wiki.toml`; that directory is the
-//! current wiki. The `[peers]` table enumerates reachable wikis by local alias.
+//! A repo may host any number of independent wikis. Each directory containing
+//! a `wiki.toml` defines one wiki. `WikiConfig::load` walks the repo tree (via
+//! `find_descendant_tomls`), parses every `wiki.toml`, and stores all of them
+//! in a map keyed by namespace name (`"default"` for the anonymous default).
+//!
+//! The legacy `[peers]` table is parsed and ignored: peers are obsolete now
+//! that all wikis in the repo are auto-discovered.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,12 +15,17 @@ use indexmap::IndexMap;
 use miette::{IntoDiagnostic, Result, WrapErr, miette};
 use toml_edit::DocumentMut;
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+/// The map key used for the anonymous default-namespace wiki.
+pub const DEFAULT_KEY: &str = "default";
+
 // ── Shared validator ──────────────────────────────────────────────────────────
 
 /// Validate a namespace string.
 ///
 /// Returns `Ok(())` if the value is acceptable, or an error with a clear
-/// message otherwise.  Called both from `WikiConfig::validate` and from
+/// message otherwise.  Called both from `WikiConfig::load` and from
 /// `commands::init`.
 pub fn validate_namespace_value(ns: &str) -> Result<()> {
     if ns.is_empty() {
@@ -46,163 +55,122 @@ pub struct WikiInfo {
     pub namespace: Option<String>,
 }
 
-/// Fully resolved config for the current wiki and its declared peers.
+/// Fully resolved config holding every discovered wiki in the repo.
+///
+/// Keyed by namespace name. The default namespace uses the literal key
+/// [`DEFAULT_KEY`] (`"default"`) — this is a sentinel for map lookup and is
+/// distinct from a wiki that declares `namespace = "default"`, which is
+/// rejected at load time by [`validate_namespace_value`].
 #[derive(Debug, Clone)]
 pub struct WikiConfig {
-    pub current: WikiInfo,
-    /// alias → resolved peer info.
-    pub peers: IndexMap<String, WikiInfo>,
+    pub wikis: IndexMap<String, WikiInfo>,
 }
 
 impl WikiConfig {
-    /// Walk up from `cwd` (capped at `repo_root`) to find the nearest
-    /// `wiki.toml`, parse it, resolve peers, and validate.
-    pub fn load(cwd: &Path, repo_root: &Path) -> Result<Self> {
-        let cwd_abs = canonical_or_self(cwd);
+    /// Discover every `wiki.toml` under `repo_root`, parse each, and validate.
+    ///
+    /// Fail-closed on any parse error, on duplicate namespace names, on more
+    /// than one default-namespace wiki, or on the reserved literal namespace
+    /// value `"default"`.
+    pub fn load(_cwd: &Path, repo_root: &Path) -> Result<Self> {
         let repo_root_abs = canonical_or_self(repo_root);
 
-        let toml_path = walk_up_for_toml(&cwd_abs, &repo_root_abs).ok_or_else(|| {
-            miette!(
-                "no wiki.toml found between {} and {}; run `wiki init` in your wiki root directory.",
-                cwd_abs.display(),
+        let candidates = find_descendant_tomls(&repo_root_abs);
+        if candidates.is_empty() {
+            return Err(miette!(
+                "no wiki.toml found under {}; run `wiki init` in your wiki root directory.",
                 repo_root_abs.display()
-            )
-        })?;
+            ));
+        }
 
-        let wiki_root = toml_path
-            .parent()
-            .ok_or_else(|| miette!("wiki.toml has no parent directory"))?
-            .to_path_buf();
+        let mut wikis: IndexMap<String, WikiInfo> = IndexMap::new();
+        for toml_path in &candidates {
+            let wiki_root = toml_path
+                .parent()
+                .ok_or_else(|| miette!("wiki.toml has no parent directory"))?
+                .to_path_buf();
 
-        let (namespace, peer_paths) = parse_wiki_toml(&toml_path)?;
+            let namespace = parse_wiki_toml(toml_path)?;
 
-        let mut peers: IndexMap<String, WikiInfo> = IndexMap::new();
-        for (alias, rel) in peer_paths {
-            let peer_root = if Path::new(&rel).is_absolute() {
-                PathBuf::from(&rel)
-            } else {
-                wiki_root.join(&rel)
-            };
-            let peer_root = canonical_or_self(&peer_root);
-            let peer_toml = peer_root.join("wiki.toml");
-            if !peer_toml.is_file() {
+            // Reject the reserved literal "default" namespace value.
+            if let Some(ns) = namespace.as_deref()
+                && ns == "default"
+            {
                 return Err(miette!(
-                    "peer `{alias}` resolves to {} but no wiki.toml exists there",
-                    peer_root.display()
+                    "wiki.toml at {} declares namespace 'default', which is reserved for the anonymous default — omit the `namespace` field instead",
+                    toml_path.display()
                 ));
             }
-            let (peer_ns, _) = parse_wiki_toml(&peer_toml)?;
-            peers.insert(
-                alias,
+
+            let key = namespace
+                .clone()
+                .unwrap_or_else(|| DEFAULT_KEY.to_string());
+
+            if let Some(prev) = wikis.get(&key) {
+                let label = if namespace.is_none() {
+                    "default namespace".to_string()
+                } else {
+                    format!("namespace `{key}`")
+                };
+                return Err(miette!(
+                    "duplicate {label} declared by both {} and {}",
+                    prev.root.display(),
+                    wiki_root.display()
+                ));
+            }
+
+            wikis.insert(
+                key,
                 WikiInfo {
-                    root: peer_root,
-                    namespace: peer_ns,
+                    root: wiki_root,
+                    namespace,
                 },
             );
         }
 
-        let cfg = WikiConfig {
-            current: WikiInfo {
-                root: wiki_root,
-                namespace,
-            },
-            peers,
-        };
-        cfg.validate()?;
-        Ok(cfg)
+        Ok(WikiConfig { wikis })
     }
 
-    /// Return current + all peer wikis in declaration order (current first).
-    /// Used by multi-namespace dispatch (`-n '*'`).
-    pub fn all_wikis(&self) -> Vec<&WikiInfo> {
-        let mut out = Vec::with_capacity(1 + self.peers.len());
-        out.push(&self.current);
-        for info in self.peers.values() {
-            out.push(info);
-        }
-        out
+    /// Return the default-namespace wiki, if one was declared.
+    pub fn default(&self) -> Option<&WikiInfo> {
+        self.wikis.get(DEFAULT_KEY)
     }
 
-    /// Enforce validation rules 1–4 at load time, fail-closed.
-    pub fn validate(&self) -> Result<()> {
-        // Rule 1 already enforced during load: every peer entry resolves to a
-        // directory containing wiki.toml. Re-check defensively.
-        for (alias, info) in &self.peers {
-            if !info.root.join("wiki.toml").is_file() {
-                return Err(miette!(
-                    "peer `{alias}` at {} has no wiki.toml",
-                    info.root.display()
-                ));
-            }
-        }
+    /// Iterate every wiki in the repo, in discovery order.
+    pub fn all(&self) -> impl Iterator<Item = &WikiInfo> {
+        self.wikis.values()
+    }
 
-        // Rule 2: each peer's namespace matches its alias key (or the peer
-        // omits namespace and the alias is "default").
-        for (alias, info) in &self.peers {
-            match &info.namespace {
-                Some(ns) if ns == alias => {}
-                None if alias == "default" => {}
-                Some(ns) => {
-                    return Err(miette!(
-                        "peer `{alias}` declares namespace `{ns}` but its alias key is `{alias}`"
-                    ));
-                }
-                None => {
-                    return Err(miette!(
-                        "peer `{alias}` has no `namespace` field but its alias key is `{alias}` (only the `default` alias may omit namespace)"
-                    ));
-                }
-            }
+    /// Resolve a `-n NS` argument (or its absence) to a single wiki.
+    ///
+    /// `target = None` returns the default-namespace wiki.
+    /// `target = Some(name)` looks up the wiki with that namespace.
+    /// The literal `"*"` is *not* accepted here — multi-namespace callers
+    /// iterate [`Self::all`] themselves.
+    pub fn resolve(&self, target: Option<&str>) -> Result<&WikiInfo> {
+        match target {
+            None => self.default().ok_or_else(|| {
+                let known = self.known_list();
+                miette!(
+                    "no default wiki declared in this repo. Declare one (omit `namespace` in a wiki.toml) or pass `-n <namespace>`. Known namespaces: [{known}]"
+                )
+            }),
+            Some("*") => Err(miette!(
+                "internal error: WikiConfig::resolve does not handle `*`; iterate `all()` instead"
+            )),
+            Some(name) => self.wikis.get(name).ok_or_else(|| {
+                let known = self.known_list();
+                miette!("unknown namespace `{name}`. Known: [{known}]")
+            }),
         }
+    }
 
-        // Rule 2b: reject the literal "default" namespace value.
-        if let Some(ns) = self.current.namespace.as_deref()
-            && ns == "default"
-        {
-            return Err(miette!(
-                "the literal namespace 'default' is reserved for the anonymous default — omit the `namespace` field instead"
-            ));
-        }
-        for (alias, info) in &self.peers {
-            if let Some(ns) = info.namespace.as_deref()
-                && ns == "default"
-            {
-                return Err(miette!(
-                    "peer `{alias}` has namespace 'default' which is reserved for the anonymous default — omit the `namespace` field instead"
-                ));
-            }
-        }
-
-        // Rule 3: at most one default namespace across current + peers.
-        let mut default_count = 0;
-        if self.current.namespace.is_none() {
-            default_count += 1;
-        }
-        for info in self.peers.values() {
-            if info.namespace.is_none() {
-                default_count += 1;
-            }
-        }
-        if default_count > 1 {
-            return Err(miette!(
-                "more than one default namespace declared across current wiki and peers"
-            ));
-        }
-
-        // Rule 4: no duplicate namespace values across current + peers.
-        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        if let Some(ns) = self.current.namespace.as_deref() {
-            seen.insert(ns);
-        }
-        for info in self.peers.values() {
-            if let Some(ns) = info.namespace.as_deref()
-                && !seen.insert(ns)
-            {
-                return Err(miette!("duplicate namespace `{ns}` across current + peers"));
-            }
-        }
-
-        Ok(())
+    fn known_list(&self) -> String {
+        self.wikis
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -210,30 +178,36 @@ fn canonical_or_self(p: &Path) -> PathBuf {
     fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-fn walk_up_for_toml(start: &Path, repo_root: &Path) -> Option<PathBuf> {
-    let mut current: &Path = start;
-    loop {
-        let candidate = current.join("wiki.toml");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if current == repo_root {
-            return None;
-        }
-        match current.parent() {
-            Some(parent) => {
-                // Stop if we've climbed above repo_root.
-                if !parent.starts_with(repo_root) && parent != repo_root {
-                    return None;
-                }
-                current = parent;
+/// Search the repo tree for `wiki.toml` files.
+///
+/// Respects `.gitignore` and standard filters via the `ignore` crate, so build
+/// outputs (`target/`, `node_modules/`, etc.) and hidden directories are
+/// skipped. Returns absolute paths in deterministic walk order.
+pub fn find_descendant_tomls(repo_root: &Path) -> Vec<PathBuf> {
+    let mut results = Vec::new();
+    for entry in ignore::WalkBuilder::new(repo_root)
+        .standard_filters(true)
+        .build()
+        .flatten()
+    {
+        if entry.file_name() == "wiki.toml" {
+            let path = entry.into_path();
+            if path.is_file() {
+                results.push(canonical_or_self(&path));
             }
-            None => return None,
         }
     }
+    results.sort();
+    results.dedup();
+    results
 }
 
-fn parse_wiki_toml(path: &Path) -> Result<(Option<String>, IndexMap<String, String>)> {
+/// Parse a `wiki.toml` and return the declared namespace (if any).
+///
+/// The `[peers]` table is parsed loosely (just to detect malformed types) but
+/// otherwise ignored — peers are obsolete now that the loader auto-discovers
+/// every wiki in the repo.
+fn parse_wiki_toml(path: &Path) -> Result<Option<String>> {
     let raw = fs::read_to_string(path)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to read {}", path.display()))?;
@@ -255,27 +229,7 @@ fn parse_wiki_toml(path: &Path) -> Result<(Option<String>, IndexMap<String, Stri
         },
     };
 
-    let mut peers = IndexMap::new();
-    if let Some(item) = doc.get("peers") {
-        if let Some(table) = item.as_table_like() {
-            for (key, value) in table.iter() {
-                let path_str = value.as_str().ok_or_else(|| {
-                    miette!(
-                        "peer `{key}` in {} must be a string path",
-                        path.display()
-                    )
-                })?;
-                peers.insert(key.to_string(), path_str.to_string());
-            }
-        } else {
-            return Err(miette!(
-                "`peers` in {} must be a table",
-                path.display()
-            ));
-        }
-    }
-
-    Ok((namespace, peers))
+    Ok(namespace)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -294,17 +248,18 @@ mod tests {
     }
 
     #[test]
-    fn load_finds_wiki_toml_by_walk_up() {
+    fn load_finds_wiki_toml_anywhere_in_repo() {
         let dir = TempDir::new().unwrap();
         let repo = dir.path();
         let wiki_root = repo.join("wiki");
         write(&wiki_root.join("wiki.toml"), "");
-        let deep = wiki_root.join("a/b/c");
-        fs::create_dir_all(&deep).unwrap();
-        let cfg = WikiConfig::load(&deep, repo).expect("load");
+        let unrelated = repo.join("packages/cli/src/foo");
+        fs::create_dir_all(&unrelated).unwrap();
+        let cfg = WikiConfig::load(&unrelated, repo).expect("load");
         let canon = fs::canonicalize(&wiki_root).unwrap();
-        assert_eq!(cfg.current.root, canon);
-        assert!(cfg.current.namespace.is_none());
+        let def = cfg.default().expect("default wiki");
+        assert_eq!(def.root, canon);
+        assert!(def.namespace.is_none());
     }
 
     #[test]
@@ -312,68 +267,93 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let repo = dir.path();
         let err = WikiConfig::load(repo, repo).unwrap_err();
-        let s = err.to_string();
-        assert!(s.contains("wiki init"), "got: {s}");
+        assert!(err.to_string().contains("wiki init"), "got: {err}");
     }
 
     #[test]
-    fn validate_rejects_peer_namespace_mismatch() {
+    fn load_succeeds_with_multiple_wikis() {
         let dir = TempDir::new().unwrap();
         let repo = dir.path();
-        let wiki_root = repo.join("wiki");
-        write(
-            &wiki_root.join("wiki.toml"),
-            "[peers]\nfoo = \"../foo\"\n",
-        );
-        let foo_root = repo.join("foo");
-        write(&foo_root.join("wiki.toml"), "namespace = \"bar\"\n");
-
-        let err = WikiConfig::load(&wiki_root, repo).unwrap_err();
-        assert!(err.to_string().contains("alias key"), "got: {err}");
+        write(&repo.join("wiki/wiki.toml"), "");
+        write(&repo.join("mesh/wiki.toml"), "namespace = \"mesh\"\n");
+        let cfg = WikiConfig::load(repo, repo).expect("load");
+        assert_eq!(cfg.wikis.len(), 2);
+        assert!(cfg.default().is_some());
+        assert!(cfg.wikis.contains_key("mesh"));
     }
 
     #[test]
-    fn validate_rejects_duplicate_namespace() {
-        // current = foo, peer = foo (alias mismatch first, but duplicate ns
-        // detected when peer namespace matches alias and current namespace).
-        // Use different alias names so rule 2 passes; but we reuse a namespace.
-        let mut cfg = WikiConfig {
-            current: WikiInfo {
-                root: PathBuf::from("/w"),
-                namespace: Some("foo".into()),
-            },
-            peers: IndexMap::new(),
-        };
-        // Peer alias "foo" with namespace "foo" — duplicate of current.
-        cfg.peers.insert(
-            "foo".into(),
-            WikiInfo {
-                root: PathBuf::from("/p"),
-                namespace: Some("foo".into()),
-            },
-        );
-        // Bypass rule 1 by skipping load and calling validate directly; we
-        // expect duplicate-namespace error after rule 2 passes.
-        // Construct so rule 1 also passes (skip): provide a real toml.
-        // Since validate() first checks rule 1, write the toml.
+    fn load_errors_on_duplicate_namespace_name() {
         let dir = TempDir::new().unwrap();
-        let p = dir.path().join("p");
-        write(&p.join("wiki.toml"), "");
-        cfg.peers.get_mut("foo").unwrap().root = p;
-        let err = cfg.validate().unwrap_err();
-        // Rule 4 fires (after rule 2 since alias matches namespace).
-        assert!(err.to_string().contains("duplicate"), "got: {err}");
+        let repo = dir.path();
+        write(&repo.join("alpha/wiki.toml"), "namespace = \"shared\"\n");
+        write(&repo.join("beta/wiki.toml"), "namespace = \"shared\"\n");
+        let err = WikiConfig::load(repo, repo).unwrap_err();
+        let s = err.to_string();
+        assert!(s.contains("namespace `shared`") || s.contains("duplicate"), "got: {s}");
     }
 
-    // ── F4: non-string namespace ──────────────────────────────────────────────
+    #[test]
+    fn load_errors_on_two_defaults() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        write(&repo.join("a/wiki.toml"), "");
+        write(&repo.join("b/wiki.toml"), "");
+        let err = WikiConfig::load(repo, repo).unwrap_err();
+        assert!(
+            err.to_string().contains("default namespace") || err.to_string().contains("duplicate"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_returns_default_for_none() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        write(&repo.join("wiki/wiki.toml"), "");
+        write(&repo.join("mesh/wiki.toml"), "namespace = \"mesh\"\n");
+        let cfg = WikiConfig::load(repo, repo).expect("load");
+        let def = cfg.resolve(None).expect("default");
+        assert!(def.namespace.is_none());
+    }
+
+    #[test]
+    fn resolve_returns_named_for_some() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        write(&repo.join("wiki/wiki.toml"), "");
+        write(&repo.join("mesh/wiki.toml"), "namespace = \"mesh\"\n");
+        let cfg = WikiConfig::load(repo, repo).expect("load");
+        let mesh = cfg.resolve(Some("mesh")).expect("mesh");
+        assert_eq!(mesh.namespace.as_deref(), Some("mesh"));
+    }
+
+    #[test]
+    fn resolve_errors_on_unknown_namespace() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        write(&repo.join("wiki/wiki.toml"), "");
+        let cfg = WikiConfig::load(repo, repo).expect("load");
+        let err = cfg.resolve(Some("nope")).unwrap_err();
+        assert!(err.to_string().contains("unknown namespace"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_errors_when_no_default_declared() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        write(&repo.join("mesh/wiki.toml"), "namespace = \"mesh\"\n");
+        let cfg = WikiConfig::load(repo, repo).expect("load");
+        let err = cfg.resolve(None).unwrap_err();
+        assert!(err.to_string().contains("no default wiki"), "got: {err}");
+    }
 
     #[test]
     fn parse_errors_on_non_string_namespace_integer() {
         let dir = TempDir::new().unwrap();
         let repo = dir.path();
-        let wiki_root = repo.join("wiki");
-        write(&wiki_root.join("wiki.toml"), "namespace = 42\n");
-        let err = WikiConfig::load(&wiki_root, repo).unwrap_err();
+        write(&repo.join("wiki/wiki.toml"), "namespace = 42\n");
+        let err = WikiConfig::load(repo, repo).unwrap_err();
         let s = err.to_string();
         assert!(s.contains("non-string") || s.contains("must be a string"), "got: {s}");
     }
@@ -382,56 +362,33 @@ mod tests {
     fn parse_errors_on_non_string_namespace_array() {
         let dir = TempDir::new().unwrap();
         let repo = dir.path();
-        let wiki_root = repo.join("wiki");
-        write(&wiki_root.join("wiki.toml"), "namespace = [\"foo\"]\n");
-        let err = WikiConfig::load(&wiki_root, repo).unwrap_err();
+        write(&repo.join("wiki/wiki.toml"), "namespace = [\"foo\"]\n");
+        let err = WikiConfig::load(repo, repo).unwrap_err();
         let s = err.to_string();
         assert!(s.contains("non-string") || s.contains("must be a string"), "got: {s}");
     }
 
     #[test]
-    fn parse_errors_on_non_string_namespace_in_peer() {
+    fn load_rejects_literal_default_namespace() {
         let dir = TempDir::new().unwrap();
         let repo = dir.path();
-        let wiki_root = repo.join("wiki");
+        write(&repo.join("wiki/wiki.toml"), "namespace = \"default\"\n");
+        let err = WikiConfig::load(repo, repo).unwrap_err();
+        let s = err.to_string();
+        assert!(s.contains("reserved") || s.contains("'default'"), "got: {s}");
+    }
+
+    #[test]
+    fn load_ignores_obsolete_peers_table() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
         write(
-            &wiki_root.join("wiki.toml"),
+            &repo.join("wiki/wiki.toml"),
             "[peers]\nfoo = \"../foo\"\n",
         );
-        let foo_root = repo.join("foo");
-        write(&foo_root.join("wiki.toml"), "namespace = true\n");
-        let err = WikiConfig::load(&wiki_root, repo).unwrap_err();
-        let s = err.to_string();
-        assert!(s.contains("non-string") || s.contains("must be a string"), "got: {s}");
-    }
-
-    // ── F8: literal "default" namespace ──────────────────────────────────────
-
-    #[test]
-    fn validate_rejects_literal_default_namespace_on_current() {
-        let dir = TempDir::new().unwrap();
-        let repo = dir.path();
-        let wiki_root = repo.join("wiki");
-        write(&wiki_root.join("wiki.toml"), "namespace = \"default\"\n");
-        let err = WikiConfig::load(&wiki_root, repo).unwrap_err();
-        let s = err.to_string();
-        assert!(s.contains("reserved") || s.contains("'default'"), "got: {s}");
-    }
-
-    #[test]
-    fn validate_rejects_literal_default_namespace_on_peer() {
-        let dir = TempDir::new().unwrap();
-        let repo = dir.path();
-        let wiki_root = repo.join("wiki");
-        write(
-            &wiki_root.join("wiki.toml"),
-            "namespace = \"host\"\n[peers]\ndefault = \"../def\"\n",
-        );
-        let def_root = repo.join("def");
-        write(&def_root.join("wiki.toml"), "namespace = \"default\"\n");
-        let err = WikiConfig::load(&wiki_root, repo).unwrap_err();
-        let s = err.to_string();
-        assert!(s.contains("reserved") || s.contains("'default'"), "got: {s}");
+        // Note: no foo/wiki.toml created — peers used to require this.
+        let cfg = WikiConfig::load(repo, repo).expect("load ignores peers");
+        assert_eq!(cfg.wikis.len(), 1);
     }
 
     // ── validate_namespace_value helper ──────────────────────────────────────
@@ -459,29 +416,5 @@ mod tests {
         assert!(validate_namespace_value("foo").is_ok());
         assert!(validate_namespace_value("foo-bar_1").is_ok());
         assert!(validate_namespace_value("A9").is_ok());
-    }
-
-    #[test]
-    fn validate_rejects_two_default_namespaces() {
-        let dir = TempDir::new().unwrap();
-        let p = dir.path().join("p");
-        write(&p.join("wiki.toml"), "");
-        let mut peers = IndexMap::new();
-        peers.insert(
-            "default".into(),
-            WikiInfo {
-                root: p,
-                namespace: None,
-            },
-        );
-        let cfg = WikiConfig {
-            current: WikiInfo {
-                root: PathBuf::from("/w"),
-                namespace: None,
-            },
-            peers,
-        };
-        let err = cfg.validate().unwrap_err();
-        assert!(err.to_string().contains("default namespace"), "got: {err}");
     }
 }

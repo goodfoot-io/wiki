@@ -44,5 +44,5 @@ When wiki documentation behavior changes, use this order:
 
 ## References
 
-- [Wiki CLI architecture page](wiki/architecture/wiki-cli.md#L8-L54&506212e)
+- [Wiki CLI architecture page](wiki/architecture/wiki-cli.md#L8-L41)
 - [Wiki Organization](wiki/meta/wiki-organization.md#L9-L67&e2b1474)

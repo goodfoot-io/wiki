@@ -223,7 +223,7 @@ enum Commands {
     /// Generate a shell script of `git mesh add` / `git mesh why` commands
     /// for every fragment link found in the wiki corpus.
     Scaffold {
-        /// Glob patterns to match wiki pages (default: $WIKI_DIR/**/*.md)
+        /// Glob patterns to match wiki pages (default: <wiki-root>/**/*.md)
         #[arg(value_name = "glob")]
         globs: Vec<String>,
     },
@@ -385,9 +385,8 @@ fn run(
                 "this command does not support multi-namespace (`-n '*'`)"
             )
         })?;
-        let wikis = cfg.all_wikis();
-        let targets: Vec<(String, &std::path::Path)> = wikis
-            .iter()
+        let targets: Vec<(String, &std::path::Path)> = cfg
+            .all()
             .map(|info| {
                 (
                     info.namespace.clone().unwrap_or_else(|| "default".into()),
@@ -396,8 +395,13 @@ fn run(
             })
             .collect();
         let command_name = command_name(command.as_ref(), effective_query.as_deref());
-        // Use the current wiki's root as the perf root; this is informational.
-        perf::init(cfg.current.root.as_path(), command_name, json);
+        // Use the first discovered wiki's root as the perf root; informational.
+        let perf_root = cfg
+            .all()
+            .next()
+            .map(|w| w.root.as_path())
+            .unwrap_or(repo_root.as_path());
+        perf::init(perf_root, command_name, json);
         let _command_span = perf::span_for_command(command_name);
         let started = Instant::now();
         let result: Result<i32> = match command {
@@ -595,25 +599,12 @@ fn run(
 }
 
 /// Resolve `-n NS` to a `WikiInfo` from the loaded config. `None` returns the
-/// current wiki; `Some(name)` looks up a peer alias or, if it matches the
-/// current wiki's namespace, returns the current wiki.
+/// default-namespace wiki; `Some(name)` looks up the wiki with that namespace.
 fn resolve_target(
     cfg: &wiki_config::WikiConfig,
     namespace: Option<&str>,
 ) -> Result<wiki_config::WikiInfo> {
-    match namespace {
-        None => Ok(cfg.current.clone()),
-        Some(name) => {
-            if cfg.current.namespace.as_deref() == Some(name) {
-                return Ok(cfg.current.clone());
-            }
-            cfg.peers.get(name).cloned().ok_or_else(|| {
-                miette::miette!(
-                    "namespace `{name}` is not declared in [peers] (and is not the current namespace)"
-                )
-            })
-        }
-    }
+    cfg.resolve(namespace).cloned()
 }
 
 /// Apply `@foo query` sugar: if the query starts with `@<word> ` and `<word>`
@@ -637,7 +628,7 @@ fn apply_at_sugar(
     };
     let word = &stripped[..space];
     let rest = stripped[space + 1..].trim_start().to_string();
-    let known = cfg.peers.contains_key(word) || cfg.current.namespace.as_deref() == Some(word);
+    let known = cfg.wikis.contains_key(word);
     if known {
         (Some(word.to_string()), Some(rest))
     } else {

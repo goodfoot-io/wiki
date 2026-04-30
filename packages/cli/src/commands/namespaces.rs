@@ -28,140 +28,109 @@ pub struct NamespaceEntry {
     pub alias: String,
     pub namespace: Option<String>,
     pub path: String,
+    pub abs_path: String,
     pub status: String,
 }
 
 // ── Runner ────────────────────────────────────────────────────────────────────
 
-/// Walk up from `cwd` (capped at `repo_root`) to find a `wiki.toml`, then
-/// report the current wiki's namespace and each declared peer with validation
-/// status. Exit 1 if any peer fails rule 1 or rule 2.
-pub fn run(cwd: &Path, repo_root: &Path, json: bool) -> Result<i32> {
-    let cwd_abs = canonicalize_or_self(cwd);
+/// Enumerate every `wiki.toml` in the repo and print one row per namespace.
+///
+/// Output: `[namespace]\t[absolute path of directory containing wiki.toml]`,
+/// one row per discovered wiki, with `default` first and the rest sorted
+/// alphabetically. Exit 1 if two wikis declare the same namespace, or if any
+/// `wiki.toml` fails to parse.
+pub fn run(_cwd: &Path, repo_root: &Path, json: bool) -> Result<i32> {
     let repo_root_abs = canonicalize_or_self(repo_root);
 
-    let toml_path = walk_up_for_toml(&cwd_abs, &repo_root_abs).ok_or_else(|| {
-        miette::miette!(
-            "no wiki.toml found; run `wiki init` in your wiki root directory."
-        )
-    })?;
+    let toml_paths = find_descendant_tomls(&repo_root_abs);
+    if toml_paths.is_empty() {
+        return Err(miette::miette!(
+            "no wiki.toml found under {}; run `wiki init` in your wiki root directory.",
+            repo_root_abs.display()
+        ));
+    }
 
-    let wiki_root = toml_path
-        .parent()
-        .ok_or_else(|| miette::miette!("wiki.toml has no parent directory"))?
-        .to_path_buf();
-
-    let (current_ns, peer_map) = parse_wiki_toml(&toml_path)?;
-
-    let mut peer_entries: Vec<NamespaceEntry> = Vec::new();
+    let mut entries: Vec<NamespaceEntry> = Vec::with_capacity(toml_paths.len());
     let mut any_error = false;
 
-    for (alias, rel) in &peer_map {
-        let peer_root = if Path::new(rel.as_str()).is_absolute() {
-            PathBuf::from(rel)
-        } else {
-            wiki_root.join(rel)
-        };
-        let peer_root = canonicalize_or_self(&peer_root);
-        let display_path = relative_display(&wiki_root, &peer_root);
+    for toml_path in &toml_paths {
+        let wiki_root = toml_path
+            .parent()
+            .ok_or_else(|| miette::miette!("wiki.toml has no parent directory"))?
+            .to_path_buf();
+        let abs_path = wiki_root.display().to_string();
 
-        let peer_toml_path = peer_root.join("wiki.toml");
-        if !peer_toml_path.is_file() {
-            any_error = true;
-            peer_entries.push(NamespaceEntry {
-                alias: alias.clone(),
-                namespace: None,
-                path: display_path,
-                status: "error: no wiki.toml".to_string(),
-            });
-            continue;
-        }
-
-        // Rule 1 passed — read the peer's namespace.
-        let (peer_ns, _) = match parse_wiki_toml(&peer_toml_path) {
+        let (ns, _peers) = match parse_wiki_toml(toml_path) {
             Ok(v) => v,
             Err(e) => {
                 any_error = true;
-                peer_entries.push(NamespaceEntry {
-                    alias: alias.clone(),
+                entries.push(NamespaceEntry {
+                    alias: String::new(),
                     namespace: None,
-                    path: display_path,
+                    path: abs_path.clone(),
+                    abs_path,
                     status: format!("error: {e}"),
                 });
                 continue;
             }
         };
 
-        // Rule 2: namespace must match alias (or peer omits namespace and
-        // the alias is "default").
-        let status = match &peer_ns {
-            Some(ns) if ns == alias => "ok".to_string(),
-            None if alias == "default" => "ok".to_string(),
-            Some(ns) => {
-                any_error = true;
-                format!("error: namespace mismatch (declared '{ns}' but alias is '{alias}')")
-            }
-            None => {
-                any_error = true;
-                format!(
-                    "error: namespace mismatch (no namespace declared but alias is '{alias}')"
-                )
-            }
-        };
-
-        peer_entries.push(NamespaceEntry {
-            alias: alias.clone(),
-            namespace: peer_ns,
-            path: display_path,
-            status,
+        entries.push(NamespaceEntry {
+            alias: String::new(),
+            namespace: ns,
+            path: abs_path.clone(),
+            abs_path,
+            status: "ok".to_string(),
         });
     }
 
+    // Detect duplicate namespace names (default counts as a single bucket).
+    let mut seen: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for entry in &entries {
+        if entry.status.starts_with("error") {
+            continue;
+        }
+        let key = entry.namespace.as_deref().unwrap_or("default");
+        if let Some(prev) = seen.insert(key, entry.abs_path.as_str()) {
+            any_error = true;
+            eprintln!(
+                "error: namespace `{key}` declared by both {} and {}",
+                prev, entry.abs_path
+            );
+        }
+    }
+
+    // Sort: `default` first, then alphabetic by namespace.
+    entries.sort_by(|a, b| {
+        let a_key = a.namespace.as_deref().unwrap_or("");
+        let b_key = b.namespace.as_deref().unwrap_or("");
+        match (a_key, b_key) {
+            ("", "") => a.abs_path.cmp(&b.abs_path),
+            ("", _) => std::cmp::Ordering::Less,
+            (_, "") => std::cmp::Ordering::Greater,
+            _ => a_key.cmp(b_key),
+        }
+    });
+
     if json {
-        let current_path = relative_display(&wiki_root, &wiki_root);
-        let mut all: Vec<NamespaceEntry> = Vec::new();
-        all.push(NamespaceEntry {
-            alias: "current".to_string(),
-            namespace: current_ns,
-            path: current_path,
-            status: "ok".to_string(),
-        });
-        all.extend(peer_entries);
         println!(
             "{}",
-            serde_json::to_string_pretty(&all).into_diagnostic()?
+            serde_json::to_string_pretty(&entries).into_diagnostic()?
         );
     } else {
-        let current_ns_str = current_ns.as_deref().unwrap_or("default");
-        let current_path = relative_display(&wiki_root, &wiki_root);
-        println!("current: {current_ns_str} ({current_path})");
-
-        if peer_entries.is_empty() {
-            println!("peers: (none)");
-        } else {
-            println!("peers:");
-            let alias_width = peer_entries
-                .iter()
-                .map(|e| e.alias.len())
-                .max()
-                .unwrap_or(0);
-            for entry in &peer_entries {
-                println!(
-                    "  {:<width$} \u{2192} {}  [{}]",
-                    entry.alias,
-                    entry.path,
-                    entry.status,
-                    width = alias_width
-                );
+        // Print a third tab column when status is not "ok" so parse errors are visible.
+        for entry in &entries {
+            let ns = entry.namespace.as_deref().unwrap_or("default");
+            if entry.status == "ok" {
+                println!("{}\t{}", ns, entry.abs_path);
+            } else {
+                println!("{}\t{}\t{}", ns, entry.abs_path, entry.status);
             }
         }
     }
 
-    if any_error {
-        Ok(1)
-    } else {
-        Ok(0)
-    }
+    if any_error { Ok(1) } else { Ok(0) }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -170,66 +139,25 @@ fn canonicalize_or_self(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-fn walk_up_for_toml(start: &Path, repo_root: &Path) -> Option<PathBuf> {
-    let mut current: &Path = start;
-    loop {
-        let candidate = current.join("wiki.toml");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if current == repo_root {
-            return None;
-        }
-        match current.parent() {
-            Some(parent) => {
-                if !parent.starts_with(repo_root) && parent != repo_root {
-                    return None;
-                }
-                current = parent;
+fn find_descendant_tomls(repo_root: &Path) -> Vec<PathBuf> {
+    let mut results = Vec::new();
+    for entry in ignore::WalkBuilder::new(repo_root)
+        .standard_filters(true)
+        .build()
+        .flatten()
+    {
+        if entry.file_name() == "wiki.toml" {
+            let path = entry.into_path();
+            if path.is_file() {
+                results.push(canonicalize_or_self(&path));
             }
-            None => return None,
         }
     }
+    results.sort();
+    results.dedup();
+    results
 }
 
-/// Return a display path for `target` relative to `base`.
-///
-/// Always starts with `.` or `..` to be unambiguous. Falls back to the
-/// absolute path when no common prefix exists.
-fn relative_display(base: &Path, target: &Path) -> String {
-    if base == target {
-        return ".".to_string();
-    }
-
-    let base_components: Vec<_> = base.components().collect();
-    let target_components: Vec<_> = target.components().collect();
-
-    let common_len = base_components
-        .iter()
-        .zip(target_components.iter())
-        .take_while(|(a, b)| a == b)
-        .count();
-
-    if common_len == 0 {
-        return target.to_string_lossy().to_string();
-    }
-
-    let up_count = base_components.len() - common_len;
-    let mut result = PathBuf::new();
-    for _ in 0..up_count {
-        result.push("..");
-    }
-    for component in &target_components[common_len..] {
-        result.push(component);
-    }
-
-    let s = result.to_string_lossy().to_string();
-    if s.starts_with('.') {
-        s
-    } else {
-        format!("./{s}")
-    }
-}
 
 /// Parse a `wiki.toml` and return `(namespace, peers)`.
 fn parse_wiki_toml(

@@ -70,11 +70,10 @@ impl TestRepo {
 
 // ── `wiki namespaces` tests ───────────────────────────────────────────────────
 
-/// Happy path: current wiki with no peers.
+/// Happy path: a single default-namespace wiki.
 #[test]
-fn namespaces_happy_path_no_peers() {
+fn namespaces_happy_path_single_default() {
     let repo = TestRepo::new();
-    // Create wiki dir with wiki.toml (no namespace, no peers).
     repo.create_file("wiki/wiki.toml", "");
 
     let out = repo.run_from("wiki", &["namespaces"]);
@@ -87,23 +86,16 @@ fn namespaces_happy_path_no_peers() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("current: default"),
-        "expected 'current: default', got: {stdout}"
-    );
-    assert!(
-        stdout.contains("(none)") || stdout.contains("peers:"),
-        "expected peers block, got: {stdout}"
+        stdout.contains("default\t"),
+        "expected 'default' row, got: {stdout}"
     );
 }
 
-/// Happy path: current wiki (named) with one good peer.
+/// Happy path: a default wiki and a named wiki are both listed.
 #[test]
-fn namespaces_happy_path_with_good_peer() {
+fn namespaces_lists_multiple_wikis() {
     let repo = TestRepo::new();
-    repo.create_file(
-        "wiki/wiki.toml",
-        "namespace = \"main\"\n[peers]\nfoo = \"../foo-wiki\"\n",
-    );
+    repo.create_file("wiki/wiki.toml", "");
     repo.create_file("foo-wiki/wiki.toml", "namespace = \"foo\"\n");
 
     let out = repo.run_from("wiki", &["namespaces"]);
@@ -115,27 +107,18 @@ fn namespaces_happy_path_with_good_peer() {
         String::from_utf8_lossy(&out.stderr),
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("current: main"),
-        "expected 'current: main', got: {stdout}"
-    );
-    assert!(
-        stdout.contains("foo") && stdout.contains("[ok]"),
-        "expected peer foo with [ok], got: {stdout}"
-    );
+    assert!(stdout.contains("default\t"), "expected default row, got: {stdout}");
+    assert!(stdout.contains("foo\t"), "expected foo row, got: {stdout}");
 }
 
-/// Broken peer (missing wiki.toml): exit 1, shows error in output.
+/// Two wikis declaring the same namespace name: exit 1.
 #[test]
-fn namespaces_broken_peer_missing_wiki_toml_exits_nonzero() {
+fn namespaces_duplicate_namespace_exits_nonzero() {
     let repo = TestRepo::new();
-    repo.create_file(
-        "wiki/wiki.toml",
-        "[peers]\nbar = \"../missing-wiki\"\n",
-    );
-    // Do NOT create missing-wiki/wiki.toml.
+    repo.create_file("a/wiki.toml", "namespace = \"shared\"\n");
+    repo.create_file("b/wiki.toml", "namespace = \"shared\"\n");
 
-    let out = repo.run_from("wiki", &["namespaces"]);
+    let out = repo.run_from("", &["namespaces"]);
     assert_eq!(
         out.status.code(),
         Some(1),
@@ -144,48 +127,35 @@ fn namespaces_broken_peer_missing_wiki_toml_exits_nonzero() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("error: no wiki.toml"),
-        "expected error message for missing wiki.toml, got: {stdout}"
-    );
 }
 
-/// Broken peer (namespace mismatch): exit 1, shows mismatch message.
+/// A malformed wiki.toml is reported via an `error: ...` row in text output.
 #[test]
-fn namespaces_broken_peer_namespace_mismatch_exits_nonzero() {
+fn namespaces_malformed_wiki_toml_shows_error() {
     let repo = TestRepo::new();
-    repo.create_file(
-        "wiki/wiki.toml",
-        "[peers]\nfoo = \"../bar-wiki\"\n",
-    );
-    // Peer declares namespace "bar" but alias is "foo" — mismatch.
-    repo.create_file("bar-wiki/wiki.toml", "namespace = \"bar\"\n");
+    repo.create_file("wiki/wiki.toml", "");
+    repo.create_file("bad/wiki.toml", "this is = not = valid = toml\n");
 
-    let out = repo.run_from("wiki", &["namespaces"]);
+    let out = repo.run_from("", &["namespaces"]);
     assert_eq!(
         out.status.code(),
         Some(1),
-        "expected exit 1, got {:?}\nstdout: {}\nstderr: {}",
-        out.status,
+        "expected exit 1 for malformed toml; stdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("namespace mismatch"),
-        "expected namespace mismatch error, got: {stdout}"
+        stdout.contains("error"),
+        "expected error status in output; stdout: {stdout}"
     );
 }
 
-/// `--format json` emits an array with alias/namespace/path/status fields.
+/// `--format json` emits an array with namespace/path/status fields.
 #[test]
 fn namespaces_json_format() {
     let repo = TestRepo::new();
-    repo.create_file(
-        "wiki/wiki.toml",
-        "namespace = \"main\"\n[peers]\nfoo = \"../foo-wiki\"\n",
-    );
+    repo.create_file("wiki/wiki.toml", "");
     repo.create_file("foo-wiki/wiki.toml", "namespace = \"foo\"\n");
 
     let out = repo.run_from("wiki", &["namespaces", "--format", "json"]);
@@ -200,19 +170,16 @@ fn namespaces_json_format() {
     let parsed: serde_json::Value =
         serde_json::from_str(&stdout).expect("valid JSON output");
     let arr = parsed.as_array().expect("JSON array");
-    assert!(!arr.is_empty(), "expected non-empty array");
+    assert!(arr.len() >= 2, "expected at least 2 entries");
 
-    // Every entry must have alias, namespace, path, status fields.
     for entry in arr {
-        assert!(entry.get("alias").is_some(), "missing 'alias' in {entry}");
         assert!(entry.get("path").is_some(), "missing 'path' in {entry}");
         assert!(entry.get("status").is_some(), "missing 'status' in {entry}");
     }
 
-    // The "foo" peer must be present with status "ok".
     let foo = arr
         .iter()
-        .find(|e| e["alias"] == "foo")
+        .find(|e| e["namespace"] == "foo")
         .expect("expected foo entry");
     assert_eq!(foo["status"], "ok");
 }

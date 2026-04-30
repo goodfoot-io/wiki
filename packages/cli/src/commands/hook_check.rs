@@ -38,7 +38,16 @@ pub fn run(input: &str, _wiki_root: &Path, repo_root: &Path) -> Result<i32> {
         Ok(c) => c,
         Err(_) => return Ok(0),
     };
-    let wiki_root = cfg.current.root.as_path();
+    // Pick the wiki whose root is an ancestor of the edited file. If none
+    // matches (file is outside any wiki), silently no-op.
+    let canon_walk = std::fs::canonicalize(walk_start).unwrap_or_else(|_| walk_start.to_path_buf());
+    let target_wiki = cfg
+        .all()
+        .find(|w| canon_walk.starts_with(&w.root));
+    let Some(target_wiki) = target_wiki else {
+        return Ok(0);
+    };
+    let wiki_root = target_wiki.root.as_path();
 
     let rel_path = super::normalize_repo_relative_path(&file_path, repo_root);
     if !super::matches_default_discovery_path(&rel_path, wiki_root, repo_root) {
