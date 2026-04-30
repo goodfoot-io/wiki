@@ -1,0 +1,317 @@
+//! Integration tests for `wiki namespaces` and `wiki init`.
+
+use std::fs;
+use std::path::Path;
+use std::process::{Command, Output};
+
+use tempfile::TempDir;
+
+// ── TestRepo ──────────────────────────────────────────────────────────────────
+
+struct TestRepo {
+    dir: TempDir,
+}
+
+impl TestRepo {
+    fn new() -> Self {
+        let dir = TempDir::new().expect("tempdir");
+        let repo = Self { dir };
+        repo.git(&["init"]);
+        repo.git(&["checkout", "-b", "main"]);
+        repo
+    }
+
+    fn path(&self) -> &Path {
+        self.dir.path()
+    }
+
+    fn create_file(&self, path: &str, content: &str) {
+        let full = self.dir.path().join(path);
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent).expect("create_dir_all");
+        }
+        fs::write(full, content).expect("write file");
+    }
+
+    fn git(&self, args: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(self.dir.path())
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
+            .output()
+            .expect("spawn git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed:\n{}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Run `wiki <args>` from `cwd_rel` (a path relative to the repo root).
+    /// Returns the raw Output. Does NOT assert success.
+    fn run_from(&self, cwd_rel: &str, args: &[&str]) -> Output {
+        let cwd = if cwd_rel.is_empty() {
+            self.dir.path().to_path_buf()
+        } else {
+            self.dir.path().join(cwd_rel)
+        };
+        Command::new(env!("CARGO_BIN_EXE_wiki"))
+            .current_dir(&cwd)
+            .args(args)
+            .env("WIKI_BACKGROUND_FTS", "0")
+            .output()
+            .expect("run wiki")
+    }
+}
+
+// ── `wiki namespaces` tests ───────────────────────────────────────────────────
+
+/// Happy path: current wiki with no peers.
+#[test]
+fn namespaces_happy_path_no_peers() {
+    let repo = TestRepo::new();
+    // Create wiki dir with wiki.toml (no namespace, no peers).
+    repo.create_file("wiki/wiki.toml", "");
+
+    let out = repo.run_from("wiki", &["namespaces"]);
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("current: default"),
+        "expected 'current: default', got: {stdout}"
+    );
+    assert!(
+        stdout.contains("(none)") || stdout.contains("peers:"),
+        "expected peers block, got: {stdout}"
+    );
+}
+
+/// Happy path: current wiki (named) with one good peer.
+#[test]
+fn namespaces_happy_path_with_good_peer() {
+    let repo = TestRepo::new();
+    repo.create_file(
+        "wiki/wiki.toml",
+        "namespace = \"main\"\n[peers]\nfoo = \"../foo-wiki\"\n",
+    );
+    repo.create_file("foo-wiki/wiki.toml", "namespace = \"foo\"\n");
+
+    let out = repo.run_from("wiki", &["namespaces"]);
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("current: main"),
+        "expected 'current: main', got: {stdout}"
+    );
+    assert!(
+        stdout.contains("foo") && stdout.contains("[ok]"),
+        "expected peer foo with [ok], got: {stdout}"
+    );
+}
+
+/// Broken peer (missing wiki.toml): exit 1, shows error in output.
+#[test]
+fn namespaces_broken_peer_missing_wiki_toml_exits_nonzero() {
+    let repo = TestRepo::new();
+    repo.create_file(
+        "wiki/wiki.toml",
+        "[peers]\nbar = \"../missing-wiki\"\n",
+    );
+    // Do NOT create missing-wiki/wiki.toml.
+
+    let out = repo.run_from("wiki", &["namespaces"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "expected exit 1, got {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("error: no wiki.toml"),
+        "expected error message for missing wiki.toml, got: {stdout}"
+    );
+}
+
+/// Broken peer (namespace mismatch): exit 1, shows mismatch message.
+#[test]
+fn namespaces_broken_peer_namespace_mismatch_exits_nonzero() {
+    let repo = TestRepo::new();
+    repo.create_file(
+        "wiki/wiki.toml",
+        "[peers]\nfoo = \"../bar-wiki\"\n",
+    );
+    // Peer declares namespace "bar" but alias is "foo" — mismatch.
+    repo.create_file("bar-wiki/wiki.toml", "namespace = \"bar\"\n");
+
+    let out = repo.run_from("wiki", &["namespaces"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "expected exit 1, got {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("namespace mismatch"),
+        "expected namespace mismatch error, got: {stdout}"
+    );
+}
+
+/// `--format json` emits an array with alias/namespace/path/status fields.
+#[test]
+fn namespaces_json_format() {
+    let repo = TestRepo::new();
+    repo.create_file(
+        "wiki/wiki.toml",
+        "namespace = \"main\"\n[peers]\nfoo = \"../foo-wiki\"\n",
+    );
+    repo.create_file("foo-wiki/wiki.toml", "namespace = \"foo\"\n");
+
+    let out = repo.run_from("wiki", &["namespaces", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("valid JSON output");
+    let arr = parsed.as_array().expect("JSON array");
+    assert!(!arr.is_empty(), "expected non-empty array");
+
+    // Every entry must have alias, namespace, path, status fields.
+    for entry in arr {
+        assert!(entry.get("alias").is_some(), "missing 'alias' in {entry}");
+        assert!(entry.get("path").is_some(), "missing 'path' in {entry}");
+        assert!(entry.get("status").is_some(), "missing 'status' in {entry}");
+    }
+
+    // The "foo" peer must be present with status "ok".
+    let foo = arr
+        .iter()
+        .find(|e| e["alias"] == "foo")
+        .expect("expected foo entry");
+    assert_eq!(foo["status"], "ok");
+}
+
+// ── `wiki init` tests ─────────────────────────────────────────────────────────
+
+/// `wiki init` with no arg writes an empty wiki.toml.
+#[test]
+fn init_creates_empty_wiki_toml() {
+    let repo = TestRepo::new();
+    fs::create_dir_all(repo.path().join("new-wiki")).expect("mkdir");
+
+    let out = repo.run_from("new-wiki", &["init"]);
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let toml_path = repo.path().join("new-wiki/wiki.toml");
+    assert!(toml_path.exists(), "wiki.toml must exist after init");
+    let content = fs::read_to_string(&toml_path).expect("read wiki.toml");
+    assert!(
+        content.is_empty() || !content.contains("namespace"),
+        "empty init must not write a namespace key; got: {content:?}"
+    );
+}
+
+/// `wiki init <namespace>` writes `namespace = "<arg>"`.
+#[test]
+fn init_with_namespace_writes_namespace_field() {
+    let repo = TestRepo::new();
+    fs::create_dir_all(repo.path().join("ns-wiki")).expect("mkdir");
+
+    let out = repo.run_from("ns-wiki", &["init", "myns"]);
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let toml_path = repo.path().join("ns-wiki/wiki.toml");
+    assert!(toml_path.exists(), "wiki.toml must exist after init");
+    let content = fs::read_to_string(&toml_path).expect("read wiki.toml");
+    assert!(
+        content.contains("namespace = \"myns\""),
+        "expected namespace field, got: {content:?}"
+    );
+}
+
+/// `wiki init` fails closed when wiki.toml already exists.
+#[test]
+fn init_fails_if_wiki_toml_exists() {
+    let repo = TestRepo::new();
+    repo.create_file("existing-wiki/wiki.toml", "namespace = \"old\"\n");
+
+    let out = repo.run_from("existing-wiki", &["init"]);
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit when wiki.toml exists, got success\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // The existing file must not be overwritten.
+    let content = fs::read_to_string(repo.path().join("existing-wiki/wiki.toml"))
+        .expect("read wiki.toml");
+    assert!(
+        content.contains("namespace = \"old\""),
+        "existing wiki.toml must not be overwritten, got: {content:?}"
+    );
+}
+
+/// `wiki init` works in a directory with no ancestor wiki.toml (does not
+/// require a loaded WikiConfig).
+#[test]
+fn init_works_without_any_wiki_toml_in_tree() {
+    // Create a plain temp dir that is NOT a git repo — this ensures init
+    // doesn't depend on WikiConfig::load or git::repo_root.
+    // We need a git repo for the CLI to determine repo_root; use a fresh one.
+    let repo = TestRepo::new();
+    // No wiki.toml anywhere. Run init from the repo root.
+    let out = repo.run_from("", &["init", "fresh"]);
+    assert!(
+        out.status.success(),
+        "expected exit 0 when no wiki.toml exists anywhere, got {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let toml_path = repo.path().join("wiki.toml");
+    assert!(toml_path.exists(), "wiki.toml must be created at cwd");
+    let content = fs::read_to_string(&toml_path).expect("read wiki.toml");
+    assert!(
+        content.contains("namespace = \"fresh\""),
+        "expected namespace = fresh, got: {content:?}"
+    );
+}

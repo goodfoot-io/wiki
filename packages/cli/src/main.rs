@@ -227,6 +227,22 @@ enum Commands {
         #[arg(value_name = "glob")]
         globs: Vec<String>,
     },
+
+    /// List the current wiki's namespace and each declared peer with its
+    /// resolved path and validation status. Exits non-zero if any peer
+    /// fails rule 1 (missing wiki.toml) or rule 2 (alias/namespace mismatch).
+    Namespaces,
+
+    /// Create a wiki.toml in the current directory.
+    ///
+    /// With a namespace argument: writes `namespace = "<arg>"`.
+    /// Without: writes an empty file (default namespace).
+    /// Fails closed if wiki.toml already exists.
+    Init {
+        /// Namespace name for the new wiki (omit for the default namespace).
+        #[arg(value_name = "namespace")]
+        namespace: Option<String>,
+    },
 }
 
 /// Read all non-empty trimmed lines from stdin, if stdin is not an interactive terminal.
@@ -338,12 +354,17 @@ fn run(
     let cwd = std::env::current_dir().unwrap_or_else(|_| repo_root.clone());
 
     // Skip wiki-config loading for subcommands that may run in a directory
-    // without a wiki: `install` (no wiki touched) and `hook` (silently
-    // no-ops on non-wiki files; would otherwise fail-closed on every edit
-    // outside a wiki repo).
+    // without a wiki: `install` (no wiki touched), `hook` (silently no-ops on
+    // non-wiki files; would otherwise fail-closed on every edit outside a wiki
+    // repo), `init` (creates the wiki.toml — can't load what doesn't exist),
+    // and `namespaces` (does its own lenient peer-walk so broken peers are
+    // reported inline rather than aborting the load).
     let needs_config = !matches!(
         command,
-        Some(Commands::Install { .. }) | Some(Commands::Hook)
+        Some(Commands::Install { .. })
+            | Some(Commands::Hook)
+            | Some(Commands::Init { .. })
+            | Some(Commands::Namespaces)
     );
 
     let config = if needs_config {
@@ -451,6 +472,12 @@ fn run(
         Some(Commands::Scaffold { globs }) => {
             commands::mesh::scaffold::run(&globs, json, wiki_root, &repo_root)
         }
+        Some(Commands::Namespaces) => {
+            commands::namespaces::run(&cwd, &repo_root, json)
+        }
+        Some(Commands::Init { namespace }) => {
+            commands::init::run(&cwd, namespace.as_deref())
+        }
         None => match effective_query.as_deref() {
             Some(query) => {
                 commands::search::run(query, limit, offset, json, wiki_root, &repo_root)
@@ -557,6 +584,8 @@ fn command_name(command: Option<&Commands>, query: Option<&str>) -> &'static str
         Some(Commands::Install { .. }) => "install",
         Some(Commands::Serve { .. }) => "serve",
         Some(Commands::Scaffold { .. }) => "scaffold",
+        Some(Commands::Namespaces) => "namespaces",
+        Some(Commands::Init { .. }) => "init",
         None if query.is_some() => "search",
         None => "help",
     }
