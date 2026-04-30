@@ -402,7 +402,7 @@ fn run(
 
     let result = match command {
         Some(Commands::Check { globs }) => {
-            commands::check::run(&globs, json, wiki_root, &repo_root)
+            commands::check::run(&globs, json, wiki_root, &repo_root, config.as_ref())
         }
         Some(Commands::Links { target }) => {
             let inputs = resolve_inputs(target, read_stdin_lines)?;

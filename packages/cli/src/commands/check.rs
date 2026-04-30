@@ -9,6 +9,7 @@ use crate::frontmatter::{Frontmatter, build_index, parse_frontmatter, parse_titl
 use crate::git::resolve_ref;
 use crate::headings::extract_headings;
 use crate::parser::{LinkKind, parse_fragment_links, parse_wikilinks};
+use crate::wiki_config::WikiConfig;
 
 use super::mesh_coverage;
 
@@ -27,7 +28,13 @@ pub struct CheckDiagnostic {
 /// Run the check command.
 ///
 /// Returns the exit code: 0 = valid, 1 = validation errors, 2 = runtime error.
-pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> Result<i32> {
+pub fn run(
+    globs: &[String],
+    json: bool,
+    wiki_root: &Path,
+    repo_root: &Path,
+    wiki_config: Option<&WikiConfig>,
+) -> Result<i32> {
     let files = match discover_files(globs, wiki_root, repo_root) {
         Ok(f) => f,
         Err(e) => {
@@ -46,7 +53,7 @@ pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> 
         discover_files(&[], wiki_root, repo_root).unwrap_or_else(|_| files.clone())
     };
 
-    let diagnostics = match collect_for_files(&files, &index_files, wiki_root, repo_root) {
+    let diagnostics = match collect_for_files(&files, &index_files, wiki_root, repo_root, wiki_config) {
         Ok(d) => d,
         Err(e) => {
             if json {
@@ -79,13 +86,23 @@ pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> 
 /// diagnostics.  On discovery failure the caller should treat this as exit
 /// code 2.
 pub fn collect(globs: &[String], wiki_root: &Path, repo_root: &Path) -> Result<Vec<CheckDiagnostic>> {
+    collect_with_config(globs, wiki_root, repo_root, None)
+}
+
+/// Collect diagnostics, with an optional `WikiConfig` for namespace rules 5 and 6.
+pub fn collect_with_config(
+    globs: &[String],
+    wiki_root: &Path,
+    repo_root: &Path,
+    wiki_config: Option<&WikiConfig>,
+) -> Result<Vec<CheckDiagnostic>> {
     let files = discover_files(globs, wiki_root, repo_root)?;
     let index_files = if globs.is_empty() {
         files.clone()
     } else {
         discover_files(&[], wiki_root, repo_root).unwrap_or_else(|_| files.clone())
     };
-    collect_for_files(&files, &index_files, wiki_root, repo_root)
+    collect_for_files(&files, &index_files, wiki_root, repo_root, wiki_config)
 }
 
 fn collect_for_files(
@@ -93,6 +110,7 @@ fn collect_for_files(
     index_files: &[PathBuf],
     _wiki_root: &Path,
     repo_root: &Path,
+    wiki_config: Option<&WikiConfig>,
 ) -> Result<Vec<CheckDiagnostic>> {
     let mut diagnostics: Vec<CheckDiagnostic> = Vec::new();
 
@@ -254,6 +272,11 @@ fn collect_for_files(
         // Wikilinks
         let wiki_links = parse_wikilinks(&content);
         for wl in &wiki_links {
+            // Cross-namespace wikilinks ([[ns:Article]]) are handled by rule 6;
+            // skip them here to avoid spurious broken_wikilink diagnostics.
+            if wl.namespace.is_some() {
+                continue;
+            }
             let key = wl.title.to_lowercase();
             match index.get(&key) {
                 None => {
@@ -312,6 +335,105 @@ fn collect_for_files(
         }
     }
 
+    // ── Namespace rules 5 and 6 ───────────────────────────────────────────────
+    if let Some(cfg) = wiki_config {
+        // Collect the set of valid namespace values: current + all peer aliases.
+        // A *.wiki.md file may declare `namespace: X` where X is either the
+        // current wiki's own namespace (if named) or any declared peer alias.
+        let current_ns = cfg.current.namespace.as_deref();
+
+        // Lazy peer-title-index cache: alias -> HashMap<title_key, ()>.
+        // We only build a title set (not full paths) because we only need
+        // existence checks.
+        let mut peer_title_cache: HashMap<String, Option<std::collections::HashSet<String>>> =
+            HashMap::new();
+
+        for path in files {
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            // ── Rule 5: *.wiki.md with unknown namespace: frontmatter ─────────
+            let path_str = path.to_string_lossy();
+            if path_str.ends_with(".wiki.md")
+                && let Ok(Some(fm)) = parse_frontmatter(&content, path)
+                && let Some(declared_ns) = &fm.namespace
+            {
+                // Valid if it matches the current wiki's own namespace
+                // or is a declared peer alias.
+                let is_current = current_ns == Some(declared_ns.as_str());
+                let is_peer = cfg.peers.contains_key(declared_ns.as_str());
+                if !is_current && !is_peer {
+                    diagnostics.push(CheckDiagnostic {
+                        kind: "namespace_undeclared".into(),
+                        file: path.display().to_string(),
+                        line: 1,
+                        message: format!(
+                            "namespace `{declared_ns}` is not declared in wiki.toml \
+                             (current namespace: {current}, declared peers: [{peers}]). \
+                             Add it to [peers] or correct the namespace value.",
+                            current = current_ns.unwrap_or("default"),
+                            peers = cfg.peers.keys().cloned().collect::<Vec<_>>().join(", "),
+                        ),
+                    });
+                }
+            }
+
+            // ── Rule 6: [[ns:Article]] cross-namespace wikilinks ──────────────
+            let wiki_links = parse_wikilinks(&content);
+            for wl in &wiki_links {
+                let ns = match &wl.namespace {
+                    Some(ns) => ns,
+                    None => continue, // same-namespace links handled by existing rule
+                };
+
+                // Is the namespace the current wiki itself?
+                if current_ns == Some(ns.as_str()) {
+                    // Same-namespace cross-link — already validated by rule above; skip here.
+                    continue;
+                }
+
+                // Must be a declared peer alias.
+                if !cfg.peers.contains_key(ns.as_str()) {
+                    diagnostics.push(CheckDiagnostic {
+                        kind: "cross_namespace_wikilink_unresolved".into(),
+                        file: path.display().to_string(),
+                        line: wl.source_line,
+                        message: format!(
+                            "namespace `{ns}` in `[[{ns}:{}]]` is not declared as a peer in wiki.toml.",
+                            wl.title
+                        ),
+                    });
+                    continue;
+                }
+
+                // Peer is declared — lazily build/fetch its title set.
+                let peer_info = &cfg.peers[ns.as_str()];
+                let title_set = peer_title_cache.entry(ns.clone()).or_insert_with(|| {
+                    build_peer_title_set(&peer_info.root, repo_root)
+                });
+
+                let key = wl.title.to_lowercase();
+                let exists = title_set
+                    .as_ref()
+                    .map(|s| s.contains(&key))
+                    .unwrap_or(false);
+                if !exists {
+                    diagnostics.push(CheckDiagnostic {
+                        kind: "cross_namespace_wikilink_unresolved".into(),
+                        file: path.display().to_string(),
+                        line: wl.source_line,
+                        message: format!(
+                            "`[[{ns}:{}]]` — no page with that title or alias exists in the `{ns}` namespace.",
+                            wl.title
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
     // ── Resolve ref to check git is callable (soft check, non-fatal) ─────────
     let _ = resolve_ref(repo_root, "HEAD");
 
@@ -320,6 +442,32 @@ fn collect_for_files(
     diagnostics.extend(mesh_diags);
 
     Ok(diagnostics)
+}
+
+// ── Peer title-set builder ────────────────────────────────────────────────────
+
+/// Lazily build a set of all lowercase title/alias keys for the given peer wiki
+/// root. Returns `None` if the peer's files cannot be discovered or read
+/// (treated as "title does not exist").
+fn build_peer_title_set(
+    peer_root: &Path,
+    repo_root: &Path,
+) -> Option<std::collections::HashSet<String>> {
+    let files = discover_files(&[], peer_root, repo_root).ok()?;
+    let mut set = std::collections::HashSet::new();
+    for path in &files {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if let Ok(Some(fm)) = parse_frontmatter(&content, path) {
+            set.insert(fm.title.to_lowercase());
+            for alias in &fm.aliases {
+                set.insert(alias.to_lowercase());
+            }
+        }
+    }
+    Some(set)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -453,7 +601,7 @@ mod tests {
         repo.create_file("wiki/page.md", &make_wiki_page("Page", "No links here."));
         repo.commit("add page");
 
-        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
         assert_eq!(code, 0);
     }
 
@@ -468,7 +616,7 @@ mod tests {
         );
         repo.commit("add page");
 
-        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -481,7 +629,7 @@ mod tests {
         repo.create_file("wiki/b.md", &make_wiki_page("Shared", ""));
         repo.commit("add pages");
 
-        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -493,7 +641,7 @@ mod tests {
         repo.create_file("wiki/page.md", "# Just a heading\n\nNo frontmatter.");
         repo.commit("add page");
 
-        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -509,7 +657,7 @@ mod tests {
         repo.create_file("wiki/source.md", &make_wiki_page("Source", "See [[tp]]."));
         repo.commit("add pages");
 
-        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
         // alias_resolve warnings should not cause exit 1
         assert_eq!(code, 0);
     }
@@ -529,7 +677,7 @@ mod tests {
         );
         repo.commit("add pages");
 
-        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -548,7 +696,7 @@ mod tests {
         );
         repo.commit("add pages");
 
-        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
         assert_eq!(code, 0);
     }
 
@@ -566,7 +714,7 @@ mod tests {
         repo.commit("add pages");
 
         let globs = vec!["wiki/page_a.md".to_string()];
-        let code = run(&globs, false, &wiki_root, repo.path()).expect("run");
+        let code = run(&globs, false, &wiki_root, repo.path(), None).expect("run");
         assert_eq!(
             code, 0,
             "wikilink to a page outside the glob must resolve against the full wiki index"
@@ -586,7 +734,7 @@ mod tests {
         repo.commit("add pages");
 
         let globs = vec!["wiki/page_a.md".to_string()];
-        let code = run(&globs, false, &wiki_root, repo.path()).expect("run");
+        let code = run(&globs, false, &wiki_root, repo.path(), None).expect("run");
         assert_eq!(
             code, 1,
             "a truly missing wikilink must still be reported when using a file glob"
@@ -605,7 +753,7 @@ mod tests {
         );
         repo.commit("add files");
 
-        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
         assert_eq!(
             code, 0,
             "directory fragment links must not produce missing_file"
@@ -647,7 +795,7 @@ mod tests {
         );
         repo.commit("add files");
 
-        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
         assert_eq!(code, 1, "uncovered fragment link must fail wiki check");
     }
 
@@ -670,7 +818,7 @@ mod tests {
             .filter(|d| d.kind == "mesh_uncovered")
             .collect();
         assert_eq!(mesh_diags.len(), 1, "expected one mesh_uncovered: {diagnostics:?}");
-        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -700,7 +848,7 @@ mod tests {
             mesh_diags.is_empty(),
             "covered link must not produce mesh_uncovered: {diagnostics:?}"
         );
-        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
         assert_eq!(code, 0);
     }
 
@@ -906,7 +1054,7 @@ mod tests {
                 .join(":");
             // SAFETY: PATH_MUTEX is held.
             unsafe { std::env::set_var("PATH", &filtered_path) };
-            let code = run(&[], false, &wiki_root, repo.path()).expect("run");
+            let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
             // SAFETY: PATH_MUTEX is held.
             unsafe { std::env::set_var("PATH", &original_path) };
             code
@@ -1004,7 +1152,7 @@ mod tests {
 
         // SAFETY: PATH_MUTEX is held; no other test reads/writes PATH concurrently.
         unsafe { std::env::set_var("PATH", &new_path) };
-        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
         // SAFETY: PATH_MUTEX is held.
         unsafe { std::env::set_var("PATH", &original_path) };
 
