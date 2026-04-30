@@ -9,6 +9,7 @@ mod render;
 #[cfg(test)]
 mod test_support;
 mod version;
+mod wiki_config;
 
 use std::io::{self, BufRead, IsTerminal};
 use std::path::PathBuf;

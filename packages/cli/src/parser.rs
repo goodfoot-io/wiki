@@ -58,6 +58,10 @@ pub struct FragmentLink {
 /// A parsed `[[Title#Heading|display]]` wikilink.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wikilink {
+    /// Namespace prefix from `[[ns:Article]]` syntax. `None` for bare
+    /// `[[Article]]` links. Populated by `parse_wikilinks` in Phase 2; until
+    /// then every construction site defaults to `None`.
+    pub namespace: Option<String>,
     pub title: String,
     pub heading: Option<String>,
     pub display: Option<String>,
@@ -328,6 +332,7 @@ pub fn parse_wikilinks(content: &str) -> Vec<Wikilink> {
         }
 
         results.push(Wikilink {
+            namespace: None,
             title,
             heading,
             display,
@@ -641,5 +646,25 @@ mod tests {
         let links = parse_fragment_links(content);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].path, "real.rs");
+    }
+
+    // ── Namespaced wikilink tests (Phase 2 contract) ─────────────────────────
+
+    #[test]
+    #[ignore = "Phase 2: parse_wikilinks should detect [[ns:Article]] prefix"]
+    fn test_wikilink_with_namespace_prefix() {
+        let links = parse_wikilinks("[[foo:Article]]");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].namespace.as_deref(), Some("foo"));
+        assert_eq!(links[0].title, "Article");
+    }
+
+    #[test]
+    #[ignore = "Phase 2: bare wikilinks have namespace None"]
+    fn test_wikilink_without_namespace() {
+        let links = parse_wikilinks("[[Article]]");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].namespace, None);
+        assert_eq!(links[0].title, "Article");
     }
 }
