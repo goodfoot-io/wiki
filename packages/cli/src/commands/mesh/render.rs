@@ -22,6 +22,7 @@ pub(crate) fn render_shell(
     meshes: &[MeshDraft],
     preflight: &PreflightResult,
     uncovered_findings: usize,
+    skipped_fixtures: usize,
 ) -> String {
     let proposed_meshes = meshes.len();
     let pages_covered = unique_pages(meshes);
@@ -33,7 +34,15 @@ pub(crate) fn render_shell(
         out,
         "# wiki mesh scaffold — {uncovered_findings} uncovered findings → {proposed_meshes} proposed meshes (consolidation ratio {ratio})"
     );
-    let _ = writeln!(out, "# Pages covered: {pages_covered}");
+    if skipped_fixtures > 0 {
+        let suffix = if skipped_fixtures == 1 { "" } else { "s" };
+        let _ = writeln!(
+            out,
+            "# Pages covered: {pages_covered} ({skipped_fixtures} test fixture{suffix} skipped)"
+        );
+    } else {
+        let _ = writeln!(out, "# Pages covered: {pages_covered}");
+    }
     out.push('\n');
 
     render_preflight(&mut out, preflight);
@@ -65,6 +74,19 @@ pub(crate) fn render_shell(
         let _ = writeln!(out, "git mesh commit {}", m.slug);
     }
 
+    out
+}
+
+/// Render the empty-corpus success shell. No ratio, no preflight, no
+/// per-page sections, no footer prompt — just a tiny readable header that
+/// remains a valid `/bin/sh` script.
+pub(crate) fn render_empty_shell() -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "#!/bin/sh");
+    let _ = writeln!(
+        out,
+        "# wiki scaffold — no uncovered findings; nothing to mesh."
+    );
     out
 }
 
@@ -170,6 +192,12 @@ fn render_hint(out: &mut String, h: &Hint) {
                 let _ = writeln!(
                     out,
                     "#       the why should name the subsystem and what it does across the anchors."
+                );
+            }
+            AntiPattern::DegenerateExcerpt => {
+                let _ = writeln!(
+                    out,
+                    "# WARN: degenerate excerpt — open the source page to write the why by hand."
                 );
             }
         },

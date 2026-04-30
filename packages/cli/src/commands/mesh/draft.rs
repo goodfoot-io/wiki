@@ -30,6 +30,12 @@ pub(crate) struct MeshDraft {
     pub(crate) hints: Vec<Hint>,
     /// Number of identical-anchor-set siblings merged into this draft. Starts at 1.
     pub(crate) consolidated_count: usize,
+    /// Mirrors `AugmentedLink::section_opening_degenerate`. Carried on the
+    /// draft so it survives consolidation (which keeps the first sibling's
+    /// hints) without losing its provenance.
+    pub(crate) section_opening_degenerate: bool,
+    /// Mirrors `AugmentedLink::had_code_span_lead`.
+    pub(crate) had_code_span_lead: bool,
 }
 
 /// Build one draft per augmented link. `page_path` is the source wiki page
@@ -66,6 +72,8 @@ pub(crate) fn build(
                 section_opening: aug.section_opening.clone(),
                 hints,
                 consolidated_count: 1,
+                section_opening_degenerate: aug.section_opening_degenerate,
+                had_code_span_lead: aug.had_code_span_lead,
             }
         })
         .collect()
@@ -130,6 +138,23 @@ fn derive_noun(aug: &AugmentedLink) -> (String, Option<FallbackReason>) {
     (slug, Some(FallbackReason::NoHeadingUsedFileStem))
 }
 
+fn strip_leading_ordinal(s: &str) -> &str {
+    let t = s.trim_start();
+    let bytes = t.as_bytes();
+    let mut k = 0;
+    while k < bytes.len() && bytes[k].is_ascii_digit() {
+        k += 1;
+    }
+    if k == 0 || k >= bytes.len() {
+        return s;
+    }
+    if bytes[k] != b'.' && bytes[k] != b')' {
+        return s;
+    }
+    let after = &t[k + 1..];
+    after.strip_prefix(' ').unwrap_or(s)
+}
+
 fn file_stem_of(p: &str) -> String {
     let last = p.rsplit('/').next().unwrap_or(p);
     let last = last.split('#').next().unwrap_or(last);
@@ -140,6 +165,10 @@ fn file_stem_of(p: &str) -> String {
 }
 
 fn kebab(s: &str) -> String {
+    // Drop a leading numbered-list prefix (`3. `, `12) `) so headings like
+    // `### 3. Incremental indexing` slug to `incremental-indexing` instead
+    // of leaking the digit into the slug.
+    let s = strip_leading_ordinal(s);
     let mut out = String::with_capacity(s.len());
     let mut prev_dash = true;
     for c in s.chars() {
@@ -181,6 +210,8 @@ mod tests {
             heading_chain: Vec::new(),
             section_heading: heading.to_string(),
             section_opening: String::new(),
+            section_opening_degenerate: false,
+            had_code_span_lead: false,
         }
     }
 
@@ -202,6 +233,14 @@ mod tests {
     #[test]
     fn category_empty_for_bare_filename() {
         assert_eq!(derive_category("README.md"), "");
+    }
+
+    #[test]
+    fn kebab_drops_leading_ordinal_marker() {
+        assert_eq!(kebab("3. Incremental Indexing"), "incremental-indexing");
+        assert_eq!(kebab("12) Apply Phase"), "apply-phase");
+        // Mid-string digits stay.
+        assert_eq!(kebab("Phase 3 details"), "phase-3-details");
     }
 
     #[test]

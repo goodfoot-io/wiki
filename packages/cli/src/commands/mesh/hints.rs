@@ -27,6 +27,10 @@ pub(crate) enum AntiPattern {
     CouplingTemplate,
     /// First non-stopword token is a verb from the verb-leading set.
     VerbLead,
+    /// No usable prose paragraph existed under the section heading; the best
+    /// excerpt we could find still looks degenerate (list-marker-only,
+    /// bold-label-only, code-block intro line, or no prose at all).
+    DegenerateExcerpt,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,12 +51,15 @@ pub(crate) enum Hint {
 /// Conservative by design: each detector earns its keep with explicit positive
 /// AND negative unit tests. False positives are worse than false negatives —
 /// the reviewer reads the source sentence anyway.
-pub(crate) fn detect_anti_patterns(section_opening: &str) -> Option<Hint> {
+pub(crate) fn detect_anti_patterns(
+    section_opening: &str,
+    had_code_span_lead: bool,
+) -> Option<Hint> {
     let s = section_opening.trim();
     if s.is_empty() {
         return None;
     }
-    if is_headless_predicate(s) {
+    if is_headless_predicate(s, had_code_span_lead) {
         return Some(Hint::WarnAntiPattern {
             pattern: AntiPattern::HeadlessPredicate,
         });
@@ -107,7 +114,17 @@ const LEADING_VERBS: &[&str] = &[
     "routes",
 ];
 
-fn is_headless_predicate(s: &str) -> bool {
+/// Detector design choice (option A from the card spec):
+/// only fire when the augment pipeline observed an inline-code span as the
+/// section opening's leading token. The denylist alone produced false
+/// positives on ordinary "Coverage is …", "Validation is …" sentences whose
+/// subjects happen to be capitalized nouns. Gating on `had_code_span_lead`
+/// keeps the detector to its actual target — backticked identifiers used as
+/// bare predicates — without misclassifying ordinary prose.
+fn is_headless_predicate(s: &str, had_code_span_lead: bool) -> bool {
+    if !had_code_span_lead {
+        return false;
+    }
     let caps = match headless_predicate_re().captures(s) {
         Some(c) => c,
         None => return false,
@@ -143,7 +160,7 @@ mod tests {
 
     #[test]
     fn headless_predicate_positive_with_backticks() {
-        let h = detect_anti_patterns("`Foo` — does the thing.");
+        let h = detect_anti_patterns("Foo — does the thing.", true);
         assert!(matches!(
             h,
             Some(Hint::WarnAntiPattern { pattern: AntiPattern::HeadlessPredicate })
@@ -152,7 +169,7 @@ mod tests {
 
     #[test]
     fn headless_predicate_positive_with_is() {
-        let h = detect_anti_patterns("Foo is the thing that does X.");
+        let h = detect_anti_patterns("Foo is the thing that does X.", true);
         assert!(matches!(
             h,
             Some(Hint::WarnAntiPattern { pattern: AntiPattern::HeadlessPredicate })
@@ -160,16 +177,27 @@ mod tests {
     }
 
     #[test]
+    fn headless_predicate_requires_code_span_lead() {
+        // "Coverage is high" looks predicate-shaped but the leading token
+        // wasn't backticked — gate prevents false positive.
+        assert!(detect_anti_patterns("Coverage is computed per file.", false).is_none());
+        assert!(detect_anti_patterns("Validation is strict here.", false).is_none());
+    }
+
+    #[test]
     fn headless_predicate_negative_normal_sentence() {
         // "The billing service validates …" — has a real subject, not a
         // headless identifier. Detector must not fire.
-        assert!(detect_anti_patterns("The billing service validates the payload.").is_none());
+        assert!(
+            detect_anti_patterns("The billing service validates the payload.", false).is_none()
+        );
     }
 
     #[test]
     fn coupling_template_positive() {
         let h = detect_anti_patterns(
             "The cache wiki section describes the LRU cache used by index lookups.",
+            false,
         );
         assert!(matches!(
             h,
@@ -179,18 +207,18 @@ mod tests {
 
     #[test]
     fn coupling_template_negative_partial_phrase() {
-        // Has "wiki" and "section" and "describes" but not in the trigger order
-        // for the coupling template, and the leading subject is a noun (no
-        // verb_lead).
         assert!(
-            detect_anti_patterns("Our handler reads the wiki section before invoking validate.")
-                .is_none()
+            detect_anti_patterns(
+                "Our handler reads the wiki section before invoking validate.",
+                false,
+            )
+            .is_none()
         );
     }
 
     #[test]
     fn verb_lead_positive() {
-        let h = detect_anti_patterns("Validates the request payload before dispatch.");
+        let h = detect_anti_patterns("Validates the request payload before dispatch.", false);
         assert!(matches!(
             h,
             Some(Hint::WarnAntiPattern { pattern: AntiPattern::VerbLead })
@@ -199,8 +227,7 @@ mod tests {
 
     #[test]
     fn verb_lead_positive_after_stopword() {
-        let h = detect_anti_patterns("The describes flow runs first.");
-        // First non-stopword "describes" — fires.
+        let h = detect_anti_patterns("The describes flow runs first.", false);
         assert!(matches!(
             h,
             Some(Hint::WarnAntiPattern { pattern: AntiPattern::VerbLead })
@@ -209,12 +236,12 @@ mod tests {
 
     #[test]
     fn verb_lead_negative_noun_subject() {
-        assert!(detect_anti_patterns("The handler accepts a request.").is_none());
+        assert!(detect_anti_patterns("The handler accepts a request.", false).is_none());
     }
 
     #[test]
     fn empty_returns_none() {
-        assert!(detect_anti_patterns("").is_none());
-        assert!(detect_anti_patterns("   ").is_none());
+        assert!(detect_anti_patterns("", false).is_none());
+        assert!(detect_anti_patterns("   ", false).is_none());
     }
 }

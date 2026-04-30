@@ -21,7 +21,7 @@ use crate::parser::{LinkKind, parse_fragment_links};
 use super::augment::{AugmentedLink, augment};
 use super::draft::{self, MeshDraft};
 use super::group;
-use super::hints;
+use super::hints::{self, AntiPattern, Hint};
 use super::name::{
     co_presence_terms, deduplicate_names, detect_category, detect_rel_type, extract_source_role,
     extract_target_role, norm_cmp, rake, select_core_phrase, slugify, tokenize,
@@ -42,7 +42,19 @@ pub(crate) struct Mesh {
 
 /// Run the `wiki scaffold` subcommand.
 pub fn run(globs: &[String], json: bool, repo_root: &Path) -> Result<i32> {
-    let files = discover_files(globs, repo_root)?;
+    let discovered = discover_files(globs, repo_root)?;
+    // Filter test fixtures: `wiki check` legitimately scans them, but a
+    // scaffold run that materializes mesh commands for a test wiki would
+    // pollute the repo's mesh state on the first commit. Scoped to scaffold.
+    let total_discovered = discovered.len();
+    let files: Vec<PathBuf> = discovered
+        .into_iter()
+        .filter(|p| {
+            let s = p.to_string_lossy();
+            !s.contains("/tests/fixtures/") && !s.contains("\\tests\\fixtures\\")
+        })
+        .collect();
+    let skipped_fixtures = total_discovered - files.len();
 
     let mut all_inputs: Vec<LinkInput> = Vec::new();
     for file in &files {
@@ -71,9 +83,7 @@ pub fn run(globs: &[String], json: bool, repo_root: &Path) -> Result<i32> {
         if json {
             println!("[]");
         } else {
-            let pf = preflight::missing_in_head(repo_root, &[]);
-            let rendered = render::render_shell(&[], &pf, 0);
-            print!("{rendered}");
+            print!("{}", render::render_empty_shell());
         }
         return Ok(0);
     }
@@ -141,7 +151,12 @@ pub fn run(globs: &[String], json: bool, repo_root: &Path) -> Result<i32> {
     }
     let pf = preflight::missing_in_head(repo_root, &anchored_paths);
 
-    let rendered = render::render_shell(&drafts_by_page, &pf, uncovered_findings);
+    let rendered = render::render_shell(
+        &drafts_by_page,
+        &pf,
+        uncovered_findings,
+        skipped_fixtures,
+    );
     print!("{rendered}");
     Ok(0)
 }
@@ -185,21 +200,40 @@ fn build_meshes(inputs: &[LinkInput], repo_root: &Path) -> Vec<MeshDraft> {
         page_spans.push((start, all_drafts.len()));
     }
 
-    // Stage 2a: global slug dedup (first occurrence keeps the slug, subsequent
-    // collisions get `-2`, `-3`, … suffixes — this matches the contract where
-    // `apply-phase` and `apply-phase-2` coexist on the same page).
-    dedup_slugs(&mut all_drafts);
-
-    // Stage 2b: per-page consolidation (identical-anchor-set merge + ConsiderMerge hints).
+    // Stage 2a: per-page consolidation FIRST. Identical-anchor-set siblings
+    // collapse into one survivor; only then does the global dedup pass see
+    // contiguous slug counts. Doing this in the reverse order leaks suffix
+    // gaps (`foo`, `foo-3`, no `foo-2`) into the footer's `git mesh commit`
+    // lines whenever consolidation prunes a duplicate the dedup already
+    // suffixed.
     let mut consolidated: Vec<MeshDraft> = Vec::new();
     for (start, end) in page_spans {
         let page_drafts: Vec<MeshDraft> = all_drafts[start..end].to_vec();
         consolidated.extend(group::consolidate_within_page(page_drafts));
     }
 
-    // Stage 3: anti-pattern detection — attached after build/group hints.
+    // Stage 2b: global slug dedup over the merge survivors.
+    dedup_slugs(&mut consolidated);
+
+    // Stage 2c: ConsiderMerge runs AFTER dedup so the recorded `other_slug`
+    // is the post-dedup name (matching the footer's `git mesh commit` lines).
+    group::attach_consider_merge(&mut consolidated);
+
+    // Stage 3: degenerate-excerpt flag + anti-pattern detection. Both flags
+    // ride on the draft (carried over from `AugmentedLink` at build time) so
+    // they survive consolidation cleanly.
     for d in &mut consolidated {
-        if let Some(h) = hints::detect_anti_patterns(&d.section_opening) {
+        if d.section_opening_degenerate {
+            d.hints.push(Hint::WarnAntiPattern {
+                pattern: AntiPattern::DegenerateExcerpt,
+            });
+            // When the excerpt itself is degenerate, the secondary detectors
+            // would just pile onto an already-flagged finding — skip them.
+            continue;
+        }
+        if let Some(h) =
+            hints::detect_anti_patterns(&d.section_opening, d.had_code_span_lead)
+        {
             d.hints.push(h);
         }
     }

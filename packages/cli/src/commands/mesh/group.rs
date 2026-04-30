@@ -41,28 +41,29 @@ pub(crate) fn consolidate_within_page(drafts: Vec<MeshDraft>) -> Vec<MeshDraft> 
         }
         merged.push(first);
     }
+    merged
+}
 
-    // ── Phase 2: heading-and-file overlap → ConsiderMerge (both directions) ─
-    // Two drafts overlap when they share the section heading AND have at
-    // least one common target file (anchor[0] is the page; targets are [1..]).
-    let n = merged.len();
+/// Attach `ConsiderMerge` hints to drafts that share a section heading AND a
+/// target file. Run AFTER global slug dedup so the recorded `other_slug`
+/// references the post-dedup name. Operates on the full deduped list and
+/// only flags pairs from the same page.
+pub(crate) fn attach_consider_merge(drafts: &mut [MeshDraft]) {
+    let n = drafts.len();
     for i in 0..n {
         for j in (i + 1)..n {
-            if !shares_heading_and_file(&merged[i], &merged[j]) {
+            if drafts[i].page_path != drafts[j].page_path {
                 continue;
             }
-            let other_j = merged[j].slug.clone();
-            let other_i = merged[i].slug.clone();
-            merged[i]
-                .hints
-                .push(Hint::ConsiderMerge { other_slug: other_j });
-            merged[j]
-                .hints
-                .push(Hint::ConsiderMerge { other_slug: other_i });
+            if !shares_heading_and_file(&drafts[i], &drafts[j]) {
+                continue;
+            }
+            let other_j = drafts[j].slug.clone();
+            let other_i = drafts[i].slug.clone();
+            drafts[i].hints.push(Hint::ConsiderMerge { other_slug: other_j });
+            drafts[j].hints.push(Hint::ConsiderMerge { other_slug: other_i });
         }
     }
-
-    merged
 }
 
 fn shares_heading_and_file(a: &MeshDraft, b: &MeshDraft) -> bool {
@@ -97,6 +98,8 @@ mod tests {
             section_opening: String::new(),
             hints: Vec::new(),
             consolidated_count: 1,
+            section_opening_degenerate: false,
+            had_code_span_lead: false,
         }
     }
 
@@ -147,7 +150,7 @@ mod tests {
 
     #[test]
     fn shared_heading_and_file_emits_consider_merge_both_sides() {
-        let drafts = vec![
+        let mut drafts = vec![
             draft(
                 "wiki/perf/apply-phase",
                 "## Apply phase",
@@ -159,21 +162,21 @@ mod tests {
                 &["wiki/perf/indexing.md", "src/index.rs#L45-L60"],
             ),
         ];
-        let out = consolidate_within_page(drafts);
-        assert_eq!(out.len(), 2);
+        attach_consider_merge(&mut drafts);
+        assert_eq!(drafts.len(), 2);
         assert!(matches!(
-            out[0].hints.first(),
+            drafts[0].hints.first(),
             Some(Hint::ConsiderMerge { other_slug }) if other_slug == "wiki/perf/apply-phase-2"
         ));
         assert!(matches!(
-            out[1].hints.first(),
+            drafts[1].hints.first(),
             Some(Hint::ConsiderMerge { other_slug }) if other_slug == "wiki/perf/apply-phase"
         ));
     }
 
     #[test]
     fn shared_heading_only_emits_no_hint() {
-        let drafts = vec![
+        let mut drafts = vec![
             draft(
                 "wiki/perf/h-a",
                 "## Same",
@@ -185,15 +188,15 @@ mod tests {
                 &["wiki/perf/p.md", "src/b.rs#L1-L2"],
             ),
         ];
-        let out = consolidate_within_page(drafts);
-        for d in &out {
+        attach_consider_merge(&mut drafts);
+        for d in &drafts {
             assert!(d.hints.is_empty(), "got: {:?}", d.hints);
         }
     }
 
     #[test]
     fn shared_file_only_emits_no_hint() {
-        let drafts = vec![
+        let mut drafts = vec![
             draft(
                 "wiki/perf/one",
                 "## One",
@@ -205,8 +208,8 @@ mod tests {
                 &["wiki/perf/p.md", "src/a.rs#L5-L9"],
             ),
         ];
-        let out = consolidate_within_page(drafts);
-        for d in &out {
+        attach_consider_merge(&mut drafts);
+        for d in &drafts {
             assert!(d.hints.is_empty(), "got: {:?}", d.hints);
         }
     }
