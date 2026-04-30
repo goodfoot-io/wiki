@@ -6,6 +6,9 @@ set -uo pipefail
 
 WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Prefer the rustup-managed cargo (supports edition 2024) over any system cargo
+export PATH="$HOME/.cargo/bin:$PATH"
+
 PIDS=()
 EXIT=0
 
