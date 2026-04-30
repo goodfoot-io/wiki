@@ -1,11 +1,56 @@
 use std::path::Path;
 
 use miette::Result;
+use serde_json::json;
 
 use crate::commands::looks_like_path;
 use crate::index::WikiIndex;
 
 use super::summary::{format_search_result, render_not_found};
+
+/// Run `links` across multiple namespaces sequentially. Output is labeled.
+pub fn run_multi(
+    target: &str,
+    json: bool,
+    targets: &[(String, &Path)],
+    repo_root: &Path,
+) -> Result<i32> {
+    if json {
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        for (label, wiki_root) in targets {
+            let index = WikiIndex::prepare(wiki_root, repo_root)?;
+            let matches = index.links(target)?;
+            for m in matches {
+                let mut v = serde_json::to_value(&m).unwrap();
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("namespace".into(), json!(label));
+                }
+                out.push(v);
+            }
+        }
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        return Ok(0);
+    }
+
+    let mut any = false;
+    let mut first = true;
+    for (label, wiki_root) in targets {
+        let index = WikiIndex::prepare(wiki_root, repo_root)?;
+        let matches = index.links(target)?;
+        for result in &matches {
+            if !first {
+                println!();
+            }
+            first = false;
+            any = true;
+            println!("[{label}] {}", format_search_result(result, repo_root));
+        }
+    }
+    if !any && !looks_like_path(target) {
+        eprintln!("No references to `{target}` found in any namespace.");
+    }
+    Ok(0)
+}
 
 pub fn run(target: &str, json: bool, wiki_root: &Path, repo_root: &Path) -> Result<i32> {
     let index = WikiIndex::prepare(wiki_root, repo_root)?;

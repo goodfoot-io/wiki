@@ -80,6 +80,84 @@ pub fn run(
     }
 }
 
+/// Run `check` across multiple namespaces sequentially.
+///
+/// Each namespace is validated against its own `WikiIndex` (its own files,
+/// its own peers per Phase 4 rules 5/6). Diagnostics are labeled with the
+/// namespace they came from. Returns the worst exit code across runs.
+pub fn run_multi(
+    globs: &[String],
+    json: bool,
+    targets: &[(String, &Path)],
+    repo_root: &Path,
+) -> Result<i32> {
+    let mut all: Vec<(String, Vec<CheckDiagnostic>)> = Vec::new();
+    let mut runtime_error: Option<String> = None;
+
+    for (label, wiki_root) in targets {
+        // Load each namespace's own WikiConfig so rules 5/6 see that
+        // namespace's own [peers] table.
+        let per_cfg = WikiConfig::load(wiki_root, repo_root).ok();
+        let files = match discover_files(globs, wiki_root, repo_root) {
+            Ok(f) => f,
+            Err(e) => {
+                runtime_error = Some(format!("[{label}] {e}"));
+                break;
+            }
+        };
+        let index_files = if globs.is_empty() {
+            files.clone()
+        } else {
+            discover_files(&[], wiki_root, repo_root).unwrap_or_else(|_| files.clone())
+        };
+        match collect_for_files(&files, &index_files, wiki_root, repo_root, per_cfg.as_ref()) {
+            Ok(d) => all.push((label.clone(), d)),
+            Err(e) => {
+                runtime_error = Some(format!("[{label}] {e}"));
+                break;
+            }
+        }
+    }
+
+    if let Some(msg) = runtime_error {
+        if json {
+            eprintln!("{}", serde_json::json!({"error": msg}));
+        } else {
+            eprintln!("error: {msg}");
+        }
+        return Ok(2);
+    }
+
+    if json {
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        for (label, diags) in &all {
+            for d in diags {
+                let mut v = serde_json::to_value(d).unwrap();
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("namespace".into(), serde_json::json!(label));
+                }
+                out.push(v);
+            }
+        }
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    } else {
+        for (label, diags) in &all {
+            for d in diags {
+                println!(
+                    "**[{label}] {}** — `{}:{}`\n{}\n",
+                    d.kind, d.file, d.line, d.message
+                );
+            }
+        }
+    }
+
+    let any_error = all
+        .iter()
+        .flat_map(|(_, ds)| ds.iter())
+        .any(|d| d.kind != "alias_resolve");
+    Ok(if any_error { 1 } else { 0 })
+}
+
 /// Collect diagnostics for the given glob patterns without printing output.
 ///
 /// Returns `Err` only on discovery failure; validation errors are returned as

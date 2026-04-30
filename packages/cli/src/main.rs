@@ -380,9 +380,83 @@ fn run(
     };
 
     if effective_namespace.as_deref() == Some("*") {
-        return Err(miette::miette!(
-            "multi-namespace coming in phase 5"
-        ));
+        let cfg = config.as_ref().ok_or_else(|| {
+            miette::miette!(
+                "this command does not support multi-namespace (`-n '*'`)"
+            )
+        })?;
+        let wikis = cfg.all_wikis();
+        let targets: Vec<(String, &std::path::Path)> = wikis
+            .iter()
+            .map(|info| {
+                (
+                    info.namespace.clone().unwrap_or_else(|| "default".into()),
+                    info.root.as_path(),
+                )
+            })
+            .collect();
+        let command_name = command_name(command.as_ref(), effective_query.as_deref());
+        // Use the current wiki's root as the perf root; this is informational.
+        perf::init(cfg.current.root.as_path(), command_name, json);
+        let _command_span = perf::span_for_command(command_name);
+        let started = Instant::now();
+        let result: Result<i32> = match command {
+            Some(Commands::Check { globs }) => {
+                commands::check::run_multi(&globs, json, &targets, &repo_root)
+            }
+            Some(Commands::Links { target }) => {
+                let inputs = resolve_inputs(target, read_stdin_lines)?;
+                run_for_each(
+                    inputs,
+                    |input| commands::links::run_multi(input, json, &targets, &repo_root),
+                    false,
+                )
+            }
+            Some(Commands::Summary { title }) => {
+                let inputs = resolve_inputs(title, read_stdin_lines)?;
+                run_for_each(
+                    inputs,
+                    |input| commands::summary::run_multi(input, json, &targets, &repo_root),
+                    false,
+                )
+            }
+            Some(Commands::Refs { title }) => {
+                let inputs = resolve_inputs(title, read_stdin_lines)?;
+                run_for_each(
+                    inputs,
+                    |input| commands::refs::run_multi(input, json, &targets, &repo_root),
+                    false,
+                )
+            }
+            None => match effective_query.as_deref() {
+                Some(q) => commands::search::run_multi(q, limit, offset, json, &targets, &repo_root),
+                None => {
+                    return Err(miette::miette!(
+                        "`-n '*'` requires a query or one of: check, links, summary, refs"
+                    ));
+                }
+            },
+            _ => {
+                return Err(miette::miette!(
+                    "command does not support multi-namespace (`-n '*'`); supported: search (default query), check, links, summary, refs"
+                ));
+            }
+        };
+        match &result {
+            Ok(code) => perf::finish(
+                command_name,
+                *code,
+                started.elapsed().as_secs_f64() * 1000.0,
+                "ok",
+            ),
+            Err(_) => perf::finish(
+                command_name,
+                2,
+                started.elapsed().as_secs_f64() * 1000.0,
+                "error",
+            ),
+        }
+        return result;
     }
 
     let target = config

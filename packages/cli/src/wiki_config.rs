@@ -88,6 +88,17 @@ impl WikiConfig {
         Ok(cfg)
     }
 
+    /// Return current + all peer wikis in declaration order (current first).
+    /// Used by multi-namespace dispatch (`-n '*'`).
+    pub fn all_wikis(&self) -> Vec<&WikiInfo> {
+        let mut out = Vec::with_capacity(1 + self.peers.len());
+        out.push(&self.current);
+        for info in self.peers.values() {
+            out.push(info);
+        }
+        out
+    }
+
     /// Enforce validation rules 1–4 at load time, fail-closed.
     pub fn validate(&self) -> Result<()> {
         // Rule 1 already enforced during load: every peer entry resolves to a

@@ -1,0 +1,239 @@
+//! Integration tests for `-n '*'` multi-namespace dispatch across the five
+//! commands that support it: search (default query), links, summary, refs,
+//! check.
+//!
+//! Layout used by every test:
+//!
+//!   <repo>/wiki/wiki.toml         current wiki, default namespace, peer "foo"
+//!   <repo>/wiki/page.md           a page in the current wiki
+//!   <repo>/foo/wiki.toml          peer wiki, namespace "foo"
+//!   <repo>/foo/page.md            a page in the peer wiki
+//!
+//! Tests are run from <repo>/wiki so the walk-up finds the current wiki.
+
+use std::fs;
+use std::process::{Command, Output};
+
+use tempfile::TempDir;
+
+struct TestRepo {
+    dir: TempDir,
+}
+
+impl TestRepo {
+    fn new() -> Self {
+        let dir = TempDir::new().expect("tempdir");
+        let repo = Self { dir };
+        repo.git(&["init"]);
+        repo.git(&["checkout", "-b", "main"]);
+        repo
+    }
+
+    fn create_file(&self, path: &str, content: &str) {
+        let full = self.dir.path().join(path);
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent).expect("create_dir_all");
+        }
+        fs::write(full, content).expect("write file");
+    }
+
+    fn commit(&self, msg: &str) {
+        self.git(&["add", "-A"]);
+        self.git(&["commit", "--allow-empty", "-m", msg]);
+    }
+
+    fn git(&self, args: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(self.dir.path())
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "t@t.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "t@t.com")
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn wiki(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_wiki"))
+            .current_dir(self.dir.path().join("wiki"))
+            .args(args)
+            .env("WIKI_BACKGROUND_FTS", "0")
+            .output()
+            .expect("wiki")
+    }
+}
+
+fn page(title: &str, body: &str) -> String {
+    format!("---\ntitle: {title}\nsummary: {title} summary.\n---\n{body}\n")
+}
+
+fn make_basic_repo() -> TestRepo {
+    let repo = TestRepo::new();
+    // Current wiki — default namespace, peer "foo".
+    repo.create_file("wiki/wiki.toml", "[peers]\nfoo = \"../foo\"\n");
+    repo.create_file(
+        "wiki/page.md",
+        &page("Current Page", "Hello unique-current-token."),
+    );
+    // Peer foo
+    repo.create_file("foo/wiki.toml", "namespace = \"foo\"\n");
+    repo.create_file(
+        "foo/page.md",
+        &page("Foo Page", "Hello unique-foo-token."),
+    );
+    repo.commit("init");
+    repo
+}
+
+#[test]
+fn search_star_returns_results_from_all_namespaces() {
+    let repo = make_basic_repo();
+    let out = repo.wiki(&["-n", "*", "Page"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "stdout: {stdout}\nstderr: {}", String::from_utf8_lossy(&out.stderr));
+    // Results from both namespaces, labeled.
+    assert!(stdout.contains("[default]"), "expected [default] label; got: {stdout}");
+    assert!(stdout.contains("[foo]"), "expected [foo] label; got: {stdout}");
+    assert!(stdout.contains("Current Page"), "got: {stdout}");
+    assert!(stdout.contains("Foo Page"), "got: {stdout}");
+}
+
+#[test]
+fn search_star_json_includes_namespace_field() {
+    let repo = make_basic_repo();
+    let out = repo.wiki(&["--format", "json", "-n", "*", "Page"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "stdout: {stdout}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    let arr = v.as_array().expect("array");
+    let namespaces: Vec<String> = arr
+        .iter()
+        .map(|e| e["namespace"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(namespaces.contains(&"default".to_string()), "got: {namespaces:?}");
+    assert!(namespaces.contains(&"foo".to_string()), "got: {namespaces:?}");
+}
+
+#[test]
+fn links_star_returns_results_from_all_namespaces() {
+    let repo = TestRepo::new();
+    repo.create_file("wiki/wiki.toml", "[peers]\nfoo = \"../foo\"\n");
+    repo.create_file("wiki/target.md", &page("Target Page", "Body."));
+    repo.create_file(
+        "wiki/source.md",
+        &page("Source Page", "See [[Target Page]]."),
+    );
+    repo.create_file("foo/wiki.toml", "namespace = \"foo\"\n");
+    // Peer also has a Target Page and a page linking to it.
+    repo.create_file("foo/target.md", &page("Target Page", "Foo body."));
+    repo.create_file(
+        "foo/linker.md",
+        &page("Foo Linker", "Mentions [[Target Page]]."),
+    );
+    repo.commit("init");
+
+    let out = repo.wiki(&["-n", "*", "links", "Target Page"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "stdout: {stdout}\nstderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("[default]"), "got: {stdout}");
+    assert!(stdout.contains("[foo]"), "got: {stdout}");
+    assert!(stdout.contains("Source Page"), "got: {stdout}");
+    assert!(stdout.contains("Foo Linker"), "got: {stdout}");
+}
+
+#[test]
+fn summary_star_emits_one_entry_per_namespace_when_title_resolves() {
+    let repo = TestRepo::new();
+    repo.create_file("wiki/wiki.toml", "[peers]\nfoo = \"../foo\"\n");
+    repo.create_file("wiki/shared.md", &page("Shared", "default ver."));
+    repo.create_file("foo/wiki.toml", "namespace = \"foo\"\n");
+    repo.create_file("foo/shared.md", &page("Shared", "foo ver."));
+    repo.commit("init");
+
+    let out = repo.wiki(&["-n", "*", "summary", "Shared"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "stdout: {stdout}");
+    assert!(stdout.contains("[default]"), "got: {stdout}");
+    assert!(stdout.contains("[foo]"), "got: {stdout}");
+}
+
+#[test]
+fn refs_star_resolves_references_per_namespace() {
+    let repo = TestRepo::new();
+    repo.create_file("wiki/wiki.toml", "[peers]\nfoo = \"../foo\"\n");
+    repo.create_file(
+        "wiki/source.md",
+        &page("Source", "[[Default Target]]"),
+    );
+    repo.create_file("wiki/default-target.md", &page("Default Target", "x"));
+    repo.create_file("foo/wiki.toml", "namespace = \"foo\"\n");
+    // Peer also has a "Source" page that links to its own target.
+    repo.create_file("foo/source.md", &page("Source", "[[Foo Target]]"));
+    repo.create_file("foo/foo-target.md", &page("Foo Target", "y"));
+    repo.commit("init");
+
+    let out = repo.wiki(&["-n", "*", "refs", "Source"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "stdout: {stdout}\nstderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("[default]"), "got: {stdout}");
+    assert!(stdout.contains("[foo]"), "got: {stdout}");
+    assert!(stdout.contains("Default Target"), "got: {stdout}");
+    assert!(stdout.contains("Foo Target"), "got: {stdout}");
+}
+
+#[test]
+fn check_star_runs_rules_across_all_namespaces() {
+    let repo = TestRepo::new();
+    // Current wiki: clean; declares peer foo.
+    repo.create_file("wiki/wiki.toml", "[peers]\nfoo = \"../foo\"\n");
+    repo.create_file("wiki/clean.md", &page("Clean", "ok."));
+    // Peer wiki: contains a broken wikilink — only `wiki check -n '*'`
+    // should surface this since plain `wiki check` only validates the
+    // current namespace.
+    repo.create_file("foo/wiki.toml", "namespace = \"foo\"\n");
+    repo.create_file(
+        "foo/broken.md",
+        &page("Broken Page", "[[Nonexistent Target]]"),
+    );
+    repo.commit("init");
+
+    // Plain `check` (current namespace only) — passes.
+    let out_single = repo.wiki(&["check"]);
+    assert!(
+        out_single.status.success(),
+        "single-ns check should pass: {}",
+        String::from_utf8_lossy(&out_single.stdout)
+    );
+
+    // `check -n '*'` — should fail because peer has a broken wikilink.
+    let out_multi = repo.wiki(&["-n", "*", "check"]);
+    let stdout = String::from_utf8_lossy(&out_multi.stdout);
+    assert!(
+        !out_multi.status.success(),
+        "expected -n '*' check to surface peer error; stdout: {stdout}"
+    );
+    assert!(stdout.contains("[foo]"), "expected [foo] label; got: {stdout}");
+    assert!(
+        stdout.contains("broken_wikilink"),
+        "expected broken_wikilink diagnostic; got: {stdout}"
+    );
+}
+
+#[test]
+fn star_on_unsupported_command_errors_clearly() {
+    let repo = make_basic_repo();
+    let out = repo.wiki(&["-n", "*", "list"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "expected non-zero exit");
+    assert!(
+        stderr.contains("multi-namespace") || stderr.contains("does not support"),
+        "expected clear error; stderr: {stderr}"
+    );
+}

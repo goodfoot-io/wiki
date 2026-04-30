@@ -55,6 +55,100 @@ fn format_text_entries(entries: &[RefEntry]) -> String {
     out.trim_end().to_string()
 }
 
+/// Run `refs` across multiple namespaces sequentially. The source page is
+/// looked up in each namespace independently; namespaces where the page is
+/// missing are skipped. Output is labeled with the namespace.
+pub fn run_multi(
+    title: &str,
+    json: bool,
+    targets: &[(String, &Path)],
+    repo_root: &Path,
+) -> Result<i32> {
+    let mut any_resolved_source = false;
+    if json {
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        for (label, wiki_root) in targets {
+            let index = WikiIndex::prepare(wiki_root, repo_root)?;
+            let Some(page) = index.resolve_page(title)? else {
+                continue;
+            };
+            any_resolved_source = true;
+            let entries = collect_entries(&index, &page.content)?;
+            for e in &entries {
+                let mut v = serde_json::to_value(e).unwrap();
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("namespace".into(), serde_json::json!(label));
+                }
+                out.push(v);
+            }
+        }
+        if !any_resolved_source {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "error": format!("page '{}' not found in any namespace", title),
+                })
+            );
+            return Ok(1);
+        }
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        return Ok(0);
+    }
+
+    let mut first = true;
+    for (label, wiki_root) in targets {
+        let index = WikiIndex::prepare(wiki_root, repo_root)?;
+        let Some(page) = index.resolve_page(title)? else {
+            continue;
+        };
+        any_resolved_source = true;
+        let entries = collect_entries(&index, &page.content)?;
+        if entries.is_empty() {
+            continue;
+        }
+        if !first {
+            println!("\n---\n");
+        }
+        first = false;
+        println!("# [{label}]\n{}", format_text_entries(&entries));
+    }
+    if !any_resolved_source {
+        eprintln!("No page found with title or alias `{title}` in any namespace.");
+        return Ok(1);
+    }
+    Ok(0)
+}
+
+fn collect_entries(index: &WikiIndex, content: &str) -> Result<Vec<RefEntry>> {
+    let wikilinks = parse_wikilinks(content);
+    let mut seen = HashSet::new();
+    let mut targets = Vec::new();
+    for wikilink in wikilinks {
+        let key = wikilink.title.to_lowercase();
+        if seen.insert(key) {
+            targets.push(wikilink.title);
+        }
+    }
+    let mut entries = Vec::with_capacity(targets.len());
+    for target in targets {
+        match index.resolve_page_full(&target)? {
+            Some(full) => entries.push(RefEntry::Resolved {
+                wikilink: target,
+                title: full.title,
+                file: full.file,
+                summary: full.summary,
+                aliases: full.aliases,
+                tags: full.tags,
+            }),
+            None => entries.push(RefEntry::Unresolved {
+                wikilink: target,
+                error: "not found".to_string(),
+            }),
+        }
+    }
+    Ok(entries)
+}
+
 pub fn run(title: &str, json: bool, wiki_root: &Path, repo_root: &Path) -> Result<i32> {
     let index = WikiIndex::prepare(wiki_root, repo_root)?;
     let Some(page) = index.resolve_page(title)? else {
