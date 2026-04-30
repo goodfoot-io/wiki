@@ -127,7 +127,8 @@ if [ -f "$cargo_lock" ] && [ -f "$cargo_toml" ]; then
   if [ "$lock_version" != "$VERSION" ]; then
     (
       cd "$REPO_ROOT/packages/cli" && \
-      env CARGO_TARGET_DIR="${WIKI_CARGO_TARGET_ROOT:-$HOME/.cache/wiki/cargo-target}/sync" \
+      env PATH="$HOME/.cargo/bin:$PATH" \
+        CARGO_TARGET_DIR="${WIKI_CARGO_TARGET_ROOT:-$HOME/.cache/wiki/cargo-target}/sync" \
         cargo update --workspace --quiet
     )
     echo "Updated: $cargo_lock ($lock_version -> $VERSION)"

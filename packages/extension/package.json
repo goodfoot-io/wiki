@@ -2,7 +2,7 @@
   "name": "wiki-extension",
   "displayName": "Wiki Viewer",
   "description": "Renders wiki markdown files in webview panels with wikilink navigation.",
-  "version": "0.5.35",
+  "version": "0.5.37",
   "publisher": "goodfoot",
   "type": "module",
   "engines": {
