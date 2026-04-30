@@ -4,8 +4,6 @@
 //! detection only; the catalog itself is the contract for what comments can
 //! appear above a `git mesh add` block.
 
-#![allow(dead_code)]
-
 use std::sync::OnceLock;
 
 use regex::Regex;

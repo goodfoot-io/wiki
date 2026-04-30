@@ -5,6 +5,7 @@ use regex::Regex;
 use crate::parser::{FragmentLink, scrub_non_content};
 
 /// A `FragmentLink` augmented with surrounding text and heading context.
+#[derive(Clone)]
 pub(crate) struct AugmentedLink {
     pub(crate) link: FragmentLink,
     /// The link's source line ± 2 lines from the *raw* (unscrubbed) source,

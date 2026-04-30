@@ -4,8 +4,6 @@
 //! section context, hints) and is the unit grouping/annotation operates on.
 //! Slug derivation lives here because fallback markers are part of the draft.
 
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 
 use super::augment::AugmentedLink;

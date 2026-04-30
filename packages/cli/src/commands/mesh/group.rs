@@ -10,8 +10,6 @@
 //!
 //! Operates on drafts from a *single* page. The caller chunks by page first.
 
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
 use super::draft::MeshDraft;

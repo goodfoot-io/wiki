@@ -4,8 +4,6 @@
 //! and diffs the caller's anchored paths against it. Failure to invoke git
 //! degrades to `Skipped { reason }` — the scaffold itself must keep running.
 
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
