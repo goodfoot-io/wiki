@@ -17,6 +17,14 @@ pub(crate) struct AugmentedLink {
     pub(crate) line_text: String,
     /// Stack of ATX heading texts (levels 1–6) in effect at the link's source line.
     pub(crate) heading_chain: Vec<String>,
+    /// The deepest heading text in `heading_chain` prefixed by its ATX hashes
+    /// (e.g. `## Sync detection`). Empty when the link sits before any heading
+    /// on the page.
+    pub(crate) section_heading: String,
+    /// The first prose sentence of the section the link sits under, with
+    /// markdown link syntax cleaned via the same pipeline as `surrounding_text`.
+    /// Empty when no prose precedes the next heading.
+    pub(crate) section_opening: String,
 }
 
 /// Augment a slice of fragment links found in `content`.
@@ -27,6 +35,7 @@ pub(crate) fn augment(links: &[FragmentLink], content: &str) -> Vec<AugmentedLin
     // blocks don't pollute the chain.
     let scrubbed_lines: Vec<&str> = scrubbed.split('\n').collect();
     let heading_chain_at = build_heading_chains(&scrubbed_lines);
+    let heading_meta_at = build_heading_meta(&scrubbed_lines);
 
     links
         .iter()
@@ -40,14 +49,183 @@ pub(crate) fn augment(links: &[FragmentLink], content: &str) -> Vec<AugmentedLin
                 .get(link.source_line.saturating_sub(1))
                 .cloned()
                 .unwrap_or_default();
+            let meta = heading_meta_at
+                .get(link.source_line.saturating_sub(1))
+                .cloned()
+                .unwrap_or_default();
+            let (section_heading, section_opening) =
+                extract_section_opening(meta.as_ref(), &raw_lines, &scrubbed_lines);
             AugmentedLink {
                 link: link.clone(),
                 surrounding_text,
                 line_text,
                 heading_chain,
+                section_heading,
+                section_opening,
             }
         })
         .collect()
+}
+
+/// (heading_level, heading_line_idx_0based, heading_text) for the deepest heading
+/// in scope at each line. `None` when no heading precedes that line.
+type HeadingMeta = Option<(usize, usize, String)>;
+
+fn build_heading_meta(lines: &[&str]) -> Vec<HeadingMeta> {
+    let mut out: Vec<HeadingMeta> = Vec::with_capacity(lines.len());
+    let mut stack: Vec<(usize, usize, String)> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        out.push(stack.last().cloned());
+        if let Some((level, text)) = parse_atx_heading(line) {
+            stack.retain(|(l, _, _)| *l < level);
+            stack.push((level, i, text));
+        }
+    }
+    out
+}
+
+/// Walk forward from the heading's line until the first prose line, returning
+/// `(section_heading, section_opening)`. The heading is rendered with its ATX
+/// hashes (e.g. `## Sync detection`). The opening sentence is cleaned via the
+/// same pipeline as `extract_surrounding_text` and truncated at the first
+/// sentence terminator (`. `, `! `, `? `, end-of-paragraph).
+///
+/// Documented edge cases:
+/// - No heading above link: `section_heading = ""`, opening walks from the top
+///   of the file to the first prose line.
+/// - Section's first content is a list item: the bullet text is treated as
+///   prose (leading `- ` or `* ` stripped) — produces *something* reviewable.
+/// - Section's first content is a fenced code block: skipped entirely; the
+///   first prose line after the fence is returned. Empty when the section
+///   never produces prose before the next heading.
+pub(crate) fn extract_section_opening(
+    meta: Option<&(usize, usize, String)>,
+    raw_lines: &[&str],
+    scrubbed_lines: &[&str],
+) -> (String, String) {
+    let (heading_text, start_idx) = match meta {
+        Some((level, idx, text)) => {
+            let hashes = "#".repeat(*level);
+            (format!("{hashes} {text}"), *idx + 1)
+        }
+        None => (String::new(), 0),
+    };
+    let opening = walk_section_opening(start_idx, raw_lines, scrubbed_lines);
+    (heading_text, opening)
+}
+
+fn walk_section_opening(start_idx: usize, raw_lines: &[&str], scrubbed_lines: &[&str]) -> String {
+    let mut i = start_idx;
+    // Skip YAML frontmatter when starting from the top of the file.
+    if i == 0 && raw_lines.first().map(|l| l.trim()) == Some("---") {
+        let mut j = 1;
+        while j < raw_lines.len() && raw_lines[j].trim() != "---" {
+            j += 1;
+        }
+        if j < raw_lines.len() {
+            i = j + 1; // step past the closing fence
+        }
+    }
+    let mut in_fence = false;
+    while i < raw_lines.len() {
+        let raw = raw_lines[i];
+        let scrubbed = scrubbed_lines.get(i).copied().unwrap_or("");
+        let trimmed_raw = raw.trim();
+
+        // Toggle fenced code block state on raw lines (the scrubber blanks
+        // them out, but the fence markers themselves can survive).
+        if trimmed_raw.starts_with("```") || trimmed_raw.starts_with("~~~") {
+            in_fence = !in_fence;
+            i += 1;
+            continue;
+        }
+        if in_fence {
+            i += 1;
+            continue;
+        }
+
+        // Stop at the next ATX heading (end of section).
+        if parse_atx_heading(scrubbed).is_some() {
+            return String::new();
+        }
+
+        if trimmed_raw.is_empty() {
+            i += 1;
+            continue;
+        }
+
+        // List items: strip leading bullet so we still produce a sentence.
+        let candidate = if let Some(rest) = trimmed_raw
+            .strip_prefix("- ")
+            .or_else(|| trimmed_raw.strip_prefix("* "))
+            .or_else(|| trimmed_raw.strip_prefix("+ "))
+        {
+            rest
+        } else {
+            trimmed_raw
+        };
+
+        // Collect the prose paragraph (until blank line or next heading) so a
+        // sentence that wraps lines still terminates correctly.
+        let mut paragraph = candidate.to_string();
+        let mut j = i + 1;
+        while j < raw_lines.len() {
+            let next_raw = raw_lines[j].trim();
+            if next_raw.is_empty() {
+                break;
+            }
+            let next_scrubbed = scrubbed_lines.get(j).copied().unwrap_or("");
+            if parse_atx_heading(next_scrubbed).is_some() {
+                break;
+            }
+            if next_raw.starts_with("```") || next_raw.starts_with("~~~") {
+                break;
+            }
+            paragraph.push(' ');
+            paragraph.push_str(next_raw);
+            j += 1;
+        }
+
+        let cleaned = clean_prose_line(&paragraph);
+        return truncate_to_sentence(&cleaned);
+    }
+    String::new()
+}
+
+fn clean_prose_line(s: &str) -> String {
+    let (bt, md, wl, ws) = surrounding_cleanup_re();
+    let s = bt.replace_all(s, " ").into_owned();
+    let s = md
+        .replace_all(&s, |caps: &regex::Captures| {
+            let label = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            ext_strip_re().replace(label, "").into_owned()
+        })
+        .into_owned();
+    let s = wl
+        .replace_all(&s, |caps: &regex::Captures| {
+            caps.get(2)
+                .or_else(|| caps.get(1))
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default()
+        })
+        .into_owned();
+    ws.replace_all(&s, " ").trim().to_string()
+}
+
+fn truncate_to_sentence(s: &str) -> String {
+    // Find the first occurrence of `. `, `! `, `? `, OR end-of-string with
+    // those terminators. Keep the terminator.
+    let bytes = s.as_bytes();
+    for i in 0..bytes.len() {
+        let c = bytes[i];
+        if c == b'.' || c == b'!' || c == b'?' {
+            let next = bytes.get(i + 1).copied();
+            if matches!(next, Some(b' ') | None) {
+                return s[..=i].to_string();
+            }
+        }
+    }
+    s.to_string()
 }
 
 fn build_heading_chains(lines: &[&str]) -> Vec<Vec<String>> {
@@ -285,6 +463,80 @@ mod tests {
         let text = &result[0].surrounding_text;
         assert!(text.contains("JustTitle"));
         assert!(!text.contains("[["));
+    }
+
+    #[test]
+    fn section_opening_link_directly_under_heading() {
+        let content = "## Sync detection\nThe WikiIndex sync detects changes. Then more.\n[label](foo.rs)\n";
+        let links = parse_fragment_links(content);
+        let result = augment(&links, content);
+        assert_eq!(result[0].section_heading, "## Sync detection");
+        assert_eq!(
+            result[0].section_opening,
+            "The WikiIndex sync detects changes."
+        );
+    }
+
+    #[test]
+    fn section_opening_skips_blanks_and_finds_first_prose() {
+        let content = "## H\n\n\nFirst prose line. Second sentence.\n\nmore later [label](foo.rs)\n";
+        let links = parse_fragment_links(content);
+        let result = augment(&links, content);
+        assert_eq!(result[0].section_heading, "## H");
+        assert_eq!(result[0].section_opening, "First prose line.");
+    }
+
+    #[test]
+    fn section_opening_uses_deepest_nested_heading() {
+        let content =
+            "# Top\n\nintro\n\n## Mid\n\nmid prose.\n\n### Deep\n\nDeep prose here. Tail.\n[label](foo.rs)\n";
+        let links = parse_fragment_links(content);
+        let result = augment(&links, content);
+        assert_eq!(result[0].section_heading, "### Deep");
+        assert_eq!(result[0].section_opening, "Deep prose here.");
+    }
+
+    #[test]
+    fn section_opening_no_heading_above_walks_from_top() {
+        let content = "Top of file prose. More.\n\n[label](foo.rs)\n# After\n";
+        let links = parse_fragment_links(content);
+        let result = augment(&links, content);
+        assert_eq!(result[0].section_heading, "");
+        assert_eq!(result[0].section_opening, "Top of file prose.");
+    }
+
+    #[test]
+    fn section_opening_skips_code_fence_then_finds_prose() {
+        let content =
+            "## H\n\n```\ncode block\n```\n\nReal prose here. Then more.\n[label](foo.rs)\n";
+        let links = parse_fragment_links(content);
+        let result = augment(&links, content);
+        assert_eq!(result[0].section_heading, "## H");
+        assert_eq!(result[0].section_opening, "Real prose here.");
+    }
+
+    #[test]
+    fn section_opening_treats_list_item_as_prose() {
+        // Documented behavior: when the first content under a heading is a
+        // list, the bullet marker is stripped and the item text is returned —
+        // *something* reviewable beats nothing.
+        let content = "## H\n\n- bullet item content. trailing.\n\n[label](foo.rs)\n";
+        let links = parse_fragment_links(content);
+        let result = augment(&links, content);
+        assert_eq!(result[0].section_heading, "## H");
+        assert_eq!(result[0].section_opening, "bullet item content.");
+    }
+
+    #[test]
+    fn section_opening_cleans_markdown_link_syntax() {
+        let content =
+            "## H\n\nThe handler [handleCharge](src/charge.ts#L1-L5) validates input.\n[label](foo.rs)\n";
+        let links = parse_fragment_links(content);
+        let result = augment(&links, content);
+        // Heading source = first link; both share section. Both have same opening.
+        let opening = &result[0].section_opening;
+        assert!(opening.contains("handleCharge"), "got: {opening:?}");
+        assert!(!opening.contains("("), "link href leaked: {opening:?}");
     }
 
     #[test]
