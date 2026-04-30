@@ -59,6 +59,7 @@ struct RawFrontmatter {
     tags: Option<serde_yaml::Value>,
     keywords: Option<serde_yaml::Value>,
     summary: Option<serde_yaml::Value>,
+    namespace: Option<serde_yaml::Value>,
 }
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -71,6 +72,8 @@ pub struct Frontmatter {
     pub tags: Vec<String>,
     pub keywords: Vec<String>,
     pub summary: String,
+    /// Optional namespace assignment, only meaningful for `*.wiki.md` files.
+    pub namespace: Option<String>,
 }
 
 // ── Parsing ───────────────────────────────────────────────────────────────────
@@ -229,12 +232,20 @@ pub fn parse_frontmatter(
         }
     };
 
+    let namespace = match raw.namespace {
+        None => None,
+        Some(serde_yaml::Value::String(s)) if !s.is_empty() => Some(s),
+        Some(serde_yaml::Value::String(_)) => None,
+        Some(_) => None,
+    };
+
     Ok(Some(Frontmatter {
         title,
         aliases,
         tags,
         keywords,
         summary,
+        namespace,
     }))
 }
 
@@ -494,6 +505,7 @@ mod tests {
                 tags: vec![],
                 keywords: vec![],
                 summary: "Summary.".into(),
+            namespace: None,
             },
         )];
         let (idx, collisions) = build_index(&pages);
@@ -513,6 +525,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
+                namespace: None,
                 },
             ),
             (
@@ -523,6 +536,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
+                namespace: None,
                 },
             ),
         ];
@@ -545,6 +559,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
+                namespace: None,
                 },
             ),
             (
@@ -555,6 +570,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
+                namespace: None,
                 },
             ),
         ];
@@ -576,6 +592,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
+                namespace: None,
                 },
             ),
             (
@@ -586,6 +603,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
+                namespace: None,
                 },
             ),
         ];
@@ -636,6 +654,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
+                namespace: None,
                 },
             ),
             (
@@ -646,6 +665,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
+                namespace: None,
                 },
             ),
         ];

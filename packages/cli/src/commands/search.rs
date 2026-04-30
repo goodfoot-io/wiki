@@ -6,8 +6,8 @@ use crate::index::WikiIndex;
 
 use super::summary::format_search_result;
 
-pub fn run(query: &str, limit: i64, offset: usize, json: bool, repo_root: &Path) -> Result<i32> {
-    let index = WikiIndex::prepare(repo_root)?;
+pub fn run(query: &str, limit: i64, offset: usize, json: bool, wiki_root: &Path, repo_root: &Path) -> Result<i32> {
+    let index = WikiIndex::prepare(wiki_root, repo_root)?;
     let (matches, total) = index.search_weighted(query, limit, offset)?;
 
     if matches.is_empty() {
@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn search_matches_case_insensitively() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/a.md",
             "---\ntitle: Alpha\nsummary: Alpha summary.\n---\nContains Keyword here.\n",
@@ -99,20 +99,20 @@ mod tests {
             "---\ntitle: Beta\nsummary: Beta summary.\n---\nNo match.\n",
         );
 
-        let code = run("keyword", 20, 0, false, repo.path()).expect("run");
+        let code = run("keyword", 20, 0, false, &wiki_root, repo.path()).expect("run");
         assert_eq!(code, 0);
     }
 
     #[test]
     fn search_returns_exit_0_when_no_results_found() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/a.md",
             "---\ntitle: Alpha\nsummary: Alpha summary.\n---\nContains Keyword here.\n",
         );
 
-        let code = run("missing", 20, 0, false, repo.path()).expect("run");
+        let code = run("missing", 20, 0, false, &wiki_root, repo.path()).expect("run");
         assert_eq!(code, 0);
     }
 }

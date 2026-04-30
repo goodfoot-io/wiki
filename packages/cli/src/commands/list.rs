@@ -14,8 +14,8 @@ pub struct PageEntry {
     pub file: String,
 }
 
-pub fn run(_globs: &[String], tag: Option<&str>, json: bool, repo_root: &Path) -> Result<i32> {
-    let index = WikiIndex::prepare(repo_root)?;
+pub fn run(_globs: &[String], tag: Option<&str>, json: bool, wiki_root: &Path, repo_root: &Path) -> Result<i32> {
+    let index = WikiIndex::prepare(wiki_root, repo_root)?;
     let entries = index
         .list_pages(tag)?
         .into_iter()

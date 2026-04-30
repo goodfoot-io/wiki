@@ -55,8 +55,8 @@ fn format_text_entries(entries: &[RefEntry]) -> String {
     out.trim_end().to_string()
 }
 
-pub fn run(title: &str, json: bool, repo_root: &Path) -> Result<i32> {
-    let index = WikiIndex::prepare(repo_root)?;
+pub fn run(title: &str, json: bool, wiki_root: &Path, repo_root: &Path) -> Result<i32> {
+    let index = WikiIndex::prepare(wiki_root, repo_root)?;
     let Some(page) = index.resolve_page(title)? else {
         if json {
             eprintln!(
@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn resolves_all_wikilinks_with_aliases_and_tags() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/source.md",
             "---\ntitle: Source\nsummary: Source page.\n---\nSee [[Auth]] and [[Other Page]].\n",
@@ -210,7 +210,7 @@ mod tests {
             "---\ntitle: Other Page\nsummary: Other.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
         let entries = build_entries(&index, "Source");
 
         assert_eq!(entries.len(), 2);
@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn mixed_resolved_and_unresolved_partial_results() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/source.md",
             "---\ntitle: Source\nsummary: Source page.\n---\n[[Known]] [[Missing Page]]\n",
@@ -259,7 +259,7 @@ mod tests {
             "---\ntitle: Known\nsummary: Exists.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
         let entries = build_entries(&index, "Source");
         assert_eq!(entries.len(), 2);
         assert!(matches!(&entries[0], RefEntry::Resolved { title, .. } if title == "Known"));
@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn deduplicates_by_wikilink_target() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/source.md",
             "---\ntitle: Source\nsummary: Source page.\n---\n[[Target]] and [[Target]] and [[target]]\n",
@@ -281,7 +281,7 @@ mod tests {
             "---\ntitle: Target\nsummary: Target page.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
         let entries = build_entries(&index, "Source");
         assert_eq!(entries.len(), 1);
     }
@@ -289,26 +289,26 @@ mod tests {
     #[test]
     fn source_page_not_found_returns_exit_1() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/other.md",
             "---\ntitle: Other\nsummary: Other page.\n---\nBody.\n",
         );
 
-        let code = run("Nonexistent", true, repo.path()).expect("run");
+        let code = run("Nonexistent", true, &wiki_root, repo.path()).expect("run");
         assert_eq!(code, 1);
     }
 
     #[test]
     fn succeeds_with_exit_0_when_some_unresolved() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/source.md",
             "---\ntitle: Source\nsummary: Source page.\n---\n[[Missing]]\n",
         );
 
-        let code = run("Source", true, repo.path()).expect("run");
+        let code = run("Source", true, &wiki_root, repo.path()).expect("run");
         assert_eq!(code, 0);
     }
 }

@@ -6,8 +6,8 @@ use crate::index::WikiIndex;
 
 use super::summary::render_not_found;
 
-pub fn run(title: &str, json: bool, repo_root: &Path) -> Result<i32> {
-    let index = WikiIndex::prepare(repo_root)?;
+pub fn run(title: &str, json: bool, wiki_root: &Path, repo_root: &Path) -> Result<i32> {
+    let index = WikiIndex::prepare(wiki_root, repo_root)?;
     match index.resolve_page(title)? {
         Some(page) => {
             if json {

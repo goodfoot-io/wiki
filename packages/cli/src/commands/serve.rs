@@ -36,22 +36,29 @@ struct SearchParams {
     q: Option<String>,
 }
 
-pub fn run(port: u16, no_reload: bool, repo_root: &Path) -> Result<i32> {
+pub fn run(port: u16, no_reload: bool, wiki_root: &Path, repo_root: &Path) -> Result<i32> {
     let runtime = RuntimeBuilder::new_current_thread()
         .enable_all()
         .build()
         .into_diagnostic()
         .wrap_err("failed to create runtime for wiki serve")?;
 
-    runtime.block_on(async_run(port, no_reload, repo_root))
+    runtime.block_on(async_run(port, no_reload, wiki_root, repo_root))
 }
 
-async fn async_run(port: u16, no_reload: bool, repo_root: &Path) -> Result<i32> {
+async fn async_run(
+    port: u16,
+    no_reload: bool,
+    wiki_root: &Path,
+    repo_root: &Path,
+) -> Result<i32> {
+    let wiki_root = wiki_root.to_path_buf();
     let repo_root = repo_root.to_path_buf();
 
     let index = {
-        let root = repo_root.clone();
-        task::spawn_blocking(move || WikiIndex::prepare(&root))
+        let wr = wiki_root.clone();
+        let rr = repo_root.clone();
+        task::spawn_blocking(move || WikiIndex::prepare(&wr, &rr))
             .await
             .into_diagnostic()
             .wrap_err("failed to spawn wiki index build")??
@@ -62,7 +69,7 @@ async fn async_run(port: u16, no_reload: bool, repo_root: &Path) -> Result<i32> 
     let _watcher = if no_reload {
         None
     } else {
-        Some(start_watcher(&repo_root, reload_tx.clone(), index.clone())?)
+        Some(start_watcher(&wiki_root, &repo_root, reload_tx.clone(), index.clone())?)
     };
 
     let state = AppState {
@@ -92,12 +99,15 @@ async fn async_run(port: u16, no_reload: bool, repo_root: &Path) -> Result<i32> 
 }
 
 fn start_watcher(
+    wiki_root: &Path,
     repo_root: &Path,
     reload_tx: broadcast::Sender<()>,
     index: Arc<Mutex<WikiIndex>>,
 ) -> Result<RecommendedWatcher> {
     let repo_root = repo_root.to_path_buf();
+    let wiki_root = wiki_root.to_path_buf();
     let callback_repo_root = repo_root.clone();
+    let callback_wiki_root = wiki_root.clone();
     let worker_repo_root = repo_root.clone();
     let (path_tx, path_rx) = mpsc::channel::<std::path::PathBuf>();
 
@@ -114,7 +124,7 @@ fn start_watcher(
             return;
         }
         for path in event.paths {
-            if is_watchable_wiki_path(&path, &callback_repo_root) {
+            if is_watchable_wiki_path(&path, &callback_wiki_root, &callback_repo_root) {
                 let _ = path_tx.send(path);
             }
         }
@@ -168,21 +178,19 @@ fn watcher_worker(
     }
 }
 
-fn is_watchable_wiki_path(path: &Path, repo_root: &Path) -> bool {
+fn is_watchable_wiki_path(path: &Path, wiki_root: &Path, repo_root: &Path) -> bool {
     if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
         return false;
     }
 
-    let Ok(relative) = path.strip_prefix(repo_root) else {
+    let Ok(_relative) = path.strip_prefix(repo_root) else {
         return false;
     };
-    let relative = relative.to_string_lossy();
-    if relative.ends_with(".wiki.md") {
+    let s = path.to_string_lossy();
+    if s.ends_with(".wiki.md") {
         return true;
     }
-
-    let wiki_dir = std::env::var("WIKI_DIR").unwrap_or_else(|_| "wiki".to_string());
-    relative.starts_with(&wiki_dir)
+    path.starts_with(wiki_root)
 }
 
 async fn handler_index(State(state): State<AppState>) -> Response {

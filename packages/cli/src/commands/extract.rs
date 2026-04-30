@@ -14,7 +14,7 @@ pub struct ExtractEntry {
     pub file: String,
 }
 
-pub fn run(input: &str, json: bool, repo_root: &Path) -> Result<i32> {
+pub fn run(input: &str, json: bool, wiki_root: &Path, repo_root: &Path) -> Result<i32> {
     let wikilinks = parse_wikilinks(input);
     let mut seen = HashSet::new();
     let mut titles = Vec::new();
@@ -32,7 +32,7 @@ pub fn run(input: &str, json: bool, repo_root: &Path) -> Result<i32> {
         return Ok(0);
     }
 
-    let index = WikiIndex::prepare(repo_root)?;
+    let index = WikiIndex::prepare(wiki_root, repo_root)?;
     let (resolved, unresolved) = index.extract_pages(&titles)?;
 
     let entries = resolved

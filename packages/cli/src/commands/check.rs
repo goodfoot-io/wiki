@@ -27,8 +27,8 @@ pub struct CheckDiagnostic {
 /// Run the check command.
 ///
 /// Returns the exit code: 0 = valid, 1 = validation errors, 2 = runtime error.
-pub fn run(globs: &[String], json: bool, repo_root: &Path) -> Result<i32> {
-    let files = match discover_files(globs, repo_root) {
+pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> Result<i32> {
+    let files = match discover_files(globs, wiki_root, repo_root) {
         Ok(f) => f,
         Err(e) => {
             if json {
@@ -43,10 +43,10 @@ pub fn run(globs: &[String], json: bool, repo_root: &Path) -> Result<i32> {
     let index_files = if globs.is_empty() {
         files.clone()
     } else {
-        discover_files(&[], repo_root).unwrap_or_else(|_| files.clone())
+        discover_files(&[], wiki_root, repo_root).unwrap_or_else(|_| files.clone())
     };
 
-    let diagnostics = match collect_for_files(&files, &index_files, repo_root) {
+    let diagnostics = match collect_for_files(&files, &index_files, wiki_root, repo_root) {
         Ok(d) => d,
         Err(e) => {
             if json {
@@ -78,19 +78,20 @@ pub fn run(globs: &[String], json: bool, repo_root: &Path) -> Result<i32> {
 /// Returns `Err` only on discovery failure; validation errors are returned as
 /// diagnostics.  On discovery failure the caller should treat this as exit
 /// code 2.
-pub fn collect(globs: &[String], repo_root: &Path) -> Result<Vec<CheckDiagnostic>> {
-    let files = discover_files(globs, repo_root)?;
+pub fn collect(globs: &[String], wiki_root: &Path, repo_root: &Path) -> Result<Vec<CheckDiagnostic>> {
+    let files = discover_files(globs, wiki_root, repo_root)?;
     let index_files = if globs.is_empty() {
         files.clone()
     } else {
-        discover_files(&[], repo_root).unwrap_or_else(|_| files.clone())
+        discover_files(&[], wiki_root, repo_root).unwrap_or_else(|_| files.clone())
     };
-    collect_for_files(&files, &index_files, repo_root)
+    collect_for_files(&files, &index_files, wiki_root, repo_root)
 }
 
 fn collect_for_files(
     files: &[PathBuf],
     index_files: &[PathBuf],
+    _wiki_root: &Path,
     repo_root: &Path,
 ) -> Result<Vec<CheckDiagnostic>> {
     let mut diagnostics: Vec<CheckDiagnostic> = Vec::new();
@@ -448,11 +449,11 @@ mod tests {
     fn test_check_valid_pages_exit_0() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("wiki/page.md", &make_wiki_page("Page", "No links here."));
         repo.commit("add page");
 
-        let code = run(&[], false, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
         assert_eq!(code, 0);
     }
 
@@ -460,14 +461,14 @@ mod tests {
     fn test_check_broken_wikilink_exit_1() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/page.md",
             &make_wiki_page("Page", "See [[Nonexistent Page]]."),
         );
         repo.commit("add page");
 
-        let code = run(&[], false, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -475,12 +476,12 @@ mod tests {
     fn test_check_title_collision_exit_1() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("wiki/a.md", &make_wiki_page("Shared", ""));
         repo.create_file("wiki/b.md", &make_wiki_page("Shared", ""));
         repo.commit("add pages");
 
-        let code = run(&[], false, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -488,11 +489,11 @@ mod tests {
     fn test_check_missing_frontmatter_exit_1() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("wiki/page.md", "# Just a heading\n\nNo frontmatter.");
         repo.commit("add page");
 
-        let code = run(&[], false, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -500,7 +501,7 @@ mod tests {
     fn test_check_wikilink_via_alias_warns_exit_0() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/target.md",
             "---\ntitle: Target Page\naliases:\n  - tp\nsummary: The target page.\n---\n",
@@ -508,7 +509,7 @@ mod tests {
         repo.create_file("wiki/source.md", &make_wiki_page("Source", "See [[tp]]."));
         repo.commit("add pages");
 
-        let code = run(&[], false, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
         // alias_resolve warnings should not cause exit 1
         assert_eq!(code, 0);
     }
@@ -517,7 +518,7 @@ mod tests {
     fn test_check_heading_fragment_not_found_exit_1() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/target.md",
             &make_wiki_page("Target", "## Introduction\n"),
@@ -528,7 +529,7 @@ mod tests {
         );
         repo.commit("add pages");
 
-        let code = run(&[], false, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -536,7 +537,7 @@ mod tests {
     fn test_check_heading_fragment_found_exit_0() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/target.md",
             &make_wiki_page("Target", "## Introduction\n"),
@@ -547,7 +548,7 @@ mod tests {
         );
         repo.commit("add pages");
 
-        let code = run(&[], false, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
         assert_eq!(code, 0);
     }
 
@@ -556,7 +557,7 @@ mod tests {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         // Regression: passing a file path must not limit the index to that file only.
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/page_a.md",
             &make_wiki_page("Page A", "See [[Page B]]."),
@@ -565,7 +566,7 @@ mod tests {
         repo.commit("add pages");
 
         let globs = vec!["wiki/page_a.md".to_string()];
-        let code = run(&globs, false, repo.path()).expect("run");
+        let code = run(&globs, false, &wiki_root, repo.path()).expect("run");
         assert_eq!(
             code, 0,
             "wikilink to a page outside the glob must resolve against the full wiki index"
@@ -576,7 +577,7 @@ mod tests {
     fn test_check_glob_still_reports_genuinely_missing_wikilinks() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/page_a.md",
             &make_wiki_page("Page A", "See [[Does Not Exist]]."),
@@ -585,7 +586,7 @@ mod tests {
         repo.commit("add pages");
 
         let globs = vec!["wiki/page_a.md".to_string()];
-        let code = run(&globs, false, repo.path()).expect("run");
+        let code = run(&globs, false, &wiki_root, repo.path()).expect("run");
         assert_eq!(
             code, 1,
             "a truly missing wikilink must still be reported when using a file glob"
@@ -596,7 +597,7 @@ mod tests {
     fn test_check_directory_link_is_valid() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("src/lib.rs", "fn main() {}");
         repo.create_file(
             "wiki/page.md",
@@ -604,7 +605,7 @@ mod tests {
         );
         repo.commit("add files");
 
-        let code = run(&[], false, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
         assert_eq!(
             code, 0,
             "directory fragment links must not produce missing_file"
@@ -616,14 +617,14 @@ mod tests {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         // Collisions between pages not in the glob must not appear in the output.
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("wiki/a.md", &make_wiki_page("Shared Title", ""));
         repo.create_file("wiki/b.md", &make_wiki_page("Shared Title", ""));
         repo.create_file("wiki/c.md", &make_wiki_page("Clean", "No issues here."));
         repo.commit("add pages");
 
         let globs = vec!["wiki/c.md".to_string()];
-        let diagnostics = collect(&globs, repo.path()).expect("collect");
+        let diagnostics = collect(&globs, &wiki_root, repo.path()).expect("collect");
         assert!(
             diagnostics.is_empty(),
             "collision between out-of-scope pages must not appear when checking an unrelated file: {diagnostics:?}"
@@ -636,9 +637,9 @@ mod tests {
     fn mesh_coverage_runs_without_opt_in() {
         // Regression: mesh coverage is always on. A wiki with an uncovered
         // fragment link must fail `wiki check`, with no flag.
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
         let _guard = PATH_MUTEX.lock().expect("path mutex");
         let repo = TestRepo::new();
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
@@ -646,15 +647,15 @@ mod tests {
         );
         repo.commit("add files");
 
-        let code = run(&[], false, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
         assert_eq!(code, 1, "uncovered fragment link must fail wiki check");
     }
 
     #[test]
     fn mesh_uncovered_link_exits_1() {
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
         let _guard = PATH_MUTEX.lock().expect("path mutex");
         let repo = TestRepo::new();
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
@@ -663,21 +664,21 @@ mod tests {
         repo.commit("add files");
 
         // No mesh created — link is uncovered
-        let diagnostics = collect(&[], repo.path()).expect("collect");
+        let diagnostics = collect(&[], &wiki_root, repo.path()).expect("collect");
         let mesh_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.kind == "mesh_uncovered")
             .collect();
         assert_eq!(mesh_diags.len(), 1, "expected one mesh_uncovered: {diagnostics:?}");
-        let code = run(&[], false, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
         assert_eq!(code, 1);
     }
 
     #[test]
     fn mesh_covered_link_exits_0() {
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
         let _guard = PATH_MUTEX.lock().expect("path mutex");
         let repo = TestRepo::new();
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
@@ -690,7 +691,7 @@ mod tests {
         repo.git_mesh(&["why", "test-mesh", "-m", "Links wiki page to code."]);
         repo.git_mesh(&["commit"]);
 
-        let diagnostics = collect(&[], repo.path()).expect("collect");
+        let diagnostics = collect(&[], &wiki_root, repo.path()).expect("collect");
         let mesh_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.kind == "mesh_uncovered")
@@ -699,15 +700,15 @@ mod tests {
             mesh_diags.is_empty(),
             "covered link must not produce mesh_uncovered: {diagnostics:?}"
         );
-        let code = run(&[], false, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
         assert_eq!(code, 0);
     }
 
     #[test]
     fn mesh_covers_code_but_not_wiki_file() {
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
         let _guard = PATH_MUTEX.lock().expect("path mutex");
         let repo = TestRepo::new();
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file("src/other.rs", "fn b() {}\n");
         repo.create_file(
@@ -721,7 +722,7 @@ mod tests {
         repo.git_mesh(&["why", "test-mesh", "-m", "Code only mesh."]);
         repo.git_mesh(&["commit"]);
 
-        let diagnostics = collect(&[], repo.path()).expect("collect");
+        let diagnostics = collect(&[], &wiki_root, repo.path()).expect("collect");
         let mesh_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.kind == "mesh_uncovered")
@@ -735,9 +736,9 @@ mod tests {
 
     #[test]
     fn mesh_whole_file_code_anchor_covers_ranged_link() {
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
         let _guard = PATH_MUTEX.lock().expect("path mutex");
         let repo = TestRepo::new();
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
@@ -750,7 +751,7 @@ mod tests {
         repo.git_mesh(&["why", "test-mesh", "-m", "Whole-file anchor."]);
         repo.git_mesh(&["commit"]);
 
-        let diagnostics = collect(&[], repo.path()).expect("collect");
+        let diagnostics = collect(&[], &wiki_root, repo.path()).expect("collect");
         let mesh_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.kind == "mesh_uncovered")
@@ -763,9 +764,9 @@ mod tests {
 
     #[test]
     fn mesh_range_outside_link_does_not_cover() {
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
         let _guard = PATH_MUTEX.lock().expect("path mutex");
         let repo = TestRepo::new();
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         // Create a file with at least 20 lines
         let content: String = (1..=20).map(|i| format!("fn line_{i}() {{}}\n")).collect();
         repo.create_file("src/code.rs", &content);
@@ -780,7 +781,7 @@ mod tests {
         repo.git_mesh(&["why", "test-mesh", "-m", "Different range."]);
         repo.git_mesh(&["commit"]);
 
-        let diagnostics = collect(&[], repo.path()).expect("collect");
+        let diagnostics = collect(&[], &wiki_root, repo.path()).expect("collect");
         let mesh_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.kind == "mesh_uncovered")
@@ -796,7 +797,7 @@ mod tests {
     fn mesh_skips_links_without_line_range() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
@@ -805,7 +806,7 @@ mod tests {
         repo.commit("add files");
 
         // No mesh — but link has no range so it should be skipped
-        let diagnostics = collect(&[], repo.path()).expect("collect");
+        let diagnostics = collect(&[], &wiki_root, repo.path()).expect("collect");
         let mesh_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.kind == "mesh_uncovered")
@@ -820,14 +821,14 @@ mod tests {
     fn mesh_skips_external_links() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/page.md",
             &make_wiki_page("Page", "See [external](https://example.com/file.rs#L1-L5)."),
         );
         repo.commit("add files");
 
-        let diagnostics = collect(&[], repo.path()).expect("collect");
+        let diagnostics = collect(&[], &wiki_root, repo.path()).expect("collect");
         let mesh_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.kind == "mesh_uncovered")
@@ -841,7 +842,7 @@ mod tests {
     #[test]
     fn mesh_unavailable_emits_warning_and_exits_1() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
@@ -869,7 +870,7 @@ mod tests {
 
             // SAFETY: PATH_MUTEX is held; no other test reads/writes PATH concurrently.
             unsafe { std::env::set_var("PATH", &test_path) };
-            let result = collect(&[], repo.path());
+            let result = collect(&[], &wiki_root, repo.path());
             // Restore PATH before asserting so failures don't leak state.
             // SAFETY: PATH_MUTEX is held.
             unsafe { std::env::set_var("PATH", &original_path) };
@@ -905,7 +906,7 @@ mod tests {
                 .join(":");
             // SAFETY: PATH_MUTEX is held.
             unsafe { std::env::set_var("PATH", &filtered_path) };
-            let code = run(&[], false, repo.path()).expect("run");
+            let code = run(&[], false, &wiki_root, repo.path()).expect("run");
             // SAFETY: PATH_MUTEX is held.
             unsafe { std::env::set_var("PATH", &original_path) };
             code
@@ -916,7 +917,7 @@ mod tests {
     #[test]
     fn mesh_caches_per_anchor() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("src/code.rs", "fn a() {}\n");
         // Two wiki pages that both link to the same code anchor
         repo.create_file(
@@ -949,7 +950,7 @@ mod tests {
         // SAFETY: PATH_MUTEX is held; no other test reads/writes PATH concurrently.
         unsafe { std::env::set_var("PATH", &new_path) };
 
-        let _diagnostics = collect(&[], repo.path()).expect("collect");
+        let _diagnostics = collect(&[], &wiki_root, repo.path()).expect("collect");
 
         // SAFETY: PATH_MUTEX is held.
         unsafe { std::env::set_var("PATH", &original_path) };
@@ -966,7 +967,7 @@ mod tests {
     #[test]
     fn mesh_runtime_error_exits_2() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
@@ -1003,7 +1004,7 @@ mod tests {
 
         // SAFETY: PATH_MUTEX is held; no other test reads/writes PATH concurrently.
         unsafe { std::env::set_var("PATH", &new_path) };
-        let code = run(&[], false, repo.path()).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path()).expect("run");
         // SAFETY: PATH_MUTEX is held.
         unsafe { std::env::set_var("PATH", &original_path) };
 

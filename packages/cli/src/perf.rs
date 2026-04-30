@@ -64,9 +64,9 @@ pub fn span_for_command(command_name: &str) -> Span {
     Span::new(format!("command.{command_name}"))
 }
 
-pub fn init(repo_root: &Path, command_name: &str, json_output: bool) {
+pub fn init(wiki_root: &Path, command_name: &str, json_output: bool) {
     let _ = LOGGER.get_or_init(|| {
-        let path = log_path(repo_root)?;
+        let path = log_path(wiki_root)?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -88,7 +88,7 @@ pub fn init(repo_root: &Path, command_name: &str, json_output: bool) {
             json!({
                 "command": command_name,
                 "json_output": json_output,
-                "repo_root": repo_root.display().to_string(),
+                "wiki_root": wiki_root.display().to_string(),
             }),
         );
         Some(logger)
@@ -139,16 +139,9 @@ where
     result
 }
 
-fn log_path(repo_root: &Path) -> Option<PathBuf> {
-    let wiki_dir_name = std::env::var("WIKI_DIR").unwrap_or_else(|_| "wiki".to_string());
-    let wiki_dir_path = PathBuf::from(wiki_dir_name);
-    let wiki_dir = if wiki_dir_path.is_absolute() {
-        wiki_dir_path
-    } else {
-        repo_root.join(wiki_dir_path)
-    };
-    fs::create_dir_all(&wiki_dir).ok()?;
-    Some(wiki_dir.join("wiki.log"))
+fn log_path(wiki_root: &Path) -> Option<PathBuf> {
+    fs::create_dir_all(wiki_root).ok()?;
+    Some(wiki_root.join("wiki.log"))
 }
 
 fn write_event(logger: &Logger, name: &str, duration_ms: f64, status: &str, meta: Value) {

@@ -144,7 +144,7 @@ struct SearchRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DiscoveryState {
     head_sha: String,
-    wiki_dir: String,
+    wiki_root_abs: String,
     strategy_version: String,
 }
 
@@ -165,27 +165,46 @@ struct ChangeSet {
 pub struct WikiIndex {
     runtime: Runtime,
     conn: Connection,
+    wiki_root: PathBuf,
     repo_root: PathBuf,
+    /// Namespace of the current wiki this index represents. Used to filter
+    /// `*.wiki.md` files during discovery.
+    namespace: Option<String>,
     // Held for the lifetime of this index so concurrent `wiki` processes
     // serialize on the same wiki directory. Dropped after `conn`.
     _lock: IndexLock,
 }
 
 impl WikiIndex {
-    pub fn prepare(repo_root: &Path) -> Result<Self> {
+    pub fn prepare(wiki_root: &Path, repo_root: &Path) -> Result<Self> {
+        Self::prepare_with_namespace(wiki_root, repo_root, None)
+    }
+
+    pub fn prepare_with_namespace(
+        wiki_root: &Path,
+        repo_root: &Path,
+        namespace: Option<String>,
+    ) -> Result<Self> {
         perf::scope_result("index.prepare", json!({}), || {
             let runtime = RuntimeBuilder::new_current_thread()
                 .build()
                 .into_diagnostic()
                 .wrap_err("failed to create runtime for wiki index")?;
 
+            let wiki_root = wiki_root.to_path_buf();
             let repo_root = repo_root.to_path_buf();
-            let (conn, lock) = runtime.block_on(open_and_prepare_connection(&repo_root))?;
+            let (conn, lock) = runtime.block_on(open_and_prepare_connection(
+                &wiki_root,
+                &repo_root,
+                namespace.as_deref(),
+            ))?;
 
             Ok(Self {
                 runtime,
                 conn,
+                wiki_root,
                 repo_root,
+                namespace,
                 _lock: lock,
             })
         })
@@ -251,24 +270,22 @@ impl WikiIndex {
     }
 
     pub fn refresh_paths(&mut self, changed_paths: &[PathBuf]) -> Result<()> {
+        let wiki_root = self.wiki_root.clone();
+        let repo_root = self.repo_root.clone();
+        let namespace = self.namespace.clone();
         self.runtime.block_on(sync_core_index_for_paths(
             &mut self.conn,
-            &self.repo_root,
+            &wiki_root,
+            &repo_root,
+            namespace.as_deref(),
             changed_paths,
         ))
     }
-}
 
-fn wiki_dir(repo_root: &Path) -> Result<PathBuf> {
-    let wiki_dir_name = std::env::var("WIKI_DIR").unwrap_or_else(|_| "wiki".to_string());
-    let wiki_dir = repo_root.join(&wiki_dir_name);
-    if !wiki_dir.exists() {
-        return Err(miette!(
-            "wiki directory does not exist: {}",
-            wiki_dir.display()
-        ));
+    #[allow(dead_code)]
+    pub fn wiki_root(&self) -> &Path {
+        &self.wiki_root
     }
-    Ok(wiki_dir)
 }
 
 async fn bootstrap_schema(conn: &Connection) -> Result<()> {
@@ -337,17 +354,23 @@ pub fn is_lock_error(err: &miette::Error) -> bool {
 /// sees "Failed locking file". Holding `.index.lock` across the whole
 /// open/bootstrap/verify/sync/connection lifecycle means each process waits
 /// in the kernel for its predecessor to finish, rather than polling turso.
-async fn open_and_prepare_connection(repo_root: &Path) -> Result<(Connection, IndexLock)> {
-    let lock = IndexLock::acquire(repo_root)?;
-    match try_open_and_prepare(repo_root).await {
+async fn open_and_prepare_connection(
+    wiki_root: &Path,
+    repo_root: &Path,
+    namespace: Option<&str>,
+) -> Result<(Connection, IndexLock)> {
+    std::fs::create_dir_all(wiki_root)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to create wiki root at {}", wiki_root.display()))?;
+    let lock = IndexLock::acquire(wiki_root)?;
+    match try_open_and_prepare(wiki_root, repo_root, namespace).await {
         Ok(conn) => Ok((conn, lock)),
         Err(err) if is_lock_error(&err) => Err(err),
         Err(_) => {
             // Delete the stale or incompatible database and retry from scratch.
-            let wiki_dir = wiki_dir(repo_root)?;
-            let db_path = wiki_dir.join(".index.db");
+            let db_path = wiki_root.join(".index.db");
             let _ = std::fs::remove_file(&db_path);
-            let conn = try_open_and_prepare(repo_root).await?;
+            let conn = try_open_and_prepare(wiki_root, repo_root, namespace).await?;
             Ok((conn, lock))
         }
     }
@@ -373,10 +396,12 @@ impl IndexLock {
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
     const TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
-    fn acquire(repo_root: &Path) -> Result<Self> {
+    fn acquire(wiki_root: &Path) -> Result<Self> {
         use fs4::fs_std::FileExt;
-        let wiki_dir = wiki_dir(repo_root)?;
-        let lock_path = wiki_dir.join(".index.lock");
+        std::fs::create_dir_all(wiki_root)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("failed to create wiki root at {}", wiki_root.display()))?;
+        let lock_path = wiki_root.join(".index.lock");
         let file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -420,22 +445,25 @@ impl Drop for IndexLock {
     }
 }
 
-async fn try_open_and_prepare(repo_root: &Path) -> Result<Connection> {
-    let mut conn = open_index_connection(repo_root).await?;
+async fn try_open_and_prepare(
+    wiki_root: &Path,
+    repo_root: &Path,
+    namespace: Option<&str>,
+) -> Result<Connection> {
+    let mut conn = open_index_connection(wiki_root).await?;
     perf::scope_async_result("index.bootstrap_schema", json!({}), bootstrap_schema(&conn)).await?;
     perf::scope_async_result("index.verify_integrity", json!({}), verify_integrity(&conn)).await?;
     perf::scope_async_result(
         "index.sync",
         json!({}),
-        sync_core_index(&mut conn, repo_root),
+        sync_core_index(&mut conn, wiki_root, repo_root, namespace),
     )
     .await?;
     Ok(conn)
 }
 
-async fn open_index_connection(repo_root: &Path) -> Result<Connection> {
-    let wiki_dir = wiki_dir(repo_root)?;
-    let db_path = wiki_dir.join(".index.db");
+async fn open_index_connection(wiki_root: &Path) -> Result<Connection> {
+    let db_path = wiki_root.join(".index.db");
     let db = perf::scope_async_result(
         "index.open_database",
         json!({
@@ -571,21 +599,30 @@ async fn verify_integrity(conn: &Connection) -> Result<()> {
     ))
 }
 
-async fn sync_core_index(conn: &mut Connection, repo_root: &Path) -> Result<()> {
-    sync_core_index_inner(conn, repo_root, None).await
+async fn sync_core_index(
+    conn: &mut Connection,
+    wiki_root: &Path,
+    repo_root: &Path,
+    namespace: Option<&str>,
+) -> Result<()> {
+    sync_core_index_inner(conn, wiki_root, repo_root, namespace, None).await
 }
 
 async fn sync_core_index_for_paths(
     conn: &mut Connection,
+    wiki_root: &Path,
     repo_root: &Path,
+    namespace: Option<&str>,
     changed_paths: &[PathBuf],
 ) -> Result<()> {
-    sync_core_index_inner(conn, repo_root, Some(changed_paths)).await
+    sync_core_index_inner(conn, wiki_root, repo_root, namespace, Some(changed_paths)).await
 }
 
 async fn sync_core_index_inner(
     conn: &mut Connection,
+    wiki_root: &Path,
     repo_root: &Path,
+    namespace: Option<&str>,
     changed_paths: Option<&[PathBuf]>,
 ) -> Result<()> {
     let existing = perf::scope_async_result(
@@ -601,7 +638,7 @@ async fn sync_core_index_inner(
     let change_set = perf::scope_async_result(
         "index.compute_change_set",
         json!({}),
-        compute_change_set(conn, repo_root, &existing_by_path, changed_paths),
+        compute_change_set(conn, wiki_root, repo_root, namespace, &existing_by_path, changed_paths),
     )
     .await?;
 
@@ -668,6 +705,18 @@ async fn sync_core_index_inner(
                     path.display()
                 )
             })?;
+        // Namespace filter for `*.wiki.md`: skip files whose namespace does
+        // not match the current wiki's namespace.
+        if path_rel.ends_with(".wiki.md") {
+            let matches_ns = match (frontmatter.namespace.as_deref(), namespace) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a == b,
+                _ => false,
+            };
+            if !matches_ns {
+                continue;
+            }
+        }
         let body = markdown_body(&content);
         let mut incoming_links = parse_wikilinks(&content)
             .into_iter()
@@ -931,14 +980,18 @@ async fn sync_core_index_inner(
             .into_diagnostic()
             .wrap_err("failed to optimize FTS index")?;
     }
-    write_discovery_state(conn, &current_discovery_state(repo_root)?).await?;
+    write_discovery_state(conn, &current_discovery_state(wiki_root, repo_root)?).await?;
 
     Ok(())
 }
 
-fn discover_index_files(repo_root: &Path) -> Result<Vec<PathBuf>> {
-    match crate::commands::discover_files(&[], repo_root) {
-        Ok(files) => Ok(files),
+fn discover_index_files(
+    wiki_root: &Path,
+    repo_root: &Path,
+    namespace: Option<&str>,
+) -> Result<Vec<PathBuf>> {
+    match crate::commands::discover_files(&[], wiki_root, repo_root) {
+        Ok(files) => Ok(filter_by_namespace(files, namespace)),
         Err(e) => {
             if e.to_string().contains("no wiki pages found") {
                 Ok(Vec::new())
@@ -949,9 +1002,40 @@ fn discover_index_files(repo_root: &Path) -> Result<Vec<PathBuf>> {
     }
 }
 
+/// Filter out `*.wiki.md` files whose frontmatter `namespace` does not match
+/// the current wiki's namespace. Files under `wiki_root` (non-`.wiki.md`) are
+/// always included; namespace mismatches are quietly skipped.
+fn filter_by_namespace(files: Vec<PathBuf>, namespace: Option<&str>) -> Vec<PathBuf> {
+    files
+        .into_iter()
+        .filter(|p| {
+            let s = p.to_string_lossy();
+            if !s.ends_with(".wiki.md") {
+                return true;
+            }
+            // Read frontmatter to determine namespace.
+            let content = match std::fs::read_to_string(p) {
+                Ok(c) => c,
+                Err(_) => return false,
+            };
+            let fm = match crate::frontmatter::parse_frontmatter(&content, p) {
+                Ok(Some(fm)) => fm,
+                _ => return namespace.is_none(),
+            };
+            match (fm.namespace.as_deref(), namespace) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a == b,
+                _ => false,
+            }
+        })
+        .collect()
+}
+
 async fn compute_change_set(
     conn: &Connection,
+    wiki_root: &Path,
     repo_root: &Path,
+    namespace: Option<&str>,
     existing_by_path: &HashMap<String, ExistingDocument>,
     changed_paths: Option<&[PathBuf]>,
 ) -> Result<ChangeSet> {
@@ -959,9 +1043,9 @@ async fn compute_change_set(
         return hinted_change_set(repo_root, existing_by_path, changed_paths);
     }
 
-    let current_state = current_discovery_state(repo_root)?;
+    let current_state = current_discovery_state(wiki_root, repo_root)?;
     let Some(previous_state) = read_discovery_state(conn).await? else {
-        return full_rescan_change_set(repo_root, existing_by_path);
+        return full_rescan_change_set(wiki_root, repo_root, namespace, existing_by_path);
     };
 
     let tracked_files_present = has_tracked_files(repo_root)?;
@@ -978,20 +1062,20 @@ async fn compute_change_set(
     );
 
     if previous_state != current_state {
-        return full_rescan_change_set(repo_root, existing_by_path);
+        return full_rescan_change_set(wiki_root, repo_root, namespace, existing_by_path);
     }
 
     let mut candidate_paths = HashSet::new();
 
     if previous_state.head_sha.is_empty() != current_state.head_sha.is_empty() {
-        return full_rescan_change_set(repo_root, existing_by_path);
+        return full_rescan_change_set(wiki_root, repo_root, namespace, existing_by_path);
     }
 
     if !previous_state.head_sha.is_empty() && previous_state.head_sha != current_state.head_sha {
         for path in
             changed_paths_between(repo_root, &previous_state.head_sha, &current_state.head_sha)?
         {
-            if matches_default_discovery_path(&path, &current_state.wiki_dir) {
+            if matches_default_discovery_path(&path, wiki_root, repo_root) {
                 candidate_paths.insert(path);
             }
         }
@@ -1000,7 +1084,7 @@ async fn compute_change_set(
     if current_state.head_sha.is_empty() || !tracked_files_present {
         let current_inventory = repo_inventory(repo_root)?
             .into_iter()
-            .filter(|path| matches_default_discovery_path(path, &current_state.wiki_dir))
+            .filter(|path| matches_default_discovery_path(path, wiki_root, repo_root))
             .collect::<HashSet<_>>();
 
         for path in &current_inventory {
@@ -1008,7 +1092,7 @@ async fn compute_change_set(
         }
 
         for path in existing_by_path.keys() {
-            if matches_default_discovery_path(path, &current_state.wiki_dir)
+            if matches_default_discovery_path(path, wiki_root, repo_root)
                 && !current_inventory.contains(path)
             {
                 candidate_paths.insert(path.clone());
@@ -1024,13 +1108,13 @@ async fn compute_change_set(
 
     if has_dirty_tracked_tree {
         for path in working_tree_changed_paths(repo_root)? {
-            if matches_default_discovery_path(&path, &current_state.wiki_dir) {
+            if matches_default_discovery_path(&path, wiki_root, repo_root) {
                 candidate_paths.insert(path);
             }
         }
     } else {
         for path in untracked_paths(repo_root)? {
-            if matches_default_discovery_path(&path, &current_state.wiki_dir) {
+            if matches_default_discovery_path(&path, wiki_root, repo_root) {
                 candidate_paths.insert(path);
             }
         }
@@ -1094,11 +1178,13 @@ fn hinted_change_set(
 }
 
 fn full_rescan_change_set(
+    wiki_root: &Path,
     repo_root: &Path,
+    namespace: Option<&str>,
     existing_by_path: &HashMap<String, ExistingDocument>,
 ) -> Result<ChangeSet> {
     let files = perf::scope_result("index.discover_files", json!({}), || {
-        discover_index_files(repo_root)
+        discover_index_files(wiki_root, repo_root, namespace)
     })?;
     let mut seen_paths = HashSet::new();
     for path in &files {
@@ -1116,10 +1202,10 @@ fn full_rescan_change_set(
     })
 }
 
-fn current_discovery_state(repo_root: &Path) -> Result<DiscoveryState> {
+fn current_discovery_state(wiki_root: &Path, repo_root: &Path) -> Result<DiscoveryState> {
     Ok(DiscoveryState {
         head_sha: head_sha(repo_root).unwrap_or_default(),
-        wiki_dir: std::env::var("WIKI_DIR").unwrap_or_else(|_| "wiki".to_string()),
+        wiki_root_abs: wiki_root.to_string_lossy().into_owned(),
         strategy_version: DISCOVERY_STRATEGY_VERSION.to_string(),
     })
 }
@@ -1128,7 +1214,7 @@ async fn read_discovery_state(conn: &Connection) -> Result<Option<DiscoveryState
     let Some(head_sha) = get_state(conn, HEAD_SHA_KEY).await? else {
         return Ok(None);
     };
-    let Some(wiki_dir) = get_state(conn, WIKI_DIR_KEY).await? else {
+    let Some(wiki_root_abs) = get_state(conn, WIKI_DIR_KEY).await? else {
         return Ok(None);
     };
     let Some(strategy_version) = get_state(conn, DISCOVERY_STRATEGY_VERSION_KEY).await? else {
@@ -1137,14 +1223,14 @@ async fn read_discovery_state(conn: &Connection) -> Result<Option<DiscoveryState
 
     Ok(Some(DiscoveryState {
         head_sha,
-        wiki_dir,
+        wiki_root_abs,
         strategy_version,
     }))
 }
 
 async fn write_discovery_state(conn: &Connection, state: &DiscoveryState) -> Result<()> {
     set_state(conn, HEAD_SHA_KEY, &state.head_sha).await?;
-    set_state(conn, WIKI_DIR_KEY, &state.wiki_dir).await?;
+    set_state(conn, WIKI_DIR_KEY, &state.wiki_root_abs).await?;
     set_state(
         conn,
         DISCOVERY_STRATEGY_VERSION_KEY,
@@ -1154,7 +1240,11 @@ async fn write_discovery_state(conn: &Connection, state: &DiscoveryState) -> Res
     Ok(())
 }
 
-fn matches_default_discovery_path(path_rel: &str, wiki_dir_name: &str) -> bool {
+/// Returns true if `path_rel` (a repo-relative path) is a candidate wiki page
+/// for the current wiki: either it lives under `wiki_root`, or it ends with
+/// `.wiki.md`. Namespace assignment for `*.wiki.md` files is done downstream
+/// by reading frontmatter — this matcher errs on the side of inclusion.
+fn matches_default_discovery_path(path_rel: &str, wiki_root: &Path, repo_root: &Path) -> bool {
     if !path_rel.ends_with(".md") {
         return false;
     }
@@ -1163,9 +1253,8 @@ fn matches_default_discovery_path(path_rel: &str, wiki_dir_name: &str) -> bool {
         return true;
     }
 
-    let path = Path::new(path_rel);
-    let wiki_dir = Path::new(wiki_dir_name);
-    path.starts_with(wiki_dir)
+    let abs = repo_root.join(path_rel);
+    abs.starts_with(wiki_root)
 }
 
 async fn validate_lookup_collisions(
@@ -2302,13 +2391,13 @@ mod tests {
     #[test]
     fn creates_index_and_resolves_pages() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/example.md",
             "---\ntitle: Example\naliases:\n  - Sample\ntags:\n  - docs\nsummary: Example summary.\n---\nBody with [[Other]].\n",
         );
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
         assert!(repo.path().join("wiki/.index.db").exists());
 
         let page = index
@@ -2322,13 +2411,13 @@ mod tests {
     #[test]
     fn sync_removes_deleted_files_and_handles_renames() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/old.md",
             "---\ntitle: Old\nsummary: Old summary.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
         assert!(index.resolve_page("Old").expect("resolve").is_some());
         drop(index);
 
@@ -2338,20 +2427,20 @@ mod tests {
             "---\ntitle: New\nsummary: New summary.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
         assert!(index.resolve_page("Old").expect("resolve").is_none());
         assert!(index.resolve_page("New").expect("resolve").is_some());
         drop(index);
 
         repo.remove("wiki/new.md");
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
         assert!(index.resolve_page("New").expect("resolve").is_none());
     }
 
     #[test]
     fn search_weighted_prioritizes_exact_title_matches() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/title-match.md",
             "---\ntitle: Rust Indexing\nsummary: Title match.\n---\nBody.\n",
@@ -2361,7 +2450,7 @@ mod tests {
             "---\ntitle: Secondary\nsummary: Rust indexing summary match.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
         let (results, _) = index
             .search_weighted("rust indexing", SEARCH_LIMIT, 0)
             .expect("search");
@@ -2379,7 +2468,7 @@ mod tests {
     #[test]
     fn search_weighted_prioritizes_path_matches() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/rust-indexing-guide.md",
             "---\ntitle: Unrelated\nsummary: Path match.\n---\nNothing here.\n",
@@ -2389,7 +2478,7 @@ mod tests {
             "---\ntitle: Summary Match\nsummary: Rust indexing guide appears in the summary.\n---\nNothing here.\n",
         );
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
         let (results, _) = index
             .search_weighted("rust indexing guide", SEARCH_LIMIT, 0)
             .expect("search");
@@ -2407,7 +2496,7 @@ mod tests {
     #[test]
     fn search_weighted_truncates_to_limit() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/a.md",
             "---\ntitle: Alpha\nsummary: needle one.\n---\nBody.\n",
@@ -2421,7 +2510,7 @@ mod tests {
             "---\ntitle: Gamma\nsummary: needle three.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
         let (results, total) = index.search_weighted("needle", 2, 0).expect("search");
 
         assert_eq!(results.len(), 2);
@@ -2431,13 +2520,13 @@ mod tests {
     #[test]
     fn search_reflects_content_changes_after_resync() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/example.md",
             "---\ntitle: Example\nsummary: Rust indexing appears here.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
         let initial = index.search("rust").expect("search");
         assert_eq!(initial.len(), 1);
         drop(index);
@@ -2447,7 +2536,7 @@ mod tests {
             "---\ntitle: Example\nsummary: Graph traversal appears here.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
         assert!(index.search("rust").expect("search").is_empty());
         let updated = index.search("graph").expect("search");
         assert_eq!(updated.len(), 1);
@@ -2457,13 +2546,13 @@ mod tests {
     #[test]
     fn prepare_updates_untracked_files_without_head() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/example.md",
             "---\ntitle: Example\nsummary: Example summary.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
         assert!(index.resolve_page("Example").expect("resolve").is_some());
         drop(index);
 
@@ -2472,21 +2561,23 @@ mod tests {
             "---\ntitle: Renamed\nsummary: Example summary.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
         assert!(index.resolve_page("Example").expect("resolve").is_none());
         assert!(index.resolve_page("Renamed").expect("resolve").is_some());
     }
 
     #[test]
     fn prepare_invalidates_discovery_state_when_wiki_dir_changes() {
+        // Each wiki root has its own `.index.db`; swapping wiki roots gives
+        // each root its own isolated index.
         let repo = TestRepo::new();
-        let wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/example.md",
             "---\ntitle: Example\nsummary: Example summary.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
         assert!(index.resolve_page("Example").expect("resolve").is_some());
         drop(index);
 
@@ -2495,10 +2586,9 @@ mod tests {
             "---\ntitle: Other\nsummary: Other summary.\n---\nBody.\n",
         );
         repo.remove("wiki/example.md");
-        drop(wiki_dir);
-        let _wiki_dir = crate::test_support::set_wiki_dir("docs");
+        let docs_root = crate::test_support::write_wiki_toml(repo.path(), "docs");
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&docs_root, repo.path()).expect("prepare");
         assert!(index.resolve_page("Example").expect("resolve").is_none());
         assert!(index.resolve_page("Other").expect("resolve").is_some());
     }

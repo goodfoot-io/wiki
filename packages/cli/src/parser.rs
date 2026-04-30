@@ -317,13 +317,31 @@ pub fn parse_wikilinks(content: &str) -> Vec<Wikilink> {
             None => (inner, None),
         };
 
+        // Detect optional `[[ns:Article]]` namespace prefix. The namespace
+        // word must match `^[A-Za-z0-9_-]+$` and be followed by `:`.
+        let (namespace, after_ns) = match title_part.find(':') {
+            Some(idx) => {
+                let candidate = &title_part[..idx];
+                if !candidate.is_empty()
+                    && candidate
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                {
+                    (Some(candidate.to_string()), &title_part[idx + 1..])
+                } else {
+                    (None, title_part)
+                }
+            }
+            None => (None, title_part),
+        };
+
         // Split title on '#' for heading fragment
-        let (title, heading) = match title_part.find('#') {
+        let (title, heading) = match after_ns.find('#') {
             Some(idx) => (
-                title_part[..idx].to_string(),
-                Some(title_part[idx + 1..].to_string()),
+                after_ns[..idx].to_string(),
+                Some(after_ns[idx + 1..].to_string()),
             ),
-            None => (title_part.to_string(), None),
+            None => (after_ns.to_string(), None),
         };
 
         // Skip entirely empty titles
@@ -332,7 +350,7 @@ pub fn parse_wikilinks(content: &str) -> Vec<Wikilink> {
         }
 
         results.push(Wikilink {
-            namespace: None,
+            namespace,
             title,
             heading,
             display,
@@ -651,7 +669,6 @@ mod tests {
     // ── Namespaced wikilink tests (Phase 2 contract) ─────────────────────────
 
     #[test]
-    #[ignore = "Phase 2: parse_wikilinks should detect [[ns:Article]] prefix"]
     fn test_wikilink_with_namespace_prefix() {
         let links = parse_wikilinks("[[foo:Article]]");
         assert_eq!(links.len(), 1);
@@ -660,7 +677,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Phase 2: bare wikilinks have namespace None"]
     fn test_wikilink_without_namespace() {
         let links = parse_wikilinks("[[Article]]");
         assert_eq!(links.len(), 1);

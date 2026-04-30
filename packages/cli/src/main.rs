@@ -47,6 +47,10 @@ struct Cli {
     #[arg(long = "perf", action = ArgAction::SetTrue, global = true)]
     perf: bool,
 
+    /// Target a peer namespace (or `*` for all). Defaults to the current wiki.
+    #[arg(short = 'n', long = "namespace", value_name = "NS", global = true)]
+    namespace: Option<String>,
+
     /// Search query for the default wiki lookup.
     #[arg(value_name = "query")]
     query: Option<String>,
@@ -300,7 +304,14 @@ fn main() {
         .ok();
     }
 
-    let result = run(cli.command, cli.query, cli.limit, cli.offset, json);
+    let result = run(
+        cli.command,
+        cli.query,
+        cli.limit,
+        cli.offset,
+        cli.namespace,
+        json,
+    );
 
     match result {
         Ok(code) => process::exit(code),
@@ -320,21 +331,63 @@ fn run(
     query: Option<String>,
     limit: i64,
     offset: usize,
+    namespace: Option<String>,
     json: bool,
 ) -> Result<i32> {
     let repo_root = git::repo_root()?;
-    let command_name = command_name(command.as_ref(), query.as_deref());
-    perf::init(&repo_root, command_name, json);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| repo_root.clone());
+
+    // Skip wiki-config loading for subcommands that may run in a directory
+    // without a wiki: `install` (no wiki touched) and `hook` (silently
+    // no-ops on non-wiki files; would otherwise fail-closed on every edit
+    // outside a wiki repo).
+    let needs_config = !matches!(
+        command,
+        Some(Commands::Install { .. }) | Some(Commands::Hook)
+    );
+
+    let config = if needs_config {
+        Some(wiki_config::WikiConfig::load(&cwd, &repo_root)?)
+    } else {
+        None
+    };
+
+    // `@foo query` sugar in the default-query branch.
+    let (effective_namespace, effective_query) = match (&command, query.as_deref(), &config) {
+        (None, Some(q), Some(cfg)) => apply_at_sugar(q, cfg, namespace.as_deref()),
+        _ => (namespace.clone(), query.clone()),
+    };
+
+    if effective_namespace.as_deref() == Some("*") {
+        return Err(miette::miette!(
+            "multi-namespace coming in phase 5"
+        ));
+    }
+
+    let target = config
+        .as_ref()
+        .map(|cfg| resolve_target(cfg, effective_namespace.as_deref()))
+        .transpose()?;
+    let wiki_root_pb = target
+        .as_ref()
+        .map(|info| info.root.clone())
+        .unwrap_or_else(|| repo_root.clone());
+    let wiki_root = wiki_root_pb.as_path();
+
+    let command_name = command_name(command.as_ref(), effective_query.as_deref());
+    perf::init(wiki_root, command_name, json);
     let _command_span = perf::span_for_command(command_name);
     let started = Instant::now();
 
     let result = match command {
-        Some(Commands::Check { globs }) => commands::check::run(&globs, json, &repo_root),
+        Some(Commands::Check { globs }) => {
+            commands::check::run(&globs, json, wiki_root, &repo_root)
+        }
         Some(Commands::Links { target }) => {
             let inputs = resolve_inputs(target, read_stdin_lines)?;
             run_for_each(
                 inputs,
-                |input| commands::links::run(input, json, &repo_root),
+                |input| commands::links::run(input, json, wiki_root, &repo_root),
                 false,
             )
         }
@@ -346,19 +399,21 @@ fn run(
                 ));
             }
             let input = lines.join("\n");
-            commands::extract::run(&input, json, &repo_root)
+            commands::extract::run(&input, json, wiki_root, &repo_root)
         }
         Some(Commands::Hook) => {
             let lines = read_stdin_lines();
             let input = lines.join("\n");
-            commands::hook_check::run(&input, &repo_root)
+            commands::hook_check::run(&input, wiki_root, &repo_root)
         }
-        Some(Commands::List { tag }) => commands::list::run(&[], tag.as_deref(), json, &repo_root),
+        Some(Commands::List { tag }) => {
+            commands::list::run(&[], tag.as_deref(), json, wiki_root, &repo_root)
+        }
         Some(Commands::Summary { title }) => {
             let inputs = resolve_inputs(title, read_stdin_lines)?;
             run_for_each(
                 inputs,
-                |input| commands::summary::run(input, json, &repo_root),
+                |input| commands::summary::run(input, json, wiki_root, &repo_root),
                 false,
             )
         }
@@ -366,7 +421,7 @@ fn run(
             let inputs = resolve_inputs(title, read_stdin_lines)?;
             run_for_each(
                 inputs,
-                |input| commands::refs::run(input, json, &repo_root),
+                |input| commands::refs::run(input, json, wiki_root, &repo_root),
                 false,
             )
         }
@@ -374,7 +429,7 @@ fn run(
             title,
             fragment,
             file_base_url,
-        }) => commands::html::run(&title, fragment, file_base_url.as_deref(), &repo_root),
+        }) => commands::html::run(&title, fragment, file_base_url.as_deref(), wiki_root, &repo_root),
         Some(Commands::Install {
             codex,
             claude,
@@ -391,25 +446,21 @@ fn run(
             &git_ref,
         ),
         Some(Commands::Serve { port, no_reload }) => {
-            commands::serve::run(port, no_reload, &repo_root)
+            commands::serve::run(port, no_reload, wiki_root, &repo_root)
         }
-        Some(Commands::Scaffold { globs }) => commands::mesh::scaffold::run(&globs, json, &repo_root),
-        None => match query.as_deref() {
-            Some(query) => commands::search::run(query, limit, offset, json, &repo_root),
+        Some(Commands::Scaffold { globs }) => {
+            commands::mesh::scaffold::run(&globs, json, wiki_root, &repo_root)
+        }
+        None => match effective_query.as_deref() {
+            Some(query) => {
+                commands::search::run(query, limit, offset, json, wiki_root, &repo_root)
+            }
             None => {
                 // No subcommand and no query: print help and the wiki README.
                 let mut cmd = <Cli as clap::CommandFactory>::command();
                 cmd.print_help().ok();
 
-                let wiki_dir_name =
-                    std::env::var("WIKI_DIR").unwrap_or_else(|_| "wiki".to_string());
-                let wiki_dir_path = std::path::PathBuf::from(&wiki_dir_name);
-                let wiki_dir = if wiki_dir_path.is_absolute() {
-                    wiki_dir_path
-                } else {
-                    repo_root.join(&wiki_dir_name)
-                };
-                let readme_path = wiki_dir.join("README.md");
+                let readme_path = wiki_root.join("README.md");
 
                 if readme_path.exists() {
                     if let Ok(content) = std::fs::read_to_string(&readme_path) {
@@ -440,6 +491,57 @@ fn run(
     }
 
     result
+}
+
+/// Resolve `-n NS` to a `WikiInfo` from the loaded config. `None` returns the
+/// current wiki; `Some(name)` looks up a peer alias or, if it matches the
+/// current wiki's namespace, returns the current wiki.
+fn resolve_target(
+    cfg: &wiki_config::WikiConfig,
+    namespace: Option<&str>,
+) -> Result<wiki_config::WikiInfo> {
+    match namespace {
+        None => Ok(cfg.current.clone()),
+        Some(name) => {
+            if cfg.current.namespace.as_deref() == Some(name) {
+                return Ok(cfg.current.clone());
+            }
+            cfg.peers.get(name).cloned().ok_or_else(|| {
+                miette::miette!(
+                    "namespace `{name}` is not declared in [peers] (and is not the current namespace)"
+                )
+            })
+        }
+    }
+}
+
+/// Apply `@foo query` sugar: if the query starts with `@<word> ` and `<word>`
+/// is a declared peer alias or matches the current namespace, strip it and
+/// promote it to the effective namespace.
+fn apply_at_sugar(
+    q: &str,
+    cfg: &wiki_config::WikiConfig,
+    explicit_ns: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    if explicit_ns.is_some() {
+        return (explicit_ns.map(str::to_string), Some(q.to_string()));
+    }
+    let stripped = match q.strip_prefix('@') {
+        Some(s) => s,
+        None => return (None, Some(q.to_string())),
+    };
+    let space = match stripped.find(char::is_whitespace) {
+        Some(i) => i,
+        None => return (None, Some(q.to_string())),
+    };
+    let word = &stripped[..space];
+    let rest = stripped[space + 1..].trim_start().to_string();
+    let known = cfg.peers.contains_key(word) || cfg.current.namespace.as_deref() == Some(word);
+    if known {
+        (Some(word.to_string()), Some(rest))
+    } else {
+        (None, Some(q.to_string()))
+    }
 }
 
 fn command_name(command: Option<&Commands>, query: Option<&str>) -> &'static str {

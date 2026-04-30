@@ -50,6 +50,8 @@ fn mesh_scaffold_byte_equal_with_expected_sh() {
     let tmp = tempfile::tempdir().unwrap();
     copy_dir_recursive(&fixture_dir.join("wiki"), &tmp.path().join("wiki"));
     copy_dir_recursive(&fixture_dir.join("src"), &tmp.path().join("src"));
+    // Mark the wiki/ dir as a wiki root so `WikiConfig::load` finds it.
+    std::fs::write(tmp.path().join("wiki/wiki.toml"), "").unwrap();
 
     git(tmp.path(), &["init", "-q", "-b", "main"]);
     git(
@@ -71,9 +73,11 @@ fn mesh_scaffold_byte_equal_with_expected_sh() {
     );
 
     let bin = env!("CARGO_BIN_EXE_wiki");
+    // Run from inside the wiki dir so `WikiConfig::load` walks up and finds
+    // `wiki/wiki.toml`.
     let output = Command::new(bin)
         .args(["scaffold"])
-        .current_dir(tmp.path())
+        .current_dir(tmp.path().join("wiki"))
         .output()
         .expect("run wiki binary");
     assert!(

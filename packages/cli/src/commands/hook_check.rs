@@ -17,7 +17,7 @@ fn parse_file_path(input: &str) -> Option<String> {
 ///
 /// Only processes `.md` files. Outputs a JSON `systemMessage` envelope when
 /// validation errors remain after auto-fix so Claude can address them.
-pub fn run(input: &str, repo_root: &Path) -> Result<i32> {
+pub fn run(input: &str, _wiki_root: &Path, repo_root: &Path) -> Result<i32> {
     let Some(file_path) = parse_file_path(input) else {
         return Ok(0);
     };
@@ -26,14 +26,27 @@ pub fn run(input: &str, repo_root: &Path) -> Result<i32> {
         return Ok(0);
     }
 
-    let wiki_dir_name = std::env::var("WIKI_DIR").unwrap_or_else(|_| "wiki".to_string());
+    // Walk up from the edited file's directory to find a wiki.toml. If none
+    // exists, the file is outside any wiki and the hook silently no-ops.
+    let abs_file = if Path::new(&file_path).is_absolute() {
+        std::path::PathBuf::from(&file_path)
+    } else {
+        repo_root.join(&file_path)
+    };
+    let walk_start = abs_file.parent().unwrap_or(repo_root);
+    let cfg = match crate::wiki_config::WikiConfig::load(walk_start, repo_root) {
+        Ok(c) => c,
+        Err(_) => return Ok(0),
+    };
+    let wiki_root = cfg.current.root.as_path();
+
     let rel_path = super::normalize_repo_relative_path(&file_path, repo_root);
-    if !super::matches_default_discovery_path(&rel_path, &wiki_dir_name) {
+    if !super::matches_default_discovery_path(&rel_path, wiki_root, repo_root) {
         return Ok(0);
     }
 
     let globs = vec![file_path.clone()];
-    let diagnostics = match check::collect(&globs, repo_root) {
+    let diagnostics = match check::collect(&globs, wiki_root, repo_root) {
         Ok(d) => d,
         Err(_) => return Ok(0), // not a wiki page or discovery failed — skip silently
     };

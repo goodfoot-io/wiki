@@ -11,9 +11,10 @@ pub fn render_page(
     title: &str,
     fragment: bool,
     file_base_url: Option<&str>,
+    wiki_root: &Path,
     repo_root: &Path,
 ) -> Result<Option<String>> {
-    let index = WikiIndex::prepare(repo_root)?;
+    let index = WikiIndex::prepare(wiki_root, repo_root)?;
     let Some(page) = index.resolve_page(title)? else {
         return Ok(None);
     };
@@ -37,11 +38,12 @@ pub fn run(
     title: &str,
     fragment: bool,
     file_base_url: Option<&str>,
+    wiki_root: &Path,
     repo_root: &Path,
 ) -> Result<i32> {
-    let index = WikiIndex::prepare(repo_root)?;
+    let index = WikiIndex::prepare(wiki_root, repo_root)?;
     if index.resolve_page(title)?.is_some() {
-        if let Some(output) = render_page(title, fragment, file_base_url, repo_root)? {
+        if let Some(output) = render_page(title, fragment, file_base_url, wiki_root, repo_root)? {
             print!("{output}");
             Ok(0)
         } else {
@@ -111,7 +113,7 @@ mod tests {
     #[test]
     fn render_page_wraps_full_html_output() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/example.md",
             "---\ntitle: Example\nsummary: Summary.\n---\nHello [[Other]].\n",
@@ -121,7 +123,7 @@ mod tests {
             "---\ntitle: Other\nsummary: Other summary.\n---\nBody.\n",
         );
 
-        let output = render_page("Example", false, None, repo.path())
+        let output = render_page("Example", false, None, &wiki_root, repo.path())
             .expect("render")
             .expect("page");
 

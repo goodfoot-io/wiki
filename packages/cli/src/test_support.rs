@@ -1,38 +1,11 @@
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::path::{Path, PathBuf};
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-pub struct WikiDirGuard {
-    _lock: MutexGuard<'static, ()>,
-    previous: Option<String>,
-}
-
-pub fn set_wiki_dir(value: &str) -> WikiDirGuard {
-    let lock = env_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let previous = std::env::var("WIKI_DIR").ok();
-    unsafe {
-        std::env::set_var("WIKI_DIR", value);
-    }
-    WikiDirGuard {
-        _lock: lock,
-        previous,
-    }
-}
-
-impl Drop for WikiDirGuard {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(previous) => unsafe {
-                std::env::set_var("WIKI_DIR", previous);
-            },
-            None => unsafe {
-                std::env::remove_var("WIKI_DIR");
-            },
-        }
-    }
+/// Test helper: write an empty `wiki.toml` to `repo_root/<dir>/wiki.toml` so a
+/// `WikiConfig::load` walk-up rooted in that directory finds it. Returns the
+/// absolute path to the wiki root (i.e. `repo_root/<dir>`).
+pub fn write_wiki_toml(repo_root: &Path, dir: &str) -> PathBuf {
+    let wiki_root = repo_root.join(dir);
+    std::fs::create_dir_all(&wiki_root).expect("create wiki dir");
+    std::fs::write(wiki_root.join("wiki.toml"), "").expect("write wiki.toml");
+    wiki_root
 }

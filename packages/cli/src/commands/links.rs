@@ -7,8 +7,8 @@ use crate::index::WikiIndex;
 
 use super::summary::{format_search_result, render_not_found};
 
-pub fn run(target: &str, json: bool, repo_root: &Path) -> Result<i32> {
-    let index = WikiIndex::prepare(repo_root)?;
+pub fn run(target: &str, json: bool, wiki_root: &Path, repo_root: &Path) -> Result<i32> {
+    let index = WikiIndex::prepare(wiki_root, repo_root)?;
     let matches = index.links(target)?;
 
     if matches.is_empty() {
@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn returns_pages_linking_to_a_wiki_page() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/target.md",
             "---\ntitle: Target Page\nsummary: Target summary.\n---\nBody.\n",
@@ -112,10 +112,10 @@ mod tests {
             "---\ntitle: Source Page\nsummary: Source summary.\n---\nSee [[Target Page]] for context.\n",
         );
 
-        let code = run("Target Page", false, repo.path()).expect("run");
+        let code = run("Target Page", false, &wiki_root, repo.path()).expect("run");
         assert_eq!(code, 0);
 
-        let results = WikiIndex::prepare(repo.path())
+        let results = WikiIndex::prepare(&wiki_root, repo.path())
             .expect("prepare")
             .links("Target Page")
             .expect("links");
@@ -128,17 +128,17 @@ mod tests {
     #[test]
     fn returns_pages_referencing_a_file() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("packages/foo/bar.ts", "export const x = 1;");
         repo.create_file(
             "wiki/page.md",
             "---\ntitle: Foo Bar\nsummary: Describes the foo bar module.\n---\nSee [bar](packages/foo/bar.ts) for details.\n",
         );
 
-        let code = run("packages/foo/bar.ts", false, repo.path()).expect("run");
+        let code = run("packages/foo/bar.ts", false, &wiki_root, repo.path()).expect("run");
         assert_eq!(code, 0);
 
-        let results = WikiIndex::prepare(repo.path())
+        let results = WikiIndex::prepare(&wiki_root, repo.path())
             .expect("prepare")
             .links("packages/foo/bar.ts")
             .expect("links");
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn path_input_can_return_page_links_and_file_refs() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/target.md",
             "---\ntitle: Target Page\nsummary: Target summary.\n---\nBody.\n",
@@ -165,7 +165,7 @@ mod tests {
             "---\ntitle: Reference Page\nsummary: References the target file.\n---\nRead [the file](wiki/target.md) directly.\n",
         );
 
-        let results = WikiIndex::prepare(repo.path())
+        let results = WikiIndex::prepare(&wiki_root, repo.path())
             .expect("prepare")
             .links("wiki/target.md")
             .expect("links");
@@ -178,27 +178,27 @@ mod tests {
     #[test]
     fn returns_exit_0_when_no_references_found() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/page.md",
             "---\ntitle: Page\nsummary: A page.\n---\nNo references.\n",
         );
 
-        let code = run("packages/nonexistent/file.ts", false, repo.path()).expect("run");
+        let code = run("packages/nonexistent/file.ts", false, &wiki_root, repo.path()).expect("run");
         assert_eq!(code, 0);
     }
 
     #[test]
     fn strips_leading_dot_slash_from_path_input() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("packages/foo/bar.ts", "export const x = 1;");
         repo.create_file(
             "wiki/page.md",
             "---\ntitle: Foo Bar\nsummary: Summary.\n---\nSee [bar](packages/foo/bar.ts).\n",
         );
 
-        let code = run("./packages/foo/bar.ts", false, repo.path()).expect("run");
+        let code = run("./packages/foo/bar.ts", false, &wiki_root, repo.path()).expect("run");
         assert_eq!(code, 0);
     }
 }

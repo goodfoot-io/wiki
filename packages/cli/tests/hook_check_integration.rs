@@ -68,6 +68,12 @@ fn hook_check_skips_non_wiki_md_file() {
     )
     .expect("write README");
 
+    // The CLI walks up from cwd to find a wiki.toml. Provide one in the wiki/
+    // directory so `WikiConfig::load` succeeds; the README at src/README.md
+    // is outside the wiki and must be skipped.
+    fs::create_dir_all(repo.path().join("wiki")).expect("mkdir wiki/");
+    fs::write(repo.path().join("wiki/wiki.toml"), "").expect("write wiki.toml");
+
     // PostToolUse JSON payload that Claude Code sends to the hook.
     let payload = serde_json::json!({
         "tool_input": {
@@ -79,7 +85,6 @@ fn hook_check_skips_non_wiki_md_file() {
     let mut child = Command::new(binary)
         .arg("hook")
         .current_dir(repo.path())
-        .env("WIKI_DIR", "wiki")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

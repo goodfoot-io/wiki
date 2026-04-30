@@ -565,13 +565,13 @@ mod tests {
     #[test]
     fn render_html_resolves_wikilinks() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/target.md",
             "---\ntitle: Target Page\nsummary: Summary.\n---\n# Heading\n",
         );
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
         let rendered = render_html(
             "See [[Target Page|this page]].",
             RenderMode::Fragment {
@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn render_html_substitutes_fragment_links_in_full_page_mode() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/example.md",
             "---\ntitle: Example\nsummary: Summary.\n---\nBody.\n",
@@ -594,7 +594,7 @@ mod tests {
         repo.create_file("src/lib.rs", "fn alpha() {}\nfn beta() {}\n");
         repo.commit_all("initial");
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
         let rendered = render_html("[fragment](src/lib.rs#L1-L2)", RenderMode::FullPage, &index);
 
         assert!(rendered.contains("alpha"));
@@ -604,7 +604,7 @@ mod tests {
     #[test]
     fn render_html_substitutes_fragment_links_in_fragment_mode() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/example.md",
             "---\ntitle: Example\nsummary: Summary.\n---\nBody.\n",
@@ -612,7 +612,7 @@ mod tests {
         repo.create_file("src/lib.rs", "fn alpha() {}\n");
         repo.commit_all("initial");
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
         let rendered = render_html(
             "[fragment](src/lib.rs#L1-L1)",
             RenderMode::Fragment {
@@ -627,13 +627,13 @@ mod tests {
     #[test]
     fn render_html_leaves_fenced_code_block_contents_untouched() {
         let repo = TestRepo::new();
-        let _wiki_dir = crate::test_support::set_wiki_dir("wiki");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/example.md",
             "---\ntitle: Example\nsummary: Summary.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
         let rendered = render_html(
             "```md\n[[Example]]\n```",
             RenderMode::Fragment {
