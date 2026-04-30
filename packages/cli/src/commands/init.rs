@@ -8,6 +8,8 @@ use std::path::Path;
 
 use miette::{Result, miette};
 
+use crate::wiki_config::validate_namespace_value;
+
 /// Create `wiki.toml` in `cwd`.
 ///
 /// With `namespace = Some(ns)`: writes `namespace = "<ns>"`.
@@ -24,7 +26,10 @@ pub fn run(cwd: &Path, namespace: Option<&str>) -> Result<i32> {
     }
 
     let content = match namespace {
-        Some(ns) => format!("namespace = \"{ns}\"\n"),
+        Some(ns) => {
+            validate_namespace_value(ns)?;
+            format!("namespace = \"{ns}\"\n")
+        }
         None => String::new(),
     };
 

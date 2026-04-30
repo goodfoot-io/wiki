@@ -177,7 +177,11 @@ pub struct WikiIndex {
 
 impl WikiIndex {
     pub fn prepare(wiki_root: &Path, repo_root: &Path) -> Result<Self> {
-        Self::prepare_with_namespace(wiki_root, repo_root, None)
+        // Auto-detect namespace from wiki.toml so that peer wikis (reached via
+        // `-n <alias>`) filter *.wiki.md files correctly even when callers use
+        // the simpler `prepare` entry point.
+        let namespace = read_namespace_from_toml(wiki_root);
+        Self::prepare_with_namespace(wiki_root, repo_root, namespace)
     }
 
     pub fn prepare_with_namespace(
@@ -644,6 +648,9 @@ async fn sync_core_index_inner(
 
     let mut changed_or_new = HashSet::new();
     let mut pending_documents = Vec::new();
+    // Paths that must be removed from this namespace's index because the file's
+    // `namespace:` frontmatter no longer matches (F5: stale row after mutation).
+    let mut extra_stale: HashSet<String> = HashSet::new();
     let now_ns = unix_time_now_ns()?;
 
     for path in &change_set.changed_or_added {
@@ -714,6 +721,12 @@ async fn sync_core_index_inner(
                 _ => false,
             };
             if !matches_ns {
+                // If the file was previously indexed under this namespace,
+                // queue it for deletion so the stale row is removed (F5:
+                // namespace frontmatter mutation removes prior row).
+                if existing_by_path.contains_key(&path_rel) {
+                    extra_stale.insert(path_rel);
+                }
                 continue;
             }
         }
@@ -768,7 +781,8 @@ async fn sync_core_index_inner(
         });
     }
 
-    let stale_paths = change_set.deleted;
+    let mut stale_paths = change_set.deleted;
+    stale_paths.extend(extra_stale);
     let has_changes = !pending_documents.is_empty() || !stale_paths.is_empty();
 
     perf::scope_async_result(
@@ -983,6 +997,18 @@ async fn sync_core_index_inner(
     write_discovery_state(conn, &current_discovery_state(wiki_root, repo_root)?).await?;
 
     Ok(())
+}
+
+/// Read the `namespace` field from `<wiki_root>/wiki.toml`, if the file exists
+/// and the field is present.  Returns `None` for the default namespace (no
+/// `wiki.toml`, no `namespace` key, or any read/parse error).
+fn read_namespace_from_toml(wiki_root: &Path) -> Option<String> {
+    let toml_path = wiki_root.join("wiki.toml");
+    let raw = std::fs::read_to_string(&toml_path).ok()?;
+    let doc: toml_edit::DocumentMut = raw.parse().ok()?;
+    doc.get("namespace")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 fn discover_index_files(

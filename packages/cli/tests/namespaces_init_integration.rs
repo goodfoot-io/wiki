@@ -315,3 +315,66 @@ fn init_works_without_any_wiki_toml_in_tree() {
         "expected namespace = fresh, got: {content:?}"
     );
 }
+
+// ── F6: wiki init namespace validation ────────────────────────────────────────
+
+/// `wiki init default` must be rejected (reserved literal).
+#[test]
+fn init_rejects_reserved_default_namespace() {
+    let repo = TestRepo::new();
+    fs::create_dir_all(repo.path().join("w")).unwrap();
+    let out = repo.run_from("w", &["init", "default"]);
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit for reserved namespace 'default'\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    // No file should have been written.
+    assert!(
+        !repo.path().join("w/wiki.toml").exists(),
+        "wiki.toml must not be created after rejection"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("reserved") || combined.contains("default"),
+        "expected 'reserved' in output, got: {combined}"
+    );
+}
+
+/// `wiki init` rejects namespaces with invalid characters (spaces, slashes, etc.)
+#[test]
+fn init_rejects_namespace_with_invalid_chars() {
+    let repo = TestRepo::new();
+    fs::create_dir_all(repo.path().join("w")).unwrap();
+    // Space in namespace
+    let out = repo.run_from("w", &["init", "foo bar"]);
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit for namespace with space\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        !repo.path().join("w/wiki.toml").exists(),
+        "wiki.toml must not be created after rejection"
+    );
+}
+
+/// `wiki init` accepts valid namespace characters (letters, digits, `-`, `_`).
+#[test]
+fn init_accepts_valid_namespace_charset() {
+    let repo = TestRepo::new();
+    fs::create_dir_all(repo.path().join("w")).unwrap();
+    let out = repo.run_from("w", &["init", "my-wiki_1"]);
+    assert!(
+        out.status.success(),
+        "expected exit 0 for valid namespace\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let content = fs::read_to_string(repo.path().join("w/wiki.toml")).unwrap();
+    assert!(content.contains("namespace = \"my-wiki_1\""), "got: {content:?}");
+}

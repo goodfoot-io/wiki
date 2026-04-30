@@ -11,6 +11,30 @@ use indexmap::IndexMap;
 use miette::{IntoDiagnostic, Result, WrapErr, miette};
 use toml_edit::DocumentMut;
 
+// ── Shared validator ──────────────────────────────────────────────────────────
+
+/// Validate a namespace string.
+///
+/// Returns `Ok(())` if the value is acceptable, or an error with a clear
+/// message otherwise.  Called both from `WikiConfig::validate` and from
+/// `commands::init`.
+pub fn validate_namespace_value(ns: &str) -> Result<()> {
+    if ns.is_empty() {
+        return Err(miette!("namespace must not be empty"));
+    }
+    if ns == "default" {
+        return Err(miette!(
+            "the literal namespace 'default' is reserved for the anonymous default — omit the `namespace` field instead"
+        ));
+    }
+    if !ns.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return Err(miette!(
+            "namespace `{ns}` is invalid: only ASCII letters, digits, `_`, and `-` are allowed"
+        ));
+    }
+    Ok(())
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /// Runtime identity for one wiki.
@@ -131,6 +155,24 @@ impl WikiConfig {
             }
         }
 
+        // Rule 2b: reject the literal "default" namespace value.
+        if let Some(ns) = self.current.namespace.as_deref()
+            && ns == "default"
+        {
+            return Err(miette!(
+                "the literal namespace 'default' is reserved for the anonymous default — omit the `namespace` field instead"
+            ));
+        }
+        for (alias, info) in &self.peers {
+            if let Some(ns) = info.namespace.as_deref()
+                && ns == "default"
+            {
+                return Err(miette!(
+                    "peer `{alias}` has namespace 'default' which is reserved for the anonymous default — omit the `namespace` field instead"
+                ));
+            }
+        }
+
         // Rule 3: at most one default namespace across current + peers.
         let mut default_count = 0;
         if self.current.namespace.is_none() {
@@ -200,10 +242,18 @@ fn parse_wiki_toml(path: &Path) -> Result<(Option<String>, IndexMap<String, Stri
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to parse {}", path.display()))?;
 
-    let namespace = doc
-        .get("namespace")
-        .and_then(|item| item.as_str())
-        .map(|s| s.to_string());
+    let namespace = match doc.get("namespace") {
+        None => None,
+        Some(item) => match item.as_str() {
+            Some(s) => Some(s.to_string()),
+            None => {
+                return Err(miette!(
+                    "`namespace` in {} must be a string, found a non-string value",
+                    path.display()
+                ));
+            }
+        },
+    };
 
     let mut peers = IndexMap::new();
     if let Some(item) = doc.get("peers") {
@@ -313,6 +363,102 @@ mod tests {
         let err = cfg.validate().unwrap_err();
         // Rule 4 fires (after rule 2 since alias matches namespace).
         assert!(err.to_string().contains("duplicate"), "got: {err}");
+    }
+
+    // ── F4: non-string namespace ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_errors_on_non_string_namespace_integer() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        let wiki_root = repo.join("wiki");
+        write(&wiki_root.join("wiki.toml"), "namespace = 42\n");
+        let err = WikiConfig::load(&wiki_root, repo).unwrap_err();
+        let s = err.to_string();
+        assert!(s.contains("non-string") || s.contains("must be a string"), "got: {s}");
+    }
+
+    #[test]
+    fn parse_errors_on_non_string_namespace_array() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        let wiki_root = repo.join("wiki");
+        write(&wiki_root.join("wiki.toml"), "namespace = [\"foo\"]\n");
+        let err = WikiConfig::load(&wiki_root, repo).unwrap_err();
+        let s = err.to_string();
+        assert!(s.contains("non-string") || s.contains("must be a string"), "got: {s}");
+    }
+
+    #[test]
+    fn parse_errors_on_non_string_namespace_in_peer() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        let wiki_root = repo.join("wiki");
+        write(
+            &wiki_root.join("wiki.toml"),
+            "[peers]\nfoo = \"../foo\"\n",
+        );
+        let foo_root = repo.join("foo");
+        write(&foo_root.join("wiki.toml"), "namespace = true\n");
+        let err = WikiConfig::load(&wiki_root, repo).unwrap_err();
+        let s = err.to_string();
+        assert!(s.contains("non-string") || s.contains("must be a string"), "got: {s}");
+    }
+
+    // ── F8: literal "default" namespace ──────────────────────────────────────
+
+    #[test]
+    fn validate_rejects_literal_default_namespace_on_current() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        let wiki_root = repo.join("wiki");
+        write(&wiki_root.join("wiki.toml"), "namespace = \"default\"\n");
+        let err = WikiConfig::load(&wiki_root, repo).unwrap_err();
+        let s = err.to_string();
+        assert!(s.contains("reserved") || s.contains("'default'"), "got: {s}");
+    }
+
+    #[test]
+    fn validate_rejects_literal_default_namespace_on_peer() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        let wiki_root = repo.join("wiki");
+        write(
+            &wiki_root.join("wiki.toml"),
+            "namespace = \"host\"\n[peers]\ndefault = \"../def\"\n",
+        );
+        let def_root = repo.join("def");
+        write(&def_root.join("wiki.toml"), "namespace = \"default\"\n");
+        let err = WikiConfig::load(&wiki_root, repo).unwrap_err();
+        let s = err.to_string();
+        assert!(s.contains("reserved") || s.contains("'default'"), "got: {s}");
+    }
+
+    // ── validate_namespace_value helper ──────────────────────────────────────
+
+    #[test]
+    fn namespace_value_rejects_empty() {
+        let err = validate_namespace_value("").unwrap_err();
+        assert!(err.to_string().contains("empty"), "got: {err}");
+    }
+
+    #[test]
+    fn namespace_value_rejects_default() {
+        let err = validate_namespace_value("default").unwrap_err();
+        assert!(err.to_string().contains("reserved"), "got: {err}");
+    }
+
+    #[test]
+    fn namespace_value_rejects_bad_chars() {
+        let err = validate_namespace_value("foo bar").unwrap_err();
+        assert!(err.to_string().contains("invalid"), "got: {err}");
+    }
+
+    #[test]
+    fn namespace_value_accepts_valid() {
+        assert!(validate_namespace_value("foo").is_ok());
+        assert!(validate_namespace_value("foo-bar_1").is_ok());
+        assert!(validate_namespace_value("A9").is_ok());
     }
 
     #[test]

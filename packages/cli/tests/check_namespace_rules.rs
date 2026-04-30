@@ -235,6 +235,116 @@ fn rule6_peer_exists_but_article_missing_exits_1() {
     );
 }
 
+// ── F3: same-namespace qualified wikilink validation ─────────────────────────
+
+/// `[[foo:Typo]]` where `foo` is the CURRENT wiki's namespace and `Typo` does
+/// not exist → exit 1 with `broken_wikilink`.
+#[test]
+fn f3_same_ns_qualified_wikilink_missing_target_exits_1() {
+    let repo = TestRepo::new();
+    // Current wiki has namespace = "foo"
+    repo.create_file("wiki/wiki.toml", "namespace = \"foo\"\n");
+    repo.create_file("wiki/real.md", &make_wiki_page("Real Article", "Content."));
+    // A page that uses [[foo:Typo]] where Typo does not exist
+    repo.create_file(
+        "wiki/page.md",
+        &make_wiki_page("Page", "See [[foo:Typo]]."),
+    );
+    repo.commit("init");
+
+    let out = repo.run_check_from("wiki");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "[[current_ns:Missing]] must produce an error; stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("broken_wikilink"),
+        "expected broken_wikilink diagnostic; stdout: {stdout}"
+    );
+}
+
+/// `[[foo:Real Article]]` where `foo` is the CURRENT wiki's namespace and
+/// `Real Article` exists → exit 0, no diagnostic.
+#[test]
+fn f3_same_ns_qualified_wikilink_existing_target_is_valid() {
+    let repo = TestRepo::new();
+    repo.create_file("wiki/wiki.toml", "namespace = \"foo\"\n");
+    repo.create_file("wiki/real.md", &make_wiki_page("Real Article", "Content."));
+    repo.create_file(
+        "wiki/page.md",
+        &make_wiki_page("Page", "See [[foo:Real Article]]."),
+    );
+    repo.commit("init");
+
+    let out = repo.run_check_from("wiki");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "[[current_ns:Existing]] must be valid; stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains("broken_wikilink"),
+        "valid same-ns qualified link must not produce broken_wikilink; stdout: {stdout}"
+    );
+}
+
+// ── F7: namespace_config_invalid under -n '*' ─────────────────────────────────
+
+/// `wiki check -n '*'` where one peer namespace has a valid wiki.toml (so the
+/// root `WikiConfig::load` succeeds) but that peer's own wiki.toml declares a
+/// sub-peer with a missing `wiki.toml` (so `run_multi`'s per-namespace
+/// `WikiConfig::load` fails).
+///
+/// F7: previously `.ok()` silently swallowed the per-namespace load error,
+/// producing a green block even though rules 5/6 never ran for that namespace.
+/// After the fix, a `namespace_config_invalid` diagnostic must appear.
+#[test]
+fn f7_broken_sub_peer_emits_namespace_config_invalid() {
+    let repo = TestRepo::new();
+
+    // "bad" wiki: syntactically valid (so root load parses it), but declares
+    // a sub-peer "ghost" whose wiki.toml does not exist.
+    repo.create_file(
+        "bad/wiki.toml",
+        "namespace = \"bad\"\n[peers]\nghost = \"../ghost\"\n",
+    );
+    repo.create_file("bad/page.md", &make_wiki_page("Bad Page", "Content."));
+
+    // Root wiki lists "bad" as a peer — root load succeeds because bad/wiki.toml
+    // is syntactically valid (root load only validates peer existence, not their
+    // own sub-peers).
+    repo.create_file(
+        "wiki/wiki.toml",
+        "[peers]\nbad = \"../bad\"\n",
+    );
+    repo.create_file("wiki/page.md", &make_wiki_page("Root Page", "Hello."));
+    repo.commit("init");
+
+    // Run with -n '*' from the wiki dir
+    let cwd = repo.dir.path().join("wiki");
+    let out = Command::new(env!("CARGO_BIN_EXE_wiki"))
+        .current_dir(&cwd)
+        .args(["check", "-n", "*"])
+        .env("WIKI_BACKGROUND_FTS", "0")
+        .output()
+        .expect("run wiki check -n '*'");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        !out.status.success(),
+        "broken sub-peer must cause non-zero exit; stdout: {stdout}\nstderr: {stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("namespace_config_invalid"),
+        "expected namespace_config_invalid in combined output; stdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
 /// `[[foo:Real Article]]` where peer `foo` exists and `Real Article` is in its
 /// wiki → exit 0, no diagnostic.
 #[test]

@@ -97,7 +97,23 @@ pub fn run_multi(
     for (label, wiki_root) in targets {
         // Load each namespace's own WikiConfig so rules 5/6 see that
         // namespace's own [peers] table.
-        let per_cfg = WikiConfig::load(wiki_root, repo_root).ok();
+        // Emit a diagnostic on load failure and continue — silent skip would
+        // allow a green block even though rules 5/6 never ran for this namespace.
+        let per_cfg = match WikiConfig::load(wiki_root, repo_root) {
+            Ok(cfg) => Some(cfg),
+            Err(e) => {
+                all.push((label.clone(), vec![CheckDiagnostic {
+                    kind: "namespace_config_invalid".into(),
+                    file: wiki_root.display().to_string(),
+                    line: 0,
+                    message: format!(
+                        "wiki.toml for namespace `{label}` could not be loaded: {e}. \
+                         Rules 5/6 were not evaluated for this namespace."
+                    ),
+                }]));
+                continue;
+            }
+        };
         let files = match discover_files(globs, wiki_root, repo_root) {
             Ok(f) => f,
             Err(e) => {
@@ -467,8 +483,22 @@ fn collect_for_files(
                 };
 
                 // Is the namespace the current wiki itself?
+                // [[current_ns:Article]] must validate against the current wiki's index.
+                // The regular wikilink loop skips all namespaced links, so we handle
+                // same-namespace qualified links here with an existence check.
                 if current_ns == Some(ns.as_str()) {
-                    // Same-namespace cross-link — already validated by rule above; skip here.
+                    let key = wl.title.to_lowercase();
+                    if !index.contains_key(&key) && !invalid_titles.contains(&key) {
+                        diagnostics.push(CheckDiagnostic {
+                            kind: "broken_wikilink".into(),
+                            file: path.display().to_string(),
+                            line: wl.source_line,
+                            message: format!(
+                                "No page has title or alias `{}`. Check the spelling or create the page.",
+                                wl.title
+                            ),
+                        });
+                    }
                     continue;
                 }
 

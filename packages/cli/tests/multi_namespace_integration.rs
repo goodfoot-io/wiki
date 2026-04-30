@@ -237,3 +237,134 @@ fn star_on_unsupported_command_errors_clearly() {
         "expected clear error; stderr: {stderr}"
     );
 }
+
+// ── F1: tagged float surfaces in matching peer's index ────────────────────────
+
+/// A `*.wiki.md` file with `namespace: foo` in its frontmatter must appear in
+/// the peer `foo` index (`wiki -n foo list`) but NOT in the default index.
+#[test]
+fn f1_tagged_float_surfaces_in_matching_peer_index() {
+    let repo = TestRepo::new();
+    repo.create_file("wiki/wiki.toml", "[peers]\nfoo = \"../foo\"\n");
+    repo.create_file("wiki/page.md", &page("Default Page", "default content."));
+    repo.create_file("foo/wiki.toml", "namespace = \"foo\"\n");
+    repo.create_file("foo/page.md", &page("Foo Page", "foo content."));
+    // Float: lives outside both wiki roots, tagged for peer "foo".
+    repo.create_file(
+        "floats/notes.wiki.md",
+        "---\ntitle: Float Notes\nsummary: Notes float.\nnamespace: foo\n---\nFloat body.\n",
+    );
+    repo.commit("init");
+
+    // Peer "foo" list should include the float.
+    let out = repo.wiki(&["-n", "foo", "list"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "wiki -n foo list failed; stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("Float Notes"),
+        "tagged float must appear in peer index; stdout: {stdout}"
+    );
+
+    // Default list must NOT include the float.
+    let out_default = repo.wiki(&["list"]);
+    let stdout_default = String::from_utf8_lossy(&out_default.stdout);
+    assert!(
+        !stdout_default.contains("Float Notes"),
+        "tagged float must NOT appear in default index; stdout: {stdout_default}"
+    );
+}
+
+// ── F2: untagged float appears in default only ────────────────────────────────
+
+/// A `*.wiki.md` with NO `namespace:` frontmatter must appear in the default
+/// index but NOT in any peer's index.
+#[test]
+fn f2_untagged_float_in_default_only() {
+    let repo = TestRepo::new();
+    repo.create_file("wiki/wiki.toml", "[peers]\nfoo = \"../foo\"\n");
+    repo.create_file("wiki/page.md", &page("Default Page", "default content."));
+    repo.create_file("foo/wiki.toml", "namespace = \"foo\"\n");
+    repo.create_file("foo/page.md", &page("Foo Page", "foo content."));
+    // Untagged float — no namespace frontmatter.
+    repo.create_file(
+        "floats/untagged.wiki.md",
+        "---\ntitle: Untagged Float\nsummary: Untagged float.\n---\nBody.\n",
+    );
+    repo.commit("init");
+
+    // Default list should include the untagged float.
+    let out = repo.wiki(&["list"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "wiki list failed; stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("Untagged Float"),
+        "untagged float must appear in default index; stdout: {stdout}"
+    );
+
+    // Peer "foo" list must NOT include the untagged float.
+    let out_peer = repo.wiki(&["-n", "foo", "list"]);
+    let stdout_peer = String::from_utf8_lossy(&out_peer.stdout);
+    assert!(
+        !stdout_peer.contains("Untagged Float"),
+        "untagged float must NOT appear in peer index; stdout: {stdout_peer}"
+    );
+}
+
+// ── F5: stale index entry removed on namespace frontmatter mutation ───────────
+
+/// Changing a `*.wiki.md` file's `namespace:` frontmatter from a peer namespace
+/// to untagged (or to a different namespace) must remove the stale row from the
+/// prior namespace's index.
+#[test]
+fn f5_namespace_mutation_removes_stale_row_from_prior_index() {
+    let repo = TestRepo::new();
+    repo.create_file("wiki/wiki.toml", "[peers]\nfoo = \"../foo\"\n");
+    repo.create_file("wiki/page.md", &page("Default Page", "default."));
+    repo.create_file("foo/wiki.toml", "namespace = \"foo\"\n");
+    repo.create_file("foo/page.md", &page("Foo Page", "foo."));
+    // Float tagged for peer "foo".
+    repo.create_file(
+        "floats/mutable.wiki.md",
+        "---\ntitle: Mutable Float\nsummary: Before mutation.\nnamespace: foo\n---\nBefore.\n",
+    );
+    repo.commit("initial with namespace: foo");
+
+    // Confirm it appears in peer "foo" index.
+    let out = repo.wiki(&["-n", "foo", "list"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Mutable Float"),
+        "float must be in foo index before mutation; stdout: {stdout}"
+    );
+
+    // Mutate: remove namespace frontmatter (now untagged → default only).
+    repo.create_file(
+        "floats/mutable.wiki.md",
+        "---\ntitle: Mutable Float\nsummary: After mutation.\n---\nAfter.\n",
+    );
+    repo.commit("remove namespace frontmatter");
+
+    // After mutation: float must NOT appear in peer "foo" index.
+    let out_peer = repo.wiki(&["-n", "foo", "list"]);
+    let stdout_peer = String::from_utf8_lossy(&out_peer.stdout);
+    assert!(
+        !stdout_peer.contains("Mutable Float"),
+        "stale row must be removed from foo index after namespace mutation; stdout: {stdout_peer}"
+    );
+
+    // And must appear in default index.
+    let out_default = repo.wiki(&["list"]);
+    let stdout_default = String::from_utf8_lossy(&out_default.stdout);
+    assert!(
+        stdout_default.contains("Mutable Float"),
+        "float must appear in default index after removing namespace; stdout: {stdout_default}"
+    );
+}
