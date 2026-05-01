@@ -258,6 +258,36 @@ impl WikiIndex {
             .block_on(links_async(&self.conn, &self.repo_root, input))
     }
 
+    /// Load lookup keys (titles + aliases, lowercased) for a page if it
+    /// resolves in this namespace. Returns `Ok(None)` if not found.
+    pub fn lookup_keys_for(&self, input: &str) -> Result<Option<Vec<String>>> {
+        self.runtime.block_on(async {
+            if let Some(page) = resolve_page_async(&self.conn, &self.repo_root, input).await? {
+                let keys = load_lookup_keys(&self.conn, page.document_id).await?;
+                Ok(Some(keys))
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
+    /// Run the inbound-links query against this namespace's index using
+    /// caller-supplied page target keys (e.g. resolved in another namespace)
+    /// and an optional file target. Bypasses the local resolve gate.
+    pub fn links_with_keys(
+        &self,
+        page_target_keys: &[String],
+        file_target: Option<&str>,
+        input: &str,
+    ) -> Result<Vec<SearchResult>> {
+        self.runtime.block_on(links_with_keys_async(
+            &self.conn,
+            page_target_keys,
+            file_target,
+            input,
+        ))
+    }
+
     pub fn extract_pages(&self, titles: &[String]) -> Result<(Vec<ResolvedPage>, Vec<String>)> {
         self.runtime
             .block_on(extract_pages_async(&self.conn, titles))
@@ -1792,22 +1822,30 @@ async fn links_async(
     repo_root: &Path,
     input: &str,
 ) -> Result<Vec<SearchResult>> {
+    let page_target_keys =
+        if let Some(page) = resolve_page_async(conn, repo_root, input).await? {
+            load_lookup_keys(conn, page.document_id).await?
+        } else {
+            Vec::new()
+        };
+    let file_target = looks_like_path(input)
+        .then(|| normalize_repo_relative_path(input, repo_root))
+        .filter(|path| !path.is_empty());
+    links_with_keys_async(conn, &page_target_keys, file_target.as_deref(), input).await
+}
+
+async fn links_with_keys_async(
+    conn: &Connection,
+    page_target_keys: &[String],
+    file_target: Option<&str>,
+    input: &str,
+) -> Result<Vec<SearchResult>> {
     perf::scope_async_result(
         "index.links",
         json!({
             "input": input,
         }),
         async {
-            let page_target_keys =
-                if let Some(page) = resolve_page_async(conn, repo_root, input).await? {
-                    load_lookup_keys(conn, page.document_id).await?
-                } else {
-                    Vec::new()
-                };
-            let file_target = looks_like_path(input)
-                .then(|| normalize_repo_relative_path(input, repo_root))
-                .filter(|path| !path.is_empty());
-
             if page_target_keys.is_empty() && file_target.is_none() {
                 return Ok(Vec::new());
             }
@@ -1828,12 +1866,12 @@ async fn links_async(
                 args.extend(page_target_keys.iter().cloned());
             }
 
-            if let Some(path) = &file_target {
+            if let Some(path) = file_target {
                 predicates.push(format!(
                     "(il.target_kind = 'file' AND il.target_key = ?{})",
                     args.len() + 1
                 ));
-                args.push(path.clone());
+                args.push(path.to_string());
             }
 
             let sql = format!(

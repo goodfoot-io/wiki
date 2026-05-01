@@ -68,7 +68,10 @@ pub fn run(
     };
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&diagnostics).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "errors": diagnostics })).unwrap()
+        );
     } else {
         for d in &diagnostics {
             println!("**{}** — `{}:{}`\n{}\n", d.kind, d.file, d.line, d.message);
@@ -159,7 +162,10 @@ pub fn run_multi(
                 out.push(v);
             }
         }
-        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "errors": out })).unwrap()
+        );
     } else {
         for (label, diags) in &all {
             for d in diags {

@@ -93,7 +93,7 @@ scratch	<WORK>/notes
 wiki namespaces --format json
 ```
 
-Expect: a JSON array with two objects; the default has `"namespace": null`, the named has `"namespace": "scratch"`. Both have `"status": "ok"`.
+Expect: a JSON array of two objects, each with `namespace`, `path`, and `abs_path` keys. The default entry has `"namespace": null`; the named entry has `"namespace": "scratch"`. No `alias` or `status` fields.
 
 ### 3b. Duplicate-namespace fail-closed
 
@@ -107,7 +107,7 @@ rm -rf dupA dupB
 
 Expect: `error: namespace 'dupe' declared by both …` on stderr; the two duplicate rows still print on stdout; exit `1`.
 
-### 3c. Parse-error row visible
+### 3c. Parse-error hard-fail
 
 ```bash
 mkdir broken && echo 'invalid !!!' > broken/wiki.toml
@@ -115,7 +115,7 @@ wiki namespaces ; echo "exit:$?"
 rm -rf broken
 ```
 
-Expect: a third tab column shows the parse error on the broken row; exit `1` (other namespaces still listed).
+Expect: no rows on stdout. A `miette` parse-error diagnostic on stderr pointing at `broken/wiki.toml`. Exit `2`. An unparseable peer `wiki.toml` aborts the command — there are no per-row parse errors.
 
 ## 4. Authoring content
 
@@ -341,7 +341,7 @@ Expect: clean again, exit `0`.
 wiki check --format json
 ```
 
-Expect: structured JSON report (empty `errors` array on a clean wiki).
+Expect: a JSON object envelope, e.g. `{ "errors": [] }` on a clean wiki. Validation diagnostics live in the `errors` array; the top-level shape is forward-compatible (room for warnings, summary, etc.).
 
 ## 12. `wiki hook` (PostToolUse handler)
 
@@ -368,7 +368,20 @@ When the wiki has no uncovered fragment links, the output is a single-paragraph 
 wiki install --help
 ```
 
-Expect: subcommands listing supported integration targets (e.g. `claude`, `gemini`). `wiki install <target>` writes the integration config; verify by inspecting the target's config dir afterwards. Skip in this throwaway repo unless you also want to test the integration.
+Expect a flag-based surface (not subcommands). The supported targets are exposed as flags:
+
+```
+Options:
+      --codex          Install the Codex integration
+      --claude         Print friendly Claude Code setup instructions (informational only)
+      --force          Overwrite locally modified managed files after recording a backup
+      --dry-run        Print the planned file changes without writing
+      --codex-home <PATH>
+                       Override $CODEX_HOME and ~/.codex
+      --ref <REF>      Git ref (branch, tag, or SHA) to install from [default: main]
+```
+
+`--codex` writes the Codex integration files; `--claude` is informational only — it prints setup instructions for Claude Code and does not touch the filesystem. There is no `gemini` target. Skip running `--codex` in this throwaway repo unless you also want to verify the Codex install.
 
 ## 15. `--perf` and exit-code conventions
 

@@ -3,7 +3,7 @@ use std::path::Path;
 use miette::Result;
 use serde_json::json;
 
-use crate::commands::looks_like_path;
+use crate::commands::{looks_like_path, normalize_repo_relative_path};
 use crate::index::{SearchResult, WikiIndex};
 
 use super::summary::{format_search_result, render_not_found};
@@ -17,11 +17,34 @@ pub fn run_multi(
 ) -> Result<i32> {
     let single = targets.len() == 1;
 
+    // First pass: resolve the target's lookup keys in whichever namespace
+    // owns the page. Each namespace's index holds an exclusive process lock
+    // on its wiki root, so we acquire-and-release one at a time rather than
+    // holding all indices simultaneously (multiple targets may share a root
+    // when peers point at the same directory).
+    let mut page_target_keys: Vec<String> = Vec::new();
+    for (_label, wiki_root) in targets {
+        let index = WikiIndex::prepare(wiki_root, repo_root)?;
+        if let Some(keys) = index.lookup_keys_for(target)? {
+            page_target_keys = keys;
+            break;
+        }
+    }
+
+    let file_target = if looks_like_path(target) {
+        let p = normalize_repo_relative_path(target, repo_root);
+        if p.is_empty() { None } else { Some(p) }
+    } else {
+        None
+    };
+
+    let resolved_anywhere = !page_target_keys.is_empty();
+
     if json {
         let mut out: Vec<serde_json::Value> = Vec::new();
         for (label, wiki_root) in targets {
             let index = WikiIndex::prepare(wiki_root, repo_root)?;
-            let matches = index.links(target)?;
+            let matches = index.links_with_keys(&page_target_keys, file_target.as_deref(), target)?;
             for m in matches {
                 let mut v = serde_json::to_value(&m).unwrap();
                 if !single && let Some(obj) = v.as_object_mut() {
@@ -30,16 +53,10 @@ pub fn run_multi(
                 out.push(v);
             }
         }
-        if out.is_empty() && !looks_like_path(target) {
-            // Check if the page resolves in any namespace; only show suggestions if unresolved everywhere.
-            let mut resolved_anywhere = false;
+        if out.is_empty() && !looks_like_path(target) && !resolved_anywhere {
             let mut all_suggestions: Vec<SearchResult> = Vec::new();
             for (_label, wiki_root) in targets {
                 let index = WikiIndex::prepare(wiki_root, repo_root)?;
-                if index.resolve_page(target)?.is_some() {
-                    resolved_anywhere = true;
-                    break;
-                }
                 let suggestions = index.suggest(target)?;
                 for s in suggestions {
                     if !all_suggestions.iter().any(|existing| existing.title == s.title) {
@@ -47,16 +64,14 @@ pub fn run_multi(
                     }
                 }
             }
-            if !resolved_anywhere {
-                eprintln!(
-                    "{}",
-                    serde_json::json!({
-                        "error": format!("page '{}' not found", target),
-                        "suggestions": all_suggestions,
-                    })
-                );
-                return Ok(0);
-            }
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "error": format!("page '{}' not found", target),
+                    "suggestions": all_suggestions,
+                })
+            );
+            return Ok(0);
         }
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return Ok(0);
@@ -66,7 +81,7 @@ pub fn run_multi(
     let mut first = true;
     for (label, wiki_root) in targets {
         let index = WikiIndex::prepare(wiki_root, repo_root)?;
-        let matches = index.links(target)?;
+        let matches = index.links_with_keys(&page_target_keys, file_target.as_deref(), target)?;
         for result in &matches {
             if !first {
                 println!();
@@ -80,16 +95,10 @@ pub fn run_multi(
             }
         }
     }
-    if !any && !looks_like_path(target) {
-        // Check if the page resolves in any namespace; only show suggestions if unresolved everywhere.
-        let mut resolved_anywhere = false;
+    if !any && !looks_like_path(target) && !resolved_anywhere {
         let mut all_suggestions: Vec<SearchResult> = Vec::new();
         for (_label, wiki_root) in targets {
             let index = WikiIndex::prepare(wiki_root, repo_root)?;
-            if index.resolve_page(target)?.is_some() {
-                resolved_anywhere = true;
-                break;
-            }
             let suggestions = index.suggest(target)?;
             for s in suggestions {
                 if !all_suggestions.iter().any(|existing| existing.title == s.title) {
@@ -97,9 +106,7 @@ pub fn run_multi(
                 }
             }
         }
-        if !resolved_anywhere {
-            eprintln!("{}", render_not_found(target, &all_suggestions, repo_root));
-        }
+        eprintln!("{}", render_not_found(target, &all_suggestions, repo_root));
     }
     Ok(0)
 }

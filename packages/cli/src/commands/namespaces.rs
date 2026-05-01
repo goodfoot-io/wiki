@@ -15,7 +15,6 @@ use toml_edit::DocumentMut;
 
 #[derive(Debug, Serialize)]
 pub struct NamespaceEntry {
-    pub alias: String,
     pub namespace: Option<String>,
     pub path: String,
     pub abs_path: String,
@@ -53,7 +52,6 @@ pub fn run(_cwd: &Path, repo_root: &Path, json: bool) -> Result<i32> {
         let (ns, _peers) = parse_wiki_toml(toml_path)?;
 
         entries.push(NamespaceEntry {
-            alias: String::new(),
             namespace: ns,
             path: abs_path.clone(),
             abs_path,
