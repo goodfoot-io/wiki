@@ -45,11 +45,9 @@ by walking the card directory and upserting rows into the [card_files table](pac
 Heuristics:
 - Target whole function or struct definitions (signature through closing brace)
 - Paths MUST be repository-relative (e.g. `packages/foo.ts`, NOT `../../foo.ts`)
-- `wiki check --fix` automatically converts absolute or file-relative paths to repo-relative
 - Backticks in the link label (e.g. `` [`fn`](path) ``) are supported
 - Include broad context — a link that goes stale when surrounding code changes is working as intended
-- Do not add `@sha` manually — `wiki check --fix` pins unpinned links automatically
-- Run `wiki check` to verify every fragment link with a line range is covered by a `git mesh`; use `wiki scaffold` to generate missing meshes
+- Every line-ranged fragment link (`#L<start>-L<end>`) must be covered by a `git mesh`; whole-file links do not require coverage
 
 When a file is relied upon but cannot be worked naturally into prose, add a **References** section at the bottom:
 
@@ -144,18 +142,56 @@ wiki "card files rebuild"
 
 Read each match and add a `[[wikilink]]` where relevant. If a related page discusses components now better covered by the changed page, add cross-references rather than duplicating content. This applies even to brand-new pages — existing pages may mention related concepts without linking to them.
 
-## 5. Pin and Validate
+## 5. Cover and Validate
 
-Validate only the files you changed:
+### Step order matters
+
+`git mesh add` requires every anchored path to exist in HEAD. When the wiki page itself is one of the anchors (it usually is), **commit the page before staging meshes**.
+
+Full sequence for a new or heavily-edited page:
 
 ```bash
-wiki check "wiki/architecture/my-page.md"
-wiki check "documentation/**/*.wiki.md"
+# 1. Pin fragment-link SHAs
+wiki check --fix <page>
+
+# 2. Commit the page (mesh add requires it in HEAD)
+git add <page> && git commit -m "wiki: add/update <title>"
+
+# 3. Generate covering meshes for uncovered line-ranged fragment links
+wiki scaffold
+
+# 4. Review scaffold output; consolidate into meaningful meshes with real `why` text.
+#    The scaffold splits by section — merge anchors from related sections into one mesh
+#    per logical subsystem. Never use the placeholder "[why]" verbatim.
+git mesh add <slug> <wiki-page> <source-anchor>
+git mesh why <slug> -m "One sentence defining the subsystem these anchors collectively form."
+git mesh commit
+
+# 5. Final validation
+wiki check <page>
 ```
 
 Use bare `wiki check` only when changes span many pages. `wiki check` always verifies git mesh coverage and requires `git mesh` to be installed.
 
-For the full maintenance workflow (prose updates, backlink propagation, commit), see the maintenance reference bundled with this skill.
+### `wiki check` failure modes
+
+- **`missing_sha`** — fragment link has no pinned SHA. Fix: `wiki check --fix <page>` auto-pins from git history. Never hand-edit SHAs.
+- **`broken_wikilink`** — no page matches the title or alias. Causes: title/alias mismatch (resolution is case-insensitive but otherwise exact), target outside discovered wiki roots, target path gitignored. If `wiki list` shows the page but `wiki check` does not, suspect a stale `.index.db` or binary-version mismatch.
+- **`mesh_uncovered`** — a line-ranged fragment link is not covered by any `git mesh`. Whole-file links do not require coverage. Fix: `wiki scaffold` then create and commit covering meshes.
+
+### Disk hygiene
+
+Add a `wiki/.gitignore` when first setting up a wiki directory:
+
+```
+.index.db
+.index.db-wal
+wiki.log
+```
+
+These runtime artifacts must not be committed.
+
+For the full maintenance workflow, see the maintenance reference bundled with this skill.
 
 ## 6. Git Hook Setup
 
