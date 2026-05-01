@@ -100,6 +100,9 @@ enum Commands {
         /// Glob patterns to match wiki pages (default: $WIKI_DIR/**/*.md)
         #[arg(value_name = "glob")]
         globs: Vec<String>,
+        /// Exit 0 even when validation errors are found (report-only mode)
+        #[arg(long = "no-exit-code")]
+        no_exit_code: bool,
     },
 
     /// Find wiki pages that link to the given target.
@@ -419,8 +422,8 @@ fn run(
         let _command_span = perf::span_for_command(command_name);
         let started = Instant::now();
         let result: Result<i32> = match command {
-            Some(Commands::Check { globs }) => {
-                commands::check::run_multi(&globs, json, &targets, &repo_root)
+            Some(Commands::Check { globs, no_exit_code }) => {
+                commands::check::run_multi(&globs, json, &targets, &repo_root, no_exit_code)
             }
             Some(Commands::Links { target }) => {
                 let inputs = resolve_inputs(target, read_stdin_lines)?;
@@ -496,8 +499,8 @@ fn run(
     let started = Instant::now();
 
     let result = match command {
-        Some(Commands::Check { globs }) => {
-            commands::check::run(&globs, json, wiki_root, &repo_root, config.as_ref())
+        Some(Commands::Check { globs, no_exit_code }) => {
+            commands::check::run(&globs, json, wiki_root, &repo_root, config.as_ref(), no_exit_code)
         }
         Some(Commands::Links { target }) => {
             let inputs = resolve_inputs(target, read_stdin_lines)?;

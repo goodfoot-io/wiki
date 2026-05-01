@@ -34,6 +34,7 @@ pub fn run(
     wiki_root: &Path,
     repo_root: &Path,
     wiki_config: Option<&WikiConfig>,
+    no_exit_code: bool,
 ) -> Result<i32> {
     let files = match discover_files(globs, wiki_root, repo_root) {
         Ok(f) => f,
@@ -73,7 +74,7 @@ pub fn run(
         }
     }
 
-    if diagnostics.iter().any(|d| d.kind != "alias_resolve") {
+    if diagnostics.iter().any(|d| d.kind != "alias_resolve") && !no_exit_code {
         Ok(1)
     } else {
         Ok(0)
@@ -90,6 +91,7 @@ pub fn run_multi(
     json: bool,
     targets: &[(String, &Path)],
     repo_root: &Path,
+    no_exit_code: bool,
 ) -> Result<i32> {
     let mut all: Vec<(String, Vec<CheckDiagnostic>)> = Vec::new();
     let mut runtime_error: Option<String> = None;
@@ -171,7 +173,7 @@ pub fn run_multi(
         .iter()
         .flat_map(|(_, ds)| ds.iter())
         .any(|d| d.kind != "alias_resolve");
-    Ok(if any_error { 1 } else { 0 })
+    Ok(if any_error && !no_exit_code { 1 } else { 0 })
 }
 
 /// Collect diagnostics for the given glob patterns without printing output.
@@ -711,7 +713,7 @@ mod tests {
         repo.create_file("wiki/page.md", &make_wiki_page("Page", "No links here."));
         repo.commit("add page");
 
-        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false).expect("run");
         assert_eq!(code, 0);
     }
 
@@ -726,7 +728,7 @@ mod tests {
         );
         repo.commit("add page");
 
-        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -739,7 +741,7 @@ mod tests {
         repo.create_file("wiki/b.md", &make_wiki_page("Shared", ""));
         repo.commit("add pages");
 
-        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -751,7 +753,7 @@ mod tests {
         repo.create_file("wiki/page.md", "# Just a heading\n\nNo frontmatter.");
         repo.commit("add page");
 
-        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -767,7 +769,7 @@ mod tests {
         repo.create_file("wiki/source.md", &make_wiki_page("Source", "See [[tp]]."));
         repo.commit("add pages");
 
-        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false).expect("run");
         // alias_resolve warnings should not cause exit 1
         assert_eq!(code, 0);
     }
@@ -787,7 +789,7 @@ mod tests {
         );
         repo.commit("add pages");
 
-        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -806,7 +808,7 @@ mod tests {
         );
         repo.commit("add pages");
 
-        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false).expect("run");
         assert_eq!(code, 0);
     }
 
@@ -824,7 +826,7 @@ mod tests {
         repo.commit("add pages");
 
         let globs = vec!["wiki/page_a.md".to_string()];
-        let code = run(&globs, false, &wiki_root, repo.path(), None).expect("run");
+        let code = run(&globs, false, &wiki_root, repo.path(), None, false).expect("run");
         assert_eq!(
             code, 0,
             "wikilink to a page outside the glob must resolve against the full wiki index"
@@ -844,7 +846,7 @@ mod tests {
         repo.commit("add pages");
 
         let globs = vec!["wiki/page_a.md".to_string()];
-        let code = run(&globs, false, &wiki_root, repo.path(), None).expect("run");
+        let code = run(&globs, false, &wiki_root, repo.path(), None, false).expect("run");
         assert_eq!(
             code, 1,
             "a truly missing wikilink must still be reported when using a file glob"
@@ -863,7 +865,7 @@ mod tests {
         );
         repo.commit("add files");
 
-        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false).expect("run");
         assert_eq!(
             code, 0,
             "directory fragment links must not produce missing_file"
@@ -905,7 +907,7 @@ mod tests {
         );
         repo.commit("add files");
 
-        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false).expect("run");
         assert_eq!(code, 1, "uncovered fragment link must fail wiki check");
     }
 
@@ -928,7 +930,7 @@ mod tests {
             .filter(|d| d.kind == "mesh_uncovered")
             .collect();
         assert_eq!(mesh_diags.len(), 1, "expected one mesh_uncovered: {diagnostics:?}");
-        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -958,7 +960,7 @@ mod tests {
             mesh_diags.is_empty(),
             "covered link must not produce mesh_uncovered: {diagnostics:?}"
         );
-        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false).expect("run");
         assert_eq!(code, 0);
     }
 
@@ -1164,7 +1166,7 @@ mod tests {
                 .join(":");
             // SAFETY: PATH_MUTEX is held.
             unsafe { std::env::set_var("PATH", &filtered_path) };
-            let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
+            let code = run(&[], false, &wiki_root, repo.path(), None, false).expect("run");
             // SAFETY: PATH_MUTEX is held.
             unsafe { std::env::set_var("PATH", &original_path) };
             code
@@ -1262,7 +1264,7 @@ mod tests {
 
         // SAFETY: PATH_MUTEX is held; no other test reads/writes PATH concurrently.
         unsafe { std::env::set_var("PATH", &new_path) };
-        let code = run(&[], false, &wiki_root, repo.path(), None).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false).expect("run");
         // SAFETY: PATH_MUTEX is held.
         unsafe { std::env::set_var("PATH", &original_path) };
 
