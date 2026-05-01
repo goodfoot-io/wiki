@@ -330,6 +330,12 @@ fn generate_mesh(
     let start_line = link.start_line.unwrap_or(0);
     let end_line = link.end_line.unwrap_or(start_line);
 
+    // Compute wiki section line range based on the link's source line.
+    let wiki_section_range = src_meta
+        .content
+        .as_ref()
+        .and_then(|content| find_wiki_section_range_for_link(content, link.source_line));
+
     // Target snippet: lines [startLine-1 .. endLine+5] of target content (1-based).
     let target_snippet = tgt_meta.content.as_ref().map(|c| {
         let lines: Vec<&str> = c.lines().collect();
@@ -381,7 +387,11 @@ fn generate_mesh(
     let combined_ctx = format!("{source_ctx} {target_ctx}");
     let all_tokens = tokenize(&combined_ctx);
 
-    let wiki_file_rel = path_relative_to(&input.wiki_file, repo_root);
+    let mut wiki_file_rel = path_relative_to(&input.wiki_file, repo_root);
+    // Append wiki section range if available.
+    if let Some((section_start, section_end)) = wiki_section_range {
+        wiki_file_rel = format!("{wiki_file_rel}#L{section_start}-L{section_end}");
+    }
     let path_input = format!("{wiki_file_rel} {}", link.path);
     let path_tokens = tokenize(&path_input);
 
@@ -548,6 +558,189 @@ fn locate_existing_suffix(rel_path: &str, repo_root: &Path) -> Option<String> {
     None
 }
 
+/// Find the line range of the wiki section containing the given link source line.
+///
+/// Finds the nearest heading at or before the link's source line, then determines
+/// the extent of that section (up to the next heading at the same or higher level,
+/// or EOF). Returns the (start_line, end_line) of that section (1-based).
+fn find_wiki_section_range_for_link(content: &str, link_source_line: usize) -> Option<(u32, u32)> {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() || link_source_line == 0 {
+        return None;
+    }
+
+    // Find all headings in the document.
+    let mut headings: Vec<(usize, usize)> = Vec::new(); // (line_num, level)
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(level) = parse_heading_level(line) {
+            headings.push((i + 1, level));
+        }
+    }
+
+    // Find the heading that most closely precedes the link.
+    let section_start = headings
+        .iter()
+        .filter(|(line_num, _)| *line_num <= link_source_line)
+        .max_by_key(|(line_num, _)| *line_num)
+        .map(|(line_num, _)| *line_num);
+
+    match section_start {
+        None => {
+            // No heading before the link - section starts at document top.
+            let section_end = headings
+                .first()
+                .map(|(l, _)| l - 1)
+                .unwrap_or(lines.len());
+            Some((1, section_end as u32))
+        }
+        Some(start_line) => {
+            let (_, start_level) = headings
+                .iter()
+                .find(|(l, _)| *l == start_line)
+                .unwrap();
+
+            // Find the next heading at the same or higher level.
+            let end_line = headings
+                .iter()
+                .find(|(l, level)| *l > start_line && *level <= *start_level)
+                .map(|(l, _)| l - 1)
+                .unwrap_or(lines.len());
+
+            Some((start_line as u32, end_line as u32))
+        }
+    }
+}
+
+/// Find the line range of the wiki section containing the given link.
+///
+/// Uses the heading chain to identify which section the link belongs to,
+/// then returns the (start_line, end_line) of that section (1-based).
+/// Returns None if the section cannot be determined.
+#[allow(dead_code)]
+fn find_wiki_section_range(
+    content: &str,
+    heading_chain: &[String],
+    _link_source_line: usize,
+) -> Option<(u32, u32)> {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return None;
+    }
+
+    // Parse heading level and text from each line.
+    let mut headings: Vec<(usize, usize, usize)> = Vec::new(); // (line_num, level, heading_idx)
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(level) = parse_heading_level(line) {
+            headings.push((i + 1, level, heading_chain.len().saturating_sub(1))); // placeholder heading_idx
+        }
+    }
+
+
+    // If the heading chain is empty, we're at the document top level.
+    // Find section from start to first heading, or to EOF if no headings exist.
+    if heading_chain.is_empty() {
+        let end = headings
+            .first()
+            .map(|(l, _, _)| l - 1)
+            .unwrap_or(lines.len());
+        return Some((1, end.max(1) as u32));
+    }
+
+    // Match heading chain to actual headings in the document.
+    // Start from line 1 and find headings matching the chain.
+    let mut current_level = 0; // Track the heading level of the last match.
+    let mut section_start_line = 1;
+    let format_re = Regex::new(r"[`*_~\[\]]").expect("valid regex");
+
+    for (chain_idx, chain_heading) in heading_chain.iter().enumerate() {
+        let target_level = chain_idx + 1; // h1 is level 1, h2 is level 2, etc.
+        // Strip markdown formatting from the chain heading for comparison.
+        let normalized_chain_heading =
+            format_re.replace_all(chain_heading, "").trim().to_string();
+
+        // Find the next heading matching this level and text, starting from section_start_line.
+        let mut found = false;
+        for (line_num, level, _) in &headings {
+            if *line_num < section_start_line {
+                continue; // Skip headings before our current position.
+            }
+            if *level != target_level {
+                continue; // Skip headings at other levels.
+            }
+            let heading_text = extract_heading_text(lines[line_num - 1]);
+            if heading_text.eq_ignore_ascii_case(&normalized_chain_heading) {
+                section_start_line = *line_num;
+                current_level = *level;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            // If full chain doesn't match, try matching just from this heading onwards (fallback).
+            // This handles cases where the heading chain might be incomplete or structured differently.
+            if chain_idx == heading_chain.len() - 1 {
+                // Last heading in chain - try to find ANY heading with this text
+                for (line_num, level, _) in &headings {
+                    let heading_text = extract_heading_text(lines[line_num - 1]);
+                    if heading_text.eq_ignore_ascii_case(&normalized_chain_heading) {
+                        section_start_line = *line_num;
+                        current_level = *level;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if !found {
+                return None; // Heading chain doesn't match document structure.
+            }
+        }
+    }
+
+    // Now find the end of the section: the next heading at the same or higher level,
+    // or EOF.
+    let end_line = headings
+        .iter()
+        .find(|(line_num, level, _)| *line_num > section_start_line && *level <= current_level)
+        .map(|(l, _, _)| l - 1)
+        .unwrap_or(lines.len());
+
+    Some((section_start_line as u32, end_line.max(section_start_line) as u32))
+}
+
+/// Extract the heading level (1-6) from a markdown line, or None if not a heading.
+fn parse_heading_level(line: &str) -> Option<usize> {
+    let trimmed = line.trim_start();
+    let mut level = 0;
+    for c in trimmed.chars() {
+        if c == '#' {
+            level += 1;
+        } else if c == ' ' {
+            break;
+        } else {
+            return None; // Not a valid heading.
+        }
+    }
+    if level > 0 && level <= 6 && trimmed.len() > level {
+        Some(level)
+    } else {
+        None
+    }
+}
+
+/// Extract the text content of a markdown heading (without the # symbols, whitespace, and markdown formatting).
+#[allow(dead_code)]
+fn extract_heading_text(line: &str) -> String {
+    let trimmed = line.trim_start();
+    let text = trimmed
+        .trim_start_matches('#')
+        .trim_start()
+        .trim_end()
+        .to_string();
+    // Remove markdown formatting: backticks, bold, italic, etc.
+    let re = Regex::new(r"[`*_~\[\]]").expect("valid regex");
+    re.replace_all(&text, "").trim().to_string()
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -602,5 +795,64 @@ mod tests {
         assert_eq!(strip_bare_line_range("L19-L22"), "");
         assert_eq!(strip_bare_line_range("L5"), "");
         assert_eq!(strip_bare_line_range("hello"), "hello");
+    }
+
+    #[test]
+    fn parse_heading_level_extracts_correctly() {
+        assert_eq!(parse_heading_level("# Heading"), Some(1));
+        assert_eq!(parse_heading_level("## Subheading"), Some(2));
+        assert_eq!(parse_heading_level("### `Code Heading`"), Some(3));
+        assert_eq!(parse_heading_level("#### Level 4"), Some(4));
+        assert_eq!(parse_heading_level("Not a heading"), None);
+        assert_eq!(parse_heading_level("#NoSpace"), None);
+    }
+
+    #[test]
+    fn extract_heading_text_strips_formatting() {
+        assert_eq!(extract_heading_text("# My Heading"), "My Heading");
+        assert_eq!(extract_heading_text("## `Code Title`"), "Code Title");
+        assert_eq!(extract_heading_text("### **Bold** and *italic*"), "Bold and italic");
+        assert_eq!(
+            extract_heading_text("### `git-mesh ls <anchor> --porcelain`"),
+            "git-mesh ls <anchor> --porcelain"
+        );
+    }
+
+    #[test]
+    fn find_wiki_section_range_simple() {
+        let content = "# Heading 1\nParagraph 1\n## Heading 2\nParagraph 2\n## Heading 3\n";
+        let chain = vec!["Heading 1".to_string(), "Heading 2".to_string()];
+        let range = find_wiki_section_range(content, &chain, 3);
+        // Section should start at "## Heading 2" (line 3) and end before "## Heading 3" (line 5)
+        assert_eq!(range, Some((3, 4)));
+    }
+
+    #[test]
+    fn find_wiki_section_range_with_backticks() {
+        let content = "# Main\n## `Code Section`\nContent\n## Other\n";
+        let chain = vec!["Main".to_string(), "Code Section".to_string()];
+        let range = find_wiki_section_range(content, &chain, 3);
+        // Section should be from line 2 ("## `Code Section`") to line 3 (before "## Other")
+        assert_eq!(range, Some((2, 3)));
+    }
+
+    #[test]
+    fn find_wiki_section_range_git_mesh_usage() {
+        // Content with proper line structure:
+        // 1: # Title
+        // 2: ## Section
+        // 3: ### Subsection
+        // 4: Content
+        // 5: ## Next Section
+        let content = "# Title\n## Section\n### Subsection\nContent\n## Next Section\n";
+        let chain = vec![
+            "Title".to_string(),
+            "Section".to_string(),
+            "Subsection".to_string(),
+        ];
+        let range = find_wiki_section_range(content, &chain, 3);
+        // Section should start at line 3 ("### Subsection") and end before line 5 ("## Next Section")
+        // So the range should be (3, 4)
+        assert_eq!(range, Some((3, 4)));
     }
 }
