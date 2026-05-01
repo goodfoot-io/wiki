@@ -55,6 +55,7 @@ pub fn run_multi(
                         "suggestions": all_suggestions,
                     })
                 );
+                return Ok(0);
             }
         }
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
