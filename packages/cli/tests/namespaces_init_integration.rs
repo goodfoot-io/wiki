@@ -129,9 +129,11 @@ fn namespaces_duplicate_namespace_exits_nonzero() {
     );
 }
 
-/// A malformed wiki.toml is reported via an `error: ...` row in text output.
+/// A malformed wiki.toml hard-fails: exit 2, diagnostic on stderr naming the
+/// broken file, and no row labelled `default` (or any other namespace) is
+/// printed for the unparseable file.
 #[test]
-fn namespaces_malformed_wiki_toml_shows_error() {
+fn namespaces_malformed_wiki_toml_fails_closed() {
     let repo = TestRepo::new();
     repo.create_file("wiki/wiki.toml", "");
     repo.create_file("bad/wiki.toml", "this is = not = valid = toml\n");
@@ -139,15 +141,37 @@ fn namespaces_malformed_wiki_toml_shows_error() {
     let out = repo.run_from("", &["namespaces"]);
     assert_eq!(
         out.status.code(),
-        Some(1),
-        "expected exit 1 for malformed toml; stdout: {}\nstderr: {}",
+        Some(2),
+        "expected exit 2 for malformed toml; stdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("bad/wiki.toml") || stderr.contains("bad\\wiki.toml"),
+        "expected stderr to name broken file path; stderr: {stderr}"
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("error"),
-        "expected error status in output; stdout: {stdout}"
+        !stdout.contains("default"),
+        "broken file must not be rendered as a `default` row; stdout: {stdout}"
+    );
+}
+
+/// `--format json` likewise hard-fails on a malformed wiki.toml.
+#[test]
+fn namespaces_json_malformed_wiki_toml_fails_closed() {
+    let repo = TestRepo::new();
+    repo.create_file("wiki/wiki.toml", "");
+    repo.create_file("bad/wiki.toml", "this is = not = valid = toml\n");
+
+    let out = repo.run_from("", &["namespaces", "--format", "json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "expected exit 2 for malformed toml; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
     );
 }
 
