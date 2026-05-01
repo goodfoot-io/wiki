@@ -15,7 +15,8 @@ use crate::commands::{looks_like_path, normalize_repo_relative_path, resolve_lin
 use crate::frontmatter::parse_frontmatter;
 use crate::git::{
     changed_paths_between, git_acceleration_state, has_staged_changes, has_tracked_files,
-    has_unstaged_changes, head_sha, repo_inventory, untracked_paths, working_tree_changed_paths,
+    has_unstaged_changes, head_sha, index_revision_signal, index_tracked_paths, read_head_blob,
+    read_index_blob, repo_inventory, untracked_paths, working_tree_changed_paths,
 };
 use crate::parser::{LinkKind, parse_fragment_links, parse_wikilinks};
 use crate::perf;
@@ -56,20 +57,34 @@ pub enum DocSource {
 
 impl DocSource {
     /// Return repo-relative paths that this source considers present.
-    #[allow(dead_code)]
-    pub fn list_paths(&self, _repo_root: &std::path::Path) -> miette::Result<Vec<String>> {
-        todo!("phase 3")
+    pub fn list_paths(&self, repo_root: &std::path::Path) -> miette::Result<Vec<String>> {
+        match self {
+            DocSource::WorkingTree => crate::git::repo_inventory(repo_root),
+            DocSource::Index => index_tracked_paths(repo_root),
+            DocSource::Head => crate::git::head_tracked_paths(repo_root),
+        }
     }
 
     /// Return the UTF-8 content of `path_rel` from this source, or `None` when
     /// the path is absent in this source.
-    #[allow(dead_code)]
     pub fn read(
         &self,
-        _repo_root: &std::path::Path,
-        _path_rel: &str,
+        repo_root: &std::path::Path,
+        path_rel: &str,
     ) -> miette::Result<Option<String>> {
-        todo!("phase 3")
+        match self {
+            DocSource::WorkingTree => {
+                let abs = repo_root.join(path_rel);
+                match std::fs::read_to_string(&abs) {
+                    Ok(s) => Ok(Some(s)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(miette::miette!(e)
+                        .wrap_err(format!("failed to read {}", abs.display()))),
+                }
+            }
+            DocSource::Index => read_index_blob(repo_root, path_rel),
+            DocSource::Head => read_head_blob(repo_root, path_rel),
+        }
     }
 
     /// Stable string key stored in `index_state` to isolate caches per source.
@@ -240,6 +255,14 @@ impl WikiIndex {
         Self::prepare_with_namespace(wiki_root, repo_root, namespace, DocSource::WorkingTree)
     }
 
+    /// Prepare the index for the given source, auto-detecting the wiki namespace
+    /// from `wiki.toml`.  This is the production entry point used by commands
+    /// that receive a user-selected `DocSource` from the CLI.
+    pub fn prepare_for_source(wiki_root: &Path, repo_root: &Path, source: DocSource) -> Result<Self> {
+        let namespace = read_namespace_from_toml(wiki_root);
+        Self::prepare_with_namespace(wiki_root, repo_root, namespace, source)
+    }
+
     pub fn prepare_with_namespace(
         wiki_root: &Path,
         repo_root: &Path,
@@ -258,6 +281,7 @@ impl WikiIndex {
                 &wiki_root,
                 &repo_root,
                 namespace.as_deref(),
+                source,
             ))?;
 
             Ok(Self {
@@ -437,19 +461,20 @@ async fn open_and_prepare_connection(
     wiki_root: &Path,
     repo_root: &Path,
     namespace: Option<&str>,
+    source: DocSource,
 ) -> Result<(Connection, IndexLock)> {
     std::fs::create_dir_all(wiki_root)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to create wiki root at {}", wiki_root.display()))?;
     let lock = IndexLock::acquire(wiki_root)?;
-    match try_open_and_prepare(wiki_root, repo_root, namespace).await {
+    match try_open_and_prepare(wiki_root, repo_root, namespace, source).await {
         Ok(conn) => Ok((conn, lock)),
         Err(err) if is_lock_error(&err) => Err(err),
         Err(_) => {
             // Delete the stale or incompatible database and retry from scratch.
             let db_path = wiki_root.join(".index.db");
             let _ = std::fs::remove_file(&db_path);
-            let conn = try_open_and_prepare(wiki_root, repo_root, namespace).await?;
+            let conn = try_open_and_prepare(wiki_root, repo_root, namespace, source).await?;
             Ok((conn, lock))
         }
     }
@@ -528,6 +553,7 @@ async fn try_open_and_prepare(
     wiki_root: &Path,
     repo_root: &Path,
     namespace: Option<&str>,
+    source: DocSource,
 ) -> Result<Connection> {
     let mut conn = open_index_connection(wiki_root).await?;
     perf::scope_async_result("index.bootstrap_schema", json!({}), bootstrap_schema(&conn)).await?;
@@ -535,7 +561,7 @@ async fn try_open_and_prepare(
     perf::scope_async_result(
         "index.sync",
         json!({}),
-        sync_core_index(&mut conn, wiki_root, repo_root, namespace),
+        sync_core_index(&mut conn, wiki_root, repo_root, namespace, source),
     )
     .await?;
     Ok(conn)
@@ -694,8 +720,9 @@ async fn sync_core_index(
     wiki_root: &Path,
     repo_root: &Path,
     namespace: Option<&str>,
+    source: DocSource,
 ) -> Result<()> {
-    sync_core_index_inner(conn, wiki_root, repo_root, namespace, None).await
+    sync_core_index_inner(conn, wiki_root, repo_root, namespace, None, source).await
 }
 
 async fn sync_core_index_inner(
@@ -704,6 +731,7 @@ async fn sync_core_index_inner(
     repo_root: &Path,
     namespace: Option<&str>,
     changed_paths: Option<&[PathBuf]>,
+    source: DocSource,
 ) -> Result<()> {
     let existing = perf::scope_async_result(
         "index.load_existing_documents",
@@ -718,7 +746,7 @@ async fn sync_core_index_inner(
     let change_set = perf::scope_async_result(
         "index.compute_change_set",
         json!({}),
-        compute_change_set(conn, wiki_root, repo_root, namespace, &existing_by_path, changed_paths),
+        compute_change_set(conn, wiki_root, repo_root, namespace, &existing_by_path, changed_paths, source),
     )
     .await?;
 
@@ -732,26 +760,44 @@ async fn sync_core_index_inner(
     for path in &change_set.changed_or_added {
         let path_rel = relative_path(repo_root, path)?;
 
-        let metadata = fs::metadata(path)
-            .into_diagnostic()
-            .wrap_err_with(|| format!("failed to stat {}", path.display()))?;
-        let mtime_ns = metadata_modified_ns(&metadata)
-            .wrap_err_with(|| format!("failed to read mtime for {}", path.display()))?;
-        let size_bytes = i64::try_from(metadata.len()).into_diagnostic()?;
-        let existing_doc = existing_by_path.get(&path_rel);
-
-        let must_read = match existing_doc {
-            Some(doc) => doc.mtime_ns != mtime_ns || doc.size_bytes != size_bytes,
-            None => true,
+        // For WorkingTree mode: use filesystem mtime/size as a cheap change
+        // probe before reading content.  For Index and Head modes there is no
+        // meaningful filesystem metadata, so always read from the source and
+        // rely on the content hash to skip unchanged documents.
+        let (mtime_ns, size_bytes, content) = match source {
+            DocSource::WorkingTree => {
+                let metadata = fs::metadata(path)
+                    .into_diagnostic()
+                    .wrap_err_with(|| format!("failed to stat {}", path.display()))?;
+                let mtime_ns = metadata_modified_ns(&metadata)
+                    .wrap_err_with(|| format!("failed to read mtime for {}", path.display()))?;
+                let size_bytes = i64::try_from(metadata.len()).into_diagnostic()?;
+                let existing_doc = existing_by_path.get(&path_rel);
+                let must_read = match existing_doc {
+                    Some(doc) => doc.mtime_ns != mtime_ns || doc.size_bytes != size_bytes,
+                    None => true,
+                };
+                if !must_read {
+                    continue;
+                }
+                let content = fs::read_to_string(path)
+                    .into_diagnostic()
+                    .wrap_err_with(|| format!("failed to read {}", path.display()))?;
+                (mtime_ns, size_bytes, content)
+            }
+            DocSource::Index | DocSource::Head => {
+                let Some(content) = source.read(repo_root, &path_rel)? else {
+                    // Path was listed but is no longer present — treat as deleted.
+                    if existing_by_path.contains_key(&path_rel) {
+                        extra_stale.insert(path_rel);
+                    }
+                    continue;
+                };
+                (0i64, 0i64, content)
+            }
         };
 
-        if !must_read {
-            continue;
-        }
-
-        let content = fs::read_to_string(path)
-            .into_diagnostic()
-            .wrap_err_with(|| format!("failed to read {}", path.display()))?;
+        let existing_doc = existing_by_path.get(&path_rel);
         let content_hash = sha256_hex(&content);
 
         if let Some(doc) = existing_doc
@@ -1070,7 +1116,7 @@ async fn sync_core_index_inner(
             .into_diagnostic()
             .wrap_err("failed to optimize FTS index")?;
     }
-    write_discovery_state(conn, &current_discovery_state(wiki_root, repo_root)?).await?;
+    write_discovery_state(conn, &current_discovery_state(wiki_root, repo_root, source)?).await?;
 
     Ok(())
 }
@@ -1140,16 +1186,30 @@ async fn compute_change_set(
     namespace: Option<&str>,
     existing_by_path: &HashMap<String, ExistingDocument>,
     changed_paths: Option<&[PathBuf]>,
+    source: DocSource,
 ) -> Result<ChangeSet> {
     if let Some(changed_paths) = changed_paths {
         return hinted_change_set(repo_root, existing_by_path, changed_paths);
     }
 
-    let current_state = current_discovery_state(wiki_root, repo_root)?;
+    let current_state = current_discovery_state(wiki_root, repo_root, source)?;
     let Some(previous_state) = read_discovery_state(conn).await? else {
-        return full_rescan_change_set(wiki_root, repo_root, namespace, existing_by_path);
+        return source_full_rescan(source, wiki_root, repo_root, namespace, existing_by_path);
     };
 
+    // Any mismatch in persistent state forces a full rescan.
+    if previous_state != current_state {
+        return source_full_rescan(source, wiki_root, repo_root, namespace, existing_by_path);
+    }
+
+    // For Index and Head modes: full rescan is the only incremental strategy
+    // (no mtime/size shortcut, no HEAD-diff fast path).  The cache key change
+    // detection above already handles the no-op case when nothing changed.
+    if source != DocSource::WorkingTree {
+        return source_full_rescan(source, wiki_root, repo_root, namespace, existing_by_path);
+    }
+
+    // WorkingTree incremental path below.
     let tracked_files_present = has_tracked_files(repo_root)?;
     let acceleration_state = git_acceleration_state(repo_root).unwrap_or_default();
     perf::log_event(
@@ -1163,14 +1223,10 @@ async fn compute_change_set(
         }),
     );
 
-    if previous_state != current_state {
-        return full_rescan_change_set(wiki_root, repo_root, namespace, existing_by_path);
-    }
-
     let mut candidate_paths = HashSet::new();
 
     if previous_state.head_sha.is_empty() != current_state.head_sha.is_empty() {
-        return full_rescan_change_set(wiki_root, repo_root, namespace, existing_by_path);
+        return source_full_rescan(source, wiki_root, repo_root, namespace, existing_by_path);
     }
 
     if !previous_state.head_sha.is_empty() && previous_state.head_sha != current_state.head_sha {
@@ -1279,6 +1335,42 @@ fn hinted_change_set(
     })
 }
 
+fn source_full_rescan(
+    source: DocSource,
+    wiki_root: &Path,
+    repo_root: &Path,
+    namespace: Option<&str>,
+    existing_by_path: &HashMap<String, ExistingDocument>,
+) -> Result<ChangeSet> {
+    match source {
+        DocSource::WorkingTree => full_rescan_change_set(wiki_root, repo_root, namespace, existing_by_path),
+        DocSource::Index | DocSource::Head => {
+            // List all paths from the source, filter to wiki paths, convert to
+            // absolute PathBufs so the rest of sync_core_index_inner can use them.
+            let all_paths = source.list_paths(repo_root)?;
+            let files: Vec<PathBuf> = all_paths
+                .into_iter()
+                .filter(|p| matches_default_discovery_path(p, wiki_root, repo_root))
+                .map(|p| repo_root.join(&p))
+                .collect();
+            let seen_paths: HashSet<String> = files
+                .iter()
+                .map(|f| relative_path(repo_root, f))
+                .collect::<Result<HashSet<_>>>()?;
+            let deleted = existing_by_path
+                .keys()
+                .filter(|p| !seen_paths.contains(*p))
+                .cloned()
+                .collect::<HashSet<_>>();
+            Ok(ChangeSet {
+                mode: ChangeSetMode::FullRescan,
+                changed_or_added: files,
+                deleted,
+            })
+        }
+    }
+}
+
 fn full_rescan_change_set(
     wiki_root: &Path,
     repo_root: &Path,
@@ -1304,12 +1396,21 @@ fn full_rescan_change_set(
     })
 }
 
-fn current_discovery_state(wiki_root: &Path, repo_root: &Path) -> Result<DiscoveryState> {
+fn current_discovery_state(wiki_root: &Path, repo_root: &Path, source: DocSource) -> Result<DiscoveryState> {
+    // The `head_sha` field doubles as a "source revision" signal.  Its meaning
+    // depends on the source:
+    //   WorkingTree — the HEAD commit SHA (existing behaviour)
+    //   Head        — the HEAD commit SHA (content is the HEAD snapshot)
+    //   Index       — the index revision signal (mtime:size of .git/index)
+    let source_revision = match source {
+        DocSource::WorkingTree | DocSource::Head => head_sha(repo_root).unwrap_or_default(),
+        DocSource::Index => index_revision_signal(repo_root).unwrap_or_default(),
+    };
     Ok(DiscoveryState {
-        head_sha: head_sha(repo_root).unwrap_or_default(),
+        head_sha: source_revision,
         wiki_root_abs: wiki_root.to_string_lossy().into_owned(),
         strategy_version: DISCOVERY_STRATEGY_VERSION.to_string(),
-        source: DocSource::WorkingTree.as_key().to_string(),
+        source: source.as_key().to_string(),
     })
 }
 
@@ -2763,7 +2864,6 @@ mod tests {
     // ── DocSource integration tests (Phase 2 acceptance tests — unskipped in Phase 3) ──
 
     #[test]
-    #[ignore = "phase 3"]
     fn doc_source_worktree_indexes_uncommitted_changes() {
         // Baseline: untracked wiki file is visible under WorkingTree (default).
         let repo = TestRepo::new();
@@ -2780,7 +2880,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "phase 3"]
     fn doc_source_index_indexes_staged_only() {
         // File staged but not committed: visible under Index, invisible under Head.
         let repo = TestRepo::new();
@@ -2801,6 +2900,7 @@ mod tests {
             WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Index)
                 .expect("prepare index");
         assert!(idx.resolve_page("StagedDoc").expect("resolve").is_some());
+        drop(idx);
 
         // Head mode does not see it.
         let head =
@@ -2810,7 +2910,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "phase 3"]
     fn doc_source_head_indexes_committed_only() {
         // File deleted in index but present at HEAD: visible under Head, absent under Index.
         let repo = TestRepo::new();
@@ -2830,6 +2929,7 @@ mod tests {
             WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Head)
                 .expect("prepare head");
         assert!(head.resolve_page("CommittedDoc").expect("resolve").is_some());
+        drop(head);
 
         // Index mode does not see it.
         let idx =
@@ -2839,7 +2939,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "phase 3"]
     fn doc_source_index_sees_staged_pre_worktree_edit() {
         // Committed v1, staged v2, worktree has v3.
         // Index mode should index v2 content (summary "staged v2").
@@ -2873,7 +2972,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "phase 3"]
     fn doc_source_head_sees_committed_pre_stage() {
         // Committed v1, staged v2.
         // Head mode should see v1 content (summary "committed v1").
@@ -2901,7 +2999,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "phase 3"]
     fn doc_source_index_excludes_worktree_only_addition() {
         // File never staged, never committed: invisible under Index.
         let repo = TestRepo::new();
@@ -2925,7 +3022,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "phase 3"]
     fn doc_source_toggle_triggers_full_rescan() {
         // Run with WorkingTree first (worktree-only file is present),
         // then run with Head (file absent at HEAD), assert no stale row.
@@ -2968,7 +3064,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "phase 3"]
     fn doc_source_default_unchanged_from_baseline() {
         // prepare() with no source override must produce the same results
         // as prepare_with_namespace(..., DocSource::WorkingTree).
@@ -2980,11 +3075,12 @@ mod tests {
         );
 
         let default_index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare default");
+        let default_pages = default_index.list_pages(None).expect("list default");
+        drop(default_index);
+
         let wt_index =
             WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::WorkingTree)
                 .expect("prepare wt");
-
-        let default_pages = default_index.list_pages(None).expect("list default");
         let wt_pages = wt_index.list_pages(None).expect("list wt");
 
         let default_titles: std::collections::BTreeSet<_> =

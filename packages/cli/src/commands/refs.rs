@@ -4,7 +4,7 @@ use std::path::Path;
 use miette::Result;
 use serde::Serialize;
 
-use crate::index::WikiIndex;
+use crate::index::{DocSource, WikiIndex};
 use crate::parser::parse_wikilinks;
 use crate::wiki_config::WikiConfig;
 
@@ -65,12 +65,13 @@ pub fn run_multi(
     targets: &[(String, &Path)],
     repo_root: &Path,
     wiki_config: Option<&WikiConfig>,
+    source: DocSource,
 ) -> Result<i32> {
     let mut any_resolved_source = false;
     if json {
         let mut out: Vec<serde_json::Value> = Vec::new();
         for (label, wiki_root) in targets {
-            let index = WikiIndex::prepare(wiki_root, repo_root)?;
+            let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
             let Some(page) = index.resolve_page(title)? else {
                 continue;
             };
@@ -99,7 +100,7 @@ pub fn run_multi(
 
     let mut first = true;
     for (label, wiki_root) in targets {
-        let index = WikiIndex::prepare(wiki_root, repo_root)?;
+        let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
         let Some(page) = index.resolve_page(title)? else {
             continue;
         };
@@ -221,8 +222,9 @@ pub fn run(
     wiki_root: &Path,
     repo_root: &Path,
     wiki_config: Option<&WikiConfig>,
+    source: DocSource,
 ) -> Result<i32> {
-    let index = WikiIndex::prepare(wiki_root, repo_root)?;
+    let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
     let Some(page) = index.resolve_page(title)? else {
         if json {
             eprintln!(
@@ -422,7 +424,7 @@ mod tests {
             "---\ntitle: Other\nsummary: Other page.\n---\nBody.\n",
         );
 
-        let code = run("Nonexistent", true, &wiki_root, repo.path(), None).expect("run");
+        let code = run("Nonexistent", true, &wiki_root, repo.path(), None, crate::index::DocSource::WorkingTree).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -435,7 +437,7 @@ mod tests {
             "---\ntitle: Source\nsummary: Source page.\n---\n[[Missing]]\n",
         );
 
-        let code = run("Source", true, &wiki_root, repo.path(), None).expect("run");
+        let code = run("Source", true, &wiki_root, repo.path(), None, crate::index::DocSource::WorkingTree).expect("run");
         assert_eq!(code, 0);
     }
 

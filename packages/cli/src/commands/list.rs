@@ -4,7 +4,7 @@ use miette::Result;
 use serde::Serialize;
 use serde_json::json;
 
-use crate::index::{PageListEntry, WikiIndex};
+use crate::index::{DocSource, PageListEntry, WikiIndex};
 
 #[derive(Debug, Serialize)]
 pub struct PageEntry {
@@ -17,11 +17,11 @@ pub struct PageEntry {
 
 /// Run `list` across multiple namespaces sequentially. `targets` is
 /// `(namespace_label, wiki_root)` in dispatch order. Output is labeled by namespace.
-pub fn run_multi(tag: Option<&str>, json: bool, targets: &[(String, &Path)], repo_root: &Path) -> Result<i32> {
+pub fn run_multi(tag: Option<&str>, json: bool, targets: &[(String, &Path)], repo_root: &Path, source: DocSource) -> Result<i32> {
     if json {
         let mut out: Vec<serde_json::Value> = Vec::new();
         for (label, wiki_root) in targets {
-            let index = WikiIndex::prepare(wiki_root, repo_root)?;
+            let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
             let entries = index.list_pages(tag)?.into_iter().map(page_entry).collect::<Vec<_>>();
             for entry in entries {
                 let mut v = serde_json::to_value(&entry).unwrap();
@@ -36,7 +36,7 @@ pub fn run_multi(tag: Option<&str>, json: bool, targets: &[(String, &Path)], rep
     }
 
     for (label, wiki_root) in targets {
-        let index = WikiIndex::prepare(wiki_root, repo_root)?;
+        let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
         let entries = index.list_pages(tag)?.into_iter().map(page_entry).collect::<Vec<_>>();
         for entry in &entries {
             println!("[{label}] **{}** — `{}`", entry.title, entry.file);
@@ -62,8 +62,8 @@ pub fn run_multi(tag: Option<&str>, json: bool, targets: &[(String, &Path)], rep
     Ok(0)
 }
 
-pub fn run(_globs: &[String], tag: Option<&str>, json: bool, wiki_root: &Path, repo_root: &Path) -> Result<i32> {
-    let index = WikiIndex::prepare(wiki_root, repo_root)?;
+pub fn run(_globs: &[String], tag: Option<&str>, json: bool, wiki_root: &Path, repo_root: &Path, source: DocSource) -> Result<i32> {
+    let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
     let entries = index
         .list_pages(tag)?
         .into_iter()
@@ -186,7 +186,7 @@ mod tests {
             ("ns-a".to_string(), wiki_a.as_path()),
             ("ns-b".to_string(), wiki_b.as_path()),
         ];
-        let code = run_multi(None, false, &targets, repo.path()).expect("run_multi");
+        let code = run_multi(None, false, &targets, repo.path(), crate::index::DocSource::WorkingTree).expect("run_multi");
         assert_eq!(code, 0);
     }
 
@@ -207,7 +207,7 @@ mod tests {
             ("ns-a".to_string(), wiki_a.as_path()),
             ("ns-b".to_string(), wiki_b.as_path()),
         ];
-        let code = run_multi(None, true, &targets, repo.path()).expect("run_multi json");
+        let code = run_multi(None, true, &targets, repo.path(), crate::index::DocSource::WorkingTree).expect("run_multi json");
         assert_eq!(code, 0);
     }
 
@@ -229,7 +229,7 @@ mod tests {
             ("ns-b".to_string(), wiki_b.as_path()),
         ];
         // Filter by "core" tag — only alpha matches; should still exit 0
-        let code = run_multi(Some("core"), false, &targets, repo.path()).expect("run_multi tag");
+        let code = run_multi(Some("core"), false, &targets, repo.path(), crate::index::DocSource::WorkingTree).expect("run_multi tag");
         assert_eq!(code, 0);
     }
 }

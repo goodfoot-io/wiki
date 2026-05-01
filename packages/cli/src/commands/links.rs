@@ -4,7 +4,7 @@ use miette::Result;
 use serde_json::json;
 
 use crate::commands::{looks_like_path, normalize_repo_relative_path};
-use crate::index::{SearchResult, WikiIndex};
+use crate::index::{DocSource, SearchResult, WikiIndex};
 
 use super::summary::{format_search_result, render_not_found};
 
@@ -14,6 +14,7 @@ pub fn run_multi(
     json: bool,
     targets: &[(String, &Path)],
     repo_root: &Path,
+    source: DocSource,
 ) -> Result<i32> {
     let single = targets.len() == 1;
 
@@ -24,7 +25,7 @@ pub fn run_multi(
     // when peers point at the same directory).
     let mut page_target_keys: Vec<String> = Vec::new();
     for (_label, wiki_root) in targets {
-        let index = WikiIndex::prepare(wiki_root, repo_root)?;
+        let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
         if let Some(keys) = index.lookup_keys_for(target)? {
             page_target_keys = keys;
             break;
@@ -43,7 +44,7 @@ pub fn run_multi(
     if json {
         let mut out: Vec<serde_json::Value> = Vec::new();
         for (label, wiki_root) in targets {
-            let index = WikiIndex::prepare(wiki_root, repo_root)?;
+            let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
             let matches = index.links_with_keys(&page_target_keys, file_target.as_deref(), target)?;
             for m in matches {
                 let mut v = serde_json::to_value(&m).unwrap();
@@ -56,7 +57,7 @@ pub fn run_multi(
         if out.is_empty() && !looks_like_path(target) && !resolved_anywhere {
             let mut all_suggestions: Vec<SearchResult> = Vec::new();
             for (_label, wiki_root) in targets {
-                let index = WikiIndex::prepare(wiki_root, repo_root)?;
+                let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
                 let suggestions = index.suggest(target)?;
                 for s in suggestions {
                     if !all_suggestions.iter().any(|existing| existing.title == s.title) {
@@ -80,7 +81,7 @@ pub fn run_multi(
     let mut any = false;
     let mut first = true;
     for (label, wiki_root) in targets {
-        let index = WikiIndex::prepare(wiki_root, repo_root)?;
+        let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
         let matches = index.links_with_keys(&page_target_keys, file_target.as_deref(), target)?;
         for result in &matches {
             if !first {
@@ -98,7 +99,7 @@ pub fn run_multi(
     if !any && !looks_like_path(target) && !resolved_anywhere {
         let mut all_suggestions: Vec<SearchResult> = Vec::new();
         for (_label, wiki_root) in targets {
-            let index = WikiIndex::prepare(wiki_root, repo_root)?;
+            let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
             let suggestions = index.suggest(target)?;
             for s in suggestions {
                 if !all_suggestions.iter().any(|existing| existing.title == s.title) {
@@ -111,8 +112,8 @@ pub fn run_multi(
     Ok(0)
 }
 
-pub fn run(target: &str, json: bool, wiki_root: &Path, repo_root: &Path) -> Result<i32> {
-    let index = WikiIndex::prepare(wiki_root, repo_root)?;
+pub fn run(target: &str, json: bool, wiki_root: &Path, repo_root: &Path, source: DocSource) -> Result<i32> {
+    let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
     let matches = index.links(target)?;
 
     if matches.is_empty() {
@@ -216,7 +217,7 @@ mod tests {
             "---\ntitle: Source Page\nsummary: Source summary.\n---\nSee [[Target Page]] for context.\n",
         );
 
-        let code = run("Target Page", false, &wiki_root, repo.path()).expect("run");
+        let code = run("Target Page", false, &wiki_root, repo.path(), crate::index::DocSource::WorkingTree).expect("run");
         assert_eq!(code, 0);
 
         let results = WikiIndex::prepare(&wiki_root, repo.path())
@@ -239,7 +240,7 @@ mod tests {
             "---\ntitle: Foo Bar\nsummary: Describes the foo bar module.\n---\nSee [bar](packages/foo/bar.ts) for details.\n",
         );
 
-        let code = run("packages/foo/bar.ts", false, &wiki_root, repo.path()).expect("run");
+        let code = run("packages/foo/bar.ts", false, &wiki_root, repo.path(), crate::index::DocSource::WorkingTree).expect("run");
         assert_eq!(code, 0);
 
         let results = WikiIndex::prepare(&wiki_root, repo.path())
@@ -288,7 +289,7 @@ mod tests {
             "---\ntitle: Page\nsummary: A page.\n---\nNo references.\n",
         );
 
-        let code = run("packages/nonexistent/file.ts", false, &wiki_root, repo.path()).expect("run");
+        let code = run("packages/nonexistent/file.ts", false, &wiki_root, repo.path(), crate::index::DocSource::WorkingTree).expect("run");
         assert_eq!(code, 0);
     }
 
@@ -313,7 +314,7 @@ mod tests {
             ("ns-b".to_string(), wiki_root.as_path()),
         ];
 
-        let code = run_multi("Target Page", false, &targets, repo.path()).expect("run_multi");
+        let code = run_multi("Target Page", false, &targets, repo.path(), crate::index::DocSource::WorkingTree).expect("run_multi");
         assert_eq!(code, 0);
     }
 
@@ -334,11 +335,11 @@ mod tests {
         // Capture stdout by verifying the index directly — the label suppression
         // is verified by ensuring run_multi returns 0 and finds results without panicking.
         // The absence of "[default]" in output is structural (single == true branch).
-        let code = run_multi("Target Page", false, &targets, repo.path()).expect("run_multi");
+        let code = run_multi("Target Page", false, &targets, repo.path(), crate::index::DocSource::WorkingTree).expect("run_multi");
         assert_eq!(code, 0);
 
         // JSON mode: verify no "namespace" field inserted for single target.
-        let code_json = run_multi("Target Page", true, &targets, repo.path()).expect("run_multi json");
+        let code_json = run_multi("Target Page", true, &targets, repo.path(), crate::index::DocSource::WorkingTree).expect("run_multi json");
         assert_eq!(code_json, 0);
     }
 
@@ -352,7 +353,7 @@ mod tests {
             "---\ntitle: Foo Bar\nsummary: Summary.\n---\nSee [bar](packages/foo/bar.ts).\n",
         );
 
-        let code = run("./packages/foo/bar.ts", false, &wiki_root, repo.path()).expect("run");
+        let code = run("./packages/foo/bar.ts", false, &wiki_root, repo.path(), crate::index::DocSource::WorkingTree).expect("run");
         assert_eq!(code, 0);
     }
 }

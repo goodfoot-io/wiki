@@ -3,7 +3,7 @@ use std::path::Path;
 use miette::Result;
 use serde::Serialize;
 
-use crate::index::{ResolvedPage, SearchResult, WikiIndex};
+use crate::index::{DocSource, ResolvedPage, SearchResult, WikiIndex};
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct SummaryOutput {
@@ -77,11 +77,12 @@ pub fn run_multi(
     json: bool,
     targets: &[(String, &Path)],
     repo_root: &Path,
+    source: DocSource,
 ) -> Result<i32> {
     if json {
         let mut out: Vec<serde_json::Value> = Vec::new();
         for (label, wiki_root) in targets {
-            let index = WikiIndex::prepare(wiki_root, repo_root)?;
+            let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
             if let Some(page) = index.resolve_page(title)? {
                 let so = summary_output(page);
                 let mut v = serde_json::to_value(&so).unwrap();
@@ -108,7 +109,7 @@ pub fn run_multi(
     let mut any = false;
     let mut first = true;
     for (label, wiki_root) in targets {
-        let index = WikiIndex::prepare(wiki_root, repo_root)?;
+        let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
         if let Some(page) = index.resolve_page(title)? {
             let output = summary_output(page);
             if !first {
@@ -126,8 +127,8 @@ pub fn run_multi(
     Ok(0)
 }
 
-pub fn run(title: &str, json: bool, wiki_root: &Path, repo_root: &Path) -> Result<i32> {
-    let index = WikiIndex::prepare(wiki_root, repo_root)?;
+pub fn run(title: &str, json: bool, wiki_root: &Path, repo_root: &Path, source: DocSource) -> Result<i32> {
+    let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
     match index.resolve_page(title)? {
         Some(page) => {
             let output = summary_output(page);

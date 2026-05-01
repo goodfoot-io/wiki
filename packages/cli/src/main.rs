@@ -352,8 +352,7 @@ fn main() {
         .clone()
         .or_else(|| subcommand_namespace(&cli.command));
 
-    // Phase 3 will thread `_source` through `run()` and into command call sites.
-    let _source: index::DocSource = match cli.source {
+    let source: index::DocSource = match cli.source {
         SourceArg::Worktree => index::DocSource::WorkingTree,
         SourceArg::Index => index::DocSource::Index,
         SourceArg::Head => index::DocSource::Head,
@@ -366,6 +365,7 @@ fn main() {
         cli.offset,
         namespace,
         json,
+        source,
     );
 
     match result {
@@ -388,6 +388,7 @@ fn run(
     offset: usize,
     namespace: Option<String>,
     json: bool,
+    source: index::DocSource,
 ) -> Result<i32> {
     let repo_root = git::repo_root()?;
     let cwd = std::env::current_dir().unwrap_or_else(|_| repo_root.clone());
@@ -451,7 +452,7 @@ fn run(
                 let inputs = resolve_inputs(target, read_stdin_lines)?;
                 run_for_each(
                     inputs,
-                    |input| commands::links::run_multi(input, json, &targets, &repo_root),
+                    |input| commands::links::run_multi(input, json, &targets, &repo_root, source),
                     false,
                 )
             }
@@ -459,7 +460,7 @@ fn run(
                 let inputs = resolve_inputs(title, read_stdin_lines)?;
                 run_for_each(
                     inputs,
-                    |input| commands::summary::run_multi(input, json, &targets, &repo_root),
+                    |input| commands::summary::run_multi(input, json, &targets, &repo_root, source),
                     false,
                 )
             }
@@ -467,15 +468,15 @@ fn run(
                 let inputs = resolve_inputs(title, read_stdin_lines)?;
                 run_for_each(
                     inputs,
-                    |input| commands::refs::run_multi(input, json, &targets, &repo_root, Some(cfg)),
+                    |input| commands::refs::run_multi(input, json, &targets, &repo_root, Some(cfg), source),
                     false,
                 )
             }
             Some(Commands::List { tag, namespace: _ }) => {
-                commands::list::run_multi(tag.as_deref(), json, &targets, &repo_root)
+                commands::list::run_multi(tag.as_deref(), json, &targets, &repo_root, source)
             }
             None => match effective_query.as_deref() {
-                Some(q) => commands::search::run_multi(q, limit, offset, json, &targets, &repo_root),
+                Some(q) => commands::search::run_multi(q, limit, offset, json, &targets, &repo_root, source),
                 None => {
                     return Err(miette::miette!(
                         "`-n '*'` requires a query or one of: {SUPPORTED_MULTI_NS}"
@@ -542,13 +543,13 @@ fn run(
                     .collect();
                 run_for_each(
                     inputs,
-                    |input| commands::links::run_multi(input, json, &all_targets, &repo_root),
+                    |input| commands::links::run_multi(input, json, &all_targets, &repo_root, source),
                     false,
                 )
             } else {
                 run_for_each(
                     inputs,
-                    |input| commands::links::run(input, json, wiki_root, &repo_root),
+                    |input| commands::links::run(input, json, wiki_root, &repo_root, source),
                     false,
                 )
             }
@@ -561,7 +562,7 @@ fn run(
                 ));
             }
             let input = lines.join("\n");
-            commands::extract::run(&input, json, wiki_root, &repo_root)
+            commands::extract::run(&input, json, wiki_root, &repo_root, source)
         }
         Some(Commands::Hook) => {
             let lines = read_stdin_lines();
@@ -569,13 +570,13 @@ fn run(
             commands::hook_check::run(&input, wiki_root, &repo_root)
         }
         Some(Commands::List { tag, namespace: _ }) => {
-            commands::list::run(&[], tag.as_deref(), json, wiki_root, &repo_root)
+            commands::list::run(&[], tag.as_deref(), json, wiki_root, &repo_root, source)
         }
         Some(Commands::Summary { title, namespace: _ }) => {
             let inputs = resolve_inputs(title, read_stdin_lines)?;
             run_for_each(
                 inputs,
-                |input| commands::summary::run(input, json, wiki_root, &repo_root),
+                |input| commands::summary::run(input, json, wiki_root, &repo_root, source),
                 false,
             )
         }
@@ -583,7 +584,7 @@ fn run(
             let inputs = resolve_inputs(title, read_stdin_lines)?;
             run_for_each(
                 inputs,
-                |input| commands::refs::run(input, json, wiki_root, &repo_root, config.as_ref()),
+                |input| commands::refs::run(input, json, wiki_root, &repo_root, config.as_ref(), source),
                 false,
             )
         }
@@ -613,7 +614,7 @@ fn run(
         }
         None => match effective_query.as_deref() {
             Some(query) => {
-                commands::search::run(query, limit, offset, json, wiki_root, &repo_root)
+                commands::search::run(query, limit, offset, json, wiki_root, &repo_root, source)
             }
             None => {
                 // No subcommand and no query: print help and the wiki README.

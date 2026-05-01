@@ -301,44 +301,252 @@ fn parse_line_paths(out: &str) -> Vec<String> {
     paths
 }
 
-// ─── Index / HEAD helpers (Phase 3 implements; stubs compile for Phase 1) ────
+// ─── Index / HEAD helpers ─────────────────────────────────────────────────────
 
 /// Return repo-relative UTF-8 paths of all entries in the git index.
-#[allow(dead_code)]
-pub fn index_tracked_paths(_repo: &Path) -> Result<Vec<String>> {
-    todo!("phase 3")
+pub fn index_tracked_paths(repo: &Path) -> Result<Vec<String>> {
+    let repo = open_repo(repo)?;
+    let mut paths = Vec::new();
+    for_each_tracked_path(&repo, |path| {
+        paths.push(utf8_repo_path(path, "git index path is not valid UTF-8")?);
+        Ok(())
+    })?;
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 /// Read the blob content for `path_rel` from the git index, or `None` if the
 /// path is not present in the index.
-#[allow(dead_code)]
-pub fn read_index_blob(_repo: &Path, _path_rel: &str) -> Result<Option<String>> {
-    todo!("phase 3")
+pub fn read_index_blob(repo: &Path, path_rel: &str) -> Result<Option<String>> {
+    let repo = open_repo(repo)?;
+    let index = repo
+        .index_or_load_from_head_or_empty()
+        .into_diagnostic()
+        .wrap_err("failed to load git index for blob read")?;
+
+    let entry_id = match &index {
+        gix::worktree::IndexPersistedOrInMemory::Persisted(idx) => {
+            idx.entry_by_path(gix::bstr::BStr::new(path_rel.as_bytes()))
+                .map(|e| e.id)
+        }
+        gix::worktree::IndexPersistedOrInMemory::InMemory(idx) => {
+            idx.entry_by_path(gix::bstr::BStr::new(path_rel.as_bytes()))
+                .map(|e| e.id)
+        }
+    };
+
+    let Some(id) = entry_id else {
+        return Ok(None);
+    };
+
+    let object = repo
+        .find_object(id)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to read blob for index entry '{path_rel}'"))?;
+    let content = String::from_utf8(object.data.to_vec())
+        .into_diagnostic()
+        .wrap_err_with(|| format!("blob for '{path_rel}' is not valid UTF-8"))?;
+    Ok(Some(content))
 }
 
 /// Return repo-relative UTF-8 paths of all entries reachable from `HEAD`.
-#[allow(dead_code)]
-pub fn head_tracked_paths(_repo: &Path) -> Result<Vec<String>> {
-    todo!("phase 3")
+pub fn head_tracked_paths(repo: &Path) -> Result<Vec<String>> {
+    let repo = open_repo(repo)?;
+    let mut head = repo
+        .head()
+        .into_diagnostic()
+        .wrap_err("failed to read HEAD for tree traversal")?;
+    let commit_id = head
+        .try_peel_to_id()
+        .into_diagnostic()
+        .wrap_err("failed to peel HEAD to commit id")?
+        .ok_or_else(|| miette!("HEAD is unborn — no tree to traverse"))?;
+    let commit = repo
+        .find_object(commit_id)
+        .into_diagnostic()
+        .wrap_err("failed to find HEAD commit object")?
+        .try_into_commit()
+        .map_err(|_| miette!("HEAD object is not a commit"))?;
+    let tree = commit
+        .tree()
+        .into_diagnostic()
+        .wrap_err("failed to read tree from HEAD commit")?;
+
+    let mut paths = Vec::new();
+    for_each_tree_entry_recursive(&repo, tree.id, &mut String::new(), &mut paths)?;
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn for_each_tree_entry_recursive(
+    repo: &gix::Repository,
+    tree_id: gix::ObjectId,
+    prefix: &mut String,
+    paths: &mut Vec<String>,
+) -> Result<()> {
+    let tree_obj = repo
+        .find_object(tree_id)
+        .into_diagnostic()
+        .wrap_err("failed to find tree object")?;
+    let tree = tree_obj
+        .try_into_tree()
+        .map_err(|_| miette!("object is not a tree"))?;
+
+    for entry_ref in tree.iter() {
+        let entry = entry_ref
+            .into_diagnostic()
+            .wrap_err("failed to decode tree entry")?;
+        let name = std::str::from_utf8(entry.filename())
+            .into_diagnostic()
+            .wrap_err("tree entry name is not valid UTF-8")?;
+        let path = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        match entry.mode().kind() {
+            gix::object::tree::EntryKind::Tree => {
+                let sub_id = entry.object_id();
+                let prev_len = prefix.len();
+                if prefix.is_empty() {
+                    prefix.push_str(name);
+                } else {
+                    prefix.push('/');
+                    prefix.push_str(name);
+                }
+                for_each_tree_entry_recursive(repo, sub_id, prefix, paths)?;
+                prefix.truncate(prev_len);
+            }
+            gix::object::tree::EntryKind::Blob | gix::object::tree::EntryKind::BlobExecutable => {
+                paths.push(path);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Read the blob content for `path_rel` from the `HEAD` tree, or `None` if the
 /// path is absent at HEAD.
-#[allow(dead_code)]
-pub fn read_head_blob(_repo: &Path, _path_rel: &str) -> Result<Option<String>> {
-    todo!("phase 3")
+pub fn read_head_blob(repo: &Path, path_rel: &str) -> Result<Option<String>> {
+    let repo = open_repo(repo)?;
+    let mut head = repo
+        .head()
+        .into_diagnostic()
+        .wrap_err("failed to read HEAD for blob read")?;
+    let commit_id = head
+        .try_peel_to_id()
+        .into_diagnostic()
+        .wrap_err("failed to peel HEAD to commit id")?
+        .ok_or_else(|| miette!("HEAD is unborn"))?;
+    let commit = repo
+        .find_object(commit_id)
+        .into_diagnostic()
+        .wrap_err("failed to find HEAD commit")?
+        .try_into_commit()
+        .map_err(|_| miette!("HEAD is not a commit"))?;
+    let tree = commit
+        .tree()
+        .into_diagnostic()
+        .wrap_err("failed to read HEAD tree")?;
+
+    // Walk the path components to find the blob.
+    let parts: Vec<&str> = path_rel.split('/').collect();
+    let mut current_tree_id = tree.id;
+
+    for (i, part) in parts.iter().enumerate() {
+        let is_last = i == parts.len() - 1;
+        let tree_obj = repo
+            .find_object(current_tree_id)
+            .into_diagnostic()
+            .wrap_err("failed to find tree object during path walk")?;
+        let tree = tree_obj
+            .try_into_tree()
+            .map_err(|_| miette!("object is not a tree during path walk"))?;
+
+        let mut found = false;
+        for entry_ref in tree.iter() {
+            let entry = entry_ref
+                .into_diagnostic()
+                .wrap_err("failed to decode tree entry")?;
+            let name = std::str::from_utf8(entry.filename())
+                .into_diagnostic()
+                .wrap_err("tree entry name is not valid UTF-8")?;
+            if name != *part {
+                continue;
+            }
+            found = true;
+            if is_last {
+                let object = repo
+                    .find_object(entry.object_id())
+                    .into_diagnostic()
+                    .wrap_err_with(|| format!("failed to read blob for '{path_rel}'"))?;
+                let content = String::from_utf8(object.data.to_vec())
+                    .into_diagnostic()
+                    .wrap_err_with(|| format!("blob '{path_rel}' is not valid UTF-8"))?;
+                return Ok(Some(content));
+            } else {
+                current_tree_id = entry.object_id();
+            }
+            break;
+        }
+        if !found {
+            return Ok(None);
+        }
+    }
+    Ok(None)
 }
 
 /// Return `true` if `path_rel` has an entry in the git index.
 #[allow(dead_code)]
-pub fn has_index_entry(_repo: &Path, _path_rel: &str) -> Result<bool> {
-    todo!("phase 3")
+pub fn has_index_entry(repo: &Path, path_rel: &str) -> Result<bool> {
+    let repo = open_repo(repo)?;
+    let index = repo
+        .index_or_load_from_head_or_empty()
+        .into_diagnostic()
+        .wrap_err("failed to load git index for entry probe")?;
+    let found = match &index {
+        gix::worktree::IndexPersistedOrInMemory::Persisted(idx) => {
+            idx.entry_by_path(gix::bstr::BStr::new(path_rel.as_bytes()))
+                .is_some()
+        }
+        gix::worktree::IndexPersistedOrInMemory::InMemory(idx) => {
+            idx.entry_by_path(gix::bstr::BStr::new(path_rel.as_bytes()))
+                .is_some()
+        }
+    };
+    Ok(found)
 }
 
 /// Return `true` if `path_rel` exists in the `HEAD` tree.
 #[allow(dead_code)]
-pub fn has_head_entry(_repo: &Path, _path_rel: &str) -> Result<bool> {
-    todo!("phase 3")
+pub fn has_head_entry(repo: &Path, path_rel: &str) -> Result<bool> {
+    Ok(read_head_blob(repo, path_rel)?.is_some())
+}
+
+/// Return a liveness signal for the git index, used as the cache-revision key
+/// for `DocSource::Index`.  The signal is `"<mtime_ns>:<size_bytes>"` from the
+/// `.git/index` file.  When the file does not exist (empty repo, unborn HEAD)
+/// the string `"empty"` is returned so callers can still store and compare it.
+pub fn index_revision_signal(repo: &Path) -> Result<String> {
+    // `gix::open` resolves the `.git` directory from the work-tree path.
+    let gix_repo = open_repo(repo)?;
+    let index_path = gix_repo.path().join("index");
+    match std::fs::metadata(&index_path) {
+        Ok(meta) => {
+            use std::time::UNIX_EPOCH;
+            let mtime_ns = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            Ok(format!("{}:{}", mtime_ns, meta.len()))
+        }
+        Err(_) => Ok("empty".to_string()),
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -544,7 +752,6 @@ mod tests {
     // ── index / HEAD helper tests (Phase 2 acceptance tests — unskipped in Phase 3) ──
 
     #[test]
-    #[ignore = "phase 3"]
     fn index_tracked_paths_returns_staged_entries() {
         let repo = TestRepo::new();
         repo.create_file("staged.md", "content\n");
@@ -555,7 +762,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "phase 3"]
     fn index_tracked_paths_excludes_untracked() {
         let repo = TestRepo::new();
         repo.create_file("staged.md", "content\n");
@@ -567,7 +773,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "phase 3"]
     fn read_index_blob_returns_staged_content() {
         // Commit v1, then stage v2; the index holds v2, worktree has v2.
         // The test verifies that index_blob returns the staged (v2) content,
@@ -585,7 +790,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "phase 3"]
     fn read_index_blob_returns_none_for_absent_path() {
         let repo = TestRepo::new();
         repo.create_file("other.md", "content\n");
@@ -596,7 +800,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "phase 3"]
     fn head_tracked_paths_returns_committed_entries() {
         let repo = TestRepo::new();
         repo.create_file("committed.md", "content\n");
@@ -607,7 +810,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "phase 3"]
     fn head_tracked_paths_excludes_staged_only() {
         let repo = TestRepo::new();
         repo.create_file("committed.md", "content\n");
@@ -620,7 +822,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "phase 3"]
     fn read_head_blob_returns_committed_content() {
         // Commit v1, then stage v2; HEAD still holds v1.
         let repo = TestRepo::new();
@@ -636,7 +837,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "phase 3"]
     fn read_head_blob_returns_none_for_absent_path() {
         let repo = TestRepo::new();
         repo.create_file("other.md", "content\n");
@@ -647,7 +847,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "phase 3"]
     fn has_index_entry_true_for_staged() {
         let repo = TestRepo::new();
         repo.create_file("staged.md", "content\n");
@@ -657,7 +856,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "phase 3"]
     fn has_index_entry_false_for_untracked() {
         let repo = TestRepo::new();
         repo.create_file("untracked.md", "content\n");
@@ -666,7 +864,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "phase 3"]
     fn has_head_entry_true_for_committed() {
         let repo = TestRepo::new();
         repo.create_file("committed.md", "content\n");
@@ -676,7 +873,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "phase 3"]
     fn has_head_entry_false_for_staged_only() {
         let repo = TestRepo::new();
         repo.create_file("committed.md", "content\n");
