@@ -2759,4 +2759,239 @@ mod tests {
         assert!(index.resolve_page("Example").expect("resolve").is_none());
         assert!(index.resolve_page("Other").expect("resolve").is_some());
     }
+
+    // ── DocSource integration tests (Phase 2 acceptance tests — unskipped in Phase 3) ──
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn doc_source_worktree_indexes_uncommitted_changes() {
+        // Baseline: untracked wiki file is visible under WorkingTree (default).
+        let repo = TestRepo::new();
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        repo.create_file(
+            "wiki/worktree_only.md",
+            "---\ntitle: WorktreeOnly\nsummary: Worktree baseline.\n---\nBody.\n",
+        );
+
+        let index =
+            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::WorkingTree)
+                .expect("prepare");
+        assert!(index.resolve_page("WorktreeOnly").expect("resolve").is_some());
+    }
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn doc_source_index_indexes_staged_only() {
+        // File staged but not committed: visible under Index, invisible under Head.
+        let repo = TestRepo::new();
+        // Need at least one commit so HEAD exists.
+        repo.create_file("wiki/init.md", "---\ntitle: Init\nsummary: Init.\n---\nBody.\n");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-m", "initial"]);
+
+        repo.create_file(
+            "wiki/staged.md",
+            "---\ntitle: StagedDoc\nsummary: Staged only.\n---\nBody.\n",
+        );
+        repo.git(&["add", "wiki/staged.md"]);
+
+        // Index mode sees it.
+        let idx =
+            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Index)
+                .expect("prepare index");
+        assert!(idx.resolve_page("StagedDoc").expect("resolve").is_some());
+
+        // Head mode does not see it.
+        let head =
+            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Head)
+                .expect("prepare head");
+        assert!(head.resolve_page("StagedDoc").expect("resolve").is_none());
+    }
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn doc_source_head_indexes_committed_only() {
+        // File deleted in index but present at HEAD: visible under Head, absent under Index.
+        let repo = TestRepo::new();
+        repo.create_file(
+            "wiki/committed.md",
+            "---\ntitle: CommittedDoc\nsummary: Committed.\n---\nBody.\n",
+        );
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-m", "initial"]);
+
+        // Remove from index (staged deletion).
+        repo.git(&["rm", "--cached", "wiki/committed.md"]);
+
+        // Head mode still sees it.
+        let head =
+            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Head)
+                .expect("prepare head");
+        assert!(head.resolve_page("CommittedDoc").expect("resolve").is_some());
+
+        // Index mode does not see it.
+        let idx =
+            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Index)
+                .expect("prepare index");
+        assert!(idx.resolve_page("CommittedDoc").expect("resolve").is_none());
+    }
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn doc_source_index_sees_staged_pre_worktree_edit() {
+        // Committed v1, staged v2, worktree has v3.
+        // Index mode should index v2 content (summary "staged v2").
+        let repo = TestRepo::new();
+        repo.create_file(
+            "wiki/doc.md",
+            "---\ntitle: VersionDoc\nsummary: committed v1.\n---\nBody v1.\n",
+        );
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-m", "initial"]);
+
+        repo.create_file(
+            "wiki/doc.md",
+            "---\ntitle: VersionDoc\nsummary: staged v2.\n---\nBody v2.\n",
+        );
+        repo.git(&["add", "wiki/doc.md"]);
+
+        // Further worktree edit (not staged).
+        repo.create_file(
+            "wiki/doc.md",
+            "---\ntitle: VersionDoc\nsummary: worktree v3.\n---\nBody v3.\n",
+        );
+
+        let index =
+            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Index)
+                .expect("prepare");
+        let pages = index.list_pages(None).expect("list_pages");
+        let doc = pages.iter().find(|p| p.title == "VersionDoc").expect("page");
+        assert!(doc.summary.contains("staged v2"));
+    }
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn doc_source_head_sees_committed_pre_stage() {
+        // Committed v1, staged v2.
+        // Head mode should see v1 content (summary "committed v1").
+        let repo = TestRepo::new();
+        repo.create_file(
+            "wiki/doc.md",
+            "---\ntitle: VersionDoc\nsummary: committed v1.\n---\nBody v1.\n",
+        );
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-m", "initial"]);
+
+        repo.create_file(
+            "wiki/doc.md",
+            "---\ntitle: VersionDoc\nsummary: staged v2.\n---\nBody v2.\n",
+        );
+        repo.git(&["add", "wiki/doc.md"]);
+
+        let index =
+            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Head)
+                .expect("prepare");
+        let pages = index.list_pages(None).expect("list_pages");
+        let doc = pages.iter().find(|p| p.title == "VersionDoc").expect("page");
+        assert!(doc.summary.contains("committed v1"));
+    }
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn doc_source_index_excludes_worktree_only_addition() {
+        // File never staged, never committed: invisible under Index.
+        let repo = TestRepo::new();
+        repo.create_file("wiki/init.md", "---\ntitle: Init\nsummary: Init.\n---\nBody.\n");
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-m", "initial"]);
+
+        repo.create_file(
+            "wiki/worktree_only.md",
+            "---\ntitle: WorktreeOnly\nsummary: Never staged.\n---\nBody.\n",
+        );
+
+        let index =
+            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Index)
+                .expect("prepare");
+        assert!(index
+            .resolve_page("WorktreeOnly")
+            .expect("resolve")
+            .is_none());
+    }
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn doc_source_toggle_triggers_full_rescan() {
+        // Run with WorkingTree first (worktree-only file is present),
+        // then run with Head (file absent at HEAD), assert no stale row.
+        let repo = TestRepo::new();
+        repo.create_file(
+            "wiki/committed.md",
+            "---\ntitle: Committed\nsummary: Committed doc.\n---\nBody.\n",
+        );
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-m", "initial"]);
+
+        repo.create_file(
+            "wiki/worktree_only.md",
+            "---\ntitle: WorktreeOnly\nsummary: Never staged.\n---\nBody.\n",
+        );
+
+        // Run 1: WorkingTree — worktree-only file is visible.
+        let wt =
+            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::WorkingTree)
+                .expect("prepare worktree");
+        assert!(wt
+            .resolve_page("WorktreeOnly")
+            .expect("resolve")
+            .is_some());
+        drop(wt);
+
+        // Run 2: Head — worktree-only file must not appear (stale row must not survive).
+        let head =
+            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Head)
+                .expect("prepare head");
+        assert!(head
+            .resolve_page("WorktreeOnly")
+            .expect("resolve")
+            .is_none());
+        assert!(head
+            .resolve_page("Committed")
+            .expect("resolve")
+            .is_some());
+    }
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn doc_source_default_unchanged_from_baseline() {
+        // prepare() with no source override must produce the same results
+        // as prepare_with_namespace(..., DocSource::WorkingTree).
+        let repo = TestRepo::new();
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        repo.create_file(
+            "wiki/example.md",
+            "---\ntitle: Example\nsummary: Sanity check.\n---\nBody.\n",
+        );
+
+        let default_index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare default");
+        let wt_index =
+            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::WorkingTree)
+                .expect("prepare wt");
+
+        let default_pages = default_index.list_pages(None).expect("list default");
+        let wt_pages = wt_index.list_pages(None).expect("list wt");
+
+        let default_titles: std::collections::BTreeSet<_> =
+            default_pages.iter().map(|p| p.title.as_str()).collect();
+        let wt_titles: std::collections::BTreeSet<_> =
+            wt_pages.iter().map(|p| p.title.as_str()).collect();
+
+        assert_eq!(default_titles, wt_titles);
+    }
 }

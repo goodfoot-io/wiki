@@ -540,4 +540,150 @@ mod tests {
             Vec::<String>::new()
         );
     }
+
+    // ── index / HEAD helper tests (Phase 2 acceptance tests — unskipped in Phase 3) ──
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn index_tracked_paths_returns_staged_entries() {
+        let repo = TestRepo::new();
+        repo.create_file("staged.md", "content\n");
+        repo.git(&["add", "staged.md"]);
+
+        let paths = index_tracked_paths(repo.path()).expect("index_tracked_paths");
+        assert!(paths.contains(&"staged.md".to_owned()));
+    }
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn index_tracked_paths_excludes_untracked() {
+        let repo = TestRepo::new();
+        repo.create_file("staged.md", "content\n");
+        repo.git(&["add", "staged.md"]);
+        repo.create_file("untracked.md", "content\n");
+
+        let paths = index_tracked_paths(repo.path()).expect("index_tracked_paths");
+        assert!(!paths.contains(&"untracked.md".to_owned()));
+    }
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn read_index_blob_returns_staged_content() {
+        // Commit v1, then stage v2; the index holds v2, worktree has v2.
+        // The test verifies that index_blob returns the staged (v2) content,
+        // not the committed content.
+        let repo = TestRepo::new();
+        repo.create_file("doc.md", "v1\n");
+        repo.commit("initial");
+        repo.create_file("doc.md", "v2\n");
+        repo.git(&["add", "doc.md"]);
+
+        let content = read_index_blob(repo.path(), "doc.md")
+            .expect("read_index_blob")
+            .expect("expected Some");
+        assert_eq!(content, "v2\n");
+    }
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn read_index_blob_returns_none_for_absent_path() {
+        let repo = TestRepo::new();
+        repo.create_file("other.md", "content\n");
+        repo.git(&["add", "other.md"]);
+
+        let result = read_index_blob(repo.path(), "missing.md").expect("read_index_blob");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn head_tracked_paths_returns_committed_entries() {
+        let repo = TestRepo::new();
+        repo.create_file("committed.md", "content\n");
+        repo.commit("initial");
+
+        let paths = head_tracked_paths(repo.path()).expect("head_tracked_paths");
+        assert!(paths.contains(&"committed.md".to_owned()));
+    }
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn head_tracked_paths_excludes_staged_only() {
+        let repo = TestRepo::new();
+        repo.create_file("committed.md", "content\n");
+        repo.commit("initial");
+        repo.create_file("staged_only.md", "content\n");
+        repo.git(&["add", "staged_only.md"]);
+
+        let paths = head_tracked_paths(repo.path()).expect("head_tracked_paths");
+        assert!(!paths.contains(&"staged_only.md".to_owned()));
+    }
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn read_head_blob_returns_committed_content() {
+        // Commit v1, then stage v2; HEAD still holds v1.
+        let repo = TestRepo::new();
+        repo.create_file("doc.md", "v1\n");
+        repo.commit("initial");
+        repo.create_file("doc.md", "v2\n");
+        repo.git(&["add", "doc.md"]);
+
+        let content = read_head_blob(repo.path(), "doc.md")
+            .expect("read_head_blob")
+            .expect("expected Some");
+        assert_eq!(content, "v1\n");
+    }
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn read_head_blob_returns_none_for_absent_path() {
+        let repo = TestRepo::new();
+        repo.create_file("other.md", "content\n");
+        repo.commit("initial");
+
+        let result = read_head_blob(repo.path(), "missing.md").expect("read_head_blob");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn has_index_entry_true_for_staged() {
+        let repo = TestRepo::new();
+        repo.create_file("staged.md", "content\n");
+        repo.git(&["add", "staged.md"]);
+
+        assert!(has_index_entry(repo.path(), "staged.md").expect("has_index_entry"));
+    }
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn has_index_entry_false_for_untracked() {
+        let repo = TestRepo::new();
+        repo.create_file("untracked.md", "content\n");
+
+        assert!(!has_index_entry(repo.path(), "untracked.md").expect("has_index_entry"));
+    }
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn has_head_entry_true_for_committed() {
+        let repo = TestRepo::new();
+        repo.create_file("committed.md", "content\n");
+        repo.commit("initial");
+
+        assert!(has_head_entry(repo.path(), "committed.md").expect("has_head_entry"));
+    }
+
+    #[test]
+    #[ignore = "phase 3"]
+    fn has_head_entry_false_for_staged_only() {
+        let repo = TestRepo::new();
+        repo.create_file("committed.md", "content\n");
+        repo.commit("initial");
+        repo.create_file("staged_only.md", "content\n");
+        repo.git(&["add", "staged_only.md"]);
+
+        assert!(!has_head_entry(repo.path(), "staged_only.md").expect("has_head_entry"));
+    }
 }
