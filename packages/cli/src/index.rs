@@ -37,10 +37,50 @@ const FTS_COLUMNS: &[(&str, f32)] = &[
 ];
 const SUGGESTION_LIMIT: i64 = 3;
 const SUGGESTION_MIN_SCORE: f64 = 0.5;
-const DISCOVERY_STRATEGY_VERSION: &str = "1";
+const DISCOVERY_STRATEGY_VERSION: &str = "2";
 const HEAD_SHA_KEY: &str = "head_sha";
 const WIKI_DIR_KEY: &str = "wiki_dir";
 const DISCOVERY_STRATEGY_VERSION_KEY: &str = "discovery_strategy_version";
+pub const DOC_SOURCE_KEY: &str = "doc_source";
+
+/// Selects which git snapshot `WikiIndex` reads from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocSource {
+    /// Read from the working tree (default, existing behaviour).
+    WorkingTree,
+    /// Read from the git index (staging area).
+    Index,
+    /// Read from the HEAD commit.
+    Head,
+}
+
+impl DocSource {
+    /// Return repo-relative paths that this source considers present.
+    #[allow(dead_code)]
+    pub fn list_paths(&self, _repo_root: &std::path::Path) -> miette::Result<Vec<String>> {
+        todo!("phase 3")
+    }
+
+    /// Return the UTF-8 content of `path_rel` from this source, or `None` when
+    /// the path is absent in this source.
+    #[allow(dead_code)]
+    pub fn read(
+        &self,
+        _repo_root: &std::path::Path,
+        _path_rel: &str,
+    ) -> miette::Result<Option<String>> {
+        todo!("phase 3")
+    }
+
+    /// Stable string key stored in `index_state` to isolate caches per source.
+    pub fn as_key(&self) -> &'static str {
+        match self {
+            DocSource::WorkingTree => "worktree",
+            DocSource::Index => "index",
+            DocSource::Head => "head",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Snippet {
@@ -159,6 +199,7 @@ struct DiscoveryState {
     head_sha: String,
     wiki_root_abs: String,
     strategy_version: String,
+    source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,6 +223,9 @@ pub struct WikiIndex {
     repo_root: PathBuf,
     /// Namespace of the current wiki this index represents.
     namespace: Option<String>,
+    /// Document source selected for this index session.
+    #[allow(dead_code)]
+    source: DocSource,
     // Held for the lifetime of this index so concurrent `wiki` processes
     // serialize on the same wiki directory. Dropped after `conn`.
     _lock: IndexLock,
@@ -193,13 +237,14 @@ impl WikiIndex {
         // `-n <alias>`) filter *.wiki.md files correctly even when callers use
         // the simpler `prepare` entry point.
         let namespace = read_namespace_from_toml(wiki_root);
-        Self::prepare_with_namespace(wiki_root, repo_root, namespace)
+        Self::prepare_with_namespace(wiki_root, repo_root, namespace, DocSource::WorkingTree)
     }
 
     pub fn prepare_with_namespace(
         wiki_root: &Path,
         repo_root: &Path,
         namespace: Option<String>,
+        source: DocSource,
     ) -> Result<Self> {
         perf::scope_result("index.prepare", json!({}), || {
             let runtime = RuntimeBuilder::new_current_thread()
@@ -221,6 +266,7 @@ impl WikiIndex {
                 wiki_root,
                 repo_root,
                 namespace,
+                source,
                 _lock: lock,
             })
         })
@@ -1263,6 +1309,7 @@ fn current_discovery_state(wiki_root: &Path, repo_root: &Path) -> Result<Discove
         head_sha: head_sha(repo_root).unwrap_or_default(),
         wiki_root_abs: wiki_root.to_string_lossy().into_owned(),
         strategy_version: DISCOVERY_STRATEGY_VERSION.to_string(),
+        source: DocSource::WorkingTree.as_key().to_string(),
     })
 }
 
@@ -1276,11 +1323,15 @@ async fn read_discovery_state(conn: &Connection) -> Result<Option<DiscoveryState
     let Some(strategy_version) = get_state(conn, DISCOVERY_STRATEGY_VERSION_KEY).await? else {
         return Ok(None);
     };
+    let source = get_state(conn, DOC_SOURCE_KEY)
+        .await?
+        .unwrap_or_else(|| DocSource::WorkingTree.as_key().to_string());
 
     Ok(Some(DiscoveryState {
         head_sha,
         wiki_root_abs,
         strategy_version,
+        source,
     }))
 }
 
@@ -1293,6 +1344,7 @@ async fn write_discovery_state(conn: &Connection, state: &DiscoveryState) -> Res
         &state.strategy_version,
     )
     .await?;
+    set_state(conn, DOC_SOURCE_KEY, &state.source).await?;
     Ok(())
 }
 

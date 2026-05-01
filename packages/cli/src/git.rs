@@ -301,6 +301,46 @@ fn parse_line_paths(out: &str) -> Vec<String> {
     paths
 }
 
+// ─── Index / HEAD helpers (Phase 3 implements; stubs compile for Phase 1) ────
+
+/// Return repo-relative UTF-8 paths of all entries in the git index.
+#[allow(dead_code)]
+pub fn index_tracked_paths(_repo: &Path) -> Result<Vec<String>> {
+    todo!("phase 3")
+}
+
+/// Read the blob content for `path_rel` from the git index, or `None` if the
+/// path is not present in the index.
+#[allow(dead_code)]
+pub fn read_index_blob(_repo: &Path, _path_rel: &str) -> Result<Option<String>> {
+    todo!("phase 3")
+}
+
+/// Return repo-relative UTF-8 paths of all entries reachable from `HEAD`.
+#[allow(dead_code)]
+pub fn head_tracked_paths(_repo: &Path) -> Result<Vec<String>> {
+    todo!("phase 3")
+}
+
+/// Read the blob content for `path_rel` from the `HEAD` tree, or `None` if the
+/// path is absent at HEAD.
+#[allow(dead_code)]
+pub fn read_head_blob(_repo: &Path, _path_rel: &str) -> Result<Option<String>> {
+    todo!("phase 3")
+}
+
+/// Return `true` if `path_rel` has an entry in the git index.
+#[allow(dead_code)]
+pub fn has_index_entry(_repo: &Path, _path_rel: &str) -> Result<bool> {
+    todo!("phase 3")
+}
+
+/// Return `true` if `path_rel` exists in the `HEAD` tree.
+#[allow(dead_code)]
+pub fn has_head_entry(_repo: &Path, _path_rel: &str) -> Result<bool> {
+    todo!("phase 3")
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

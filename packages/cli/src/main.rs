@@ -26,6 +26,14 @@ enum Format {
     Json,
 }
 
+/// Which git snapshot the wiki index reads from.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SourceArg {
+    Worktree,
+    Index,
+    Head,
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "wiki",
@@ -54,6 +62,15 @@ struct Cli {
     /// the subcommand (supported on: check, links, list, summary, refs).
     #[arg(short = 'n', long = "namespace", value_name = "NS")]
     namespace: Option<String>,
+
+    /// Document source: working tree (default), git index, or HEAD commit.
+    #[arg(
+        long = "source",
+        value_enum,
+        default_value_t = SourceArg::Worktree,
+        global = true
+    )]
+    source: SourceArg,
 
     /// Search query for the default wiki lookup.
     #[arg(value_name = "query")]
@@ -334,6 +351,13 @@ fn main() {
         .namespace
         .clone()
         .or_else(|| subcommand_namespace(&cli.command));
+
+    // Phase 3 will thread `_source` through `run()` and into command call sites.
+    let _source: index::DocSource = match cli.source {
+        SourceArg::Worktree => index::DocSource::WorkingTree,
+        SourceArg::Index => index::DocSource::Index,
+        SourceArg::Head => index::DocSource::Head,
+    };
 
     let result = run(
         cli.command,
