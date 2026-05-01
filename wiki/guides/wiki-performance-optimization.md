@@ -31,8 +31,4 @@ Full-text search (FTS) indexing is [decoupled from the core document index](pack
 
 To keep search performance high while improving relevance, [weighted search ranking](packages/cli/src/index.rs#L1362-L1410&9b91dfb) combines exact title matches, path matches, and FTS results. Each pass is optimized separately (using B-tree lookups for titles and paths before falling back to BM25), ensuring that common navigational searches are nearly instantaneous.
 
-### 6. Debounced Live Reloading
-
-In [serve mode](packages/cli/src/commands/serve.rs#L93-L130&6a486f7), the file watcher uses a background worker thread with debouncing. This batches multiple file change events (e.g., from a branch switch or batch edit) into a single incremental index refresh, preventing rapid reload cycles.
-
 See also: [[Wiki CLI]]

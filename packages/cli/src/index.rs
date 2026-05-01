@@ -167,8 +167,7 @@ pub struct WikiIndex {
     conn: Connection,
     wiki_root: PathBuf,
     repo_root: PathBuf,
-    /// Namespace of the current wiki this index represents. Used to filter
-    /// `*.wiki.md` files during discovery.
+    /// Namespace of the current wiki this index represents.
     namespace: Option<String>,
     // Held for the lifetime of this index so concurrent `wiki` processes
     // serialize on the same wiki directory. Dropped after `conn`.
@@ -224,11 +223,6 @@ impl WikiIndex {
             .block_on(resolve_page_full_async(&self.conn, &self.repo_root, input))
     }
 
-    pub fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
-        self.search_weighted(query, SEARCH_LIMIT, 0)
-            .map(|(results, _)| results)
-    }
-
     pub fn search_weighted(
         &self,
         query: &str,
@@ -269,26 +263,14 @@ impl WikiIndex {
             .block_on(extract_pages_async(&self.conn, titles))
     }
 
-    pub fn repo_root(&self) -> &Path {
-        &self.repo_root
-    }
-
-    pub fn refresh_paths(&mut self, changed_paths: &[PathBuf]) -> Result<()> {
-        let wiki_root = self.wiki_root.clone();
-        let repo_root = self.repo_root.clone();
-        let namespace = self.namespace.clone();
-        self.runtime.block_on(sync_core_index_for_paths(
-            &mut self.conn,
-            &wiki_root,
-            &repo_root,
-            namespace.as_deref(),
-            changed_paths,
-        ))
-    }
-
     #[allow(dead_code)]
     pub fn wiki_root(&self) -> &Path {
         &self.wiki_root
+    }
+
+    #[cfg(test)]
+    pub fn repo_root(&self) -> &Path {
+        &self.repo_root
     }
 
     pub fn namespace(&self) -> Option<&str> {
@@ -614,16 +596,6 @@ async fn sync_core_index(
     namespace: Option<&str>,
 ) -> Result<()> {
     sync_core_index_inner(conn, wiki_root, repo_root, namespace, None).await
-}
-
-async fn sync_core_index_for_paths(
-    conn: &mut Connection,
-    wiki_root: &Path,
-    repo_root: &Path,
-    namespace: Option<&str>,
-    changed_paths: &[PathBuf],
-) -> Result<()> {
-    sync_core_index_inner(conn, wiki_root, repo_root, namespace, Some(changed_paths)).await
 }
 
 async fn sync_core_index_inner(
@@ -2557,7 +2529,9 @@ mod tests {
         );
 
         let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
-        let initial = index.search("rust").expect("search");
+        let (initial, _) = index
+            .search_weighted("rust", SEARCH_LIMIT, 0)
+            .expect("search");
         assert_eq!(initial.len(), 1);
         drop(index);
 
@@ -2567,8 +2541,16 @@ mod tests {
         );
 
         let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
-        assert!(index.search("rust").expect("search").is_empty());
-        let updated = index.search("graph").expect("search");
+        assert!(
+            index
+                .search_weighted("rust", SEARCH_LIMIT, 0)
+                .expect("search")
+                .0
+                .is_empty()
+        );
+        let (updated, _) = index
+            .search_weighted("graph", SEARCH_LIMIT, 0)
+            .expect("search");
         assert_eq!(updated.len(), 1);
         assert_eq!(updated[0].title, "Example");
     }

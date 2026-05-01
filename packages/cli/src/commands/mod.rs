@@ -2,7 +2,6 @@ pub mod check;
 pub mod extract;
 pub(crate) mod mesh_coverage;
 pub mod hook_check;
-pub mod html;
 pub mod init;
 pub mod install;
 pub mod links;
@@ -11,7 +10,6 @@ pub mod mesh;
 pub mod namespaces;
 pub mod refs;
 pub mod search;
-pub mod serve;
 pub mod summary;
 
 use std::path::{Path, PathBuf};

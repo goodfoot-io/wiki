@@ -5,7 +5,6 @@ mod headings;
 mod index;
 mod parser;
 mod perf;
-mod render;
 #[cfg(test)]
 mod test_support;
 mod version;
@@ -33,7 +32,7 @@ enum Format {
     version = crate::version::VERSION,
     before_help = concat!("wiki ", env!("WIKI_VERSION"), "\n"),
     about = "wiki - Read and maintain wiki pages",
-    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, links, list, summary, extract, refs, hook, html, install, serve) are reserved and cannot be used as page titles.\n\nUse `-n '*'` to run a command across all wikis in the repo. Each result is labeled with its namespace. Supported subcommands: search (default query), check, links, list, summary, refs.",
+    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, links, list, summary, extract, refs, hook, install) are reserved and cannot be used as page titles.\n\nUse `-n '*'` to run a command across all wikis in the repo. Each result is labeled with its namespace. Supported subcommands: search (default query), check, links, list, summary, refs.",
     disable_help_subcommand = true,
     disable_version_flag = true,
 )]
@@ -180,21 +179,6 @@ enum Commands {
         title: Option<String>,
     },
 
-    /// Render a page to HTML.
-    Html {
-        /// Page title, alias, or file path
-        #[arg(value_name = "title|path")]
-        title: String,
-
-        /// Render only the article fragment
-        #[arg(long)]
-        fragment: bool,
-
-        /// Base URL used for source fragment links in fragment mode
-        #[arg(long, value_name = "url")]
-        file_base_url: Option<String>,
-    },
-
     /// Install the wiki integration into an external tool's config home.
     ///
     /// Use --codex to install the Codex integration (downloads the latest
@@ -227,17 +211,6 @@ enum Commands {
         /// Git ref (branch, tag, or SHA) to install from.
         #[arg(long = "ref", value_name = "REF", default_value = "main")]
         git_ref: String,
-    },
-
-    /// Start a local web server that renders wiki pages as HTML.
-    Serve {
-        /// Port to listen on
-        #[arg(short = 'p', long, default_value = "8080")]
-        port: u16,
-
-        /// Disable live reload over server-sent events
-        #[arg(long)]
-        no_reload: bool,
     },
 
     /// Generate a shell script of `git mesh add` / `git mesh why` commands
@@ -568,11 +541,6 @@ fn run(
                 false,
             )
         }
-        Some(Commands::Html {
-            title,
-            fragment,
-            file_base_url,
-        }) => commands::html::run(&title, fragment, file_base_url.as_deref(), wiki_root, &repo_root),
         Some(Commands::Install {
             codex,
             claude,
@@ -588,9 +556,6 @@ fn run(
             codex_home.as_deref(),
             &git_ref,
         ),
-        Some(Commands::Serve { port, no_reload }) => {
-            commands::serve::run(port, no_reload, wiki_root, &repo_root)
-        }
         Some(Commands::Scaffold { globs }) => {
             commands::mesh::scaffold::run(&globs, json, wiki_root, &repo_root)
         }
@@ -689,9 +654,7 @@ fn command_name(command: Option<&Commands>, query: Option<&str>) -> &'static str
         Some(Commands::List { .. }) => "list",
         Some(Commands::Summary { .. }) => "summary",
         Some(Commands::Refs { .. }) => "refs",
-        Some(Commands::Html { .. }) => "html",
         Some(Commands::Install { .. }) => "install",
-        Some(Commands::Serve { .. }) => "serve",
         Some(Commands::Scaffold { .. }) => "scaffold",
         Some(Commands::Namespaces) => "namespaces",
         Some(Commands::Init { .. }) => "init",

@@ -34,17 +34,11 @@ wiki links path/to/article.md
 wiki check
 wiki stale
 
-# Render an article to HTML (standalone or for the extension webview)
-wiki html "Authorization"
-
 # Extract frontmatter, summaries, pinned articles, or headings
 wiki extract ...
 wiki summary "Authorization"
 wiki pin list
 wiki list
-
-# Run as a long-lived server for editor integrations
-wiki serve
 
 # Run inside a git hook (indexes new/changed articles)
 wiki hook post-commit

@@ -46,7 +46,7 @@ pub enum FrontmatterError {
 ///
 /// These are reserved to prevent ambiguity with `wiki <title>` default dispatch.
 pub const RESERVED_TITLES: &[&str] = &[
-    "check", "pin", "stale", "links", "list", "summary", "print", "html", "serve",
+    "check", "pin", "stale", "links", "list", "summary", "print",
 ];
 
 // ── Raw deserialization helper ────────────────────────────────────────────────

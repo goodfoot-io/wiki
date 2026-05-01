@@ -33,10 +33,10 @@ Several commands support navigating and searching the wiki from the command line
 - **Summary**: The [summary command](packages/cli/src/commands/summary.rs#e2b1474) outputs a page's frontmatter-defined summary along with a repo-relative path to its source file.
 - **Print**: The [print command](packages/cli/src/commands/print.rs#e2b1474) outputs the full raw markdown content of a wiki page to stdout.
 
-## Rendering and Serving
+## Rendering
 
-The [html command](packages/cli/src/commands/html.rs#e2b1474) renders the wiki as a static site. The [serve command](packages/cli/src/commands/serve.rs#6a486f7) starts a local development server with live-reloading to preview changes. It caches the `WikiIndex` in application state to eliminate per-request index rebuilds, using a background worker thread with debouncing to handle file change events. The server supports incremental indexing via `refresh_paths` and defers search index updates to a background catch-up task. Both commands reserve their names in frontmatter to avoid routing conflicts.
+The CLI does not render markdown. HTML rendering is owned entirely by the VS Code extension's webview, which reads pages directly from disk; the CLI's responsibilities stop at read, search, validation, and indexing.
 
 ## Frontmatter
 
-The [frontmatter module](packages/cli/src/frontmatter.rs#L37-L47&e2b1474) parses and validates YAML frontmatter from wiki pages. It reserves certain titles (`check`, `pin`, `stale`, `links`, `list`, `summary`, `print`, `html`, `serve`) to prevent ambiguity with command-line dispatch.
+The [frontmatter module](packages/cli/src/frontmatter.rs#L45-L50) parses and validates YAML frontmatter from wiki pages. It reserves certain titles (`check`, `pin`, `stale`, `links`, `list`, `summary`, `print`) to prevent ambiguity with command-line dispatch.

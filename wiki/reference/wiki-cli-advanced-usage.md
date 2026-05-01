@@ -278,26 +278,6 @@ JSON output:
 }
 ```
 
-#### `wiki html [title|path]`
-
-`--format json` does not change the success output. The command prints HTML in both cases.
-
-Output with or without `--format json`:
-
-```html
-<!doctype html>
-<html>
-  <head>...</head>
-  <body>
-    <article>...</article>
-  </body>
-</html>
-```
-
-#### `wiki serve`
-
-`--format json` does not change runtime behavior. The command starts the server in both cases rather than switching stdout to a JSON payload.
-
 ## Exit Codes
 
 All commands use a consistent three-value exit code convention:
