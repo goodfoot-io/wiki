@@ -175,7 +175,7 @@ fn namespaces_json_malformed_wiki_toml_fails_closed() {
     );
 }
 
-/// `--format json` emits an array with namespace/path/status fields.
+/// `--format json` emits an array with namespace/path fields.
 #[test]
 fn namespaces_json_format() {
     let repo = TestRepo::new();
@@ -198,14 +198,12 @@ fn namespaces_json_format() {
 
     for entry in arr {
         assert!(entry.get("path").is_some(), "missing 'path' in {entry}");
-        assert!(entry.get("status").is_some(), "missing 'status' in {entry}");
+        assert!(entry.get("namespace").is_some(), "missing 'namespace' in {entry}");
     }
 
-    let foo = arr
-        .iter()
+    arr.iter()
         .find(|e| e["namespace"] == "foo")
         .expect("expected foo entry");
-    assert_eq!(foo["status"], "ok");
 }
 
 // ── `wiki init` tests ─────────────────────────────────────────────────────────

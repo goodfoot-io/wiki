@@ -1,19 +1,9 @@
-//! `wiki namespaces` — list the current wiki and its declared peers with
-//! per-peer validation status.
+//! `wiki namespaces` — list every `wiki.toml` discovered under the repo root,
+//! one row per declared namespace.
 //!
-//! Validation is non-fatal here: unlike `WikiConfig::load`, which enforces
-//! rules 1–4 fail-closed, this command walks up from `cwd` to find the nearest
-//! `wiki.toml` and then re-examines each declared peer independently, reporting
-//! per-peer failures inline. A non-zero exit code is emitted if any peer fails
-//! rule 1 (missing `wiki.toml`) or rule 2 (alias/namespace mismatch).
-//!
-//! Implementation note: we use approach (b) from the task description — re-walk
-//! peers ourselves with lenient (non-aborting) error handling — rather than
-//! adding a `WikiConfig::load_lenient` variant. This keeps `WikiConfig`
-//! strictly fail-closed and confines the lenient logic to this command where
-//! it is intentionally user-visible. Consequently `namespaces` bypasses the
-//! normal `WikiConfig::load` and is listed alongside `install`, `hook`, and
-//! `init` in the `needs_config` exclusion in `main.rs`.
+//! TOML parse failures hard-fail via `?`, mirroring `WikiConfig::load`, so a
+//! broken `wiki.toml` aborts the command with a `miette` diagnostic and exit
+//! code 2. Duplicate-namespace conflicts remain a soft failure with exit 1.
 
 use std::path::{Path, PathBuf};
 
@@ -29,7 +19,6 @@ pub struct NamespaceEntry {
     pub namespace: Option<String>,
     pub path: String,
     pub abs_path: String,
-    pub status: String,
 }
 
 // ── Runner ────────────────────────────────────────────────────────────────────
@@ -61,36 +50,19 @@ pub fn run(_cwd: &Path, repo_root: &Path, json: bool) -> Result<i32> {
             .to_path_buf();
         let abs_path = wiki_root.display().to_string();
 
-        let (ns, _peers) = match parse_wiki_toml(toml_path) {
-            Ok(v) => v,
-            Err(e) => {
-                any_error = true;
-                entries.push(NamespaceEntry {
-                    alias: String::new(),
-                    namespace: None,
-                    path: abs_path.clone(),
-                    abs_path,
-                    status: format!("error: {e}"),
-                });
-                continue;
-            }
-        };
+        let (ns, _peers) = parse_wiki_toml(toml_path)?;
 
         entries.push(NamespaceEntry {
             alias: String::new(),
             namespace: ns,
             path: abs_path.clone(),
             abs_path,
-            status: "ok".to_string(),
         });
     }
 
     // Detect duplicate namespace names (default counts as a single bucket).
     let mut seen: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for entry in &entries {
-        if entry.status.starts_with("error") {
-            continue;
-        }
         let key = entry.namespace.as_deref().unwrap_or("default");
         if let Some(prev) = seen.insert(key, entry.abs_path.as_str()) {
             any_error = true;
@@ -119,14 +91,9 @@ pub fn run(_cwd: &Path, repo_root: &Path, json: bool) -> Result<i32> {
             serde_json::to_string_pretty(&entries).into_diagnostic()?
         );
     } else {
-        // Print a third tab column when status is not "ok" so parse errors are visible.
         for entry in &entries {
             let ns = entry.namespace.as_deref().unwrap_or("default");
-            if entry.status == "ok" {
-                println!("{}\t{}", ns, entry.abs_path);
-            } else {
-                println!("{}\t{}\t{}", ns, entry.abs_path, entry.status);
-            }
+            println!("{}\t{}", ns, entry.abs_path);
         }
     }
 
