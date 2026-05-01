@@ -1,7 +1,6 @@
 # Charge handler notes • src/notes.wiki.md
 
-## Charge handler notes
-> Implementation lives in handleCharge.
+> Implementation lives in [handleCharge](./charge.ts#L2-L7).
 
 ```bash
 git mesh add src/charge-handler-notes \
@@ -10,10 +9,11 @@ git mesh add src/charge-handler-notes \
 git mesh why src/charge-handler-notes -m "[why]"
 ```
 
+---
+
 # Billing • wiki/billing.md
 
-## Billing
-> The billing service validates the checkout payload before submitCheckout is called.
+> The billing service validates the checkout payload before [submitCheckout](src/checkout.ts#L2-L8) is called.
 
 ```bash
 git mesh add wiki/billing \
@@ -23,7 +23,7 @@ git mesh why wiki/billing -m "[why]"
 ```
 
 ## Charge handler
-> The server-side handler handleCharge validates the schema and dispatches to Stripe.
+> The server-side handler [handleCharge](src/charge.ts#L2-L7) validates the schema and dispatches to Stripe.
 
 ```bash
 git mesh add wiki/charge-handler \
@@ -32,10 +32,11 @@ git mesh add wiki/charge-handler \
 git mesh why wiki/charge-handler -m "[why]"
 ```
 
+---
+
 # CLI parser • wiki/cli/parser.md
 
-## CLI parser
-> The argument parser entrypoint is parse_args.
+> The argument parser entrypoint is [parse_args](src/parser.rs#L2-L4).
 
 ```bash
 git mesh add wiki/cli/cli-parser \
@@ -44,10 +45,12 @@ git mesh add wiki/cli/cli-parser \
 git mesh why wiki/cli/cli-parser -m "[why]"
 ```
 
+---
+
 # Edge cases • wiki/edge.md
 
 ## git-mesh ls
-> The command git_mesh_ls lists meshes touching an anchor.
+> The command [git_mesh_ls](src/parser.rs#L2-L4) lists meshes touching an anchor.
 
 ```bash
 git mesh add wiki/git-mesh-ls \
@@ -57,7 +60,7 @@ git mesh why wiki/git-mesh-ls -m "[why]"
 ```
 
 ## Identifier predicate
-> build_index is the entry point used by build_index.
+> `build_index` is the entry point used by [build_index](src/index.rs#L10-L20).
 
 ```bash
 git mesh add wiki/identifier-predicate \
@@ -67,7 +70,7 @@ git mesh why wiki/identifier-predicate -m "[why]"
 ```
 
 ## Bold label only
-> where_anchor
+> [where_anchor](src/index.rs#L25-L40)
 
 ```bash
 git mesh add wiki/bold-label-only \
@@ -77,7 +80,7 @@ git mesh why wiki/bold-label-only -m "[why]"
 ```
 
 ## Table opening
-> After the table the table_anchor is referenced once more.
+> After the table the [table_anchor](src/checkout.ts#L2-L8) is referenced once more.
 
 ```bash
 git mesh add wiki/table-opening \
@@ -87,7 +90,7 @@ git mesh why wiki/table-opening -m "[why]"
 ```
 
 ## Table opening
-> After the table the table_anchor is referenced once more.
+> After the table the [table_anchor](src/checkout.ts#L2-L8) is referenced once more.
 
 ```bash
 git mesh add wiki/table-opening-2 \
@@ -97,7 +100,7 @@ git mesh why wiki/table-opening-2 -m "[why]"
 ```
 
 ## Ordered list opening
-> Validates the schema before validate_step is invoked.
+> 1. Validates the schema before [validate_step](src/charge.ts#L2-L7) is invoked.
 
 ```bash
 git mesh add wiki/ordered-list-opening \
@@ -116,10 +119,11 @@ git mesh add wiki/truly-degenerate \
 git mesh why wiki/truly-degenerate -m "[why]"
 ```
 
+---
+
 # Incremental indexing • wiki/perf/indexing.md
 
-## (top of file)
-> See bootstrap for the entry point.
+> See [bootstrap](src/index.rs#L1-L5) for the entry point.
 
 ```bash
 git mesh add wiki/perf/bootstrap \
@@ -129,7 +133,9 @@ git mesh why wiki/perf/bootstrap -m "[why]"
 ```
 
 ## Sync detection
-> The WikiIndex sync detects changes incrementally.
+> The WikiIndex sync detects changes incrementally. It probes git state
+> and computes a diff against the last snapshot at [build_index](src/index.rs#L10-L20)
+> and again at [build_index](src/index.rs#L10-L20).
 
 ```bash
 git mesh add wiki/perf/sync-detection \
@@ -139,7 +145,8 @@ git mesh why wiki/perf/sync-detection -m "[why]"
 ```
 
 ## Apply phase
-> The indexer applies each diff entry to the in-memory tree; the implementation spans apply_changes and apply_changes_batch.
+> The indexer applies each diff entry to the in-memory tree; the implementation
+> spans [apply_changes](src/index.rs#L25-L40) and [apply_changes_batch](src/index.rs#L45-L60).
 
 ```bash
 git mesh add wiki/perf/apply-phase \
@@ -149,7 +156,8 @@ git mesh why wiki/perf/apply-phase -m "[why]"
 ```
 
 ## Apply phase
-> The indexer applies each diff entry to the in-memory tree; the implementation spans apply_changes and apply_changes_batch.
+> The indexer applies each diff entry to the in-memory tree; the implementation
+> spans [apply_changes](src/index.rs#L25-L40) and [apply_changes_batch](src/index.rs#L45-L60).
 
 ```bash
 git mesh add wiki/perf/apply-phase-2 \
@@ -159,7 +167,8 @@ git mesh why wiki/perf/apply-phase-2 -m "[why]"
 ```
 
 ## Cache layer
-> The cache wiki section describes the LRU cache used by index lookups, backed by CacheKey.
+> The cache wiki section describes the LRU cache used by index lookups,
+> backed by [CacheKey](src/index.rs#L70-L80).
 
 ```bash
 git mesh add wiki/perf/cache-layer \

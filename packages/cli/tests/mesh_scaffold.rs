@@ -284,6 +284,208 @@ fn mesh_scaffold_only_parse_errors_emits_block_alone() {
     );
 }
 
+/// JSON mode emits `{ schemaVersion: 1, parseErrors: [], pages: [...] }` shape.
+#[test]
+fn mesh_scaffold_json_shape_and_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wiki_dir = tmp.path().join("wiki");
+    std::fs::create_dir_all(&wiki_dir).unwrap();
+    std::fs::write(wiki_dir.join("wiki.toml"), "").unwrap();
+
+    // Page with a heading chain where top equals title (trim positive).
+    std::fs::write(
+        wiki_dir.join("billing.md"),
+        "---\ntitle: Billing\n---\n\n# Billing\n\n## Charge handler\n\nThe handler processes charges. See [charge](src/charge.rs#L1-L5) for details.\n",
+    )
+    .unwrap();
+    let src_dir = tmp.path().join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(src_dir.join("charge.rs"), "// charge\n").unwrap();
+
+    git(tmp.path(), &["init", "-q", "-b", "main"]);
+    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "--format", "json"])
+        .current_dir(&wiki_dir)
+        .output()
+        .expect("run wiki binary");
+    assert!(output.status.success(), "wiki scaffold --json failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON output");
+
+    // schemaVersion must be 1.
+    assert_eq!(v["schemaVersion"], 1, "schemaVersion must be 1:\n{stdout}");
+
+    // parseErrors must be present and empty.
+    assert!(v["parseErrors"].is_array(), "parseErrors must be array:\n{stdout}");
+    assert!(v["parseErrors"].as_array().unwrap().is_empty(), "parseErrors must be empty:\n{stdout}");
+
+    // pages must be present and non-empty.
+    assert!(v["pages"].is_array(), "pages must be array:\n{stdout}");
+    let pages = v["pages"].as_array().unwrap();
+    assert!(!pages.is_empty(), "pages must be non-empty:\n{stdout}");
+
+    let page = &pages[0];
+    assert_eq!(page["path"], "wiki/billing.md");
+    assert_eq!(page["title"], "Billing");
+
+    let meshes = page["meshes"].as_array().unwrap();
+    assert!(!meshes.is_empty());
+    let mesh = &meshes[0];
+
+    // headingChain must be trimmed (Billing dropped, Charge handler kept).
+    let chain = mesh["headingChain"].as_array().unwrap();
+    assert_eq!(chain.len(), 1, "leading 'Billing' should be trimmed, got chain: {chain:?}");
+    assert_eq!(chain[0], "Charge handler");
+
+    // sectionOpening must be an array.
+    assert!(mesh["sectionOpening"].is_array(), "sectionOpening must be array:\n{stdout}");
+
+    // anchors must be structured objects.
+    let anchors = mesh["anchors"].as_array().unwrap();
+    assert!(!anchors.is_empty());
+    assert!(anchors[0]["path"].is_string(), "anchor.path must be string:\n{stdout}");
+    assert!(anchors[0]["startLine"].is_number(), "anchor.startLine must be number:\n{stdout}");
+    assert!(anchors[0]["endLine"].is_number(), "anchor.endLine must be number:\n{stdout}");
+
+    // Legacy fields must be absent.
+    assert!(mesh["name"].is_null(), "legacy 'name' field must be absent:\n{stdout}");
+    assert!(mesh["why"].is_null(), "legacy 'why' field must be absent:\n{stdout}");
+    assert!(mesh["wikiFile"].is_null(), "legacy 'wikiFile' field must be absent:\n{stdout}");
+    assert!(mesh["anchor"].is_null(), "legacy 'anchor' string field must be absent:\n{stdout}");
+}
+
+/// JSON mode with empty corpus still emits the structured object, not `[]`.
+#[test]
+fn mesh_scaffold_json_empty_corpus_structured_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wiki_dir = tmp.path().join("wiki");
+    std::fs::create_dir_all(&wiki_dir).unwrap();
+    std::fs::write(wiki_dir.join("wiki.toml"), "").unwrap();
+
+    // A valid file with no fragment links → empty corpus.
+    std::fs::write(
+        wiki_dir.join("page.md"),
+        "---\ntitle: Empty\n---\n\nNo links here.\n",
+    )
+    .unwrap();
+
+    git(tmp.path(), &["init", "-q", "-b", "main"]);
+    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "--format", "json"])
+        .current_dir(&wiki_dir)
+        .output()
+        .expect("run wiki binary");
+    assert!(output.status.success(), "wiki scaffold --json failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+
+    // Must be an object (not `[]`).
+    assert!(v.is_object(), "empty corpus must emit object, not array:\n{stdout}");
+    assert_eq!(v["schemaVersion"], 1);
+    assert!(v["parseErrors"].is_array());
+    assert!(v["pages"].is_array());
+    assert!(v["pages"].as_array().unwrap().is_empty());
+}
+
+/// JSON mode — parse errors appear in `parseErrors[]` with correct category tags.
+#[test]
+fn mesh_scaffold_json_parse_errors_in_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wiki_dir = tmp.path().join("wiki");
+    std::fs::create_dir_all(&wiki_dir).unwrap();
+    std::fs::write(wiki_dir.join("wiki.toml"), "").unwrap();
+
+    // Category 1: NoFrontmatter.
+    std::fs::write(wiki_dir.join("no_fm.md"), "# No frontmatter\n").unwrap();
+    // Category 2: MissingTitle.
+    std::fs::write(wiki_dir.join("missing_title.md"), "---\nsummary: x\n---\n\nbody\n").unwrap();
+    // Category 3: EmptyTitle.
+    std::fs::write(wiki_dir.join("empty_title.md"), "---\ntitle:\n---\n\nbody\n").unwrap();
+    // Clean file with no links (so all_inputs.is_empty() → but we want the parse_errors path).
+    std::fs::write(wiki_dir.join("clean.md"), "---\ntitle: Clean\n---\n\nNo links.\n").unwrap();
+
+    git(tmp.path(), &["init", "-q", "-b", "main"]);
+    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "--format", "json"])
+        .current_dir(&wiki_dir)
+        .output()
+        .expect("run wiki binary");
+    assert!(output.status.success(), "wiki scaffold --json failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+
+    let errors = v["parseErrors"].as_array().unwrap();
+    assert!(!errors.is_empty(), "parseErrors must be non-empty:\n{stdout}");
+
+    // Check category tags are snake_case.
+    let categories: Vec<&str> = errors
+        .iter()
+        .map(|e| e["category"].as_str().unwrap())
+        .collect();
+    assert!(categories.contains(&"no_frontmatter"), "no_frontmatter category missing: {categories:?}");
+    assert!(categories.contains(&"missing_title"), "missing_title category missing: {categories:?}");
+    assert!(categories.contains(&"empty_title"), "empty_title category missing: {categories:?}");
+
+    // Each error must have path and message.
+    for e in errors {
+        assert!(e["path"].is_string(), "error.path must be string");
+        assert!(e["message"].is_string(), "error.message must be string");
+        assert!(e["category"].is_string(), "error.category must be string");
+    }
+}
+
+/// JSON mode — top-of-file link (no heading above) has empty headingChain.
+#[test]
+fn mesh_scaffold_json_top_of_file_link_empty_chain() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wiki_dir = tmp.path().join("wiki");
+    std::fs::create_dir_all(&wiki_dir).unwrap();
+    std::fs::write(wiki_dir.join("wiki.toml"), "").unwrap();
+
+    std::fs::write(
+        wiki_dir.join("page.md"),
+        "---\ntitle: My Page\n---\n\nSee [x](src/x.rs#L1-L2) at the top.\n\n# Heading below\n",
+    )
+    .unwrap();
+    let src_dir = tmp.path().join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(src_dir.join("x.rs"), "// x\n").unwrap();
+
+    git(tmp.path(), &["init", "-q", "-b", "main"]);
+    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "--format", "json"])
+        .current_dir(&wiki_dir)
+        .output()
+        .expect("run wiki binary");
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+
+    let mesh = &v["pages"][0]["meshes"][0];
+    let chain = mesh["headingChain"].as_array().unwrap();
+    assert!(chain.is_empty(), "top-of-file link must have empty headingChain, got: {chain:?}");
+}
+
 /// JSON mode against a wiki with an unreadable (non-UTF-8) file must exit
 /// non-zero with a diagnostic — preserving baseline hard-error semantics.
 #[test]
@@ -327,7 +529,7 @@ fn mesh_scaffold_json_unreadable_file_exits_nonzero() {
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
-        .args(["scaffold", "--json"])
+        .args(["scaffold", "--format", "json"])
         .current_dir(&wiki_dir)
         .output()
         .expect("run wiki binary");

@@ -42,13 +42,15 @@ pub(crate) fn consolidate_within_page(drafts: Vec<MeshDraft>) -> Vec<MeshDraft> 
 mod tests {
     use super::*;
 
-    fn draft(slug: &str, heading: &str, anchors: &[&str]) -> MeshDraft {
+    fn draft(slug: &str, _heading: &str, anchors: &[&str]) -> MeshDraft {
         MeshDraft {
             page_path: anchors[0].to_string(),
             slug: slug.to_string(),
             anchors: anchors.iter().map(|s| s.to_string()).collect(),
-            section_heading: heading.to_string(),
+            structured_anchors: Vec::new(),
             section_opening: String::new(),
+            heading_chain: Vec::new(),
+            section_opening_lines: Vec::new(),
             consolidated_count: 1,
         }
     }

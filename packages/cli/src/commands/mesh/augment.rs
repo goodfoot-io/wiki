@@ -8,14 +8,6 @@ use crate::parser::{FragmentLink, scrub_non_content};
 #[derive(Clone)]
 pub(crate) struct AugmentedLink {
     pub(crate) link: FragmentLink,
-    /// The link's source line ± 2 lines from the *raw* (unscrubbed) source,
-    /// joined with `' '`, then run through the JS `surroundingText` cleanup
-    /// pipeline (backticks blanked, `[label](href)` reduced to extension-trimmed
-    /// label, `[[wikilink|display]]` unwrapped to display/title, whitespace
-    /// collapsed). Mirrors `parseFragmentLinks` in `mesh-scaffold-v4.mjs`.
-    pub(crate) surrounding_text: String,
-    /// The raw (unscrubbed) text of the link's source line.
-    pub(crate) line_text: String,
     /// Stack of ATX heading texts (levels 1–6) in effect at the link's source line.
     pub(crate) heading_chain: Vec<String>,
     /// The deepest heading text in `heading_chain` prefixed by its ATX hashes
@@ -23,9 +15,13 @@ pub(crate) struct AugmentedLink {
     /// on the page.
     pub(crate) section_heading: String,
     /// The first prose sentence of the section the link sits under, with
-    /// markdown link syntax cleaned via the same pipeline as `surrounding_text`.
+    /// markdown link syntax cleaned via the same pipeline.
     /// Empty when no prose precedes the next heading.
     pub(crate) section_opening: String,
+    /// Verbatim source lines of the excerpt paragraph (inline markup preserved).
+    /// These are the raw lines of the *same paragraph* chosen by `section_opening`,
+    /// but without any cleanup applied.
+    pub(crate) section_opening_lines: Vec<String>,
 }
 
 /// Augment a slice of fragment links found in `content`.
@@ -45,11 +41,6 @@ pub(crate) fn augment(links: &[FragmentLink], content: &str) -> Vec<AugmentedLin
     links
         .iter()
         .map(|link| {
-            let surrounding_text = extract_surrounding_text(link.source_line, &raw_lines);
-            let line_text = raw_lines
-                .get(link.source_line.saturating_sub(1))
-                .map(|s| (*s).to_string())
-                .unwrap_or_default();
             let heading_chain = heading_chain_at
                 .get(link.source_line.saturating_sub(1))
                 .cloned()
@@ -58,15 +49,14 @@ pub(crate) fn augment(links: &[FragmentLink], content: &str) -> Vec<AugmentedLin
                 .get(link.source_line.saturating_sub(1))
                 .cloned()
                 .unwrap_or_default();
-            let (section_heading, section_opening, _degenerate, _had_code_lead) =
+            let (section_heading, section_opening, _degenerate, _had_code_lead, section_opening_lines) =
                 extract_section_opening(meta.as_ref(), &raw_lines, &scrubbed_lines);
             AugmentedLink {
                 link: link.clone(),
-                surrounding_text,
-                line_text,
                 heading_chain,
                 section_heading,
                 section_opening,
+                section_opening_lines,
             }
         })
         .collect()
@@ -111,10 +101,15 @@ fn build_heading_meta_from_raw(raw_lines: &[&str], scrubbed_lines: &[&str]) -> V
 }
 
 /// Walk forward from the heading's line until the first prose line, returning
-/// `(section_heading, section_opening)`. The heading is rendered with its ATX
-/// hashes (e.g. `## Sync detection`). The opening sentence is cleaned via the
-/// same pipeline as `extract_surrounding_text` and truncated at the first
-/// sentence terminator (`. `, `! `, `? `, end-of-paragraph).
+/// `(section_heading, section_opening, degenerate, had_code_lead, section_opening_lines)`.
+/// The heading is rendered with its ATX hashes (e.g. `## Sync detection`).
+/// The opening sentence is cleaned via the same pipeline as
+/// `extract_surrounding_text` and truncated at the first sentence terminator
+/// (`. `, `! `, `? `, end-of-paragraph).
+///
+/// `section_opening_lines` contains the verbatim source lines of the same
+/// paragraph chosen for `section_opening`, with markup (wikilinks, inline
+/// links) preserved exactly as written.
 ///
 /// Documented edge cases:
 /// - No heading above link: `section_heading = ""`, opening walks from the top
@@ -128,7 +123,7 @@ pub(crate) fn extract_section_opening(
     meta: Option<&(usize, usize, String)>,
     raw_lines: &[&str],
     scrubbed_lines: &[&str],
-) -> (String, String, bool, bool) {
+) -> (String, String, bool, bool, Vec<String>) {
     let (heading_text, start_idx) = match meta {
         Some((level, idx, text)) => {
             let hashes = "#".repeat(*level);
@@ -136,17 +131,20 @@ pub(crate) fn extract_section_opening(
         }
         None => (String::new(), 0),
     };
-    let (opening, degenerate, had_code_lead) =
+    let (opening, degenerate, had_code_lead, opening_lines) =
         walk_section_opening(start_idx, raw_lines, scrubbed_lines);
-    (heading_text, opening, degenerate, had_code_lead)
+    (heading_text, opening, degenerate, had_code_lead, opening_lines)
 }
 
 /// Walk forward collecting prose paragraphs. Returns
-/// `(opening, degenerate, had_code_span_lead)`.
+/// `(opening, degenerate, had_code_span_lead, opening_lines)`.
 ///
 /// `degenerate` is true when no real prose paragraph could be found before the
 /// next heading — the best-available text is still emitted so the reviewer has
 /// *something* to read, but the renderer attaches a `DegenerateExcerpt` warn.
+///
+/// `opening_lines` contains the verbatim source lines of the chosen paragraph,
+/// with inline markup (wikilinks, inline links) preserved exactly.
 ///
 /// A candidate paragraph is "degenerate" when, after marker-stripping and
 /// prose cleanup, it: has no alphabetic content, is shorter than 12 chars, ends
@@ -158,7 +156,7 @@ fn walk_section_opening(
     start_idx: usize,
     raw_lines: &[&str],
     _scrubbed_lines: &[&str],
-) -> (String, bool, bool) {
+) -> (String, bool, bool, Vec<String>) {
     let mut i = start_idx;
     // Skip YAML frontmatter when starting from the top of the file.
     if i == 0 && raw_lines.first().map(|l| l.trim()) == Some("---") {
@@ -171,7 +169,7 @@ fn walk_section_opening(
         }
     }
     let mut in_fence = false;
-    let mut best_degenerate: Option<(String, bool)> = None;
+    let mut best_degenerate: Option<(String, bool, Vec<String>)> = None;
     while i < raw_lines.len() {
         let raw = raw_lines[i];
         let trimmed_raw = raw.trim();
@@ -218,7 +216,9 @@ fn walk_section_opening(
 
         // Collect the prose paragraph (until blank line, heading, fence, or
         // table) so a sentence that wraps lines still terminates correctly.
+        // Collect verbatim lines in parallel.
         let mut paragraph = candidate.to_string();
+        let mut verbatim_lines: Vec<String> = vec![raw.to_string()];
         let mut j = i + 1;
         while j < raw_lines.len() {
             let next_raw = raw_lines[j].trim();
@@ -236,6 +236,7 @@ fn walk_section_opening(
             }
             paragraph.push(' ');
             paragraph.push_str(next_raw);
+            verbatim_lines.push(raw_lines[j].to_string());
             j += 1;
         }
 
@@ -243,16 +244,16 @@ fn walk_section_opening(
         let cleaned = clean_prose_line(&paragraph);
         let truncated = truncate_to_sentence(&cleaned);
         if !is_degenerate(&truncated) {
-            return (truncated, false, had_code_lead);
+            return (truncated, false, had_code_lead, verbatim_lines);
         }
         if best_degenerate.is_none() {
-            best_degenerate = Some((truncated, had_code_lead));
+            best_degenerate = Some((truncated, had_code_lead, verbatim_lines));
         }
         i = j;
     }
     match best_degenerate {
-        Some((s, code_lead)) => (s, true, code_lead),
-        None => (String::new(), false, false),
+        Some((s, code_lead, lines)) => (s, true, code_lead, lines),
+        None => (String::new(), false, false, Vec::new()),
     }
 }
 
@@ -430,42 +431,6 @@ fn ext_strip_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"\.[a-z]{1,5}$").unwrap())
 }
 
-/// Extract the link line ± 2 lines from the *raw* content, joined with `' '`,
-/// then apply the JS cleanup pipeline.
-fn extract_surrounding_text(source_line: usize, raw_lines: &[&str]) -> String {
-    if raw_lines.is_empty() {
-        return String::new();
-    }
-    let idx = source_line.saturating_sub(1);
-    // JS: lines.slice(Math.max(0, sourceLine - 3), sourceLine + 2) on 1-based,
-    // which yields raw_lines[idx-2 ..= idx+2] in 0-based (5-line window).
-    let start = idx.saturating_sub(2);
-    let end_excl = (idx + 3).min(raw_lines.len());
-    let joined = raw_lines[start..end_excl].join(" ");
-
-    let (bt, md, wl, ws) = surrounding_cleanup_re();
-    // 1. backticks → ' '
-    let s = bt.replace_all(&joined, " ").into_owned();
-    // 2. [label](href) → label with extension stripped from end of label
-    let s = md
-        .replace_all(&s, |caps: &regex::Captures| {
-            let label = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-            ext_strip_re().replace(label, "").into_owned()
-        })
-        .into_owned();
-    // 3. [[t|d]] → d ?? t
-    let s = wl
-        .replace_all(&s, |caps: &regex::Captures| {
-            caps.get(2)
-                .or_else(|| caps.get(1))
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_default()
-        })
-        .into_owned();
-    // 4. whitespace collapse + trim
-    ws.replace_all(&s, " ").trim().to_string()
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -532,7 +497,7 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].source_line, 1);
         let result = augment(&links, content);
-        assert!(!result[0].surrounding_text.is_empty());
+        // No heading above link → empty chain.
         assert!(result[0].heading_chain.is_empty());
     }
 
@@ -542,71 +507,8 @@ mod tests {
         let links = parse_fragment_links(content);
         assert_eq!(links.len(), 1);
         let result = augment(&links, content);
-        assert!(!result[0].surrounding_text.is_empty());
-    }
-
-    #[test]
-    fn surrounding_text_window_is_five_lines() {
-        // sourceLine=3 → raw_lines[1..=5] (1-based: lines 1..=5)
-        let content = "L1 alpha\nL2 beta\nL3 [label](foo.rs)\nL4 delta\nL5 epsilon\nL6 zeta\n";
-        let links = parse_fragment_links(content);
-        assert_eq!(links.len(), 1);
-        let result = augment(&links, content);
-        let text = &result[0].surrounding_text;
-        // Window: L1..L5, joined with space, label substituted in for the link.
-        assert!(text.contains("L1 alpha"), "got: {text:?}");
-        assert!(text.contains("L5 epsilon"), "got: {text:?}");
-        assert!(
-            !text.contains("L6"),
-            "L6 should be outside window: {text:?}"
-        );
-        // [label](foo.rs) → label (ext stripped from label, but no dot ext here)
-        assert!(text.contains("label"));
-    }
-
-    #[test]
-    fn cleanup_strips_backticks() {
-        let content = "use the `Foo` widget [label](foo.rs#L1-L2) here\n";
-        let links = parse_fragment_links(content);
-        let result = augment(&links, content);
-        let text = &result[0].surrounding_text;
-        assert!(!text.contains('`'), "backticks not stripped: {text:?}");
-        assert!(!text.contains("Foo"), "code-span content leaked: {text:?}");
-    }
-
-    #[test]
-    fn cleanup_label_with_href_keeps_label_strips_extension() {
-        let content = "click [config.ts](foo.rs#L1-L2) please\n";
-        let links = parse_fragment_links(content);
-        let result = augment(&links, content);
-        let text = &result[0].surrounding_text;
-        // Label is "config.ts" — extension stripped → "config"
-        assert!(text.contains("config"));
-        assert!(
-            !text.contains("config.ts"),
-            "extension not stripped: {text:?}"
-        );
-        assert!(!text.contains("foo.rs"), "href leaked: {text:?}");
-    }
-
-    #[test]
-    fn cleanup_unwraps_wikilink_with_display() {
-        let content = "see [[Real Title|display name]] and [label](foo.rs#L1-L2)\n";
-        let links = parse_fragment_links(content);
-        let result = augment(&links, content);
-        let text = &result[0].surrounding_text;
-        assert!(text.contains("display name"));
-        assert!(!text.contains("[["), "wikilink not unwrapped: {text:?}");
-    }
-
-    #[test]
-    fn cleanup_unwraps_wikilink_without_display() {
-        let content = "see [[JustTitle]] and [label](foo.rs#L1-L2)\n";
-        let links = parse_fragment_links(content);
-        let result = augment(&links, content);
-        let text = &result[0].surrounding_text;
-        assert!(text.contains("JustTitle"));
-        assert!(!text.contains("[["));
+        // Augment must not panic on last-line links.
+        assert_eq!(result[0].heading_chain, vec!["Heading"]);
     }
 
     #[test]
@@ -731,13 +633,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn line_text_is_raw_unscrubbed() {
-        let content = "hello `code` [label](foo.rs#L1-L2) world\n";
-        let links = parse_fragment_links(content);
-        let result = augment(&links, content);
-        // line_text preserves the raw line including backticks.
-        assert!(result[0].line_text.contains('`'));
-        assert!(result[0].line_text.contains("code"));
-    }
 }

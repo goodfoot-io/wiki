@@ -8,6 +8,15 @@ use std::path::{Path, PathBuf};
 
 use super::augment::AugmentedLink;
 
+/// Structured anchor triple — path and line range, before stringification.
+#[derive(Debug, Clone)]
+pub(crate) struct StructuredAnchor {
+    /// Repo-root-relative path with forward slashes.
+    pub(crate) path: String,
+    pub(crate) start_line: u32,
+    pub(crate) end_line: u32,
+}
+
 /// One mesh proposal before grouping. `consolidated_count` is `1` until
 /// `group` merges siblings into it.
 #[derive(Debug, Clone)]
@@ -19,11 +28,14 @@ pub(crate) struct MeshDraft {
     /// Ordered list of anchor strings (`page` first, then targets like
     /// `src/index.rs#L10-L20`). Render emits these as a single `git mesh add`.
     pub(crate) anchors: Vec<String>,
-    /// Heading text rendered with ATX hashes (e.g. `## Sync detection`), or
-    /// empty when the link sits before any heading.
-    pub(crate) section_heading: String,
+    /// Structured anchor triples for the target links (parallel to `anchors[1..]`).
+    pub(crate) structured_anchors: Vec<StructuredAnchor>,
     /// First prose sentence under the heading, cleaned of markdown link syntax.
     pub(crate) section_opening: String,
+    /// Full ancestor heading chain above the link (verbatim text from parse_atx_heading).
+    pub(crate) heading_chain: Vec<String>,
+    /// Source-verbatim lines of the excerpt paragraph (markup preserved).
+    pub(crate) section_opening_lines: Vec<String>,
     /// Number of identical-anchor-set siblings merged into this draft. Starts at 1.
     pub(crate) consolidated_count: usize,
 }
@@ -31,10 +43,12 @@ pub(crate) struct MeshDraft {
 /// Build one draft per augmented link. `page_path` is the source wiki page
 /// (already repo-root-relative). `target_anchors` is the per-link list of
 /// anchor strings that go after `page_path` on the `git mesh add` line.
+/// `structured_anchors` is the parallel list of structured anchor triples.
 pub(crate) fn build(
     page_path: &str,
     augmented: &[AugmentedLink],
     target_anchors: &[Vec<String>],
+    structured_anchors: &[Vec<StructuredAnchor>],
     repo_root: &Path,
 ) -> Vec<MeshDraft> {
     assert_eq!(
@@ -42,10 +56,16 @@ pub(crate) fn build(
         target_anchors.len(),
         "draft::build expects parallel slices"
     );
+    assert_eq!(
+        augmented.len(),
+        structured_anchors.len(),
+        "draft::build expects parallel slices for structured_anchors"
+    );
     augmented
         .iter()
         .zip(target_anchors.iter())
-        .map(|(aug, targets)| {
+        .zip(structured_anchors.iter())
+        .map(|((aug, targets), structured)| {
             let slug = derive_slug(page_path, aug, repo_root);
             let mut anchors = Vec::with_capacity(1 + targets.len());
             anchors.push(page_path.to_string());
@@ -54,8 +74,10 @@ pub(crate) fn build(
                 page_path: page_path.to_string(),
                 slug,
                 anchors,
-                section_heading: aug.section_heading.clone(),
+                structured_anchors: structured.clone(),
                 section_opening: aug.section_opening.clone(),
+                heading_chain: aug.heading_chain.clone(),
+                section_opening_lines: aug.section_opening_lines.clone(),
                 consolidated_count: 1,
             }
         })
@@ -181,11 +203,10 @@ mod tests {
                 original_href: path.to_string(),
                 source_line: 1,
             },
-            surrounding_text: String::new(),
-            line_text: String::new(),
             heading_chain: Vec::new(),
             section_heading: heading.to_string(),
             section_opening: String::new(),
+            section_opening_lines: Vec::new(),
         }
     }
 
@@ -239,7 +260,18 @@ mod tests {
     fn build_produces_one_draft_per_link_with_anchors_prefixed_by_page() {
         let augs = vec![aug_with("## Sync detection", "build_index", "src/index.rs")];
         let targets = vec![vec!["src/index.rs#L10-L20".to_string()]];
-        let drafts = build("wiki/perf/indexing.md", &augs, &targets, Path::new("/"));
+        let structured = vec![vec![StructuredAnchor {
+            path: "src/index.rs".to_string(),
+            start_line: 10,
+            end_line: 20,
+        }]];
+        let drafts = build(
+            "wiki/perf/indexing.md",
+            &augs,
+            &targets,
+            &structured,
+            Path::new("/"),
+        );
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].slug, "wiki/perf/sync-detection");
         assert_eq!(
@@ -250,13 +282,26 @@ mod tests {
             ]
         );
         assert_eq!(drafts[0].consolidated_count, 1);
+        assert_eq!(drafts[0].structured_anchors.len(), 1);
+        assert_eq!(drafts[0].structured_anchors[0].start_line, 10);
     }
 
     #[test]
     fn build_uses_label_when_no_heading() {
         let augs = vec![aug_with("", "bootstrap", "src/index.rs")];
         let targets = vec![vec!["src/index.rs#L1-L5".to_string()]];
-        let drafts = build("wiki/perf/indexing.md", &augs, &targets, Path::new("/"));
+        let structured = vec![vec![StructuredAnchor {
+            path: "src/index.rs".to_string(),
+            start_line: 1,
+            end_line: 5,
+        }]];
+        let drafts = build(
+            "wiki/perf/indexing.md",
+            &augs,
+            &targets,
+            &structured,
+            Path::new("/"),
+        );
         assert_eq!(drafts[0].slug, "wiki/perf/bootstrap");
     }
 }
