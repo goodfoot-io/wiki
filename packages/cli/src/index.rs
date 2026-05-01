@@ -20,7 +20,7 @@ use crate::git::{
 use crate::parser::{LinkKind, parse_fragment_links, parse_wikilinks};
 use crate::perf;
 
-const SCHEMA_VERSION: &str = "3";
+const SCHEMA_VERSION: &str = "4";
 pub const SEARCH_LIMIT: i64 = 3;
 const SUGGESTION_LIMIT: i64 = 3;
 const SUGGESTION_MIN_SCORE: f64 = 0.5;
@@ -576,8 +576,8 @@ async fn recreate_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_tags_document_id ON tags(document_id);
         CREATE INDEX IF NOT EXISTS idx_tags_tag_key ON tags(tag_key);
         CREATE INDEX IF NOT EXISTS idx_incoming_links_target ON incoming_links(target_kind, target_key);
-        CREATE INDEX IF NOT EXISTS idx_documents_fts ON documents USING fts (title, aliases_text, tags_text, keywords_text, summary)
-        WITH (weights = 'title=5.0,aliases_text=4.0,tags_text=3.0,keywords_text=3.0,summary=2.0');
+        CREATE INDEX IF NOT EXISTS idx_documents_fts ON documents USING fts (title, aliases_text, tags_text, keywords_text, summary, body)
+        WITH (weights = 'title=5.0,aliases_text=4.0,tags_text=3.0,keywords_text=3.0,summary=2.0,body=1.0');
         ",
     )
     .await
@@ -1678,9 +1678,9 @@ async fn search_async(
                     d.path_rel,
                     d.summary,
                     d.source_raw,
-                    fts_score(d.title, d.aliases_text, d.tags_text, d.keywords_text, d.summary, ?1) AS score
+                    fts_score(d.title, d.aliases_text, d.tags_text, d.keywords_text, d.summary, d.body, ?1) AS score
                 FROM documents d
-                WHERE fts_match(d.title, d.aliases_text, d.tags_text, d.keywords_text, d.summary, ?1)
+                WHERE fts_match(d.title, d.aliases_text, d.tags_text, d.keywords_text, d.summary, d.body, ?1)
                 ORDER BY score DESC, d.title ASC
                 {limit_clause}
                 "
