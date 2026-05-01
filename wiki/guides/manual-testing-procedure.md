@@ -351,29 +351,7 @@ printf '{"tool_input":{"file_path":"%s/docs/authentication.md"}}' "$WORK" | wiki
 
 Expect: exit `0` and no `systemMessage` because the file is clean. With a broken edit (e.g. introducing `[[BadLink]]`), the hook prints a JSON `{"systemMessage":"…"}` describing the failure.
 
-## 13. `wiki html`
-
-```bash
-wiki html "Authentication" > /tmp/auth.html
-head -5 /tmp/auth.html
-```
-
-Expect: HTML with `<title>Authentication</title>`, links rendered as `<a>` tags, the page body as HTML.
-
-## 14. `wiki serve`
-
-```bash
-wiki serve --port 8765 &
-SERVE_PID=$!
-sleep 1
-curl -sS "http://localhost:8765/Authentication" | head -10
-curl -sS "http://localhost:8765/" | head -3
-kill $SERVE_PID
-```
-
-Expect: HTTP 200 responses; the index lists every page; per-page URLs render the same HTML as `wiki html`.
-
-## 15. `wiki scaffold` (git mesh integration)
+## 13. `wiki scaffold` (git mesh integration)
 
 ```bash
 wiki scaffold > /tmp/scaffold.sh
@@ -382,7 +360,7 @@ head -20 /tmp/scaffold.sh
 
 Expect: a shell script of `git mesh add <slug> <anchor>` and `git mesh why <slug> -m "…"` commands, one cluster per fragment-link group. The script is safe to inspect; running it stages mesh data (run only if you have `git mesh` installed).
 
-## 16. `wiki install`
+## 14. `wiki install`
 
 ```bash
 wiki install --help
@@ -390,7 +368,7 @@ wiki install --help
 
 Expect: subcommands listing supported integration targets (e.g. `claude`, `gemini`). `wiki install <target>` writes the integration config; verify by inspecting the target's config dir afterwards. Skip in this throwaway repo unless you also want to test the integration.
 
-## 17. `--perf` and exit-code conventions
+## 15. `--perf` and exit-code conventions
 
 ```bash
 WIKI_PERF=1 wiki "Authentication" 2>/tmp/perf.log >/dev/null
@@ -407,7 +385,7 @@ Exit-code summary across the suite:
 | Soft validation problem (e.g. duplicate ns rows still printed) | `1` |
 | Hard config / arg failure (no `wiki.toml`, unknown namespace, init refusal) | `2` |
 
-## 18. Cleanup
+## 16. Cleanup
 
 ```bash
 cd /
@@ -426,7 +404,6 @@ rm -rf "$WORK"
 | `summary`, `refs`, `links`, `extract` | 7–10 |
 | `check` (clean, broken link, cross-ns, JSON) | 11 |
 | `hook` (PostToolUse JSON in/out) | 12 |
-| `html`, `serve` | 13–14 |
-| `scaffold` | 15 |
-| `install` | 16 |
-| `--perf` and exit-code conventions | 17 |
+| `scaffold` | 13 |
+| `install` | 14 |
+| `--perf` and exit-code conventions | 15 |
