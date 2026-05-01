@@ -22,6 +22,19 @@ use crate::perf;
 
 const SCHEMA_VERSION: &str = "4";
 pub const SEARCH_LIMIT: i64 = 3;
+
+/// Single source of truth for FTS index columns and their weights.
+/// Both the DDL (`CREATE INDEX … USING fts`) and the search SQL
+/// (`fts_score` / `fts_match` argument lists) are built from this slice
+/// so the positional order can never diverge between the two sites.
+const FTS_COLUMNS: &[(&str, f32)] = &[
+    ("title", 5.0),
+    ("aliases_text", 4.0),
+    ("tags_text", 3.0),
+    ("keywords_text", 3.0),
+    ("summary", 2.0),
+    ("body", 1.0),
+];
 const SUGGESTION_LIMIT: i64 = 3;
 const SUGGESTION_MIN_SCORE: f64 = 0.5;
 const DISCOVERY_STRATEGY_VERSION: &str = "1";
@@ -511,7 +524,17 @@ async fn open_index_connection(wiki_root: &Path) -> Result<Connection> {
 }
 
 async fn recreate_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
+    let fts_col_list = FTS_COLUMNS
+        .iter()
+        .map(|(col, _)| *col)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let fts_weights = FTS_COLUMNS
+        .iter()
+        .map(|(col, w)| format!("{col}={w:.1}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let schema = format!(
         "
         DROP INDEX IF EXISTS idx_documents_fts;
         DROP TABLE IF EXISTS keywords;
@@ -576,10 +599,11 @@ async fn recreate_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_tags_document_id ON tags(document_id);
         CREATE INDEX IF NOT EXISTS idx_tags_tag_key ON tags(tag_key);
         CREATE INDEX IF NOT EXISTS idx_incoming_links_target ON incoming_links(target_kind, target_key);
-        CREATE INDEX IF NOT EXISTS idx_documents_fts ON documents USING fts (title, aliases_text, tags_text, keywords_text, summary, body)
-        WITH (weights = 'title=5.0,aliases_text=4.0,tags_text=3.0,keywords_text=3.0,summary=2.0,body=1.0');
-        ",
-    )
+        CREATE INDEX IF NOT EXISTS idx_documents_fts ON documents USING fts ({fts_col_list})
+        WITH (weights = '{fts_weights}');
+        "
+    );
+    conn.execute_batch(&schema)
     .await
     .into_diagnostic()
     .wrap_err("failed to create wiki index schema")?;
@@ -1671,6 +1695,11 @@ async fn search_async(
                 return Ok(Vec::new());
             }
 
+            let fts_col_args = FTS_COLUMNS
+                .iter()
+                .map(|(col, _)| format!("d.{col}"))
+                .collect::<Vec<_>>()
+                .join(", ");
             let sql = format!(
                 "
                 SELECT
@@ -1678,9 +1707,9 @@ async fn search_async(
                     d.path_rel,
                     d.summary,
                     d.source_raw,
-                    fts_score(d.title, d.aliases_text, d.tags_text, d.keywords_text, d.summary, d.body, ?1) AS score
+                    fts_score({fts_col_args}, ?1) AS score
                 FROM documents d
-                WHERE fts_match(d.title, d.aliases_text, d.tags_text, d.keywords_text, d.summary, d.body, ?1)
+                WHERE fts_match({fts_col_args}, ?1)
                 ORDER BY score DESC, d.title ASC
                 {limit_clause}
                 "
@@ -2242,6 +2271,42 @@ fn markdown_body(content: &str) -> String {
         return remainder[close + 6..].to_string();
     }
     content.to_string()
+}
+
+#[cfg(test)]
+mod markdown_body_tests {
+    use super::markdown_body;
+
+    /// `markdown_body` must strip the YAML frontmatter block so that terms
+    /// appearing only in the frontmatter do not leak into the body column.
+    /// This is the direct guard for the invariant that `frontmatter_only_term_matches_via_metadata`
+    /// relies on: if this function regressed and returned the full source string,
+    /// frontmatter-only terms would be double-indexed in the body column.
+    #[test]
+    fn strips_frontmatter_block() {
+        let content = "---\ntitle: Doc\nsummary: unique_fm_term here\n---\nBody text only.\n";
+        let body = markdown_body(content);
+        assert!(
+            !body.contains("unique_fm_term"),
+            "frontmatter term must not appear in body output; got: {body:?}"
+        );
+        assert!(
+            body.contains("Body text only."),
+            "body content must be preserved; got: {body:?}"
+        );
+    }
+
+    #[test]
+    fn no_frontmatter_returned_as_is() {
+        let content = "Just body text.\n";
+        assert_eq!(markdown_body(content), content);
+    }
+
+    #[test]
+    fn unclosed_frontmatter_returned_as_is() {
+        let content = "---\ntitle: Doc\nsummary: no close\nBody text.\n";
+        assert_eq!(markdown_body(content), content);
+    }
 }
 
 fn sha256_hex(content: &str) -> String {

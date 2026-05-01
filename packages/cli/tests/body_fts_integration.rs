@@ -240,34 +240,101 @@ fn delete_drops_document_from_fts() {
     );
 }
 
-/// A term that only appears in frontmatter (not body) must match via a metadata column,
-/// not via the body column. This confirms `markdown_body` strips frontmatter correctly.
+/// A term that only appears in frontmatter (not body) must still match the document,
+/// and a term that only appears in the body must also match the same document.
+///
+/// Uses a single document to isolate each column: "sibilance" lives only in the
+/// YAML `summary` field; "vexillology" lives only in the markdown body.
+/// If `markdown_body` regressed and returned the raw source un-stripped, "sibilance"
+/// would appear in the body column as well — the unit test in `index.rs` (module
+/// `markdown_body_tests`) is the direct guard for that invariant; this test confirms
+/// the end-to-end search surface for both columns independently.
 #[test]
 fn frontmatter_only_term_matches_via_metadata() {
     let repo = make_wiki_repo();
-    // "sibilance" is in the summary (frontmatter) and NOT in the body.
     repo.create_file(
-        "wiki/meta_only.md",
-        "---\ntitle: Meta Only Doc\nsummary: Contains the word sibilance here.\n---\nBody has no special terms at all.\n",
+        "wiki/combo.md",
+        "---\ntitle: Combo Doc\nsummary: Contains the word sibilance here.\n---\nBody discusses vexillology exclusively.\n",
     );
-    // "bodyterm" is only in the body.
-    repo.create_file(
-        "wiki/body_only.md",
-        "---\ntitle: Body Only Doc\nsummary: Generic summary.\n---\nBody has the word sibilance in the prose.\n",
-    );
-    repo.commit("add meta_only and body_only");
+    repo.commit("add combo");
 
-    let out = repo.wiki(&["sibilance"]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success());
-    // Both docs contain "sibilance" — meta_only in summary, body_only in body.
+    // Frontmatter-only term must find the document.
+    let out_fm = repo.wiki(&["sibilance"]);
+    let stdout_fm = String::from_utf8_lossy(&out_fm.stdout);
+    assert!(out_fm.status.success());
     assert!(
-        stdout.contains("Meta Only Doc"),
-        "expected Meta Only Doc (summary match); got: {stdout}"
+        stdout_fm.contains("Combo Doc"),
+        "expected Combo Doc for frontmatter term 'sibilance'; got: {stdout_fm}"
     );
+
+    // Body-only term must also find the same document.
+    let out_body = repo.wiki(&["vexillology"]);
+    let stdout_body = String::from_utf8_lossy(&out_body.stdout);
+    assert!(out_body.status.success());
     assert!(
-        stdout.contains("Body Only Doc"),
-        "expected Body Only Doc (body match); got: {stdout}"
+        stdout_body.contains("Combo Doc"),
+        "expected Combo Doc for body term 'vexillology'; got: {stdout_body}"
+    );
+}
+
+/// Under search-limit contention, an exact-title-match doc must not be evicted by body-only hits.
+///
+/// Corpus: one doc has title "Luminal" (the exact query token, so it is promoted by the
+/// exact-match lookup pipeline before FTS scores are applied), one has "luminal" in summary
+/// (weight 2.0), and three docs have it only in their bodies (weight 1.0). SEARCH_LIMIT is 3,
+/// so the three body-only docs could fill all result slots. This test asserts that the
+/// title-exact-match doc ranks first and is not displaced, locking the behavior against
+/// future tuning.
+///
+/// Note: Turso FTS BM25 scoring does not reliably rank a single summary occurrence above
+/// multiple body occurrences when IDF is corpus-relative (the summary doc may be evicted
+/// when 3+ body docs share the same term). Only the exact-match pipeline guarantee for the
+/// title doc is asserted here.
+#[test]
+fn common_term_ranking_survives_search_limit() {
+    let repo = make_wiki_repo();
+
+    // Title is the exact query token; this doc is promoted via exact-match lookup,
+    // which prepends it to results before any FTS score is considered.
+    repo.create_file(
+        "wiki/title_doc.md",
+        "---\ntitle: Luminal\nsummary: Unrelated summary text.\n---\nBody prose without the common term.\n",
+    );
+    repo.create_file(
+        "wiki/summary_doc.md",
+        "---\ntitle: Summary Doc\nsummary: This summary discusses luminal phenomena.\n---\nBody prose without the common term.\n",
+    );
+    repo.create_file(
+        "wiki/body1.md",
+        "---\ntitle: Body Doc One\nsummary: Unrelated.\n---\nThis body mentions luminal once.\n",
+    );
+    repo.create_file(
+        "wiki/body2.md",
+        "---\ntitle: Body Doc Two\nsummary: Unrelated.\n---\nThis body also mentions luminal.\n",
+    );
+    repo.create_file(
+        "wiki/body3.md",
+        "---\ntitle: Body Doc Three\nsummary: Unrelated.\n---\nAnother body with luminal in the text.\n",
+    );
+    repo.commit("add contention corpus");
+
+    let out = repo.wiki(&["--format", "json", "luminal"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "wiki failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("json parse failed");
+    let arr = v.as_array().expect("expected json array");
+    assert!(!arr.is_empty(), "expected at least one result; got: {stdout}");
+
+    let titles: Vec<&str> = arr
+        .iter()
+        .map(|e| e["title"].as_str().unwrap_or(""))
+        .collect();
+
+    // The exact-match title doc must rank first and must not be displaced by body-only FTS hits.
+    assert!(
+        titles.first() == Some(&"Luminal"),
+        "title-bearing doc (exact match) must rank first and not be evicted; order: {titles:?}"
     );
 }
 
