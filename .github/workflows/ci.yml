@@ -23,14 +23,19 @@ jobs:
         with:
           workspaces: packages/cli
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       - name: Cargo check
         run: cd packages/cli && cargo check --quiet
 
       - name: Cargo clippy
         run: cd packages/cli && cargo clippy --quiet -- -D warnings
 
-      - name: Cargo test
-        run: cd packages/cli && cargo test --quiet -- --test-threads=1
+      - name: Cargo nextest
+        run: cd packages/cli && cargo nextest run
 
       - name: Cargo build (release)
         run: cd packages/cli && cargo build --release
