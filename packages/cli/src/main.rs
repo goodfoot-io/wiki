@@ -19,6 +19,9 @@ use std::time::Instant;
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use miette::Result;
 
+/// Subcommands that support `-n '*'` (all namespaces) mode.
+const SUPPORTED_MULTI_NS: &str = "search, check, links, list, summary, refs";
+
 #[derive(Debug, Clone, ValueEnum)]
 enum Format {
     Json,
@@ -30,7 +33,7 @@ enum Format {
     version = crate::version::VERSION,
     before_help = concat!("wiki ", env!("WIKI_VERSION"), "\n"),
     about = "wiki - Read and maintain wiki pages",
-    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, links, list, summary, extract, refs, hook, html, install, serve) are reserved and cannot be used as page titles.",
+    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, links, list, summary, extract, refs, hook, html, install, serve) are reserved and cannot be used as page titles.\n\nUse `-n '*'` to run a command across all wikis in the repo. Each result is labeled with its namespace. Supported subcommands: search (default query), check, links, list, summary, refs.",
     disable_help_subcommand = true,
     disable_version_flag = true,
 )]
@@ -91,6 +94,8 @@ enum Commands {
     /// covered by a `git mesh` that anchors both the wiki file and the
     /// link target. `git mesh` must be installed; missing the binary
     /// fails the check.
+    ///
+    /// Use `-n '*'` to check all wikis in the repo.
     Check {
         /// Glob patterns to match wiki pages (default: $WIKI_DIR/**/*.md)
         #[arg(value_name = "glob")]
@@ -103,6 +108,10 @@ enum Commands {
     /// file targets by repo-relative path. Path-like inputs may match both and
     /// return a unified search-style result set with snippets. Reads from stdin
     /// when the argument is omitted.
+    ///
+    /// By default, searches all wikis in the repo (repo-wide backlinks). Use
+    /// `-n <ns>` to scope to a single namespace, or `-n '*'` as an explicit
+    /// synonym for the repo-wide default.
     Links {
         /// Page title, alias, or file path; reads from stdin if omitted
         #[arg(value_name = "target")]
@@ -126,7 +135,8 @@ enum Commands {
 
     /// List all wiki pages with metadata (title, aliases, tags, file path).
     ///
-    /// Optionally filter by tag.
+    /// Optionally filter by tag. Use `-n '*'` to list pages across all wikis
+    /// in the repo; each row is labeled with its namespace.
     List {
         /// Filter pages by tag
         #[arg(long = "tag", value_name = "tag")]
@@ -140,6 +150,8 @@ enum Commands {
     /// summary to stdout. Reads from stdin when the argument is omitted. With
     /// --format json, emits
     /// { title, file, summary }.
+    ///
+    /// Use `-n '*'` to search across all wikis in the repo.
     Summary {
         /// Page title, alias, or file path; reads from stdin if omitted
         #[arg(value_name = "title|path")]
@@ -154,6 +166,8 @@ enum Commands {
     /// Reads from stdin when the argument is omitted. With --format json,
     /// emits [{ wikilink, title, file, summary, aliases, tags }] for
     /// resolved links and [{ wikilink, error }] for unresolved ones.
+    ///
+    /// Use `-n '*'` to resolve wikilinks across all wikis in the repo.
     Refs {
         /// Page title, alias, or file path; reads from stdin if omitted
         #[arg(value_name = "title|path")]
@@ -432,17 +446,20 @@ fn run(
                     false,
                 )
             }
+            Some(Commands::List { tag }) => {
+                commands::list::run_multi(tag.as_deref(), json, &targets, &repo_root)
+            }
             None => match effective_query.as_deref() {
                 Some(q) => commands::search::run_multi(q, limit, offset, json, &targets, &repo_root),
                 None => {
                     return Err(miette::miette!(
-                        "`-n '*'` requires a query or one of: check, links, summary, refs"
+                        "`-n '*'` requires a query or one of: {SUPPORTED_MULTI_NS}"
                     ));
                 }
             },
             _ => {
                 return Err(miette::miette!(
-                    "command does not support multi-namespace (`-n '*'`); supported: search (default query), check, links, summary, refs"
+                    "command does not support multi-namespace (`-n '*'`); supported: {SUPPORTED_MULTI_NS}"
                 ));
             }
         };
@@ -484,11 +501,32 @@ fn run(
         }
         Some(Commands::Links { target }) => {
             let inputs = resolve_inputs(target, read_stdin_lines)?;
-            run_for_each(
-                inputs,
-                |input| commands::links::run(input, json, wiki_root, &repo_root),
-                false,
-            )
+            if effective_namespace.is_none() {
+                // No explicit -n: default to repo-wide backlinks across all wikis.
+                let cfg = config.as_ref().ok_or_else(|| {
+                    miette::miette!("no wiki.toml found; cannot resolve repo-wide links")
+                })?;
+                let all_targets: Vec<(String, &std::path::Path)> = cfg
+                    .all()
+                    .map(|info| {
+                        (
+                            info.namespace.clone().unwrap_or_else(|| "default".into()),
+                            info.root.as_path(),
+                        )
+                    })
+                    .collect();
+                run_for_each(
+                    inputs,
+                    |input| commands::links::run_multi(input, json, &all_targets, &repo_root),
+                    false,
+                )
+            } else {
+                run_for_each(
+                    inputs,
+                    |input| commands::links::run(input, json, wiki_root, &repo_root),
+                    false,
+                )
+            }
         }
         Some(Commands::Extract) => {
             let lines = read_stdin_lines();

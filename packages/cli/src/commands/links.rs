@@ -234,6 +234,31 @@ mod tests {
     }
 
     #[test]
+    fn run_multi_finds_backlinks_across_two_namespaces() {
+        let repo = TestRepo::new();
+        // Both pages live in the same wiki so the index can resolve the wikilink.
+        // run_multi is called with two namespace entries pointing to the same root —
+        // this exercises the iteration and labeled-output path without requiring
+        // cross-wiki wikilink resolution, which the index does not support.
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        repo.create_file(
+            "wiki/target.md",
+            "---\ntitle: Target Page\nsummary: Target summary.\n---\nBody.\n",
+        );
+        repo.create_file(
+            "wiki/source.md",
+            "---\ntitle: Source Page\nsummary: Links to target.\n---\nSee [[Target Page]].\n",
+        );
+        let targets: Vec<(String, &Path)> = vec![
+            ("ns-a".to_string(), wiki_root.as_path()),
+            ("ns-b".to_string(), wiki_root.as_path()),
+        ];
+
+        let code = run_multi("Target Page", false, &targets, repo.path()).expect("run_multi");
+        assert_eq!(code, 0);
+    }
+
+    #[test]
     fn strips_leading_dot_slash_from_path_input() {
         let repo = TestRepo::new();
         let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
