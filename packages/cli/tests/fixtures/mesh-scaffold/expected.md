@@ -1,14 +1,3 @@
-# wiki scaffold
-
-18 uncovered findings → 16 proposed meshes (consolidation ratio 1.12×).
-Pages covered: 5.
-
-## Pre-flight
-
-Anchored paths must exist in HEAD before mesh commit.
-
-All anchored paths exist in HEAD.
-
 # Charge handler notes • src/notes.wiki.md
 
 ## Charge handler notes
@@ -48,8 +37,6 @@ git mesh why wiki/charge-handler -m "[why]"
 ## CLI parser
 > The argument parser entrypoint is parse_args.
 
-> **Consolidated** 2 occurrences of this anchor set.
-
 ```bash
 git mesh add wiki/cli/cli-parser \
   wiki/cli/parser.md \
@@ -71,8 +58,6 @@ git mesh why wiki/git-mesh-ls -m "[why]"
 
 ## Identifier predicate
 > build_index is the entry point used by build_index.
-
-> **WARN:** source sentence opens with a bare identifier predicate; the why should name the subsystem rather than restating the symbol.
 
 ```bash
 git mesh add wiki/identifier-predicate \
@@ -114,8 +99,6 @@ git mesh why wiki/table-opening-2 -m "[why]"
 ## Ordered list opening
 > Validates the schema before validate_step is invoked.
 
-> **WARN:** source sentence opens with a verb rather than a subject; the why should name the subsystem and what it does across the anchors.
-
 ```bash
 git mesh add wiki/ordered-list-opening \
   wiki/edge.md \
@@ -125,8 +108,6 @@ git mesh why wiki/ordered-list-opening -m "[why]"
 
 ## Truly degenerate
 > 1.
-
-> **WARN:** degenerate excerpt — open the source page to write the why by hand.
 
 ```bash
 git mesh add wiki/truly-degenerate \
@@ -140,8 +121,6 @@ git mesh why wiki/truly-degenerate -m "[why]"
 ## (top of file)
 > See bootstrap for the entry point.
 
-> **TODO: rename** — fallback derivation (no section heading above link; used link label).
-
 ```bash
 git mesh add wiki/perf/bootstrap \
   wiki/perf/indexing.md \
@@ -151,8 +130,6 @@ git mesh why wiki/perf/bootstrap -m "[why]"
 
 ## Sync detection
 > The WikiIndex sync detects changes incrementally.
-
-> **Consolidated** 2 occurrences of this anchor set.
 
 ```bash
 git mesh add wiki/perf/sync-detection \
@@ -164,8 +141,6 @@ git mesh why wiki/perf/sync-detection -m "[why]"
 ## Apply phase
 > The indexer applies each diff entry to the in-memory tree; the implementation spans apply_changes and apply_changes_batch.
 
-> **Consider merging** with `wiki/perf/apply-phase-2`.
-
 ```bash
 git mesh add wiki/perf/apply-phase \
   wiki/perf/indexing.md \
@@ -175,8 +150,6 @@ git mesh why wiki/perf/apply-phase -m "[why]"
 
 ## Apply phase
 > The indexer applies each diff entry to the in-memory tree; the implementation spans apply_changes and apply_changes_batch.
-
-> **Consider merging** with `wiki/perf/apply-phase`.
 
 ```bash
 git mesh add wiki/perf/apply-phase-2 \
@@ -188,8 +161,6 @@ git mesh why wiki/perf/apply-phase-2 -m "[why]"
 ## Cache layer
 > The cache wiki section describes the LRU cache used by index lookups, backed by CacheKey.
 
-> **WARN:** source sentence describes the coupling rather than the subsystem; the why should name the subsystem and what it does across the anchors.
-
 ```bash
 git mesh add wiki/perf/cache-layer \
   wiki/perf/indexing.md \
@@ -197,23 +168,3 @@ git mesh add wiki/perf/cache-layer \
 git mesh why wiki/perf/cache-layer -m "[why]"
 ```
 
-# Commit Changes After Review
-
-```bash
-git mesh commit src/charge-handler-notes
-git mesh commit wiki/billing
-git mesh commit wiki/charge-handler
-git mesh commit wiki/cli/cli-parser
-git mesh commit wiki/git-mesh-ls
-git mesh commit wiki/identifier-predicate
-git mesh commit wiki/bold-label-only
-git mesh commit wiki/table-opening
-git mesh commit wiki/table-opening-2
-git mesh commit wiki/ordered-list-opening
-git mesh commit wiki/truly-degenerate
-git mesh commit wiki/perf/bootstrap
-git mesh commit wiki/perf/sync-detection
-git mesh commit wiki/perf/apply-phase
-git mesh commit wiki/perf/apply-phase-2
-git mesh commit wiki/perf/cache-layer
-```

@@ -1,17 +1,15 @@
 //! Phase-1 draft model: one `MeshDraft` per fragment link, before grouping.
 //!
 //! The draft carries everything the renderer needs (page, slug, anchors,
-//! section context, hints) and is the unit grouping/annotation operates on.
-//! Slug derivation lives here because fallback markers are part of the draft.
+//! section context) and is the unit grouping operates on.
+//! Slug derivation lives here.
 
 use std::path::{Path, PathBuf};
 
 use super::augment::AugmentedLink;
-use super::hints::{FallbackReason, Hint};
 
-/// One mesh proposal before grouping. Carries the inputs to render plus a
-/// growing list of hints. `consolidated_count` is `1` until `group` merges
-/// siblings into it.
+/// One mesh proposal before grouping. `consolidated_count` is `1` until
+/// `group` merges siblings into it.
 #[derive(Debug, Clone)]
 pub(crate) struct MeshDraft {
     /// Source wiki page, repo-root-relative with forward slashes.
@@ -26,16 +24,8 @@ pub(crate) struct MeshDraft {
     pub(crate) section_heading: String,
     /// First prose sentence under the heading, cleaned of markdown link syntax.
     pub(crate) section_opening: String,
-    /// Structured hints earned during build/group/annotate. Renderer formats them.
-    pub(crate) hints: Vec<Hint>,
     /// Number of identical-anchor-set siblings merged into this draft. Starts at 1.
     pub(crate) consolidated_count: usize,
-    /// Mirrors `AugmentedLink::section_opening_degenerate`. Carried on the
-    /// draft so it survives consolidation (which keeps the first sibling's
-    /// hints) without losing its provenance.
-    pub(crate) section_opening_degenerate: bool,
-    /// Mirrors `AugmentedLink::had_code_span_lead`.
-    pub(crate) had_code_span_lead: bool,
 }
 
 /// Build one draft per augmented link. `page_path` is the source wiki page
@@ -56,24 +46,17 @@ pub(crate) fn build(
         .iter()
         .zip(target_anchors.iter())
         .map(|(aug, targets)| {
-            let (slug, fallback) = derive_slug(page_path, aug, repo_root);
+            let slug = derive_slug(page_path, aug, repo_root);
             let mut anchors = Vec::with_capacity(1 + targets.len());
             anchors.push(page_path.to_string());
             anchors.extend(targets.iter().cloned());
-            let mut hints = Vec::new();
-            if let Some(reason) = fallback {
-                hints.push(Hint::FallbackSlug { reason });
-            }
             MeshDraft {
                 page_path: page_path.to_string(),
                 slug,
                 anchors,
                 section_heading: aug.section_heading.clone(),
                 section_opening: aug.section_opening.clone(),
-                hints,
                 consolidated_count: 1,
-                section_opening_degenerate: aug.section_opening_degenerate,
-                had_code_span_lead: aug.had_code_span_lead,
             }
         })
         .collect()
@@ -82,21 +65,15 @@ pub(crate) fn build(
 /// Slug = `<category>/<noun>`. Category is the page's parent directory; for
 /// `wiki/<sub>/file.md` that's `wiki/<sub>`, for `wiki/file.md` it's `wiki`,
 /// for any other path it's the first path segment. Noun is the deepest section
-/// heading kebab-cased; falls back to the link label, then the target file
-/// stem (with a `FallbackSlug` reason attached).
-fn derive_slug(
-    page_path: &str,
-    aug: &AugmentedLink,
-    _repo_root: &Path,
-) -> (String, Option<FallbackReason>) {
+/// heading kebab-cased; falls back to the link label, then the target file stem.
+fn derive_slug(page_path: &str, aug: &AugmentedLink, _repo_root: &Path) -> String {
     let category = derive_category(page_path);
-    let (noun, fallback) = derive_noun(aug);
-    let slug = if category.is_empty() {
+    let noun = derive_noun(aug);
+    if category.is_empty() {
         noun
     } else {
         format!("{category}/{noun}")
-    };
-    (slug, fallback)
+    }
 }
 
 fn derive_category(page_path: &str) -> String {
@@ -109,7 +86,7 @@ fn derive_category(page_path: &str) -> String {
     dirs.join("/")
 }
 
-fn derive_noun(aug: &AugmentedLink) -> (String, Option<FallbackReason>) {
+fn derive_noun(aug: &AugmentedLink) -> String {
     // Strip ATX hashes from `section_heading` if present.
     let heading = aug
         .section_heading
@@ -118,24 +95,23 @@ fn derive_noun(aug: &AugmentedLink) -> (String, Option<FallbackReason>) {
     if !heading.is_empty() {
         let slug = kebab(heading);
         if !slug.is_empty() {
-            return (slug, None);
+            return slug;
         }
     }
     let label = aug.link.original_text.trim();
     if !label.is_empty() {
         let slug = kebab(label);
         if !slug.is_empty() {
-            return (slug, Some(FallbackReason::NoHeadingUsedLabel));
+            return slug;
         }
     }
     let stem = file_stem_of(&aug.link.path);
     let slug = kebab(&stem);
-    let slug = if slug.is_empty() {
+    if slug.is_empty() {
         "anchor".to_string()
     } else {
         slug
-    };
-    (slug, Some(FallbackReason::NoHeadingUsedFileStem))
+    }
 }
 
 fn strip_leading_ordinal(s: &str) -> &str {
@@ -210,8 +186,6 @@ mod tests {
             heading_chain: Vec::new(),
             section_heading: heading.to_string(),
             section_opening: String::new(),
-            section_opening_degenerate: false,
-            had_code_span_lead: false,
         }
     }
 
@@ -246,25 +220,19 @@ mod tests {
     #[test]
     fn noun_from_heading_is_kebabbed() {
         let a = aug_with("## Sync detection", "build_index", "src/index.rs");
-        let (n, f) = derive_noun(&a);
-        assert_eq!(n, "sync-detection");
-        assert!(f.is_none());
+        assert_eq!(derive_noun(&a), "sync-detection");
     }
 
     #[test]
-    fn noun_falls_back_to_label_with_marker() {
+    fn noun_falls_back_to_label() {
         let a = aug_with("", "bootstrap", "src/index.rs");
-        let (n, f) = derive_noun(&a);
-        assert_eq!(n, "bootstrap");
-        assert_eq!(f, Some(FallbackReason::NoHeadingUsedLabel));
+        assert_eq!(derive_noun(&a), "bootstrap");
     }
 
     #[test]
-    fn noun_falls_back_to_file_stem_with_marker() {
+    fn noun_falls_back_to_file_stem() {
         let a = aug_with("", "", "src/index.rs");
-        let (n, f) = derive_noun(&a);
-        assert_eq!(n, "index");
-        assert_eq!(f, Some(FallbackReason::NoHeadingUsedFileStem));
+        assert_eq!(derive_noun(&a), "index");
     }
 
     #[test]
@@ -282,20 +250,13 @@ mod tests {
             ]
         );
         assert_eq!(drafts[0].consolidated_count, 1);
-        assert!(drafts[0].hints.is_empty());
     }
 
     #[test]
-    fn build_attaches_fallback_hint_when_noun_from_label() {
+    fn build_uses_label_when_no_heading() {
         let augs = vec![aug_with("", "bootstrap", "src/index.rs")];
         let targets = vec![vec!["src/index.rs#L1-L5".to_string()]];
         let drafts = build("wiki/perf/indexing.md", &augs, &targets, Path::new("/"));
         assert_eq!(drafts[0].slug, "wiki/perf/bootstrap");
-        assert!(matches!(
-            drafts[0].hints.first(),
-            Some(Hint::FallbackSlug {
-                reason: FallbackReason::NoHeadingUsedLabel
-            })
-        ));
     }
 }

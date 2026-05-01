@@ -26,15 +26,6 @@ pub(crate) struct AugmentedLink {
     /// markdown link syntax cleaned via the same pipeline as `surrounding_text`.
     /// Empty when no prose precedes the next heading.
     pub(crate) section_opening: String,
-    /// True when the best opening we could find still looks degenerate
-    /// (too short, ends in `:`, was list-marker-only, bold-label-only, or
-    /// no prose paragraph existed before the next heading). Drives the
-    /// `DegenerateExcerpt` warn comment.
-    pub(crate) section_opening_degenerate: bool,
-    /// True when the section opening's leading token came from inline code
-    /// (i.e. was originally backtick-wrapped before prose cleanup). Used by
-    /// the `HeadlessPredicate` detector to gate on identifier-led openings.
-    pub(crate) had_code_span_lead: bool,
 }
 
 /// Augment a slice of fragment links found in `content`.
@@ -67,7 +58,7 @@ pub(crate) fn augment(links: &[FragmentLink], content: &str) -> Vec<AugmentedLin
                 .get(link.source_line.saturating_sub(1))
                 .cloned()
                 .unwrap_or_default();
-            let (section_heading, section_opening, degenerate, had_code_lead) =
+            let (section_heading, section_opening, _degenerate, _had_code_lead) =
                 extract_section_opening(meta.as_ref(), &raw_lines, &scrubbed_lines);
             AugmentedLink {
                 link: link.clone(),
@@ -76,8 +67,6 @@ pub(crate) fn augment(links: &[FragmentLink], content: &str) -> Vec<AugmentedLin
                 heading_chain,
                 section_heading,
                 section_opening,
-                section_opening_degenerate: degenerate,
-                had_code_span_lead: had_code_lead,
             }
         })
         .collect()
@@ -87,10 +76,7 @@ pub(crate) fn augment(links: &[FragmentLink], content: &str) -> Vec<AugmentedLin
 /// in scope at each line. `None` when no heading precedes that line.
 type HeadingMeta = Option<(usize, usize, String)>;
 
-fn build_heading_meta_from_raw(
-    raw_lines: &[&str],
-    scrubbed_lines: &[&str],
-) -> Vec<HeadingMeta> {
+fn build_heading_meta_from_raw(raw_lines: &[&str], scrubbed_lines: &[&str]) -> Vec<HeadingMeta> {
     let mut out: Vec<HeadingMeta> = Vec::with_capacity(raw_lines.len());
     let mut stack: Vec<(usize, usize, String)> = Vec::new();
     let mut in_fence = false;
@@ -107,7 +93,12 @@ fn build_heading_meta_from_raw(
         // Sanity-check fence state against the scrubber (it blanks fence
         // bodies entirely, so a heading inside a fence will be blank in
         // scrubbed even when our toggle slips out of sync with weird input).
-        if scrubbed_lines.get(i).map(|s| s.trim()).unwrap_or("").is_empty() {
+        if scrubbed_lines
+            .get(i)
+            .map(|s| s.trim())
+            .unwrap_or("")
+            .is_empty()
+        {
             // Don't parse a heading from a line the scrubber blanked.
             continue;
         }
@@ -362,10 +353,7 @@ fn truncate_to_sentence(s: &str) -> String {
     s.to_string()
 }
 
-fn build_heading_chains_from_raw(
-    raw_lines: &[&str],
-    scrubbed_lines: &[&str],
-) -> Vec<Vec<String>> {
+fn build_heading_chains_from_raw(raw_lines: &[&str], scrubbed_lines: &[&str]) -> Vec<Vec<String>> {
     let mut chains: Vec<Vec<String>> = Vec::with_capacity(raw_lines.len());
     let mut stack: Vec<(usize, String)> = Vec::new();
     let mut in_fence = false;
@@ -379,7 +367,12 @@ fn build_heading_chains_from_raw(
         if in_fence {
             continue;
         }
-        if scrubbed_lines.get(i).map(|s| s.trim()).unwrap_or("").is_empty() {
+        if scrubbed_lines
+            .get(i)
+            .map(|s| s.trim())
+            .unwrap_or("")
+            .is_empty()
+        {
             continue;
         }
         if let Some((level, text)) = parse_atx_heading(raw) {
@@ -618,7 +611,8 @@ mod tests {
 
     #[test]
     fn section_opening_link_directly_under_heading() {
-        let content = "## Sync detection\nThe WikiIndex sync detects changes. Then more.\n[label](foo.rs)\n";
+        let content =
+            "## Sync detection\nThe WikiIndex sync detects changes. Then more.\n[label](foo.rs)\n";
         let links = parse_fragment_links(content);
         let result = augment(&links, content);
         assert_eq!(result[0].section_heading, "## Sync detection");
@@ -630,7 +624,8 @@ mod tests {
 
     #[test]
     fn section_opening_skips_blanks_and_finds_first_prose() {
-        let content = "## H\n\n\nFirst prose line. Second sentence.\n\nmore later [label](foo.rs)\n";
+        let content =
+            "## H\n\n\nFirst prose line. Second sentence.\n\nmore later [label](foo.rs)\n";
         let links = parse_fragment_links(content);
         let result = augment(&links, content);
         assert_eq!(result[0].section_heading, "## H");
@@ -639,8 +634,7 @@ mod tests {
 
     #[test]
     fn section_opening_uses_deepest_nested_heading() {
-        let content =
-            "# Top\n\nintro\n\n## Mid\n\nmid prose.\n\n### Deep\n\nDeep prose here. Tail.\n[label](foo.rs)\n";
+        let content = "# Top\n\nintro\n\n## Mid\n\nmid prose.\n\n### Deep\n\nDeep prose here. Tail.\n[label](foo.rs)\n";
         let links = parse_fragment_links(content);
         let result = augment(&links, content);
         assert_eq!(result[0].section_heading, "### Deep");
@@ -680,8 +674,7 @@ mod tests {
 
     #[test]
     fn section_opening_cleans_markdown_link_syntax() {
-        let content =
-            "## H\n\nThe handler [handleCharge](src/charge.ts#L1-L5) validates input.\n[label](foo.rs)\n";
+        let content = "## H\n\nThe handler [handleCharge](src/charge.ts#L1-L5) validates input.\n[label](foo.rs)\n";
         let links = parse_fragment_links(content);
         let result = augment(&links, content);
         // Heading source = first link; both share section. Both have same opening.
@@ -716,7 +709,6 @@ mod tests {
         let links = parse_fragment_links(content);
         let result = augment(&links, content);
         assert_eq!(result[0].section_opening, "Real prose paragraph here.");
-        assert!(!result[0].section_opening_degenerate);
     }
 
     #[test]
@@ -729,29 +721,14 @@ mod tests {
 
     #[test]
     fn section_opening_strips_ordered_list_marker() {
-        let content = "## H\n\n1. Validates the request payload before dispatch. [label](foo.rs#L1-L2)\n";
+        let content =
+            "## H\n\n1. Validates the request payload before dispatch. [label](foo.rs#L1-L2)\n";
         let links = parse_fragment_links(content);
         let result = augment(&links, content);
         assert_eq!(
             result[0].section_opening,
             "Validates the request payload before dispatch."
         );
-    }
-
-    #[test]
-    fn degenerate_excerpt_flagged_when_no_real_prose() {
-        let content = "## H\n\n1.\n\n[x](foo.rs#L1-L2)\n";
-        let links = parse_fragment_links(content);
-        let result = augment(&links, content);
-        assert!(result[0].section_opening_degenerate);
-    }
-
-    #[test]
-    fn had_code_span_lead_set_when_first_token_backticked() {
-        let content = "## H\n\n`Foo` is the entry point. [label](foo.rs#L1-L2)\n";
-        let links = parse_fragment_links(content);
-        let result = augment(&links, content);
-        assert!(result[0].had_code_span_lead);
     }
 
     #[test]

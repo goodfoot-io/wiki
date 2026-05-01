@@ -1,9 +1,7 @@
 pub mod augment;
 pub mod draft;
 pub mod group;
-pub mod hints;
 pub mod name;
-pub mod preflight;
 pub mod render;
 pub mod scaffold;
 pub mod why;

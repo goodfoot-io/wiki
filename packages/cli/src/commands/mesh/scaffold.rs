@@ -22,12 +22,10 @@ use crate::parser::{LinkKind, parse_fragment_links};
 use super::augment::{AugmentedLink, augment};
 use super::draft::{self, MeshDraft};
 use super::group;
-use super::hints::{self, AntiPattern, Hint};
 use super::name::{
     co_presence_terms, deduplicate_names, detect_category, detect_rel_type, extract_source_role,
     extract_target_role, norm_cmp, rake, select_core_phrase, slugify, tokenize,
 };
-use super::preflight;
 use super::render;
 use super::why::{extract_prose_why, template_why};
 
@@ -47,7 +45,6 @@ pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> 
     // Filter test fixtures: `wiki check` legitimately scans them, but a
     // scaffold run that materializes mesh commands for a test wiki would
     // pollute the repo's mesh state on the first commit. Scoped to scaffold.
-    let total_discovered = discovered.len();
     let files: Vec<PathBuf> = discovered
         .into_iter()
         .filter(|p| {
@@ -55,7 +52,6 @@ pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> 
             !s.contains("/tests/fixtures/") && !s.contains("\\tests\\fixtures\\")
         })
         .collect();
-    let skipped_fixtures = total_discovered - files.len();
 
     let mut all_inputs: Vec<LinkInput> = Vec::new();
     for file in &files {
@@ -83,8 +79,6 @@ pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> 
     if all_inputs.is_empty() {
         if json {
             println!("[]");
-        } else {
-            print!("{}", render::render_empty_markdown());
         }
         return Ok(0);
     }
@@ -135,22 +129,8 @@ pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> 
         return Ok(0);
     }
 
-    // ── Markdown mode: build/group/hints/preflight pipeline ───────────────
-    let uncovered_findings = all_inputs.len();
+    // ── Markdown mode: build/group pipeline ──────────────────────────────
     let drafts_by_page = build_meshes(&all_inputs, repo_root);
-
-    // Collect anchored paths (page paths + target paths) deduped, in declaration order.
-    let mut anchored_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut anchored_paths: Vec<String> = Vec::new();
-    for d in &drafts_by_page {
-        for a in &d.anchors {
-            let path_only = a.split('#').next().unwrap_or(a).to_string();
-            if anchored_seen.insert(path_only.clone()) {
-                anchored_paths.push(path_only);
-            }
-        }
-    }
-    let pf = preflight::missing_in_head(repo_root, &anchored_paths);
 
     // Build the page-title lookup keyed by the same repo-root-relative
     // `page_path` strings the drafts use, so the renderer can prefix each
@@ -163,13 +143,7 @@ pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> 
         page_titles.insert(rel, title);
     }
 
-    let rendered = render::render_markdown(
-        &drafts_by_page,
-        &page_titles,
-        &pf,
-        uncovered_findings,
-        skipped_fixtures,
-    );
+    let rendered = render::render_markdown(&drafts_by_page, &page_titles);
     print!("{rendered}");
     Ok(0)
 }
@@ -185,7 +159,10 @@ fn build_meshes(inputs: &[LinkInput], repo_root: &Path) -> Vec<MeshDraft> {
         if !by_page.contains_key(&input.wiki_file) {
             page_order.push(input.wiki_file.clone());
         }
-        by_page.entry(input.wiki_file.clone()).or_default().push(input);
+        by_page
+            .entry(input.wiki_file.clone())
+            .or_default()
+            .push(input);
     }
 
     // Stage 1: build drafts per page.
@@ -201,7 +178,8 @@ fn build_meshes(inputs: &[LinkInput], repo_root: &Path) -> Vec<MeshDraft> {
                 let link = &i.augmented.link;
                 let resolved = resolve_link_path(&link.path, &i.wiki_file, repo_root);
                 let anchor_rel = path_relative_to(&resolved, repo_root);
-                let anchor_rel = locate_existing_suffix(&anchor_rel, repo_root).unwrap_or(anchor_rel);
+                let anchor_rel =
+                    locate_existing_suffix(&anchor_rel, repo_root).unwrap_or(anchor_rel);
                 let start = link.start_line.unwrap_or(0);
                 let end = link.end_line.unwrap_or(start);
                 vec![format!("{anchor_rel}#L{start}-L{end}")]
@@ -228,32 +206,6 @@ fn build_meshes(inputs: &[LinkInput], repo_root: &Path) -> Vec<MeshDraft> {
     // Stage 2b: global slug dedup over the merge survivors.
     dedup_slugs(&mut consolidated);
 
-    // Stage 2c: ConsiderMerge runs AFTER dedup so the recorded `other_slug`
-    // is the post-dedup name (matching the footer's `git mesh commit` lines).
-    group::attach_consider_merge(&mut consolidated);
-
-    // Stage 3: degenerate-excerpt flag + anti-pattern detection. Both flags
-    // ride on the draft (carried over from `AugmentedLink` at build time) so
-    // they survive consolidation cleanly.
-    for d in &mut consolidated {
-        if d.section_opening_degenerate {
-            d.hints.push(Hint::WarnAntiPattern {
-                pattern: AntiPattern::DegenerateExcerpt,
-            });
-            // When the excerpt itself is degenerate, the secondary detectors
-            // would just pile onto an already-flagged finding — skip them.
-            continue;
-        }
-        if let Some(h) =
-            hints::detect_anti_patterns(&d.section_opening, d.had_code_span_lead)
-        {
-            d.hints.push(h);
-        }
-    }
-
-    // Re-shape ConsiderMerge ordering: leave hints in their attachment order
-    // (build → consolidate → anti-pattern) — `Consolidated`/`ConsiderMerge`
-    // come before `WarnAntiPattern` because the consolidation pass ran first.
     consolidated
 }
 
@@ -587,17 +539,11 @@ fn find_wiki_section_range_for_link(content: &str, link_source_line: usize) -> O
     match section_start {
         None => {
             // No heading before the link - section starts at document top.
-            let section_end = headings
-                .first()
-                .map(|(l, _)| l - 1)
-                .unwrap_or(lines.len());
+            let section_end = headings.first().map(|(l, _)| l - 1).unwrap_or(lines.len());
             Some((1, section_end as u32))
         }
         Some(start_line) => {
-            let (_, start_level) = headings
-                .iter()
-                .find(|(l, _)| *l == start_line)
-                .unwrap();
+            let (_, start_level) = headings.iter().find(|(l, _)| *l == start_line).unwrap();
 
             // Find the next heading at the same or higher level.
             let end_line = headings
@@ -635,7 +581,6 @@ fn find_wiki_section_range(
         }
     }
 
-
     // If the heading chain is empty, we're at the document top level.
     // Find section from start to first heading, or to EOF if no headings exist.
     if heading_chain.is_empty() {
@@ -655,8 +600,7 @@ fn find_wiki_section_range(
     for (chain_idx, chain_heading) in heading_chain.iter().enumerate() {
         let target_level = chain_idx + 1; // h1 is level 1, h2 is level 2, etc.
         // Strip markdown formatting from the chain heading for comparison.
-        let normalized_chain_heading =
-            format_re.replace_all(chain_heading, "").trim().to_string();
+        let normalized_chain_heading = format_re.replace_all(chain_heading, "").trim().to_string();
 
         // Find the next heading matching this level and text, starting from section_start_line.
         let mut found = false;
@@ -704,7 +648,10 @@ fn find_wiki_section_range(
         .map(|(l, _, _)| l - 1)
         .unwrap_or(lines.len());
 
-    Some((section_start_line as u32, end_line.max(section_start_line) as u32))
+    Some((
+        section_start_line as u32,
+        end_line.max(section_start_line) as u32,
+    ))
 }
 
 /// Extract the heading level (1-6) from a markdown line, or None if not a heading.
@@ -811,7 +758,10 @@ mod tests {
     fn extract_heading_text_strips_formatting() {
         assert_eq!(extract_heading_text("# My Heading"), "My Heading");
         assert_eq!(extract_heading_text("## `Code Title`"), "Code Title");
-        assert_eq!(extract_heading_text("### **Bold** and *italic*"), "Bold and italic");
+        assert_eq!(
+            extract_heading_text("### **Bold** and *italic*"),
+            "Bold and italic"
+        );
         assert_eq!(
             extract_heading_text("### `git-mesh ls <anchor> --porcelain`"),
             "git-mesh ls <anchor> --porcelain"
