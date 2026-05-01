@@ -1,17 +1,22 @@
 {
-  "description": "Validate wiki pages with `wiki check` after edits",
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-check.sh",
-            "timeout": 30
+            "command": "node $CLAUDE_PLUGIN_ROOT/hooks/bin/wiki-check.983545c7.mjs",
+            "timeout": 30000
           }
-        ]
+        ],
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit"
       }
     ]
+  },
+  "__generated": {
+    "files": [
+      "wiki-check.983545c7.mjs"
+    ],
+    "timestamp": "2026-05-01T20:22:25.372Z"
   }
 }
