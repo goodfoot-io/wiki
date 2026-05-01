@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use miette::Result;
@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::index::WikiIndex;
 use crate::parser::parse_wikilinks;
+use crate::wiki_config::WikiConfig;
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
@@ -63,6 +64,7 @@ pub fn run_multi(
     json: bool,
     targets: &[(String, &Path)],
     repo_root: &Path,
+    wiki_config: Option<&WikiConfig>,
 ) -> Result<i32> {
     let mut any_resolved_source = false;
     if json {
@@ -73,7 +75,7 @@ pub fn run_multi(
                 continue;
             };
             any_resolved_source = true;
-            let entries = collect_entries(&index, &page.content)?;
+            let entries = collect_entries(&index, &page.content, wiki_config, repo_root)?;
             for e in &entries {
                 let mut v = serde_json::to_value(e).unwrap();
                 if let Some(obj) = v.as_object_mut() {
@@ -102,7 +104,7 @@ pub fn run_multi(
             continue;
         };
         any_resolved_source = true;
-        let entries = collect_entries(&index, &page.content)?;
+        let entries = collect_entries(&index, &page.content, wiki_config, repo_root)?;
         if entries.is_empty() {
             continue;
         }
@@ -119,21 +121,85 @@ pub fn run_multi(
     Ok(0)
 }
 
-fn collect_entries(index: &WikiIndex, content: &str) -> Result<Vec<RefEntry>> {
+fn collect_entries(
+    index: &WikiIndex,
+    content: &str,
+    wiki_config: Option<&WikiConfig>,
+    repo_root: &Path,
+) -> Result<Vec<RefEntry>> {
     let wikilinks = parse_wikilinks(content);
     let mut seen = HashSet::new();
-    let mut targets = Vec::new();
-    for wikilink in wikilinks {
-        let key = wikilink.title.to_lowercase();
+    let mut targets: Vec<(Option<String>, String)> = Vec::new();
+    for wl in wikilinks {
+        let key = (
+            wl.namespace.as_ref().map(|n| n.to_lowercase()),
+            wl.title.to_lowercase(),
+        );
         if seen.insert(key) {
-            targets.push(wikilink.title);
+            targets.push((wl.namespace, wl.title));
         }
     }
+
+    let current_namespace = index.namespace();
+    let mut peer_indices: HashMap<String, Option<WikiIndex>> = HashMap::new();
     let mut entries = Vec::with_capacity(targets.len());
-    for target in targets {
-        match index.resolve_page_full(&target)? {
+    for (ns, title) in targets {
+        let display = match &ns {
+            Some(n) => format!("{n}:{title}"),
+            None => title.clone(),
+        };
+
+        // Same-namespace link, or explicit prefix matching the current wiki.
+        let resolve_locally = match &ns {
+            None => true,
+            Some(n) => current_namespace == Some(n.as_str()),
+        };
+
+        if resolve_locally {
+            match index.resolve_page_full(&title)? {
+                Some(full) => entries.push(RefEntry::Resolved {
+                    wikilink: display,
+                    title: full.title,
+                    file: full.file,
+                    summary: full.summary,
+                    aliases: full.aliases,
+                    tags: full.tags,
+                }),
+                None => entries.push(RefEntry::Unresolved {
+                    wikilink: display,
+                    error: "not found".to_string(),
+                }),
+            }
+            continue;
+        }
+
+        let ns_name = ns.as_deref().expect("ns is Some when resolving cross-namespace");
+        let peer_info = wiki_config.and_then(|cfg| cfg.wikis.get(ns_name));
+        let Some(peer_info) = peer_info else {
+            entries.push(RefEntry::Unresolved {
+                wikilink: display,
+                error: format!(
+                    "namespace `{ns_name}` is not declared by any wiki.toml in this repo"
+                ),
+            });
+            continue;
+        };
+
+        let peer_root = peer_info.root.clone();
+        let peer_index_slot = peer_indices
+            .entry(ns_name.to_string())
+            .or_insert_with(|| WikiIndex::prepare(&peer_root, repo_root).ok());
+        let Some(peer_index) = peer_index_slot.as_ref() else {
+            entries.push(RefEntry::Unresolved {
+                wikilink: display,
+                error: format!("could not load namespace `{ns_name}`"),
+            });
+            continue;
+        };
+
+        match peer_index.resolve_page_full(&title)? {
             Some(full) => entries.push(RefEntry::Resolved {
-                wikilink: target,
+                wikilink: display,
                 title: full.title,
                 file: full.file,
                 summary: full.summary,
@@ -141,15 +207,21 @@ fn collect_entries(index: &WikiIndex, content: &str) -> Result<Vec<RefEntry>> {
                 tags: full.tags,
             }),
             None => entries.push(RefEntry::Unresolved {
-                wikilink: target,
-                error: "not found".to_string(),
+                wikilink: display,
+                error: format!("not found in namespace `{ns_name}`"),
             }),
         }
     }
     Ok(entries)
 }
 
-pub fn run(title: &str, json: bool, wiki_root: &Path, repo_root: &Path) -> Result<i32> {
+pub fn run(
+    title: &str,
+    json: bool,
+    wiki_root: &Path,
+    repo_root: &Path,
+    wiki_config: Option<&WikiConfig>,
+) -> Result<i32> {
     let index = WikiIndex::prepare(wiki_root, repo_root)?;
     let Some(page) = index.resolve_page(title)? else {
         if json {
@@ -165,33 +237,7 @@ pub fn run(title: &str, json: bool, wiki_root: &Path, repo_root: &Path) -> Resul
         return Ok(1);
     };
 
-    let wikilinks = parse_wikilinks(&page.content);
-    let mut seen = HashSet::new();
-    let mut targets = Vec::new();
-    for wikilink in wikilinks {
-        let key = wikilink.title.to_lowercase();
-        if seen.insert(key) {
-            targets.push(wikilink.title);
-        }
-    }
-
-    let mut entries = Vec::with_capacity(targets.len());
-    for target in targets {
-        match index.resolve_page_full(&target)? {
-            Some(full) => entries.push(RefEntry::Resolved {
-                wikilink: target,
-                title: full.title,
-                file: full.file,
-                summary: full.summary,
-                aliases: full.aliases,
-                tags: full.tags,
-            }),
-            None => entries.push(RefEntry::Unresolved {
-                wikilink: target,
-                error: "not found".to_string(),
-            }),
-        }
-    }
+    let entries = collect_entries(&index, &page.content, wiki_config, repo_root)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&entries).unwrap());
@@ -205,6 +251,7 @@ pub fn run(title: &str, json: bool, wiki_root: &Path, repo_root: &Path) -> Resul
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
     use std::process::Command;
     use tempfile::TempDir;
 
@@ -252,39 +299,25 @@ mod tests {
         }
     }
 
+    fn write_namespaced_wiki(repo_root: &Path, dir: &str, ns: &str) -> PathBuf {
+        let wiki_root = repo_root.join(dir);
+        fs::create_dir_all(&wiki_root).expect("create wiki dir");
+        fs::write(
+            wiki_root.join("wiki.toml"),
+            format!("namespace = \"{ns}\"\n"),
+        )
+        .expect("write wiki.toml");
+        wiki_root
+    }
+
     fn build_entries(index: &WikiIndex, page_title: &str) -> Vec<RefEntry> {
         let page = index
             .resolve_page(page_title)
             .expect("resolve")
             .expect("page");
-        let wikilinks = parse_wikilinks(&page.content);
-        let mut seen = HashSet::new();
-        let mut targets = Vec::new();
-        for wikilink in wikilinks {
-            let key = wikilink.title.to_lowercase();
-            if seen.insert(key) {
-                targets.push(wikilink.title);
-            }
-        }
-
-        let mut entries = Vec::new();
-        for target in targets {
-            match index.resolve_page_full(&target).expect("resolve_full") {
-                Some(full) => entries.push(RefEntry::Resolved {
-                    wikilink: target,
-                    title: full.title,
-                    file: full.file,
-                    summary: full.summary,
-                    aliases: full.aliases,
-                    tags: full.tags,
-                }),
-                None => entries.push(RefEntry::Unresolved {
-                    wikilink: target,
-                    error: "not found".to_string(),
-                }),
-            }
-        }
-        entries
+        // Mirror the production pipeline using a no-op config, so single-namespace
+        // tests that don't need cross-namespace resolution behave as before.
+        collect_entries(index, &page.content, None, index.repo_root()).expect("collect")
     }
 
     #[test]
@@ -389,7 +422,7 @@ mod tests {
             "---\ntitle: Other\nsummary: Other page.\n---\nBody.\n",
         );
 
-        let code = run("Nonexistent", true, &wiki_root, repo.path()).expect("run");
+        let code = run("Nonexistent", true, &wiki_root, repo.path(), None).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -402,7 +435,116 @@ mod tests {
             "---\ntitle: Source\nsummary: Source page.\n---\n[[Missing]]\n",
         );
 
-        let code = run("Source", true, &wiki_root, repo.path()).expect("run");
+        let code = run("Source", true, &wiki_root, repo.path(), None).expect("run");
         assert_eq!(code, 0);
+    }
+
+    // ── Cross-namespace wikilink resolution (regression for main-9) ───────────
+
+    #[test]
+    fn cross_namespace_wikilink_resolves_against_peer_index() {
+        let repo = TestRepo::new();
+        let default_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        let _scratch_root = write_namespaced_wiki(repo.path(), "scratch", "scratch");
+        repo.create_file(
+            "wiki/authentication.md",
+            "---\ntitle: Authentication\nsummary: Auth.\n---\nWe use OAuth2. See [[Sessions]] and [[scratch:Operator Notes]].\n",
+        );
+        repo.create_file(
+            "wiki/sessions.md",
+            "---\ntitle: Sessions\nsummary: Session lifecycle.\n---\nBody.\n",
+        );
+        repo.create_file(
+            "scratch/operator-notes.md",
+            "---\ntitle: Operator Notes\nsummary: Day-to-day operator notes.\n---\nBody.\n",
+        );
+
+        let cfg = WikiConfig::load(repo.path(), repo.path()).expect("config");
+        let index = WikiIndex::prepare(&default_root, repo.path()).expect("prepare");
+        let page = index
+            .resolve_page("Authentication")
+            .expect("resolve")
+            .expect("page");
+        let entries =
+            collect_entries(&index, &page.content, Some(&cfg), repo.path()).expect("entries");
+
+        assert_eq!(entries.len(), 2);
+        let cross = entries
+            .iter()
+            .find(|e| matches!(e, RefEntry::Resolved { wikilink, .. } | RefEntry::Unresolved { wikilink, .. } if wikilink.starts_with("scratch:")))
+            .expect("cross-namespace entry present with prefix preserved");
+        match cross {
+            RefEntry::Resolved {
+                wikilink,
+                title,
+                summary,
+                ..
+            } => {
+                assert_eq!(wikilink, "scratch:Operator Notes");
+                assert_eq!(title, "Operator Notes");
+                assert!(
+                    summary.contains("operator"),
+                    "summary should come from the peer page, got: {summary}"
+                );
+            }
+            _ => panic!("expected scratch:Operator Notes to resolve against the peer index"),
+        }
+    }
+
+    #[test]
+    fn cross_namespace_unresolved_preserves_prefix_and_names_namespace() {
+        let repo = TestRepo::new();
+        let default_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        let _scratch_root = write_namespaced_wiki(repo.path(), "scratch", "scratch");
+        repo.create_file(
+            "wiki/source.md",
+            "---\ntitle: Source\nsummary: Src.\n---\nSee [[scratch:Missing]].\n",
+        );
+
+        let cfg = WikiConfig::load(repo.path(), repo.path()).expect("config");
+        let index = WikiIndex::prepare(&default_root, repo.path()).expect("prepare");
+        let page = index.resolve_page("Source").expect("resolve").expect("page");
+        let entries =
+            collect_entries(&index, &page.content, Some(&cfg), repo.path()).expect("entries");
+
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
+            RefEntry::Unresolved { wikilink, error } => {
+                assert_eq!(wikilink, "scratch:Missing");
+                assert!(
+                    error.contains("scratch"),
+                    "error must name the scratch namespace, got: {error}"
+                );
+            }
+            _ => panic!("expected unresolved entry"),
+        }
+    }
+
+    #[test]
+    fn cross_namespace_unknown_namespace_named_in_error() {
+        let repo = TestRepo::new();
+        let default_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        repo.create_file(
+            "wiki/source.md",
+            "---\ntitle: Source\nsummary: Src.\n---\nSee [[unknown:X]].\n",
+        );
+
+        let cfg = WikiConfig::load(repo.path(), repo.path()).expect("config");
+        let index = WikiIndex::prepare(&default_root, repo.path()).expect("prepare");
+        let page = index.resolve_page("Source").expect("resolve").expect("page");
+        let entries =
+            collect_entries(&index, &page.content, Some(&cfg), repo.path()).expect("entries");
+
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
+            RefEntry::Unresolved { wikilink, error } => {
+                assert_eq!(wikilink, "unknown:X");
+                assert!(
+                    error.contains("unknown") && error.contains("not declared"),
+                    "error must name the unknown namespace and note it's undeclared, got: {error}"
+                );
+            }
+            _ => panic!("expected unresolved entry for unknown namespace"),
+        }
     }
 }

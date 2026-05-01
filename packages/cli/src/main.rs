@@ -428,7 +428,7 @@ fn run(
                 let inputs = resolve_inputs(title, read_stdin_lines)?;
                 run_for_each(
                     inputs,
-                    |input| commands::refs::run_multi(input, json, &targets, &repo_root),
+                    |input| commands::refs::run_multi(input, json, &targets, &repo_root, Some(cfg)),
                     false,
                 )
             }
@@ -520,7 +520,7 @@ fn run(
             let inputs = resolve_inputs(title, read_stdin_lines)?;
             run_for_each(
                 inputs,
-                |input| commands::refs::run(input, json, wiki_root, &repo_root),
+                |input| commands::refs::run(input, json, wiki_root, &repo_root, config.as_ref()),
                 false,
             )
         }

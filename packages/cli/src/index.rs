@@ -290,6 +290,10 @@ impl WikiIndex {
     pub fn wiki_root(&self) -> &Path {
         &self.wiki_root
     }
+
+    pub fn namespace(&self) -> Option<&str> {
+        self.namespace.as_deref()
+    }
 }
 
 async fn bootstrap_schema(conn: &Connection) -> Result<()> {
