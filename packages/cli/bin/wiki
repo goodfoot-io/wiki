@@ -1,4 +1,1 @@
-#!/bin/sh
-# Replaced by postinstall with a symlink to the native binary.
-echo "@goodfoot/wiki: Installation incomplete. Run 'npm install @goodfoot/wiki' to finish setup." >&2
-exit 1
+/home/node/wiki/npm/wiki-linux-arm64/bin/wiki
