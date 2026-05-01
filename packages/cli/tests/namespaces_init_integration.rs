@@ -206,6 +206,36 @@ fn namespaces_json_format() {
         .expect("expected foo entry");
 }
 
+/// `--format json` rows must NOT contain an `alias` key.
+#[test]
+fn namespaces_json_format_omits_alias_key() {
+    let repo = TestRepo::new();
+    repo.create_file("wiki/wiki.toml", "");
+    repo.create_file("foo-wiki/wiki.toml", "namespace = \"foo\"\n");
+
+    let out = repo.run_from("wiki", &["namespaces", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("valid JSON output");
+    let arr = parsed.as_array().expect("JSON array");
+    assert!(!arr.is_empty(), "expected at least one entry");
+
+    for entry in arr {
+        let obj = entry.as_object().expect("entry is object");
+        assert!(
+            !obj.contains_key("alias"),
+            "entry must not contain an `alias` key, got: {entry}"
+        );
+    }
+}
+
 // ── `wiki init` tests ─────────────────────────────────────────────────────────
 
 /// `wiki init` with no arg writes an empty wiki.toml.

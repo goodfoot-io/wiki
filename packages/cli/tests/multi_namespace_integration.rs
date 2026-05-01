@@ -238,6 +238,45 @@ fn star_on_unsupported_command_errors_clearly() {
     );
 }
 
+// ── Cross-namespace inbound links: peer namespace links to default page ──────
+
+/// `wiki links "Authentication" -n '*'` should include backlinks from peer
+/// namespaces that contain `[[default:Authentication]]`, even though those
+/// peer namespaces don't OWN an `Authentication` page.
+#[test]
+fn links_star_surfaces_cross_namespace_inbound_links() {
+    let repo = TestRepo::new();
+    // Default wiki — declares peer "scratch" at ../scratch.
+    repo.create_file("wiki/wiki.toml", "[peers]\nscratch = \"../scratch\"\n");
+    repo.create_file(
+        "wiki/authentication.md",
+        &page("Authentication", "Auth body."),
+    );
+    // Peer "scratch" — has its own wiki.toml declaring namespace, and a page
+    // that links into the default namespace via `[[default:Authentication]]`.
+    repo.create_file("scratch/wiki.toml", "namespace = \"scratch\"\n");
+    repo.create_file(
+        "scratch/notes/operator-notes.md",
+        &page(
+            "Operator Notes",
+            "Refers to [[default:Authentication]] for login flow.",
+        ),
+    );
+    repo.commit("init");
+
+    let out = repo.wiki(&["-n", "*", "links", "Authentication"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("Operator Notes"),
+        "expected cross-namespace inbound link from scratch:Operator Notes; stdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
 // ── F1: tagged float surfaces in matching peer's index ────────────────────────
 
 /// A `*.wiki.md` file with `namespace: foo` in its frontmatter must appear in
