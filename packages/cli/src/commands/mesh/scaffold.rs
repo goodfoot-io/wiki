@@ -3,10 +3,6 @@
 //! Discover wiki files, parse their fragment links, and emit a markdown
 //! document (or JSON) of `git mesh add` / `git mesh why` commands — one mesh
 //! per link.
-//!
-//! Phase B: name generation is fully wired; whys are template-only because
-//! [`why::extract_prose_why`] is a Phase B stub returning `None`. Phase C will
-//! add the prose-why heuristics.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -152,12 +148,10 @@ pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> 
     for file in &files {
         let content = match fs::read_to_string(file) {
             Ok(s) => s,
-            Err(e) => {
-                if json {
-                    // JSON mode must preserve baseline hard-error semantics.
-                    return Err(miette::miette!("{}: {}", file.display(), e));
-                }
-                // Markdown mode: unreadable files are reported via parse_errors.
+            Err(_) => {
+                // Unreadable files are surfaced via parse_errors (classify_frontmatter
+                // records ParseErrorKind::Unreadable independently). Skip from the
+                // link pipeline.
                 continue;
             }
         };
@@ -194,11 +188,7 @@ pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> 
     }
     parse_errors.sort_by(|a, b| a.path.cmp(&b.path));
 
-    // ── Unified build/group pipeline (both modes) ─────────────────────────
-    let consolidated = build_meshes(&all_inputs, repo_root);
-
-    // Build the page-title lookup keyed by the same repo-root-relative
-    // `page_path` strings the drafts use.
+    // Build the page-title lookup keyed by repo-root-relative path strings.
     let mut page_titles: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
     for f in &files {
@@ -207,26 +197,16 @@ pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> 
         page_titles.insert(rel, title);
     }
 
+    // Collect parse-error paths for exclusion from pages output.
+    let parse_error_paths: std::collections::HashSet<String> =
+        parse_errors.iter().map(|e| e.path.clone()).collect();
+
+    // ── Unified build/group pipeline (both modes) ─────────────────────────
+    // Trim heading chains once here so both renderers consume pre-trimmed data.
+    let mut consolidated = build_meshes(&all_inputs, repo_root);
+    trim_chains_in_place(&mut consolidated, &page_titles);
+
     if json {
-        if all_inputs.is_empty() {
-            // Empty corpus — still emit structured output.
-            let parse_errors_json: Vec<ParseErrorJson> = parse_errors
-                .iter()
-                .map(|e| ParseErrorJson {
-                    path: e.path.clone(),
-                    category: ParseErrorCategory::from_kind(&e.kind),
-                    message: e.kind.reason(),
-                })
-                .collect();
-            let output = ScaffoldOutput {
-                schema_version: 1,
-                parse_errors: parse_errors_json,
-                pages: Vec::new(),
-            };
-            let s = serde_json::to_string_pretty(&output).into_diagnostic()?;
-            println!("{s}");
-            return Ok(0);
-        }
         let parse_errors_json: Vec<ParseErrorJson> = parse_errors
             .iter()
             .map(|e| ParseErrorJson {
@@ -235,7 +215,7 @@ pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> 
                 message: e.kind.reason(),
             })
             .collect();
-        let pages = build_pages_json(&consolidated, &page_titles);
+        let pages = build_pages_json(&consolidated, &page_titles, &parse_error_paths);
         let output = ScaffoldOutput {
             schema_version: 1,
             parse_errors: parse_errors_json,
@@ -252,21 +232,26 @@ pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> 
         return Ok(0);
     }
 
-    let rendered = render::render_markdown(&consolidated, &page_titles, &parse_errors);
+    let rendered = render::render_markdown(&consolidated, &page_titles, &parse_errors, &parse_error_paths);
     print!("{rendered}");
     Ok(0)
 }
 
-/// Build the JSON page list from consolidated drafts.
+/// Build the JSON page list from consolidated drafts, excluding pages whose
+/// paths appear in `parse_error_paths` (schema must be disjoint).
 fn build_pages_json(
     drafts: &[MeshDraft],
     page_titles: &std::collections::HashMap<String, Option<String>>,
+    parse_error_paths: &std::collections::HashSet<String>,
 ) -> Vec<PageJson> {
     // Group by page in first-occurrence order.
     let mut page_order: Vec<String> = Vec::new();
     let mut by_page: std::collections::HashMap<String, Vec<&MeshDraft>> =
         std::collections::HashMap::new();
     for d in drafts {
+        if parse_error_paths.contains(&d.page_path) {
+            continue;
+        }
         if !by_page.contains_key(&d.page_path) {
             page_order.push(d.page_path.clone());
         }
@@ -284,12 +269,10 @@ fn build_pages_json(
             let meshes = page_drafts
                 .iter()
                 .map(|d| {
-                    // Trim heading chain: drop leading entry if it matches page title
-                    // (after normalization via extract_heading_text-style stripping).
-                    let trimmed_chain = trim_heading_chain(&d.heading_chain, &title);
+                    // heading_chain was already trimmed once in trim_chains_in_place.
                     MeshJson {
                         slug: d.slug.clone(),
-                        heading_chain: trimmed_chain,
+                        heading_chain: d.heading_chain.clone(),
                         section_opening: d.section_opening_lines.clone(),
                         anchors: d
                             .structured_anchors
@@ -312,10 +295,26 @@ fn build_pages_json(
         .collect()
 }
 
+/// Trim heading chains on all drafts in place. The leading chain entry is
+/// dropped when it matches the page's frontmatter title after normalization.
+/// This runs once after `build_meshes` so both renderers consume pre-trimmed data.
+fn trim_chains_in_place(
+    drafts: &mut [MeshDraft],
+    page_titles: &std::collections::HashMap<String, Option<String>>,
+) {
+    for d in drafts.iter_mut() {
+        let title = page_titles
+            .get(&d.page_path)
+            .and_then(|t| t.as_deref())
+            .unwrap_or("");
+        d.heading_chain = trim_heading_chain(&d.heading_chain, title);
+    }
+}
+
 /// Trim the leading entry of `heading_chain` when it matches the page's
 /// frontmatter `title` after normalization (strip inline markup, collapse
 /// whitespace, case-insensitive compare). Returns the trimmed chain.
-fn trim_heading_chain(chain: &[String], page_title: &str) -> Vec<String> {
+pub(crate) fn trim_heading_chain(chain: &[String], page_title: &str) -> Vec<String> {
     if chain.is_empty() {
         return Vec::new();
     }
@@ -329,11 +328,9 @@ fn trim_heading_chain(chain: &[String], page_title: &str) -> Vec<String> {
 }
 
 /// Normalize heading or title text for comparison: strip inline markup chars
-/// (`*`, `_`, `` ` ``, `[`, `]`), collapse whitespace, trim.
-/// Mirrors the behavior of `extract_heading_text` in the legacy path.
-fn normalize_heading_text(s: &str) -> String {
+/// (`*`, `_`, `` ` ``, `[`, `]`), collapse whitespace.
+pub(crate) fn normalize_heading_text(s: &str) -> String {
     let stripped: String = s.chars().filter(|c| !"`*_[]".contains(*c)).collect();
-    // Collapse whitespace
     stripped.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -568,20 +565,6 @@ fn locate_existing_suffix(rel_path: &str, repo_root: &Path) -> Option<String> {
     None
 }
 
-/// Extract the text content of a markdown heading (without the # symbols, whitespace, and markdown formatting).
-#[allow(dead_code)]
-fn extract_heading_text(line: &str) -> String {
-    let trimmed = line.trim_start();
-    let text = trimmed
-        .trim_start_matches('#')
-        .trim_start()
-        .trim_end()
-        .to_string();
-    // Remove markdown formatting: backticks, bold, italic, etc.
-    let re = Regex::new(r"[`*_~\[\]]").expect("valid regex");
-    re.replace_all(&text, "").trim().to_string()
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -643,20 +626,6 @@ mod tests {
         let chain = vec!["Incremental indexing".to_string()];
         let trimmed = trim_heading_chain(&chain, "Incremental indexing");
         assert!(trimmed.is_empty());
-    }
-
-    #[test]
-    fn extract_heading_text_strips_formatting() {
-        assert_eq!(extract_heading_text("# My Heading"), "My Heading");
-        assert_eq!(extract_heading_text("## `Code Title`"), "Code Title");
-        assert_eq!(
-            extract_heading_text("### **Bold** and *italic*"),
-            "Bold and italic"
-        );
-        assert_eq!(
-            extract_heading_text("### `git-mesh ls <anchor> --porcelain`"),
-            "git-mesh ls <anchor> --porcelain"
-        );
     }
 
     // ── classify_frontmatter unit tests ──────────────────────────────────────

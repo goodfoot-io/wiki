@@ -167,10 +167,10 @@ fn mesh_scaffold_parse_error_block() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // The output must begin with the parse-error block.
+    // Because a clean file with links follows, the advisory header is used.
     assert!(
-        stdout.starts_with("Unable to generate scaffolding due to parsing errors:\n"),
-        "expected parse-error block at start, got:\n{stdout}"
+        stdout.starts_with("Some wiki pages could not be parsed and were skipped:\n"),
+        "expected advisory parse-error header at start, got:\n{stdout}"
     );
 
     // All four bad files must be listed with their exact reason strings.
@@ -486,16 +486,84 @@ fn mesh_scaffold_json_top_of_file_link_empty_chain() {
     assert!(chain.is_empty(), "top-of-file link must have empty headingChain, got: {chain:?}");
 }
 
-/// JSON mode against a wiki with an unreadable (non-UTF-8) file must exit
-/// non-zero with a diagnostic — preserving baseline hard-error semantics.
+/// JSON mode — a file in `parseErrors[]` must NOT appear in `pages[]` (disjoint
+/// schema). A file with malformed frontmatter that also contains fragment links
+/// should land in parseErrors and nowhere else.
 #[test]
-fn mesh_scaffold_json_unreadable_file_exits_nonzero() {
+fn mesh_scaffold_json_parse_error_page_not_in_pages() {
     let tmp = tempfile::tempdir().unwrap();
     let wiki_dir = tmp.path().join("wiki");
     std::fs::create_dir_all(&wiki_dir).unwrap();
     std::fs::write(wiki_dir.join("wiki.toml"), "").unwrap();
 
-    // A valid file so the wiki is non-empty.
+    // File with missing title but contains a fragment link — should be in parseErrors only.
+    std::fs::write(
+        wiki_dir.join("bad.md"),
+        "---\nsummary: x\n---\n\nSee [x](src/x.rs#L1-L2) for details.\n",
+    )
+    .unwrap();
+    // A clean file so pages[] is non-empty.
+    std::fs::write(
+        wiki_dir.join("clean.md"),
+        "---\ntitle: Clean\n---\n\nSee [y](src/y.rs#L1-L2) for details.\n",
+    )
+    .unwrap();
+
+    let src_dir = tmp.path().join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(src_dir.join("x.rs"), "// x\n").unwrap();
+    std::fs::write(src_dir.join("y.rs"), "// y\n").unwrap();
+
+    git(tmp.path(), &["init", "-q", "-b", "main"]);
+    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "--format", "json"])
+        .current_dir(&wiki_dir)
+        .output()
+        .expect("run wiki binary");
+    assert!(
+        output.status.success(),
+        "wiki scaffold --format json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+
+    // bad.md must be in parseErrors.
+    let errors = v["parseErrors"].as_array().unwrap();
+    assert!(
+        errors.iter().any(|e| e["path"].as_str().map_or(false, |p| p.contains("bad.md"))),
+        "bad.md must appear in parseErrors:\n{stdout}"
+    );
+
+    // bad.md must NOT be in pages.
+    let pages = v["pages"].as_array().unwrap();
+    assert!(
+        !pages.iter().any(|p| p["path"].as_str().map_or(false, |pp| pp.contains("bad.md"))),
+        "bad.md must not appear in pages[]:\n{stdout}"
+    );
+
+    // clean.md must be in pages.
+    assert!(
+        pages.iter().any(|p| p["path"].as_str().map_or(false, |pp| pp.contains("clean.md"))),
+        "clean.md must appear in pages[]:\n{stdout}"
+    );
+}
+
+/// JSON mode — unreadable (non-UTF-8) file appears in `parseErrors[]` with
+/// `category == "unreadable"` and does NOT appear in `pages[]`. Exit code is 0.
+#[test]
+fn mesh_scaffold_json_unreadable_file_in_parse_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wiki_dir = tmp.path().join("wiki");
+    std::fs::create_dir_all(&wiki_dir).unwrap();
+    std::fs::write(wiki_dir.join("wiki.toml"), "").unwrap();
+
+    // A valid file with a fragment link so pages[] is non-empty.
     std::fs::write(
         wiki_dir.join("clean.md"),
         "---\ntitle: Clean\nsummary: s\n---\n\nSee [x](src/x.rs#L1-L2).\n",
@@ -535,8 +603,36 @@ fn mesh_scaffold_json_unreadable_file_exits_nonzero() {
         .expect("run wiki binary");
 
     assert!(
-        !output.status.success(),
-        "expected non-zero exit for unreadable file in JSON mode, got success.\nstdout: {}",
-        String::from_utf8_lossy(&output.stdout)
+        output.status.success(),
+        "expected exit 0 for unreadable file in JSON mode, got failure.\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+
+    // parseErrors must contain the unreadable file with category "unreadable".
+    let errors = v["parseErrors"].as_array().unwrap();
+    let unreadable_entry = errors.iter().find(|e| {
+        e["path"].as_str().map_or(false, |p| p.contains("unreadable.md"))
+    });
+    assert!(
+        unreadable_entry.is_some(),
+        "unreadable.md must appear in parseErrors:\n{stdout}"
+    );
+    assert_eq!(
+        unreadable_entry.unwrap()["category"],
+        "unreadable",
+        "category must be 'unreadable':\n{stdout}"
+    );
+
+    // The unreadable file must NOT appear in pages[].
+    let pages = v["pages"].as_array().unwrap();
+    let bad_page = pages.iter().find(|p| {
+        p["path"].as_str().map_or(false, |pp| pp.contains("unreadable.md"))
+    });
+    assert!(
+        bad_page.is_none(),
+        "unreadable.md must not appear in pages[]:\n{stdout}"
     );
 }
