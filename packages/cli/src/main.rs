@@ -49,8 +49,10 @@ struct Cli {
     #[arg(long = "perf", action = ArgAction::SetTrue, global = true)]
     perf: bool,
 
-    /// Target a peer namespace (or `*` for all). Defaults to the current wiki.
-    #[arg(short = 'n', long = "namespace", value_name = "NS", global = true)]
+    /// Target a peer namespace (or `*` for all) for the default search.
+    /// Defaults to the current wiki. For other commands, pass `-n` after
+    /// the subcommand (supported on: check, links, list, summary, refs).
+    #[arg(short = 'n', long = "namespace", value_name = "NS")]
     namespace: Option<String>,
 
     /// Search query for the default wiki lookup.
@@ -105,6 +107,9 @@ enum Commands {
         /// Skip the git mesh coverage check (useful when `git mesh check` runs separately)
         #[arg(long = "no-mesh")]
         no_mesh: bool,
+        /// Target a peer namespace (or `*` for all). Defaults to the current wiki.
+        #[arg(short = 'n', long = "namespace", value_name = "NS")]
+        namespace: Option<String>,
     },
 
     /// Find wiki pages that link to the given target.
@@ -121,6 +126,9 @@ enum Commands {
         /// Page title, alias, or file path; reads from stdin if omitted
         #[arg(value_name = "target")]
         target: Option<String>,
+        /// Target a peer namespace (or `*` for all). Defaults to repo-wide.
+        #[arg(short = 'n', long = "namespace", value_name = "NS")]
+        namespace: Option<String>,
     },
 
     /// Extract wikilinks from stdin and print each page's title and summary.
@@ -146,6 +154,9 @@ enum Commands {
         /// Filter pages by tag
         #[arg(long = "tag", value_name = "tag")]
         tag: Option<String>,
+        /// Target a peer namespace (or `*` for all). Defaults to the current wiki.
+        #[arg(short = 'n', long = "namespace", value_name = "NS")]
+        namespace: Option<String>,
     },
 
     /// Print the summary of a wiki page.
@@ -161,6 +172,9 @@ enum Commands {
         /// Page title, alias, or file path; reads from stdin if omitted
         #[arg(value_name = "title|path")]
         title: Option<String>,
+        /// Target a peer namespace (or `*` for all). Defaults to the current wiki.
+        #[arg(short = 'n', long = "namespace", value_name = "NS")]
+        namespace: Option<String>,
     },
 
     /// Print metadata for all wikilinks referenced by a wiki page.
@@ -177,6 +191,9 @@ enum Commands {
         /// Page title, alias, or file path; reads from stdin if omitted
         #[arg(value_name = "title|path")]
         title: Option<String>,
+        /// Target a peer namespace (or `*` for all). Defaults to the current wiki.
+        #[arg(short = 'n', long = "namespace", value_name = "NS")]
+        namespace: Option<String>,
     },
 
     /// Install the wiki integration into an external tool's config home.
@@ -313,12 +330,17 @@ fn main() {
         .ok();
     }
 
+    let namespace = cli
+        .namespace
+        .clone()
+        .or_else(|| subcommand_namespace(&cli.command));
+
     let result = run(
         cli.command,
         cli.query,
         cli.limit,
         cli.offset,
-        cli.namespace,
+        namespace,
         json,
     );
 
@@ -398,10 +420,10 @@ fn run(
         let _command_span = perf::span_for_command(command_name);
         let started = Instant::now();
         let result: Result<i32> = match command {
-            Some(Commands::Check { globs, no_exit_code, no_mesh }) => {
+            Some(Commands::Check { globs, no_exit_code, no_mesh, namespace: _ }) => {
                 commands::check::run_multi(&globs, json, &targets, &repo_root, no_exit_code, no_mesh)
             }
-            Some(Commands::Links { target }) => {
+            Some(Commands::Links { target, namespace: _ }) => {
                 let inputs = resolve_inputs(target, read_stdin_lines)?;
                 run_for_each(
                     inputs,
@@ -409,7 +431,7 @@ fn run(
                     false,
                 )
             }
-            Some(Commands::Summary { title }) => {
+            Some(Commands::Summary { title, namespace: _ }) => {
                 let inputs = resolve_inputs(title, read_stdin_lines)?;
                 run_for_each(
                     inputs,
@@ -417,7 +439,7 @@ fn run(
                     false,
                 )
             }
-            Some(Commands::Refs { title }) => {
+            Some(Commands::Refs { title, namespace: _ }) => {
                 let inputs = resolve_inputs(title, read_stdin_lines)?;
                 run_for_each(
                     inputs,
@@ -425,7 +447,7 @@ fn run(
                     false,
                 )
             }
-            Some(Commands::List { tag }) => {
+            Some(Commands::List { tag, namespace: _ }) => {
                 commands::list::run_multi(tag.as_deref(), json, &targets, &repo_root)
             }
             None => match effective_query.as_deref() {
@@ -475,10 +497,10 @@ fn run(
     let started = Instant::now();
 
     let result = match command {
-        Some(Commands::Check { globs, no_exit_code, no_mesh }) => {
+        Some(Commands::Check { globs, no_exit_code, no_mesh, namespace: _ }) => {
             commands::check::run(&globs, json, wiki_root, &repo_root, config.as_ref(), no_exit_code, no_mesh)
         }
-        Some(Commands::Links { target }) => {
+        Some(Commands::Links { target, namespace: _ }) => {
             let inputs = resolve_inputs(target, read_stdin_lines)?;
             if effective_namespace.is_none() {
                 // No explicit -n: default to repo-wide backlinks across all wikis.
@@ -522,10 +544,10 @@ fn run(
             let input = lines.join("\n");
             commands::hook_check::run(&input, wiki_root, &repo_root)
         }
-        Some(Commands::List { tag }) => {
+        Some(Commands::List { tag, namespace: _ }) => {
             commands::list::run(&[], tag.as_deref(), json, wiki_root, &repo_root)
         }
-        Some(Commands::Summary { title }) => {
+        Some(Commands::Summary { title, namespace: _ }) => {
             let inputs = resolve_inputs(title, read_stdin_lines)?;
             run_for_each(
                 inputs,
@@ -533,7 +555,7 @@ fn run(
                 false,
             )
         }
-        Some(Commands::Refs { title }) => {
+        Some(Commands::Refs { title, namespace: _ }) => {
             let inputs = resolve_inputs(title, read_stdin_lines)?;
             run_for_each(
                 inputs,
@@ -642,6 +664,18 @@ fn apply_at_sugar(
         (Some(word.to_string()), Some(rest))
     } else {
         (None, Some(q.to_string()))
+    }
+}
+
+/// Extract the per-subcommand `-n` namespace, if the active subcommand carries one.
+fn subcommand_namespace(command: &Option<Commands>) -> Option<String> {
+    match command {
+        Some(Commands::Check { namespace, .. })
+        | Some(Commands::Links { namespace, .. })
+        | Some(Commands::List { namespace, .. })
+        | Some(Commands::Summary { namespace, .. })
+        | Some(Commands::Refs { namespace, .. }) => namespace.clone(),
+        _ => None,
     }
 }
 
