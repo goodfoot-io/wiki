@@ -12,6 +12,14 @@ else
   BUILD_CMD="SKIP_INSTALL=1 yarn build"
 fi
 
+# Prefer the locally-built wiki binary so that wiki check uses the same version
+# of the CLI that the repo builds (avoids ancestor-walk behaviour in older installs).
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOCAL_WIKI="$SCRIPT_DIR/../packages/cli/target/release/wiki"
+if [ -x "$LOCAL_WIKI" ]; then
+  export PATH="$(dirname "$LOCAL_WIKI"):$PATH"
+fi
+
 {
   yarn typecheck &&
   yarn lint &&

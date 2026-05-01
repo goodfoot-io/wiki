@@ -229,7 +229,7 @@ fn check_star_runs_rules_across_all_namespaces() {
 #[test]
 fn star_on_unsupported_command_errors_clearly() {
     let repo = make_basic_repo();
-    let out = repo.wiki(&["-n", "*", "list"]);
+    let out = repo.wiki(&["-n", "*", "extract"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "expected non-zero exit");
     assert!(
