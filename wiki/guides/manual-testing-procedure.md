@@ -354,11 +354,13 @@ Expect: exit `0` and no `systemMessage` because the file is clean. With a broken
 ## 13. `wiki scaffold` (git mesh integration)
 
 ```bash
-wiki scaffold > /tmp/scaffold.sh
-head -20 /tmp/scaffold.sh
+wiki scaffold > /tmp/scaffold.md
+head -20 /tmp/scaffold.md
 ```
 
-Expect: a shell script of `git mesh add <slug> <anchor>` and `git mesh why <slug> -m "…"` commands, one cluster per fragment-link group. The script is safe to inspect; running it stages mesh data (run only if you have `git mesh` installed).
+Expect: a markdown document with one section per fragment-link group — each section carries the source heading, the opening sentence as a blockquote, and a fenced bash block of `git mesh add <slug> <anchor>` / `git mesh why <slug> -m "[why]"` commands. A trailing "Commit Changes After Review" block lists every `git mesh commit` line. The document is safe to inspect; copying the bash blocks into your shell stages mesh data (do this only if you have `git mesh` installed).
+
+When the wiki has no uncovered fragment links, the output is a single-paragraph markdown notice (`# wiki scaffold` + "No uncovered fragment links — every link is already covered by a mesh."), not the document above.
 
 ## 14. `wiki install`
 

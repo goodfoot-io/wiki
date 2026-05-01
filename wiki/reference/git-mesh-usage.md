@@ -43,7 +43,7 @@ The line range token (`start-end`) is parsed for format validation only; range f
 
 **Where:** [`scaffold.rs`](packages/cli/src/commands/mesh/scaffold.rs#L141-L143)
 
-**Invoked by:** `wiki scaffold` — emits shell script output, does **not** shell out to `git-mesh`.
+**Invoked by:** `wiki scaffold` — emits markdown output, does **not** shell out to `git-mesh`.
 
 **Purpose:** Scaffold command for adding anchors (wiki file + code file/range) to a named mesh subsystem.
 
@@ -53,7 +53,7 @@ The line range token (`start-end`) is parsed for format validation only; range f
 
 **Where:** [`scaffold.rs`](packages/cli/src/commands/mesh/scaffold.rs#L144-L148)
 
-**Invoked by:** `wiki scaffold` — emits shell script output, does **not** shell out to `git-mesh`.
+**Invoked by:** `wiki scaffold` — emits markdown output, does **not** shell out to `git-mesh`.
 
 **Purpose:** Scaffold command for setting the human-readable description of a mesh subsystem.
 

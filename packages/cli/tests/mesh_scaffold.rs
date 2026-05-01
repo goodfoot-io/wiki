@@ -1,7 +1,7 @@
 //! Integration test for `wiki scaffold` against a captured baseline
-//! (`tests/fixtures/mesh-scaffold/expected.sh`).
+//! (`tests/fixtures/mesh-scaffold/expected.md`).
 //!
-//! `expected.sh` is a Rust-output regression baseline — not a JS-oracle
+//! `expected.md` is a Rust-output regression baseline — not a JS-oracle
 //! capture. The JS prototype had bugs (raw anchor paths, shell-unsafe why
 //! interpolation) that the Rust port deliberately diverges from; once those
 //! are fixed in Rust, the baseline is regenerated from the corrected output
@@ -10,7 +10,7 @@
 //! The test stages the fixture wiki tree into a temporary git repo (the Rust
 //! binary requires a git root for path resolution), runs the compiled binary
 //! with cwd set to the temp repo, and asserts byte-equality against
-//! `expected.sh`.
+//! `expected.md`.
 
 use std::path::Path;
 use std::process::Command;
@@ -39,11 +39,11 @@ fn git(workdir: &Path, args: &[&str]) {
 }
 
 #[test]
-fn mesh_scaffold_byte_equal_with_expected_sh() {
+fn mesh_scaffold_byte_equal_with_expected_md() {
     let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mesh-scaffold");
-    let expected_path = fixture_dir.join("expected.sh");
-    let expected =
-        std::fs::read(&expected_path).expect("tests/fixtures/mesh-scaffold/expected.sh must exist");
+    let expected_path = fixture_dir.join("expected.md");
+    let expected = std::fs::read(&expected_path)
+        .expect("tests/fixtures/mesh-scaffold/expected.md must exist");
 
     // Stage fixture into a fresh tempdir + git repo so the Rust binary can
     // resolve a repo root and discover wiki files.
@@ -90,8 +90,7 @@ fn mesh_scaffold_byte_equal_with_expected_sh() {
         let got = String::from_utf8_lossy(&output.stdout);
         let want = String::from_utf8_lossy(&expected);
         panic!(
-            "wiki scaffold output diverged from expected.sh\n\
-             --- got ---\n{got}\n--- want ---\n{want}"
+            "wiki scaffold output diverged from expected.md\n--- got ---\n{got}\n--- want ---\n{want}"
         );
     }
 }

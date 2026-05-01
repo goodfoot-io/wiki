@@ -33,17 +33,23 @@ wiki scaffold wiki/architecture/*.md
 wiki scaffold "packages/auth/**/*.wiki.md"
 ```
 
-Scans the same file set as `wiki check` and emits shell commands to create meshes for every fragment link not yet covered. Output is printed to stdout — nothing is staged or committed.
+Scans the same file set as `wiki check` and emits a markdown document containing the `git mesh add` / `git mesh why` / `git mesh commit` commands needed to create a mesh for every fragment link not yet covered. Output is printed to stdout — nothing is staged or committed.
 
-For each uncovered link the scaffold emits:
+For each uncovered link the scaffold emits a section under the source page with the section heading the link sits under, the opening prose sentence as a blockquote, and a fenced bash block:
+
+````markdown
+## <Section heading the link sits under>
+> <Opening prose sentence under that heading>
 
 ```bash
 git mesh add wiki/<page-title-slug>/<target-slug> \
   <wiki-file> \
   <path>#L<start>-L<end>
-git mesh why wiki/<page-title-slug>/<target-slug> \
-  -m "<why derived from surrounding prose>"
+git mesh why wiki/<page-title-slug>/<target-slug> -m "[why]"
 ```
+````
+
+The trailing `[why]` placeholder is intentional — every why is meant to be rewritten by the author before commit (see [[Adding Mesh Coverage]]).
 
 ### Mesh naming
 
@@ -76,15 +82,13 @@ where `$WIKI_DIR` defaults to `wiki`. This matches the default discovery behavio
 
 ```bash
 # 1. Generate scaffold for all uncovered links
-wiki scaffold > meshes.sh
+wiki scaffold > meshes.md
 
-# 2. Review and edit mesh names and whys in meshes.sh
+# 2. Open meshes.md and review/edit mesh names and whys
 
-# 3. Run the scaffold
-sh meshes.sh
+# 3. Copy the rewritten `git mesh add` / `git mesh why` blocks into your shell
 
-# 4. Commit each mesh
-git mesh commit wiki/<name>
+# 4. Copy the trailing "Commit Changes After Review" block into your shell
 
 # 5. Validate coverage
 wiki check

@@ -1,7 +1,8 @@
 //! `wiki scaffold` end-to-end pipeline.
 //!
-//! Discover wiki files, parse their fragment links, and emit a shell script
-//! (or JSON) of `git mesh add` / `git mesh why` commands — one mesh per link.
+//! Discover wiki files, parse their fragment links, and emit a markdown
+//! document (or JSON) of `git mesh add` / `git mesh why` commands — one mesh
+//! per link.
 //!
 //! Phase B: name generation is fully wired; whys are template-only because
 //! [`why::extract_prose_why`] is a Phase B stub returning `None`. Phase C will
@@ -83,7 +84,7 @@ pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> 
         if json {
             println!("[]");
         } else {
-            print!("{}", render::render_empty_shell());
+            print!("{}", render::render_empty_markdown());
         }
         return Ok(0);
     }
@@ -134,7 +135,7 @@ pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> 
         return Ok(0);
     }
 
-    // ── Shell mode: build/group/hints/preflight pipeline ──────────────────
+    // ── Markdown mode: build/group/hints/preflight pipeline ───────────────
     let uncovered_findings = all_inputs.len();
     let drafts_by_page = build_meshes(&all_inputs, repo_root);
 
@@ -151,8 +152,20 @@ pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> 
     }
     let pf = preflight::missing_in_head(repo_root, &anchored_paths);
 
-    let rendered = render::render_shell(
+    // Build the page-title lookup keyed by the same repo-root-relative
+    // `page_path` strings the drafts use, so the renderer can prefix each
+    // per-page section with the source page's frontmatter `title`.
+    let mut page_titles: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    for f in &files {
+        let rel = path_relative_to(f, repo_root);
+        let title = wiki_meta_cache.get(f).and_then(|m| m.title.clone());
+        page_titles.insert(rel, title);
+    }
+
+    let rendered = render::render_markdown(
         &drafts_by_page,
+        &page_titles,
         &pf,
         uncovered_findings,
         skipped_fixtures,

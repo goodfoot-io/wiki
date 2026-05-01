@@ -25,7 +25,7 @@ Each `mesh_uncovered` finding names the wiki file, the fragment link, and the li
 wiki scaffold wiki/architecture/wiki-cli.md
 ```
 
-The output is a shell script of `git mesh add` and `git mesh why` commands — **a starting point, not a finished artifact**. The scaffold derives:
+The output is a markdown document — one section per fragment link, each ending in a fenced bash block of `git mesh add` and `git mesh why` commands, plus a trailing "Commit Changes After Review" block that lists every `git mesh commit` line. The whole document is **a starting point, not a finished artifact**. The scaffold derives:
 
 - **Mesh names** from the page title slug and the link label.
 - **Whys** from the prose sentence that contains the link, with markdown stripped.

@@ -84,20 +84,24 @@ block, the summary version does not. Different commands, similar headers,
 not visually distinct enough that a copy-pasted log clearly identifies which
 command produced it.
 
-### `wiki scaffold` empty output is just a shebang + comment (Step 13)
+### `wiki scaffold` empty output exercises only the empty-corpus path (Step 13)
 
 With seed content that contains wikilinks but no fragment-link anchors, the
-output is:
+output is the empty-corpus markdown notice:
 
-```
-#!/bin/sh
-# wiki scaffold — no uncovered findings; nothing to mesh.
+```markdown
+# wiki scaffold
+
+No uncovered fragment links — every link is already covered by a mesh.
 ```
 
-This is a perfectly fine empty case, but the procedure body describes the
-"non-empty" case (`a shell script of git mesh add ... commands`) without
-explicitly setting up fragment-anchor content beforehand. As written, the
-procedure exercises only the empty-output path.
+That is the intended empty case, but the procedure body now describes the
+non-empty markdown document (per-section headings, blockquote opening
+sentences, fenced bash blocks, and a trailing "Commit Changes After Review"
+block) without explicitly seeding fragment-anchor content beforehand. As
+written, Step 13 exercises only the empty-output path. The non-empty branch
+is covered by `packages/cli/tests/fixtures/mesh-scaffold/expected.md` but is
+never reached by the manual procedure.
 
 ### `--format json` clean check returns `[]`, not a structured report (Step 11d)
 

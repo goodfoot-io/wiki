@@ -1,25 +1,25 @@
-//! Shell rendering for the build-then-render pipeline.
+//! Markdown rendering for the build-then-render pipeline.
 //!
-//! Consumes deduplicated `MeshDraft`s plus a `PreflightResult` and emits the
-//! review-ready shell script described by `tests/fixtures/mesh-scaffold/expected.sh`.
+//! Consumes deduplicated `MeshDraft`s plus a `PreflightResult` and emits a
+//! review-ready markdown document described by
+//! `tests/fixtures/mesh-scaffold/expected.md`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 
 use super::draft::MeshDraft;
 use super::hints::{AntiPattern, FallbackReason, Hint};
 use super::preflight::PreflightResult;
 
-/// Total fixed display width of the per-page divider, in characters.
-const DIVIDER_WIDTH: usize = 66;
-
-/// Render `meshes` (already grouped per-page in declaration order) and a
-/// pre-flight result into a shell script.
+/// Render `meshes` (already grouped per-page in declaration order), the
+/// per-page titles (frontmatter `title` keyed by `page_path`, `None` when
+/// absent), and the pre-flight result into a markdown document.
 ///
 /// `uncovered_findings` is the pre-consolidation link count; `proposed_meshes`
 /// is the post-consolidation count (i.e. `meshes.len()`).
-pub(crate) fn render_shell(
+pub(crate) fn render_markdown(
     meshes: &[MeshDraft],
+    page_titles: &HashMap<String, Option<String>>,
     preflight: &PreflightResult,
     uncovered_findings: usize,
     skipped_fixtures: usize,
@@ -29,19 +29,20 @@ pub(crate) fn render_shell(
     let ratio = consolidation_ratio(uncovered_findings, proposed_meshes);
 
     let mut out = String::new();
-    let _ = writeln!(out, "#!/bin/sh");
+    let _ = writeln!(out, "# wiki scaffold");
+    out.push('\n');
     let _ = writeln!(
         out,
-        "# wiki mesh scaffold — {uncovered_findings} uncovered findings → {proposed_meshes} proposed meshes (consolidation ratio {ratio})"
+        "{uncovered_findings} uncovered findings → {proposed_meshes} proposed meshes (consolidation ratio {ratio})."
     );
     if skipped_fixtures > 0 {
         let suffix = if skipped_fixtures == 1 { "" } else { "s" };
         let _ = writeln!(
             out,
-            "# Pages covered: {pages_covered} ({skipped_fixtures} test fixture{suffix} skipped)"
+            "Pages covered: {pages_covered} ({skipped_fixtures} test fixture{suffix} skipped)."
         );
     } else {
-        let _ = writeln!(out, "# Pages covered: {pages_covered}");
+        let _ = writeln!(out, "Pages covered: {pages_covered}.");
     }
     out.push('\n');
 
@@ -49,86 +50,96 @@ pub(crate) fn render_shell(
     out.push('\n');
 
     // Group by page in first-occurrence order.
-    let mut page_order: Vec<String> = Vec::new();
     let mut by_page: Vec<(String, Vec<&MeshDraft>)> = Vec::new();
     for m in meshes {
         if let Some(entry) = by_page.iter_mut().find(|(k, _)| *k == m.page_path) {
             entry.1.push(m);
         } else {
-            page_order.push(m.page_path.clone());
             by_page.push((m.page_path.clone(), vec![m]));
         }
     }
 
     for (page, page_meshes) in &by_page {
-        let _ = writeln!(out, "{}", page_divider(page));
+        let title = page_titles.get(page).and_then(|t| t.as_deref());
+        let header = match title {
+            Some(t) if !t.is_empty() => format!("# {t} • {page}"),
+            _ => format!("# {page}"),
+        };
+        let _ = writeln!(out, "{header}");
+        out.push('\n');
         for m in page_meshes {
-            out.push('\n');
             render_mesh_block(&mut out, m);
         }
-        out.push('\n');
     }
 
-    let _ = writeln!(out, "# Run after reviewing whys above:");
+    let _ = writeln!(out, "# Commit Changes After Review");
+    out.push('\n');
+    let _ = writeln!(out, "```bash");
     for m in meshes {
         let _ = writeln!(out, "git mesh commit {}", m.slug);
     }
+    let _ = writeln!(out, "```");
 
     out
 }
 
-/// Render the empty-corpus success shell. No ratio, no preflight, no
+/// Render the empty-corpus success markdown. No ratio, no preflight, no
 /// per-page sections, no footer prompt — just a tiny readable header that
-/// remains a valid `/bin/sh` script.
-pub(crate) fn render_empty_shell() -> String {
+/// remains valid markdown.
+pub(crate) fn render_empty_markdown() -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "#!/bin/sh");
+    let _ = writeln!(out, "# wiki scaffold");
+    out.push('\n');
     let _ = writeln!(
         out,
-        "# wiki scaffold — no uncovered findings; nothing to mesh."
+        "No uncovered fragment links — every link is already covered by a mesh."
     );
     out
 }
 
 fn render_preflight(out: &mut String, preflight: &PreflightResult) {
+    let _ = writeln!(out, "## Pre-flight");
+    out.push('\n');
     let _ = writeln!(
         out,
-        "# Pre-flight: anchored paths must exist in HEAD before mesh commit."
+        "Anchored paths must exist in HEAD before mesh commit."
     );
+    out.push('\n');
     match preflight {
         PreflightResult::Ok { missing } if missing.is_empty() => {
-            let _ = writeln!(out, "# All anchored paths exist in HEAD.");
+            let _ = writeln!(out, "All anchored paths exist in HEAD.");
         }
         PreflightResult::Ok { missing } => {
-            let _ = writeln!(out, "# Missing in HEAD:");
+            let _ = writeln!(out, "Missing in HEAD:");
+            out.push('\n');
             for p in missing {
-                let _ = writeln!(out, "#   {p}");
+                let _ = writeln!(out, "- `{p}`");
             }
         }
         PreflightResult::Skipped { reason } => {
-            let _ = writeln!(out, "# Pre-flight skipped: {reason}");
+            let _ = writeln!(out, "Pre-flight skipped: {reason}");
         }
     }
 }
 
 fn render_mesh_block(out: &mut String, m: &MeshDraft) {
-    // Source heading + opening sentence
-    let heading = if m.section_heading.is_empty() {
+    let heading_text = strip_atx_hashes(&m.section_heading);
+    let heading = if heading_text.is_empty() {
         "(top of file)".to_string()
     } else {
-        m.section_heading.clone()
+        heading_text
     };
-    let _ = writeln!(out, "# Source: {heading}");
-    let _ = writeln!(out, "#   \"{}\"", m.section_opening);
+    let _ = writeln!(out, "## {heading}");
+    let _ = writeln!(out, "> {}", m.section_opening);
 
-    // Hint comments (in attachment order: build → consolidate → anti-pattern)
+    // Hint annotations as additional blockquote paragraphs.
     for h in &m.hints {
+        out.push('\n');
         render_hint(out, h);
     }
+    out.push('\n');
 
-    // git mesh add <slug> \
-    //   <anchor1> \
-    //   <anchor2>
+    let _ = writeln!(out, "```bash");
     let _ = writeln!(out, "git mesh add {} \\", m.slug);
     let last = m.anchors.len().saturating_sub(1);
     for (i, a) in m.anchors.iter().enumerate() {
@@ -138,28 +149,33 @@ fn render_mesh_block(out: &mut String, m: &MeshDraft) {
             let _ = writeln!(out, "  {a} \\");
         }
     }
-    let _ = writeln!(out, "git mesh why {} -m \"\"", m.slug);
+    let _ = writeln!(out, "git mesh why {} -m \"[why]\"", m.slug);
+    let _ = writeln!(out, "```");
+    out.push('\n');
 }
 
 fn render_hint(out: &mut String, h: &Hint) {
     match h {
         Hint::Consolidated { count } => {
-            let _ = writeln!(out, "# Consolidated {count} occurrences of this anchor set");
+            let _ = writeln!(
+                out,
+                "> **Consolidated** {count} occurrences of this anchor set."
+            );
         }
         Hint::ConsiderMerge { other_slug } => {
-            let _ = writeln!(out, "# Consider merging with {other_slug}");
+            let _ = writeln!(out, "> **Consider merging** with `{other_slug}`.");
         }
         Hint::FallbackSlug { reason } => match reason {
             FallbackReason::NoHeadingUsedLabel => {
                 let _ = writeln!(
                     out,
-                    "# TODO: rename — fallback derivation (no section heading above link; used link label)"
+                    "> **TODO: rename** — fallback derivation (no section heading above link; used link label)."
                 );
             }
             FallbackReason::NoHeadingUsedFileStem => {
                 let _ = writeln!(
                     out,
-                    "# TODO: rename — fallback derivation (no section heading or link label; used target file stem)"
+                    "> **TODO: rename** — fallback derivation (no section heading or link label; used target file stem)."
                 );
             }
         },
@@ -167,58 +183,35 @@ fn render_hint(out: &mut String, h: &Hint) {
             AntiPattern::CouplingTemplate => {
                 let _ = writeln!(
                     out,
-                    "# WARN: source sentence describes the coupling rather than the subsystem;"
-                );
-                let _ = writeln!(
-                    out,
-                    "#       the why should name the subsystem and what it does across the anchors."
+                    "> **WARN:** source sentence describes the coupling rather than the subsystem; the why should name the subsystem and what it does across the anchors."
                 );
             }
             AntiPattern::HeadlessPredicate => {
                 let _ = writeln!(
                     out,
-                    "# WARN: source sentence opens with a bare identifier predicate;"
-                );
-                let _ = writeln!(
-                    out,
-                    "#       the why should name the subsystem rather than restating the symbol."
+                    "> **WARN:** source sentence opens with a bare identifier predicate; the why should name the subsystem rather than restating the symbol."
                 );
             }
             AntiPattern::VerbLead => {
                 let _ = writeln!(
                     out,
-                    "# WARN: source sentence opens with a verb rather than a subject;"
-                );
-                let _ = writeln!(
-                    out,
-                    "#       the why should name the subsystem and what it does across the anchors."
+                    "> **WARN:** source sentence opens with a verb rather than a subject; the why should name the subsystem and what it does across the anchors."
                 );
             }
             AntiPattern::DegenerateExcerpt => {
                 let _ = writeln!(
                     out,
-                    "# WARN: degenerate excerpt — open the source page to write the why by hand."
+                    "> **WARN:** degenerate excerpt — open the source page to write the why by hand."
                 );
             }
         },
     }
 }
 
-/// Build the per-page divider line, e.g. `# ── wiki/billing.md ───…` padded
-/// with `─` to a fixed display-character width.
-fn page_divider(page: &str) -> String {
-    // Prefix `# ── ` is 5 codepoints; trailing space + dashes fill the rest.
-    let prefix = "# ── ";
-    let used = prefix.chars().count() + page.chars().count() + 1; // +1 for the space
-    let dashes = DIVIDER_WIDTH.saturating_sub(used);
-    let mut s = String::new();
-    s.push_str(prefix);
-    s.push_str(page);
-    s.push(' ');
-    for _ in 0..dashes {
-        s.push('─');
-    }
-    s
+fn strip_atx_hashes(s: &str) -> String {
+    s.trim_start_matches(|c: char| c == '#' || c.is_whitespace())
+        .trim()
+        .to_string()
 }
 
 fn unique_pages(meshes: &[MeshDraft]) -> usize {
@@ -248,9 +241,9 @@ mod tests {
     }
 
     #[test]
-    fn divider_pads_to_fixed_width() {
-        let d = page_divider("wiki/billing.md");
-        assert_eq!(d.chars().count(), DIVIDER_WIDTH);
-        assert!(d.starts_with("# ── wiki/billing.md "));
+    fn strip_atx_hashes_drops_leading_hashes() {
+        assert_eq!(strip_atx_hashes("## Sync detection"), "Sync detection");
+        assert_eq!(strip_atx_hashes("# Charge handler notes"), "Charge handler notes");
+        assert_eq!(strip_atx_hashes(""), "");
     }
 }
