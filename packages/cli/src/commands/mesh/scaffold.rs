@@ -97,7 +97,14 @@ pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> 
     for file in &files {
         let content = match fs::read_to_string(file) {
             Ok(s) => s,
-            Err(_) => continue, // Unreadable files are reported via parse_errors.
+            Err(e) => {
+                if json {
+                    // JSON mode must preserve baseline hard-error semantics.
+                    return Err(miette::miette!("{}: {}", file.display(), e));
+                }
+                // Markdown mode: unreadable files are reported via parse_errors.
+                continue;
+            }
         };
         let raw_links = parse_fragment_links(&content);
         let augmented = augment(&raw_links, &content);

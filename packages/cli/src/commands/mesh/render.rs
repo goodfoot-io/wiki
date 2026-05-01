@@ -61,14 +61,11 @@ pub(crate) fn render_markdown(
 pub(crate) fn render_empty_markdown(parse_errors: &[ParseError]) -> String {
     let mut out = String::new();
 
-    // Prepend parse-error block when non-empty.
     if !parse_errors.is_empty() {
+        // When every file fails to parse there is no corpus to report.
+        // Emit only the parse-error block — no separator, no success line.
         render_parse_errors(&mut out, parse_errors);
-        // When there are parse errors but no meshes (empty corpus), the
-        // empty-corpus body still follows — emit the separator.
-        use std::fmt::Write as _;
-        let _ = writeln!(out, "---");
-        out.push('\n');
+        return out;
     }
 
     use std::fmt::Write as _;
@@ -161,14 +158,32 @@ mod tests {
     }
 
     #[test]
-    fn render_empty_markdown_with_errors_has_block_and_separator() {
+    fn render_empty_markdown_with_errors_block_alone() {
         let errors = vec![make_error("wiki/bad.md", ParseErrorKind::MissingTitle)];
         let out = render_empty_markdown(&errors);
         assert!(out.starts_with("Unable to generate scaffolding due to parsing errors:\n"));
         assert!(out.contains("wiki/bad.md (frontmatter present but `title:` is missing)"));
-        // Separator between block and corpus body.
-        assert!(out.contains("\n---\n"));
+        // No separator and no success line when parse errors are present.
+        assert!(!out.contains("\n---\n"), "separator must be absent");
+        assert!(
+            !out.contains("# wiki scaffold"),
+            "success header must be absent"
+        );
+        assert!(
+            !out.contains("No uncovered fragment links"),
+            "success body must be absent"
+        );
+    }
+
+    #[test]
+    fn render_empty_markdown_no_errors_emits_success_body() {
+        let out = render_empty_markdown(&[]);
+        assert!(
+            !out.contains("Unable to generate"),
+            "no parse-error block expected with zero errors"
+        );
         assert!(out.contains("# wiki scaffold"));
+        assert!(out.contains("No uncovered fragment links"));
     }
 
     #[test]

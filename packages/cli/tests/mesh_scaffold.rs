@@ -215,3 +215,126 @@ fn mesh_scaffold_parse_error_block() {
         "clean page section expected after separator:\n{stdout}"
     );
 }
+
+/// Every discovered wiki file fails to parse → only the parse-error block,
+/// no `---` separator, no success line.
+#[test]
+fn mesh_scaffold_only_parse_errors_emits_block_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wiki_dir = tmp.path().join("wiki");
+    std::fs::create_dir_all(&wiki_dir).unwrap();
+    std::fs::write(wiki_dir.join("wiki.toml"), "").unwrap();
+
+    // Only files that fail to parse — no clean file with links.
+    std::fs::write(wiki_dir.join("no_fm.md"), "# No frontmatter.\n").unwrap();
+    std::fs::write(
+        wiki_dir.join("missing_title.md"),
+        "---\nsummary: x\n---\n\nbody\n",
+    )
+    .unwrap();
+
+    git(tmp.path(), &["init", "-q", "-b", "main"]);
+    git(
+        tmp.path(),
+        &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
+    );
+    git(
+        tmp.path(),
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold"])
+        .current_dir(&wiki_dir)
+        .output()
+        .expect("run wiki binary");
+    assert!(
+        output.status.success(),
+        "wiki scaffold failed: stderr=\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.starts_with("Unable to generate scaffolding due to parsing errors:\n"),
+        "expected parse-error block at start, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("\n---\n"),
+        "separator must be absent when only parse errors:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("No uncovered fragment links"),
+        "success line must be absent when only parse errors:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("# wiki scaffold"),
+        "success header must be absent when only parse errors:\n{stdout}"
+    );
+}
+
+/// JSON mode against a wiki with an unreadable (non-UTF-8) file must exit
+/// non-zero with a diagnostic — preserving baseline hard-error semantics.
+#[test]
+fn mesh_scaffold_json_unreadable_file_exits_nonzero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wiki_dir = tmp.path().join("wiki");
+    std::fs::create_dir_all(&wiki_dir).unwrap();
+    std::fs::write(wiki_dir.join("wiki.toml"), "").unwrap();
+
+    // A valid file so the wiki is non-empty.
+    std::fs::write(
+        wiki_dir.join("clean.md"),
+        "---\ntitle: Clean\nsummary: s\n---\n\nSee [x](src/x.rs#L1-L2).\n",
+    )
+    .unwrap();
+    // Non-UTF-8 bytes → unreadable.
+    std::fs::write(wiki_dir.join("unreadable.md"), [0xFF_u8, 0xFE, 0x00]).unwrap();
+
+    let src_dir = tmp.path().join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(src_dir.join("x.rs"), "// x\n").unwrap();
+
+    git(tmp.path(), &["init", "-q", "-b", "main"]);
+    git(
+        tmp.path(),
+        &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
+    );
+    git(
+        tmp.path(),
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "--json"])
+        .current_dir(&wiki_dir)
+        .output()
+        .expect("run wiki binary");
+
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit for unreadable file in JSON mode, got success.\nstdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
