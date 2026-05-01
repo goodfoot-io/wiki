@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use super::draft::MeshDraft;
+use super::scaffold::ParseError;
 
 /// Render `meshes` (already grouped per-page in declaration order) and the
 /// per-page titles (frontmatter `title` keyed by `page_path`, `None` when
@@ -13,8 +14,20 @@ use super::draft::MeshDraft;
 pub(crate) fn render_markdown(
     meshes: &[MeshDraft],
     page_titles: &HashMap<String, Option<String>>,
+    parse_errors: &[ParseError],
 ) -> String {
     let mut out = String::new();
+
+    // Prepend parse-error block when non-empty.
+    if !parse_errors.is_empty() {
+        render_parse_errors(&mut out, parse_errors);
+        // Separator only when other content follows (meshes is non-empty).
+        if !meshes.is_empty() {
+            use std::fmt::Write as _;
+            let _ = writeln!(out, "---");
+            out.push('\n');
+        }
+    }
 
     // Group by page in first-occurrence order.
     let mut by_page: Vec<(String, Vec<&MeshDraft>)> = Vec::new();
@@ -40,6 +53,41 @@ pub(crate) fn render_markdown(
     }
 
     out
+}
+
+/// Render the empty-corpus success markdown. No ratio, no preflight, no
+/// per-page sections, no footer prompt — just a tiny readable header that
+/// remains valid markdown.
+pub(crate) fn render_empty_markdown(parse_errors: &[ParseError]) -> String {
+    let mut out = String::new();
+
+    // Prepend parse-error block when non-empty.
+    if !parse_errors.is_empty() {
+        render_parse_errors(&mut out, parse_errors);
+        // When there are parse errors but no meshes (empty corpus), the
+        // empty-corpus body still follows — emit the separator.
+        use std::fmt::Write as _;
+        let _ = writeln!(out, "---");
+        out.push('\n');
+    }
+
+    use std::fmt::Write as _;
+    let _ = writeln!(out, "# wiki scaffold");
+    out.push('\n');
+    let _ = writeln!(
+        out,
+        "No uncovered fragment links — every link is already covered by a mesh."
+    );
+    out
+}
+
+fn render_parse_errors(out: &mut String, parse_errors: &[ParseError]) {
+    use std::fmt::Write as _;
+    let _ = writeln!(out, "Unable to generate scaffolding due to parsing errors:");
+    for e in parse_errors {
+        let _ = writeln!(out, "- {} ({})", e.path, e.kind.reason());
+    }
+    out.push('\n');
 }
 
 fn render_mesh_block(out: &mut String, m: &MeshDraft) {
@@ -89,5 +137,64 @@ mod tests {
             "Charge handler notes"
         );
         assert_eq!(strip_atx_hashes(""), "");
+    }
+
+    // ── parse-error block unit tests ──────────────────────────────────────────
+
+    use super::super::scaffold::{ParseError, ParseErrorKind};
+
+    fn make_error(path: &str, kind: ParseErrorKind) -> ParseError {
+        ParseError {
+            path: path.to_string(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn render_empty_markdown_zero_errors_no_block() {
+        let out = render_empty_markdown(&[]);
+        assert!(
+            !out.contains("Unable to generate"),
+            "no parse-error block expected with zero errors"
+        );
+        assert!(out.contains("# wiki scaffold"));
+    }
+
+    #[test]
+    fn render_empty_markdown_with_errors_has_block_and_separator() {
+        let errors = vec![make_error("wiki/bad.md", ParseErrorKind::MissingTitle)];
+        let out = render_empty_markdown(&errors);
+        assert!(out.starts_with("Unable to generate scaffolding due to parsing errors:\n"));
+        assert!(out.contains("wiki/bad.md (frontmatter present but `title:` is missing)"));
+        // Separator between block and corpus body.
+        assert!(out.contains("\n---\n"));
+        assert!(out.contains("# wiki scaffold"));
+    }
+
+    #[test]
+    fn render_parse_error_reason_strings() {
+        fn reason(kind: ParseErrorKind) -> String {
+            kind.reason()
+        }
+        assert_eq!(
+            reason(ParseErrorKind::NoFrontmatter),
+            "no frontmatter block — file does not start with `---`"
+        );
+        assert_eq!(
+            reason(ParseErrorKind::MissingTitle),
+            "frontmatter present but `title:` is missing"
+        );
+        assert_eq!(
+            reason(ParseErrorKind::EmptyTitle),
+            "frontmatter present but `title:` is empty"
+        );
+        assert_eq!(
+            reason(ParseErrorKind::Unreadable("oops".to_string())),
+            "file could not be read: oops"
+        );
+        assert_eq!(
+            reason(ParseErrorKind::Malformed),
+            "malformed frontmatter — could not parse `title`"
+        );
     }
 }

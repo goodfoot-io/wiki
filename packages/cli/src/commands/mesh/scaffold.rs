@@ -12,12 +12,52 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use miette::{IntoDiagnostic, Result, WrapErr};
+use miette::{IntoDiagnostic, Result};
 use regex::Regex;
 use serde::Serialize;
 
 use crate::commands::{discover_files, resolve_link_path};
 use crate::parser::{LinkKind, parse_fragment_links};
+
+// ── Parse-error types ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub(crate) enum ParseErrorKind {
+    /// File does not start with `---\n`.
+    NoFrontmatter,
+    /// Frontmatter present, no `title:` key.
+    MissingTitle,
+    /// `title:` present, value empty/whitespace.
+    EmptyTitle,
+    /// IO error or invalid UTF-8 — message captured.
+    Unreadable(String),
+    /// Starts with `---` but regex rejected it (BOM, CRLF, no closing fence, etc.).
+    Malformed,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ParseError {
+    pub(crate) path: String,
+    pub(crate) kind: ParseErrorKind,
+}
+
+impl ParseErrorKind {
+    pub(crate) fn reason(&self) -> String {
+        match self {
+            ParseErrorKind::NoFrontmatter => {
+                "no frontmatter block — file does not start with `---`".to_string()
+            }
+            ParseErrorKind::MissingTitle => {
+                "frontmatter present but `title:` is missing".to_string()
+            }
+            ParseErrorKind::EmptyTitle => "frontmatter present but `title:` is empty".to_string(),
+            ParseErrorKind::Unreadable(msg) => format!("file could not be read: {msg}"),
+            ParseErrorKind::Malformed => {
+                "malformed frontmatter — could not parse `title`".to_string()
+            }
+        }
+    }
+}
 
 use super::augment::{AugmentedLink, augment};
 use super::draft::{self, MeshDraft};
@@ -55,9 +95,10 @@ pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> 
 
     let mut all_inputs: Vec<LinkInput> = Vec::new();
     for file in &files {
-        let content = fs::read_to_string(file)
-            .into_diagnostic()
-            .wrap_err_with(|| format!("failed to read wiki file: {}", file.display()))?;
+        let content = match fs::read_to_string(file) {
+            Ok(s) => s,
+            Err(_) => continue, // Unreadable files are reported via parse_errors.
+        };
         let raw_links = parse_fragment_links(&content);
         let augmented = augment(&raw_links, &content);
         // Filter to internal links with a parsed line range — mirrors the JS
@@ -76,21 +117,32 @@ pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> 
         }
     }
 
+    // Build per-source frontmatter map (title, summary) keyed by absolute path,
+    // and accumulate parse errors for source files.
+    let mut wiki_meta_cache: std::collections::HashMap<PathBuf, FileMeta> =
+        std::collections::HashMap::new();
+    let mut parse_errors: Vec<ParseError> = Vec::new();
+    for f in &files {
+        let (meta, err_kind) = classify_frontmatter(f);
+        if let Some(kind) = err_kind {
+            let rel = path_relative_to(f, repo_root);
+            parse_errors.push(ParseError { path: rel, kind });
+        }
+        wiki_meta_cache.insert(f.clone(), meta);
+    }
+    parse_errors.sort_by(|a, b| a.path.cmp(&b.path));
+
     if all_inputs.is_empty() {
         if json {
             println!("[]");
+        } else {
+            print!("{}", render::render_empty_markdown(&parse_errors));
         }
         return Ok(0);
     }
 
     // Build per-source frontmatter map (title, summary) keyed by absolute path.
     let mut meshes: Vec<Mesh> = Vec::with_capacity(all_inputs.len());
-    let mut wiki_meta_cache: std::collections::HashMap<PathBuf, FileMeta> =
-        std::collections::HashMap::new();
-    for f in &files {
-        let meta = read_file_meta(f);
-        wiki_meta_cache.insert(f.clone(), meta);
-    }
     let mut target_meta_cache: std::collections::HashMap<PathBuf, FileMeta> =
         std::collections::HashMap::new();
 
@@ -143,7 +195,7 @@ pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> 
         page_titles.insert(rel, title);
     }
 
-    let rendered = render::render_markdown(&drafts_by_page, &page_titles);
+    let rendered = render::render_markdown(&drafts_by_page, &page_titles, &parse_errors);
     print!("{rendered}");
     Ok(0)
 }
@@ -247,6 +299,120 @@ fn read_file_meta(path: &Path) -> FileMeta {
         meta.summary = parse_frontmatter_field(text, "summary");
     }
     meta
+}
+
+/// Classify the frontmatter of a file, returning both the `FileMeta` and an
+/// optional `ParseErrorKind` if the file's `title` could not be extracted.
+fn classify_frontmatter(path: &Path) -> (FileMeta, Option<ParseErrorKind>) {
+    // Step 1: read raw bytes; if IO fails or bytes are not valid UTF-8 → Unreadable.
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                FileMeta::default(),
+                Some(ParseErrorKind::Unreadable(e.to_string())),
+            );
+        }
+    };
+    let text = match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                FileMeta::default(),
+                Some(ParseErrorKind::Unreadable(e.to_string())),
+            );
+        }
+    };
+
+    // Step 2: must start with `---\n` or `---\r\n`.
+    if !text.starts_with("---\n") && !text.starts_with("---\r\n") {
+        let meta = FileMeta {
+            content: Some(text.clone()),
+            ..Default::default()
+        };
+        return (meta, Some(ParseErrorKind::NoFrontmatter));
+    }
+
+    // Step 3: locate closing `---` fence.
+    let after_open = text
+        .strip_prefix("---\r\n")
+        .or_else(|| text.strip_prefix("---\n"))
+        .unwrap_or(&text[4..]);
+    let has_closing_fence = after_open
+        .lines()
+        .any(|l| l.trim_end_matches('\r') == "---");
+    if !has_closing_fence {
+        let meta = FileMeta {
+            content: Some(text.clone()),
+            ..Default::default()
+        };
+        return (meta, Some(ParseErrorKind::Malformed));
+    }
+
+    // Step 4: look for `title:` line inside the fenced block.
+    // Collect lines between the two `---` fences.
+    let lines: Vec<&str> = after_open.lines().collect();
+    let closing_idx = lines.iter().position(|l| l.trim_end_matches('\r') == "---");
+    let fm_lines = match closing_idx {
+        Some(i) => &lines[..i],
+        None => &lines[..],
+    };
+
+    let title_line = fm_lines
+        .iter()
+        .find(|l| l.starts_with("title:") || l.starts_with("title :"));
+
+    if title_line.is_none() {
+        let meta = FileMeta {
+            content: Some(text.clone()),
+            ..Default::default()
+        };
+        return (meta, Some(ParseErrorKind::MissingTitle));
+    }
+
+    // Check if the value is empty/whitespace.
+    let raw_value = title_line
+        .unwrap()
+        .split_once(':')
+        .map(|(_, v)| v)
+        .unwrap_or("")
+        .trim();
+    let stripped_value = raw_value
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| {
+            raw_value
+                .strip_prefix('\'')
+                .and_then(|s| s.strip_suffix('\''))
+        })
+        .unwrap_or(raw_value)
+        .trim();
+
+    if stripped_value.is_empty() {
+        let meta = FileMeta {
+            content: Some(text.clone()),
+            ..Default::default()
+        };
+        return (meta, Some(ParseErrorKind::EmptyTitle));
+    }
+
+    // Step 5: run parse_frontmatter_field — if it returns None despite a
+    // non-empty title line, the frontmatter is malformed (BOM, CRLF, etc.).
+    let title = parse_frontmatter_field(&text, "title");
+    if title.is_none() {
+        let meta = FileMeta {
+            content: Some(text.clone()),
+            ..Default::default()
+        };
+        return (meta, Some(ParseErrorKind::Malformed));
+    }
+
+    let meta = FileMeta {
+        content: Some(text.clone()),
+        title,
+        summary: parse_frontmatter_field(&text, "summary"),
+    };
+    (meta, None)
 }
 
 fn parse_frontmatter_field(content: &str, field: &str) -> Option<String> {
@@ -804,5 +970,72 @@ mod tests {
         // Section should start at line 3 ("### Subsection") and end before line 5 ("## Next Section")
         // So the range should be (3, 4)
         assert_eq!(range, Some((3, 4)));
+    }
+
+    // ── classify_frontmatter unit tests ──────────────────────────────────────
+
+    fn classify_str(text: &str) -> Option<ParseErrorKind> {
+        // Write to a tempfile and run the classifier.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), text.as_bytes()).unwrap();
+        let (_, kind) = classify_frontmatter(tmp.path());
+        kind
+    }
+
+    #[test]
+    fn classify_no_frontmatter() {
+        let kind = classify_str("# Just a body.\n");
+        assert!(
+            matches!(kind, Some(ParseErrorKind::NoFrontmatter)),
+            "expected NoFrontmatter, got {kind:?}"
+        );
+    }
+
+    #[test]
+    fn classify_missing_title() {
+        let kind = classify_str("---\nsummary: x\n---\n\nbody\n");
+        assert!(
+            matches!(kind, Some(ParseErrorKind::MissingTitle)),
+            "expected MissingTitle, got {kind:?}"
+        );
+    }
+
+    #[test]
+    fn classify_empty_title() {
+        let kind = classify_str("---\ntitle:\nsummary: x\n---\n\nbody\n");
+        assert!(
+            matches!(kind, Some(ParseErrorKind::EmptyTitle)),
+            "expected EmptyTitle, got {kind:?}"
+        );
+    }
+
+    #[test]
+    fn classify_malformed_bom() {
+        // BOM-prefixed frontmatter — parse_frontmatter_field will return None.
+        let kind = classify_str("\u{FEFF}---\ntitle: x\nsummary: y\n---\n");
+        assert!(
+            matches!(
+                kind,
+                Some(ParseErrorKind::Malformed | ParseErrorKind::NoFrontmatter)
+            ),
+            "expected Malformed or NoFrontmatter, got {kind:?}"
+        );
+    }
+
+    #[test]
+    fn classify_unreadable_non_utf8() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), [0xFF_u8, 0xFE, 0x00]).unwrap();
+        let (_, kind) = classify_frontmatter(tmp.path());
+        assert!(
+            matches!(kind, Some(ParseErrorKind::Unreadable(_))),
+            "expected Unreadable, got {kind:?}"
+        );
+    }
+
+    #[test]
+    fn classify_clean_file() {
+        let kind = classify_str("---\ntitle: Hello\nsummary: World\n---\n\nbody\n");
+        assert!(kind.is_none(), "expected no error, got {kind:?}");
     }
 }
