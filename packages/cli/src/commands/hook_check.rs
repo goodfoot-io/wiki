@@ -3,6 +3,7 @@ use std::path::Path;
 use miette::Result;
 
 use super::check;
+use crate::index::DocSource;
 
 /// Parse `tool_input.file_path` from a PostToolUse JSON event.
 fn parse_file_path(input: &str) -> Option<String> {
@@ -17,7 +18,7 @@ fn parse_file_path(input: &str) -> Option<String> {
 ///
 /// Only processes `.md` files. Outputs a JSON `systemMessage` envelope when
 /// validation errors remain after auto-fix so Claude can address them.
-pub fn run(input: &str, _wiki_root: &Path, repo_root: &Path) -> Result<i32> {
+pub fn run(input: &str, _wiki_root: &Path, repo_root: &Path, source: DocSource) -> Result<i32> {
     let Some(file_path) = parse_file_path(input) else {
         return Ok(0);
     };
@@ -55,7 +56,7 @@ pub fn run(input: &str, _wiki_root: &Path, repo_root: &Path) -> Result<i32> {
     }
 
     let globs = vec![file_path.clone()];
-    let diagnostics = match check::collect(&globs, wiki_root, repo_root) {
+    let diagnostics = match check::collect_with_config(&globs, wiki_root, repo_root, None, source) {
         Ok(d) => d,
         Err(_) => return Ok(0), // not a wiki page or discovery failed — skip silently
     };

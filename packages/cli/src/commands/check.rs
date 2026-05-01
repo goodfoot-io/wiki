@@ -8,8 +8,70 @@ use crate::commands::discover_files;
 use crate::frontmatter::{Frontmatter, build_index, parse_frontmatter, parse_title};
 use crate::git::resolve_ref;
 use crate::headings::extract_headings;
+use crate::index::DocSource;
 use crate::parser::{LinkKind, parse_fragment_links, parse_wikilinks};
 use crate::wiki_config::WikiConfig;
+
+/// Read `path` from the chosen `DocSource`.
+///
+/// For `WorkingTree` this preserves today's behaviour (`fs::read_to_string`).
+/// For `Index`/`Head`, the path is converted to a repo-relative form and read
+/// through `DocSource::read`; absent paths surface as `Err(NotFound)` so
+/// callers can keep their existing missing-file diagnostic flow.
+fn read_via_source(
+    path: &Path,
+    repo_root: &Path,
+    source: DocSource,
+) -> std::io::Result<String> {
+    match source {
+        DocSource::WorkingTree => std::fs::read_to_string(path),
+        DocSource::Index | DocSource::Head => {
+            let path_rel = path
+                .strip_prefix(repo_root)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+            match source.read(repo_root, &path_rel) {
+                Ok(Some(s)) => Ok(s),
+                Ok(None) => Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("{path_rel} not present in source {:?}", source),
+                )),
+                Err(e) => Err(std::io::Error::other(e.to_string())),
+            }
+        }
+    }
+}
+
+/// Return the repo-relative paths the chosen `DocSource` considers "present"
+/// among the candidates produced by the worktree-default discovery.
+///
+/// For `WorkingTree`, the candidate list is returned unchanged.  For
+/// `Index`/`Head`, the candidate list is filtered against the source's
+/// `list_paths` so a worktree-only file does not appear under
+/// `--source=index|head`.
+fn filter_files_for_source(
+    files: Vec<PathBuf>,
+    repo_root: &Path,
+    source: DocSource,
+) -> Result<Vec<PathBuf>> {
+    if matches!(source, DocSource::WorkingTree) {
+        return Ok(files);
+    }
+    let listed: std::collections::HashSet<String> = source
+        .list_paths(repo_root)?
+        .into_iter()
+        .collect();
+    Ok(files
+        .into_iter()
+        .filter(|p| {
+            let rel = p
+                .strip_prefix(repo_root)
+                .map(|r| r.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| p.to_string_lossy().into_owned());
+            listed.contains(&rel)
+        })
+        .collect())
+}
 
 use super::mesh_coverage;
 
@@ -28,6 +90,7 @@ pub struct CheckDiagnostic {
 /// Run the check command.
 ///
 /// Returns the exit code: 0 = valid, 1 = validation errors, 2 = runtime error.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     globs: &[String],
     json: bool,
@@ -36,8 +99,20 @@ pub fn run(
     wiki_config: Option<&WikiConfig>,
     no_exit_code: bool,
     no_mesh: bool,
+    source: DocSource,
 ) -> Result<i32> {
     let files = match discover_files(globs, wiki_root, repo_root) {
+        Ok(f) => f,
+        Err(e) => {
+            if json {
+                eprintln!("{}", serde_json::json!({"error": e.to_string()}));
+            } else {
+                eprintln!("error: {e}");
+            }
+            return Ok(2);
+        }
+    };
+    let files = match filter_files_for_source(files, repo_root, source) {
         Ok(f) => f,
         Err(e) => {
             if json {
@@ -52,10 +127,11 @@ pub fn run(
     let index_files = if globs.is_empty() {
         files.clone()
     } else {
-        discover_files(&[], wiki_root, repo_root).unwrap_or_else(|_| files.clone())
+        let raw = discover_files(&[], wiki_root, repo_root).unwrap_or_else(|_| files.clone());
+        filter_files_for_source(raw, repo_root, source).unwrap_or_else(|_| files.clone())
     };
 
-    let diagnostics = match collect_for_files(&files, &index_files, wiki_root, repo_root, wiki_config, no_mesh) {
+    let diagnostics = match collect_for_files(&files, &index_files, wiki_root, repo_root, wiki_config, no_mesh, source) {
         Ok(d) => d,
         Err(e) => {
             if json {
@@ -97,6 +173,7 @@ pub fn run_multi(
     repo_root: &Path,
     no_exit_code: bool,
     no_mesh: bool,
+    source: DocSource,
 ) -> Result<i32> {
     let mut all: Vec<(String, Vec<CheckDiagnostic>)> = Vec::new();
     let mut runtime_error: Option<String> = None;
@@ -128,12 +205,20 @@ pub fn run_multi(
                 break;
             }
         };
+        let files = match filter_files_for_source(files, repo_root, source) {
+            Ok(f) => f,
+            Err(e) => {
+                runtime_error = Some(format!("[{label}] {e}"));
+                break;
+            }
+        };
         let index_files = if globs.is_empty() {
             files.clone()
         } else {
-            discover_files(&[], wiki_root, repo_root).unwrap_or_else(|_| files.clone())
+            let raw = discover_files(&[], wiki_root, repo_root).unwrap_or_else(|_| files.clone());
+            filter_files_for_source(raw, repo_root, source).unwrap_or_else(|_| files.clone())
         };
-        match collect_for_files(&files, &index_files, wiki_root, repo_root, per_cfg.as_ref(), no_mesh) {
+        match collect_for_files(&files, &index_files, wiki_root, repo_root, per_cfg.as_ref(), no_mesh, source) {
             Ok(d) => all.push((label.clone(), d)),
             Err(e) => {
                 runtime_error = Some(format!("[{label}] {e}"));
@@ -189,8 +274,9 @@ pub fn run_multi(
 /// Returns `Err` only on discovery failure; validation errors are returned as
 /// diagnostics.  On discovery failure the caller should treat this as exit
 /// code 2.
+#[allow(dead_code)]
 pub fn collect(globs: &[String], wiki_root: &Path, repo_root: &Path) -> Result<Vec<CheckDiagnostic>> {
-    collect_with_config(globs, wiki_root, repo_root, None)
+    collect_with_config(globs, wiki_root, repo_root, None, DocSource::WorkingTree)
 }
 
 /// Collect diagnostics, with an optional `WikiConfig` for namespace rules 5 and 6.
@@ -199,14 +285,17 @@ pub fn collect_with_config(
     wiki_root: &Path,
     repo_root: &Path,
     wiki_config: Option<&WikiConfig>,
+    source: DocSource,
 ) -> Result<Vec<CheckDiagnostic>> {
     let files = discover_files(globs, wiki_root, repo_root)?;
+    let files = filter_files_for_source(files, repo_root, source)?;
     let index_files = if globs.is_empty() {
         files.clone()
     } else {
-        discover_files(&[], wiki_root, repo_root).unwrap_or_else(|_| files.clone())
+        let raw = discover_files(&[], wiki_root, repo_root).unwrap_or_else(|_| files.clone());
+        filter_files_for_source(raw, repo_root, source).unwrap_or_else(|_| files.clone())
     };
-    collect_for_files(&files, &index_files, wiki_root, repo_root, wiki_config, false)
+    collect_for_files(&files, &index_files, wiki_root, repo_root, wiki_config, false, source)
 }
 
 fn collect_for_files(
@@ -216,6 +305,7 @@ fn collect_for_files(
     repo_root: &Path,
     wiki_config: Option<&WikiConfig>,
     no_mesh: bool,
+    source: DocSource,
 ) -> Result<Vec<CheckDiagnostic>> {
     let mut diagnostics: Vec<CheckDiagnostic> = Vec::new();
 
@@ -229,7 +319,7 @@ fn collect_for_files(
 
     for path in index_files {
         let in_scope = files_set.contains(path);
-        let content = match std::fs::read_to_string(path) {
+        let content = match read_via_source(path, repo_root, source) {
             Ok(c) => c,
             Err(e) => {
                 if in_scope {
@@ -297,14 +387,14 @@ fn collect_for_files(
     // Build a map from path -> content (for heading extraction)
     let mut content_cache: HashMap<PathBuf, String> = HashMap::new();
     for (path, _) in &pages {
-        if let Ok(c) = std::fs::read_to_string(path) {
+        if let Ok(c) = read_via_source(path, repo_root, source) {
             content_cache.insert(path.clone(), c);
         }
     }
 
     // ── Validate links in all files (including ones that failed frontmatter) ──
     for path in files {
-        let content = match std::fs::read_to_string(path) {
+        let content = match read_via_source(path, repo_root, source) {
             Ok(c) => c,
             Err(_) => continue, // already reported above
         };
@@ -317,8 +407,10 @@ fn collect_for_files(
             }
             let resolved = crate::commands::resolve_link_path(&link.path, path, repo_root);
             let abs = repo_root.join(&resolved);
-            match std::fs::read_to_string(&abs) {
+            match read_via_source(&abs, repo_root, source) {
                 Err(_) => {
+                    // Directories are valid link targets and have no
+                    // readable content under any source.
                     if abs.is_dir() {
                         continue;
                     }
@@ -459,7 +551,7 @@ fn collect_for_files(
             cfg.all().filter_map(|w| w.namespace.as_deref()).collect();
 
         for path in files {
-            let content = match std::fs::read_to_string(path) {
+            let content = match read_via_source(path, repo_root, source) {
                 Ok(c) => c,
                 Err(_) => continue,
             };
@@ -559,7 +651,12 @@ fn collect_for_files(
     let _ = resolve_ref(repo_root, "HEAD");
 
     // ── Mesh coverage pass (skipped when --no-mesh) ───────────────────────────
-    if !no_mesh {
+    //
+    // The mesh-coverage check shells out to `git-mesh` and reads files via the
+    // worktree, so it is only meaningful under `--source=worktree`.  When the
+    // user selected `--source=index|head` we skip mesh coverage explicitly
+    // rather than silently mixing snapshot sources.
+    if !no_mesh && matches!(source, DocSource::WorkingTree) {
         let mesh_diags = mesh_coverage::collect_mesh_diagnostics(files, repo_root)?;
         diagnostics.extend(mesh_diags);
     }
@@ -724,7 +821,7 @@ mod tests {
         repo.create_file("wiki/page.md", &make_wiki_page("Page", "No links here."));
         repo.commit("add page");
 
-        let code = run(&[], false, &wiki_root, repo.path(), None, false, false).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false, false, crate::index::DocSource::WorkingTree).expect("run");
         assert_eq!(code, 0);
     }
 
@@ -739,7 +836,7 @@ mod tests {
         );
         repo.commit("add page");
 
-        let code = run(&[], false, &wiki_root, repo.path(), None, false, false).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false, false, crate::index::DocSource::WorkingTree).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -752,7 +849,7 @@ mod tests {
         repo.create_file("wiki/b.md", &make_wiki_page("Shared", ""));
         repo.commit("add pages");
 
-        let code = run(&[], false, &wiki_root, repo.path(), None, false, false).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false, false, crate::index::DocSource::WorkingTree).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -764,7 +861,7 @@ mod tests {
         repo.create_file("wiki/page.md", "# Just a heading\n\nNo frontmatter.");
         repo.commit("add page");
 
-        let code = run(&[], false, &wiki_root, repo.path(), None, false, false).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false, false, crate::index::DocSource::WorkingTree).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -780,7 +877,7 @@ mod tests {
         repo.create_file("wiki/source.md", &make_wiki_page("Source", "See [[tp]]."));
         repo.commit("add pages");
 
-        let code = run(&[], false, &wiki_root, repo.path(), None, false, false).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false, false, crate::index::DocSource::WorkingTree).expect("run");
         // alias_resolve warnings should not cause exit 1
         assert_eq!(code, 0);
     }
@@ -800,7 +897,7 @@ mod tests {
         );
         repo.commit("add pages");
 
-        let code = run(&[], false, &wiki_root, repo.path(), None, false, false).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false, false, crate::index::DocSource::WorkingTree).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -819,7 +916,7 @@ mod tests {
         );
         repo.commit("add pages");
 
-        let code = run(&[], false, &wiki_root, repo.path(), None, false, false).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false, false, crate::index::DocSource::WorkingTree).expect("run");
         assert_eq!(code, 0);
     }
 
@@ -837,7 +934,7 @@ mod tests {
         repo.commit("add pages");
 
         let globs = vec!["wiki/page_a.md".to_string()];
-        let code = run(&globs, false, &wiki_root, repo.path(), None, false, false).expect("run");
+        let code = run(&globs, false, &wiki_root, repo.path(), None, false, false, crate::index::DocSource::WorkingTree).expect("run");
         assert_eq!(
             code, 0,
             "wikilink to a page outside the glob must resolve against the full wiki index"
@@ -857,7 +954,7 @@ mod tests {
         repo.commit("add pages");
 
         let globs = vec!["wiki/page_a.md".to_string()];
-        let code = run(&globs, false, &wiki_root, repo.path(), None, false, false).expect("run");
+        let code = run(&globs, false, &wiki_root, repo.path(), None, false, false, crate::index::DocSource::WorkingTree).expect("run");
         assert_eq!(
             code, 1,
             "a truly missing wikilink must still be reported when using a file glob"
@@ -876,7 +973,7 @@ mod tests {
         );
         repo.commit("add files");
 
-        let code = run(&[], false, &wiki_root, repo.path(), None, false, false).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false, false, crate::index::DocSource::WorkingTree).expect("run");
         assert_eq!(
             code, 0,
             "directory fragment links must not produce missing_file"
@@ -918,7 +1015,7 @@ mod tests {
         );
         repo.commit("add files");
 
-        let code = run(&[], false, &wiki_root, repo.path(), None, false, false).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false, false, crate::index::DocSource::WorkingTree).expect("run");
         assert_eq!(code, 1, "uncovered fragment link must fail wiki check");
     }
 
@@ -941,7 +1038,7 @@ mod tests {
             .filter(|d| d.kind == "mesh_uncovered")
             .collect();
         assert_eq!(mesh_diags.len(), 1, "expected one mesh_uncovered: {diagnostics:?}");
-        let code = run(&[], false, &wiki_root, repo.path(), None, false, false).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false, false, crate::index::DocSource::WorkingTree).expect("run");
         assert_eq!(code, 1);
     }
 
@@ -971,7 +1068,7 @@ mod tests {
             mesh_diags.is_empty(),
             "covered link must not produce mesh_uncovered: {diagnostics:?}"
         );
-        let code = run(&[], false, &wiki_root, repo.path(), None, false, false).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false, false, crate::index::DocSource::WorkingTree).expect("run");
         assert_eq!(code, 0);
     }
 
@@ -1177,7 +1274,7 @@ mod tests {
                 .join(":");
             // SAFETY: PATH_MUTEX is held.
             unsafe { std::env::set_var("PATH", &filtered_path) };
-            let code = run(&[], false, &wiki_root, repo.path(), None, false, false).expect("run");
+            let code = run(&[], false, &wiki_root, repo.path(), None, false, false, crate::index::DocSource::WorkingTree).expect("run");
             // SAFETY: PATH_MUTEX is held.
             unsafe { std::env::set_var("PATH", &original_path) };
             code
@@ -1275,10 +1372,93 @@ mod tests {
 
         // SAFETY: PATH_MUTEX is held; no other test reads/writes PATH concurrently.
         unsafe { std::env::set_var("PATH", &new_path) };
-        let code = run(&[], false, &wiki_root, repo.path(), None, false, false).expect("run");
+        let code = run(&[], false, &wiki_root, repo.path(), None, false, false, crate::index::DocSource::WorkingTree).expect("run");
         // SAFETY: PATH_MUTEX is held.
         unsafe { std::env::set_var("PATH", &original_path) };
 
         assert_eq!(code, 2, "git-mesh non-zero exit must produce exit code 2 (runtime error)");
+    }
+
+    /// Finding 2 regression: `--source=index` must validate the staged
+    /// content, not the worktree.  Worktree is clean, but the index has a
+    /// broken wikilink — `wiki check --source=index` must report it.
+    #[test]
+    fn check_source_index_validates_staged_broken_when_worktree_clean() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        // Commit a clean baseline.
+        repo.create_file("wiki/page.md", &make_wiki_page("Page", "No links."));
+        repo.commit("clean baseline");
+
+        // Stage a broken edit, then restore the worktree to the clean version.
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [[Nonexistent]]."),
+        );
+        repo.git(&["add", "wiki/page.md"]);
+        repo.create_file("wiki/page.md", &make_wiki_page("Page", "No links."));
+
+        // --source=worktree: clean.
+        let diags_wt = collect_with_config(
+            &[],
+            &wiki_root,
+            repo.path(),
+            None,
+            crate::index::DocSource::WorkingTree,
+        )
+        .expect("collect wt");
+        assert!(
+            diags_wt.iter().all(|d| d.kind == "alias_resolve"),
+            "worktree should be clean, got: {:?}",
+            diags_wt
+        );
+
+        // --source=index: should see the broken wikilink staged.
+        let diags_idx = collect_with_config(
+            &[],
+            &wiki_root,
+            repo.path(),
+            None,
+            crate::index::DocSource::Index,
+        )
+        .expect("collect idx");
+        assert!(
+            diags_idx.iter().any(|d| d.kind == "broken_wikilink"),
+            "index should see staged broken wikilink, got: {:?}",
+            diags_idx
+        );
+    }
+
+    /// Finding 2 regression (inverse): `--source=head` must ignore worktree
+    /// edits.  The worktree has a broken wikilink, but HEAD is clean —
+    /// `wiki check --source=head` must report no errors.
+    #[test]
+    fn check_source_head_ignores_worktree_only_breakage() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        repo.create_file("wiki/page.md", &make_wiki_page("Page", "No links."));
+        repo.commit("clean HEAD");
+
+        // Worktree: introduce a broken link without staging it.
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [[Nonexistent]]."),
+        );
+
+        let diags_head = collect_with_config(
+            &[],
+            &wiki_root,
+            repo.path(),
+            None,
+            crate::index::DocSource::Head,
+        )
+        .expect("collect head");
+        assert!(
+            diags_head.iter().all(|d| d.kind == "alias_resolve"),
+            "HEAD should be clean, got: {:?}",
+            diags_head
+        );
     }
 }

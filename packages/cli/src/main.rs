@@ -446,7 +446,7 @@ fn run(
         let started = Instant::now();
         let result: Result<i32> = match command {
             Some(Commands::Check { globs, no_exit_code, no_mesh, namespace: _ }) => {
-                commands::check::run_multi(&globs, json, &targets, &repo_root, no_exit_code, no_mesh)
+                commands::check::run_multi(&globs, json, &targets, &repo_root, no_exit_code, no_mesh, source)
             }
             Some(Commands::Links { target, namespace: _ }) => {
                 let inputs = resolve_inputs(target, read_stdin_lines)?;
@@ -523,7 +523,7 @@ fn run(
 
     let result = match command {
         Some(Commands::Check { globs, no_exit_code, no_mesh, namespace: _ }) => {
-            commands::check::run(&globs, json, wiki_root, &repo_root, config.as_ref(), no_exit_code, no_mesh)
+            commands::check::run(&globs, json, wiki_root, &repo_root, config.as_ref(), no_exit_code, no_mesh, source)
         }
         Some(Commands::Links { target, namespace: _ }) => {
             let inputs = resolve_inputs(target, read_stdin_lines)?;
@@ -567,7 +567,7 @@ fn run(
         Some(Commands::Hook) => {
             let lines = read_stdin_lines();
             let input = lines.join("\n");
-            commands::hook_check::run(&input, wiki_root, &repo_root)
+            commands::hook_check::run(&input, wiki_root, &repo_root, source)
         }
         Some(Commands::List { tag, namespace: _ }) => {
             commands::list::run(&[], tag.as_deref(), json, wiki_root, &repo_root, source)

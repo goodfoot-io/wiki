@@ -316,34 +316,93 @@ pub fn index_tracked_paths(repo: &Path) -> Result<Vec<String>> {
     Ok(paths)
 }
 
-/// Read the blob content for `path_rel` from the git index, or `None` if the
-/// path is not present in the index.
-pub fn read_index_blob(repo: &Path, path_rel: &str) -> Result<Option<String>> {
-    let repo = open_repo(repo)?;
-    let index = repo
-        .index_or_load_from_head_or_empty()
-        .into_diagnostic()
-        .wrap_err("failed to load git index for blob read")?;
+/// Maximum symlink resolution depth before giving up (mirrors the small caps
+/// used by most filesystems and prevents cycles in pathological repos).
+const SYMLINK_RECURSION_LIMIT: usize = 8;
 
-    let entry_id = match &index {
+/// Look up the index entry for `path_rel`, returning the blob id and whether
+/// it represents a symlink.
+fn index_entry_id_and_kind(
+    repo: &gix::Repository,
+    path_rel: &str,
+) -> Option<(gix::ObjectId, gix::index::entry::Mode)> {
+    let index = repo.index_or_load_from_head_or_empty().ok()?;
+    match &index {
         gix::worktree::IndexPersistedOrInMemory::Persisted(idx) => {
             idx.entry_by_path(gix::bstr::BStr::new(path_rel.as_bytes()))
-                .map(|e| e.id)
+                .map(|e| (e.id, e.mode))
         }
         gix::worktree::IndexPersistedOrInMemory::InMemory(idx) => {
             idx.entry_by_path(gix::bstr::BStr::new(path_rel.as_bytes()))
-                .map(|e| e.id)
+                .map(|e| (e.id, e.mode))
         }
-    };
+    }
+}
 
-    let Some(id) = entry_id else {
+/// Resolve a relative symlink target against the directory containing
+/// `from_path_rel`, normalising `.` and `..` segments and producing a
+/// repo-relative UTF-8 path.  Returns `None` if the resolution escapes the
+/// repository root.
+fn resolve_symlink_target_rel(from_path_rel: &str, target: &str) -> Option<String> {
+    // Absolute targets escape the repo and are unsupported under index/head
+    // sources (we cannot read arbitrary worktree paths from a snapshot).
+    if target.starts_with('/') {
+        return None;
+    }
+    let mut parts: Vec<&str> = if let Some((dir, _)) = from_path_rel.rsplit_once('/') {
+        dir.split('/').filter(|s| !s.is_empty()).collect()
+    } else {
+        Vec::new()
+    };
+    for component in target.split('/') {
+        match component {
+            "" | "." => continue,
+            ".." => {
+                parts.pop()?;
+            }
+            other => parts.push(other),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+/// Read the blob content for `path_rel` from the git index, or `None` if the
+/// path is not present in the index.
+///
+/// Mirrors `--source=worktree`'s `fs::read_to_string` semantics by following
+/// symlinks within the same source up to `SYMLINK_RECURSION_LIMIT` hops.
+pub fn read_index_blob(repo: &Path, path_rel: &str) -> Result<Option<String>> {
+    let gix_repo = open_repo(repo)?;
+    read_index_blob_inner(&gix_repo, path_rel, 0)
+}
+
+fn read_index_blob_inner(
+    repo: &gix::Repository,
+    path_rel: &str,
+    depth: usize,
+) -> Result<Option<String>> {
+    if depth > SYMLINK_RECURSION_LIMIT {
+        return Err(miette!(
+            "symlink resolution exceeded depth limit at index path '{path_rel}'"
+        ));
+    }
+    let Some((id, mode)) = index_entry_id_and_kind(repo, path_rel) else {
         return Ok(None);
     };
-
     let object = repo
         .find_object(id)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to read blob for index entry '{path_rel}'"))?;
+    if mode == gix::index::entry::Mode::SYMLINK {
+        let target = String::from_utf8(object.data.to_vec())
+            .into_diagnostic()
+            .wrap_err_with(|| format!("symlink target for '{path_rel}' is not valid UTF-8"))?;
+        let Some(resolved) = resolve_symlink_target_rel(path_rel, target.trim_end_matches('\0'))
+        else {
+            return Ok(None);
+        };
+        return read_index_blob_inner(repo, &resolved, depth + 1);
+    }
     let content = String::from_utf8(object.data.to_vec())
         .into_diagnostic()
         .wrap_err_with(|| format!("blob for '{path_rel}' is not valid UTF-8"))?;
@@ -422,6 +481,16 @@ fn for_each_tree_entry_recursive(
             gix::object::tree::EntryKind::Blob | gix::object::tree::EntryKind::BlobExecutable => {
                 paths.push(path);
             }
+            gix::object::tree::EntryKind::Link => {
+                // Symlinks are surfaced as paths so callers can follow them
+                // via `read_head_blob`, which dereferences within the same
+                // source for parity with worktree `fs::read_to_string`.
+                paths.push(path);
+            }
+            // Submodule gitlinks (`Commit`): wiki content does not live in
+            // submodules; full traversal is out of scope.  Skip silently.
+            gix::object::tree::EntryKind::Commit => {}
+            #[allow(unreachable_patterns)]
             _ => {}
         }
     }
@@ -430,8 +499,17 @@ fn for_each_tree_entry_recursive(
 
 /// Read the blob content for `path_rel` from the `HEAD` tree, or `None` if the
 /// path is absent at HEAD.
+///
+/// Symlinks are followed within the same source up to
+/// `SYMLINK_RECURSION_LIMIT` hops, mirroring `--source=worktree`'s
+/// `fs::read_to_string` semantics.  Submodule gitlinks (`EntryKind::Commit`)
+/// are reported as absent because wiki content does not live in submodules.
 pub fn read_head_blob(repo: &Path, path_rel: &str) -> Result<Option<String>> {
-    let repo = open_repo(repo)?;
+    let gix_repo = open_repo(repo)?;
+    read_head_blob_inner(&gix_repo, path_rel, 0)
+}
+
+fn head_root_tree_id(repo: &gix::Repository) -> Result<gix::ObjectId> {
     let mut head = repo
         .head()
         .into_diagnostic()
@@ -451,10 +529,22 @@ pub fn read_head_blob(repo: &Path, path_rel: &str) -> Result<Option<String>> {
         .tree()
         .into_diagnostic()
         .wrap_err("failed to read HEAD tree")?;
+    Ok(tree.id)
+}
 
-    // Walk the path components to find the blob.
+fn read_head_blob_inner(
+    repo: &gix::Repository,
+    path_rel: &str,
+    depth: usize,
+) -> Result<Option<String>> {
+    if depth > SYMLINK_RECURSION_LIMIT {
+        return Err(miette!(
+            "symlink resolution exceeded depth limit at HEAD path '{path_rel}'"
+        ));
+    }
+    let root_tree_id = head_root_tree_id(repo)?;
     let parts: Vec<&str> = path_rel.split('/').collect();
-    let mut current_tree_id = tree.id;
+    let mut current_tree_id = root_tree_id;
 
     for (i, part) in parts.iter().enumerate() {
         let is_last = i == parts.len() - 1;
@@ -479,6 +569,31 @@ pub fn read_head_blob(repo: &Path, path_rel: &str) -> Result<Option<String>> {
             }
             found = true;
             if is_last {
+                let kind = entry.mode().kind();
+                if matches!(kind, gix::object::tree::EntryKind::Link) {
+                    // Resolve symlink within the same source.
+                    let object = repo
+                        .find_object(entry.object_id())
+                        .into_diagnostic()
+                        .wrap_err_with(|| {
+                            format!("failed to read symlink blob for '{path_rel}'")
+                        })?;
+                    let target = String::from_utf8(object.data.to_vec())
+                        .into_diagnostic()
+                        .wrap_err_with(|| {
+                            format!("symlink target for '{path_rel}' is not valid UTF-8")
+                        })?;
+                    let Some(resolved) =
+                        resolve_symlink_target_rel(path_rel, target.trim_end_matches('\0'))
+                    else {
+                        return Ok(None);
+                    };
+                    return read_head_blob_inner(repo, &resolved, depth + 1);
+                }
+                if matches!(kind, gix::object::tree::EntryKind::Commit) {
+                    // Submodule gitlink — out of scope; treat as absent.
+                    return Ok(None);
+                }
                 let object = repo
                     .find_object(entry.object_id())
                     .into_diagnostic()
@@ -870,6 +985,51 @@ mod tests {
         repo.commit("initial");
 
         assert!(has_head_entry(repo.path(), "committed.md").expect("has_head_entry"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_index_blob_follows_symlinks() {
+        let repo = TestRepo::new();
+        repo.create_file("real.md", "real content\n");
+        // Create a symlink `link.md -> real.md` and stage both.
+        std::os::unix::fs::symlink("real.md", repo.path().join("link.md"))
+            .expect("create symlink");
+        repo.git(&["add", "real.md", "link.md"]);
+
+        let content = read_index_blob(repo.path(), "link.md")
+            .expect("read_index_blob")
+            .expect("expected Some");
+        assert_eq!(content, "real content\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_head_blob_follows_symlinks() {
+        let repo = TestRepo::new();
+        repo.create_file("real.md", "real content\n");
+        std::os::unix::fs::symlink("real.md", repo.path().join("link.md"))
+            .expect("create symlink");
+        repo.commit("with symlink");
+
+        let content = read_head_blob(repo.path(), "link.md")
+            .expect("read_head_blob")
+            .expect("expected Some");
+        assert_eq!(content, "real content\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn head_tracked_paths_includes_symlink() {
+        let repo = TestRepo::new();
+        repo.create_file("real.md", "real\n");
+        std::os::unix::fs::symlink("real.md", repo.path().join("link.md"))
+            .expect("create symlink");
+        repo.commit("with symlink");
+
+        let paths = head_tracked_paths(repo.path()).expect("head_tracked_paths");
+        assert!(paths.contains(&"link.md".to_owned()));
+        assert!(paths.contains(&"real.md".to_owned()));
     }
 
     #[test]

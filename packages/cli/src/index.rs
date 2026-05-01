@@ -251,7 +251,7 @@ impl WikiIndex {
         // Auto-detect namespace from wiki.toml so that peer wikis (reached via
         // `-n <alias>`) filter *.wiki.md files correctly even when callers use
         // the simpler `prepare` entry point.
-        let namespace = read_namespace_from_toml(wiki_root);
+        let namespace = read_namespace_from_toml(wiki_root, repo_root, DocSource::WorkingTree);
         Self::prepare_with_namespace(wiki_root, repo_root, namespace, DocSource::WorkingTree)
     }
 
@@ -259,7 +259,12 @@ impl WikiIndex {
     /// from `wiki.toml`.  This is the production entry point used by commands
     /// that receive a user-selected `DocSource` from the CLI.
     pub fn prepare_for_source(wiki_root: &Path, repo_root: &Path, source: DocSource) -> Result<Self> {
-        let namespace = read_namespace_from_toml(wiki_root);
+        // Read `wiki.toml` from the same source as the rest of the discovery
+        // pipeline so the namespace filter operates on a self-consistent
+        // snapshot.  When the file is absent in the chosen source (e.g., a
+        // fresh HEAD before `wiki.toml` was committed), fall back to the
+        // default (no namespace).
+        let namespace = read_namespace_from_toml(wiki_root, repo_root, source);
         Self::prepare_with_namespace(wiki_root, repo_root, namespace, source)
     }
 
@@ -805,7 +810,7 @@ async fn sync_core_index_inner(
         {
             changed_or_new.insert(path_rel.clone());
             pending_documents.push(PendingDocument {
-                path_abs: canonical_display_path(path),
+                path_abs: display_path_for_source(path, &path_rel, source),
                 path_rel,
                 title: String::new(),
                 title_key: String::new(),
@@ -883,7 +888,7 @@ async fn sync_core_index_inner(
 
         changed_or_new.insert(path_rel.clone());
         pending_documents.push(PendingDocument {
-            path_abs: canonical_display_path(path),
+            path_abs: display_path_for_source(path, &path_rel, source),
             path_rel,
             title_key: frontmatter.title.to_lowercase(),
             aliases_text: frontmatter.aliases.join(" "),
@@ -1121,12 +1126,30 @@ async fn sync_core_index_inner(
     Ok(())
 }
 
-/// Read the `namespace` field from `<wiki_root>/wiki.toml`, if the file exists
-/// and the field is present.  Returns `None` for the default namespace (no
-/// `wiki.toml`, no `namespace` key, or any read/parse error).
-fn read_namespace_from_toml(wiki_root: &Path) -> Option<String> {
+/// Read the `namespace` field from `<wiki_root>/wiki.toml` in the chosen
+/// `DocSource`, if the file exists and the field is present.  Returns `None`
+/// for the default namespace (no `wiki.toml` in the chosen source, no
+/// `namespace` key, or any read/parse error).
+///
+/// Routing the probe through `DocSource::read` keeps the namespace filter
+/// self-consistent with the snapshot being indexed.  When the worktree's
+/// `wiki.toml` differs from HEAD/index, `--source=head|index` must filter
+/// `*.wiki.md` discovery against the snapshot's namespace, not the worktree's.
+fn read_namespace_from_toml(
+    wiki_root: &Path,
+    repo_root: &Path,
+    source: DocSource,
+) -> Option<String> {
     let toml_path = wiki_root.join("wiki.toml");
-    let raw = std::fs::read_to_string(&toml_path).ok()?;
+    let path_rel = toml_path
+        .strip_prefix(repo_root)
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
+    let raw = match (source, path_rel.as_deref()) {
+        (DocSource::WorkingTree, _) | (_, None) => std::fs::read_to_string(&toml_path).ok()?,
+        (DocSource::Index, Some(rel)) => source.read(repo_root, rel).ok().flatten()?,
+        (DocSource::Head, Some(rel)) => source.read(repo_root, rel).ok().flatten()?,
+    };
     let doc: toml_edit::DocumentMut = raw.parse().ok()?;
     doc.get("namespace")
         .and_then(|v| v.as_str())
@@ -2475,6 +2498,21 @@ fn canonical_display_path(path: &Path) -> String {
         .to_string()
 }
 
+/// Compute the path string stored in `documents.path_abs` (and surfaced in JSON
+/// `file` fields) for a document indexed from the given `DocSource`.
+///
+/// For `WorkingTree` mode this preserves today's behaviour: the canonical
+/// worktree absolute path so existing tooling that opens `file` paths
+/// continues to work.  For `Index` and `Head` modes the displayed path is
+/// repo-relative so consumers do not silently open the worktree file (which
+/// may not exist or may differ from the snapshot being inspected).
+fn display_path_for_source(path: &Path, path_rel: &str, source: DocSource) -> String {
+    match source {
+        DocSource::WorkingTree => canonical_display_path(path),
+        DocSource::Index | DocSource::Head => path_rel.to_string(),
+    }
+}
+
 fn relative_path(repo_root: &Path, path: &Path) -> Result<String> {
     path.strip_prefix(repo_root)
         .into_diagnostic()
@@ -3089,5 +3127,61 @@ mod tests {
             wt_pages.iter().map(|p| p.title.as_str()).collect();
 
         assert_eq!(default_titles, wt_titles);
+    }
+
+    /// Finding 1 regression: when the worktree's `wiki.toml` differs from
+    /// HEAD's namespace, `--source=head` must filter `*.wiki.md` against
+    /// HEAD's namespace, not the worktree's.
+    #[test]
+    fn namespace_toml_is_read_from_head_under_source_head() {
+        let repo = TestRepo::new();
+        // Commit wiki.toml with namespace "alpha" plus a wiki.md tagged alpha.
+        let wiki_dir = repo.path().join("docs");
+        fs::create_dir_all(&wiki_dir).expect("mkdir docs");
+        fs::write(wiki_dir.join("wiki.toml"), "namespace = \"alpha\"\n").expect("toml v1");
+        repo.create_file(
+            "docs/page.wiki.md",
+            "---\ntitle: Alpha Page\nnamespace: alpha\nsummary: ok.\n---\nBody.\n",
+        );
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-m", "alpha"]);
+
+        // Now mutate wiki.toml in the worktree to namespace "beta" without
+        // committing. HEAD still has "alpha".
+        fs::write(wiki_dir.join("wiki.toml"), "namespace = \"beta\"\n").expect("toml v2");
+
+        // Under --source=head, the alpha page must be visible because HEAD's
+        // namespace is alpha — even though the worktree now says beta.
+        let index =
+            WikiIndex::prepare_for_source(&wiki_dir, repo.path(), DocSource::Head).expect("prepare");
+        assert!(
+            index.resolve_page("Alpha Page").expect("resolve").is_some(),
+            "expected HEAD-namespaced page to be visible under --source=head"
+        );
+    }
+
+    /// Finding 4 regression: under --source=head/index, `path_abs` (surfaced
+    /// as the JSON `file` field) must be repo-relative rather than a
+    /// worktree-absolute path that may not match the snapshot.
+    #[test]
+    fn file_field_is_repo_relative_under_source_head() {
+        let repo = TestRepo::new();
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        repo.create_file(
+            "wiki/example.md",
+            "---\ntitle: Example\nsummary: ok.\n---\nBody.\n",
+        );
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-m", "init"]);
+
+        let index =
+            WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Head).expect("prepare");
+        let page = index
+            .resolve_page("Example")
+            .expect("resolve")
+            .expect("page");
+        // Repo-relative — does not start with the worktree absolute path and
+        // does not contain the tempdir prefix.
+        assert_eq!(page.file, "wiki/example.md", "file should be repo-relative");
     }
 }
