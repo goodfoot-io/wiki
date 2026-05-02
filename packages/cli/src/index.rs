@@ -1426,8 +1426,16 @@ fn current_discovery_state(wiki_root: &Path, repo_root: &Path, source: DocSource
     //   Head        — the HEAD commit SHA (content is the HEAD snapshot)
     //   Index       — the index revision signal (mtime:size of .git/index)
     let source_revision = match source {
-        DocSource::WorkingTree | DocSource::Head => head_sha(repo_root).unwrap_or_default(),
-        DocSource::Index => index_revision_signal(repo_root).unwrap_or_default(),
+        // Pre-existing behaviour for WorkingTree: an unborn HEAD collapses to
+        // an empty string and downstream branches handle it explicitly.
+        DocSource::WorkingTree => head_sha(repo_root).unwrap_or_default(),
+        // For Head, propagate the unborn-HEAD error rather than masking it —
+        // surfaces parity with `head_tracked_paths` which also fails closed.
+        DocSource::Head => head_sha(repo_root)?,
+        // For Index, propagate any failure to derive the cache-revision
+        // signal (missing index, missing checksum) — never fall back to a
+        // fixed empty key that would alias real divergence.
+        DocSource::Index => index_revision_signal(repo_root)?,
     };
     Ok(DiscoveryState {
         head_sha: source_revision,

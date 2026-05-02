@@ -127,8 +127,8 @@ pub fn run(
     let index_files = if globs.is_empty() {
         files.clone()
     } else {
-        let raw = discover_files(&[], wiki_root, repo_root, source).unwrap_or_else(|_| files.clone());
-        filter_files_for_source(raw, repo_root, source).unwrap_or_else(|_| files.clone())
+        let raw = discover_files(&[], wiki_root, repo_root, source)?;
+        filter_files_for_source(raw, repo_root, source)?
     };
 
     let diagnostics = match collect_for_files(&files, &index_files, wiki_root, repo_root, wiki_config, no_mesh, source) {
@@ -292,8 +292,8 @@ pub fn collect_with_config(
     let index_files = if globs.is_empty() {
         files.clone()
     } else {
-        let raw = discover_files(&[], wiki_root, repo_root, source).unwrap_or_else(|_| files.clone());
-        filter_files_for_source(raw, repo_root, source).unwrap_or_else(|_| files.clone())
+        let raw = discover_files(&[], wiki_root, repo_root, source)?;
+        filter_files_for_source(raw, repo_root, source)?
     };
     collect_for_files(&files, &index_files, wiki_root, repo_root, wiki_config, false, source)
 }
@@ -1428,6 +1428,61 @@ mod tests {
             diags_idx.iter().any(|d| d.kind == "broken_wikilink"),
             "index should see staged broken wikilink, got: {:?}",
             diags_idx
+        );
+    }
+
+    /// Finding 3 regression: under `--source=index|head`, glob discovery
+    /// must filter the source's path list — never walk the worktree.  A
+    /// worktree-only `.md` matched by the glob must NOT appear.
+    #[test]
+    fn check_source_index_glob_does_not_read_worktree() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        repo.create_file("wiki/staged.md", &make_wiki_page("Staged", "ok."));
+        repo.git(&["add", "wiki/staged.md"]);
+        // Worktree-only file matches the glob but is not in the index.
+        repo.create_file("wiki/worktree_only.md", &make_wiki_page("Worktree", "ok."));
+
+        let globs = vec!["wiki/**/*.md".to_string()];
+        let diags = collect_with_config(
+            &globs,
+            &wiki_root,
+            repo.path(),
+            None,
+            crate::index::DocSource::Index,
+        )
+        .expect("collect idx");
+        assert!(
+            diags
+                .iter()
+                .all(|d| !d.message.contains("worktree_only.md")
+                    && !d.file.contains("worktree_only.md")),
+            "--source=index glob discovery must not surface worktree-only files: {diags:?}"
+        );
+    }
+
+    /// Finding 4 + 5 regression: discovery errors under `--source=head` on
+    /// an unborn HEAD must propagate rather than being silently substituted
+    /// with the worktree candidate set or masked into an empty cache key.
+    #[test]
+    fn check_source_head_unborn_propagates_error() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        // Worktree has files but HEAD is unborn (no commits).
+        repo.create_file("wiki/page.md", &make_wiki_page("Page", "ok."));
+
+        let result = collect_with_config(
+            &[],
+            &wiki_root,
+            repo.path(),
+            None,
+            crate::index::DocSource::Head,
+        );
+        assert!(
+            result.is_err(),
+            "unborn HEAD under --source=head must surface as an error"
         );
     }
 

@@ -79,6 +79,16 @@ fn for_each_tracked_path(
     Ok(())
 }
 
+/// Open the persisted git index (`.git/index`) and fail closed when it is
+/// absent.  Used by `--source=index` code paths so a missing index never
+/// silently degrades to a HEAD-derived in-memory index.
+fn open_persisted_index(repo: &gix::Repository) -> Result<gix::worktree::Index> {
+    repo.try_index()
+        .into_diagnostic()
+        .wrap_err("failed to open git index")?
+        .ok_or_else(|| miette!("git index is absent — nothing staged"))
+}
+
 fn status_platform(
     repo: &gix::Repository,
 ) -> Result<gix::status::Platform<'_, gix::progress::Discard>> {
@@ -304,13 +314,19 @@ fn parse_line_paths(out: &str) -> Vec<String> {
 // ─── Index / HEAD helpers ─────────────────────────────────────────────────────
 
 /// Return repo-relative UTF-8 paths of all entries in the git index.
+///
+/// Fails closed when `.git/index` is absent — `--source=index` must never
+/// silently substitute HEAD content for staged content.
 pub fn index_tracked_paths(repo: &Path) -> Result<Vec<String>> {
     let repo = open_repo(repo)?;
+    let index = open_persisted_index(&repo)?;
     let mut paths = Vec::new();
-    for_each_tracked_path(&repo, |path| {
-        paths.push(utf8_repo_path(path, "git index path is not valid UTF-8")?);
-        Ok(())
-    })?;
+    for entry in index.entries() {
+        paths.push(utf8_repo_path(
+            entry.path(&index),
+            "git index path is not valid UTF-8",
+        )?);
+    }
     paths.sort();
     paths.dedup();
     Ok(paths)
@@ -322,21 +338,16 @@ const SYMLINK_RECURSION_LIMIT: usize = 8;
 
 /// Look up the index entry for `path_rel`, returning the blob id and whether
 /// it represents a symlink.
+///
+/// Fails closed when `.git/index` is absent — see `open_persisted_index`.
 fn index_entry_id_and_kind(
     repo: &gix::Repository,
     path_rel: &str,
-) -> Option<(gix::ObjectId, gix::index::entry::Mode)> {
-    let index = repo.index_or_load_from_head_or_empty().ok()?;
-    match &index {
-        gix::worktree::IndexPersistedOrInMemory::Persisted(idx) => {
-            idx.entry_by_path(gix::bstr::BStr::new(path_rel.as_bytes()))
-                .map(|e| (e.id, e.mode))
-        }
-        gix::worktree::IndexPersistedOrInMemory::InMemory(idx) => {
-            idx.entry_by_path(gix::bstr::BStr::new(path_rel.as_bytes()))
-                .map(|e| (e.id, e.mode))
-        }
-    }
+) -> Result<Option<(gix::ObjectId, gix::index::entry::Mode)>> {
+    let index = open_persisted_index(repo)?;
+    Ok(index
+        .entry_by_path(gix::bstr::BStr::new(path_rel.as_bytes()))
+        .map(|e| (e.id, e.mode)))
 }
 
 /// Resolve a relative symlink target against the directory containing
@@ -386,7 +397,7 @@ fn read_index_blob_inner(
             "symlink resolution exceeded depth limit at index path '{path_rel}'"
         ));
     }
-    let Some((id, mode)) = index_entry_id_and_kind(repo, path_rel) else {
+    let Some((id, mode)) = index_entry_id_and_kind(repo, path_rel)? else {
         return Ok(None);
     };
     let object = repo
@@ -615,24 +626,15 @@ fn read_head_blob_inner(
 }
 
 /// Return `true` if `path_rel` has an entry in the git index.
+///
+/// Fails closed when `.git/index` is absent — see `open_persisted_index`.
 #[allow(dead_code)]
 pub fn has_index_entry(repo: &Path, path_rel: &str) -> Result<bool> {
     let repo = open_repo(repo)?;
-    let index = repo
-        .index_or_load_from_head_or_empty()
-        .into_diagnostic()
-        .wrap_err("failed to load git index for entry probe")?;
-    let found = match &index {
-        gix::worktree::IndexPersistedOrInMemory::Persisted(idx) => {
-            idx.entry_by_path(gix::bstr::BStr::new(path_rel.as_bytes()))
-                .is_some()
-        }
-        gix::worktree::IndexPersistedOrInMemory::InMemory(idx) => {
-            idx.entry_by_path(gix::bstr::BStr::new(path_rel.as_bytes()))
-                .is_some()
-        }
-    };
-    Ok(found)
+    let index = open_persisted_index(&repo)?;
+    Ok(index
+        .entry_by_path(gix::bstr::BStr::new(path_rel.as_bytes()))
+        .is_some())
 }
 
 /// Return `true` if `path_rel` exists in the `HEAD` tree.
@@ -642,26 +644,21 @@ pub fn has_head_entry(repo: &Path, path_rel: &str) -> Result<bool> {
 }
 
 /// Return a liveness signal for the git index, used as the cache-revision key
-/// for `DocSource::Index`.  The signal is `"<mtime_ns>:<size_bytes>"` from the
-/// `.git/index` file.  When the file does not exist (empty repo, unborn HEAD)
-/// the string `"empty"` is returned so callers can still store and compare it.
+/// for `DocSource::Index`.  The signal is the hex of the index file's trailing
+/// SHA-1 checksum (verified by gix on load), so any change to staged content
+/// produces a new signal — including same-size restages that would alias on a
+/// coarse `(mtime, size)` key.
+///
+/// Fails closed when `.git/index` is absent: this signal is load-bearing for
+/// cache correctness, and `--source=index` errors before the signal is asked
+/// for in the missing-index case.
 pub fn index_revision_signal(repo: &Path) -> Result<String> {
-    // `gix::open` resolves the `.git` directory from the work-tree path.
     let gix_repo = open_repo(repo)?;
-    let index_path = gix_repo.path().join("index");
-    match std::fs::metadata(&index_path) {
-        Ok(meta) => {
-            use std::time::UNIX_EPOCH;
-            let mtime_ns = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            Ok(format!("{}:{}", mtime_ns, meta.len()))
-        }
-        Err(_) => Ok("empty".to_string()),
-    }
+    let index = open_persisted_index(&gix_repo)?;
+    let checksum = index
+        .checksum()
+        .ok_or_else(|| miette!("git index has no checksum — cannot derive cache-revision signal"))?;
+    Ok(checksum.to_hex().to_string())
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -973,9 +970,63 @@ mod tests {
     #[test]
     fn has_index_entry_false_for_untracked() {
         let repo = TestRepo::new();
+        // Stage a placeholder so `.git/index` exists; the probed path itself
+        // is untracked, so the entry lookup must report `false`.
+        repo.create_file("placeholder.md", "x\n");
+        repo.git(&["add", "placeholder.md"]);
         repo.create_file("untracked.md", "content\n");
 
         assert!(!has_index_entry(repo.path(), "untracked.md").expect("has_index_entry"));
+    }
+
+    /// Finding 1 regression: when `.git/index` is absent, `--source=index`
+    /// helpers must error rather than silently substitute HEAD content.
+    #[test]
+    fn index_helpers_fail_closed_when_index_absent() {
+        let repo = TestRepo::new();
+        repo.create_file("doc.md", "v1\n");
+        repo.commit("initial");
+        // Remove the on-disk index — gix would otherwise fall back to a
+        // HEAD-derived in-memory index.
+        std::fs::remove_file(repo.path().join(".git/index")).expect("remove .git/index");
+
+        assert!(
+            index_tracked_paths(repo.path()).is_err(),
+            "index_tracked_paths must fail when .git/index is absent"
+        );
+        assert!(
+            read_index_blob(repo.path(), "doc.md").is_err(),
+            "read_index_blob must fail when .git/index is absent"
+        );
+        assert!(
+            has_index_entry(repo.path(), "doc.md").is_err(),
+            "has_index_entry must fail when .git/index is absent"
+        );
+        assert!(
+            index_revision_signal(repo.path()).is_err(),
+            "index_revision_signal must fail when .git/index is absent"
+        );
+    }
+
+    /// Finding 2 regression: `index_revision_signal` keys on the index file's
+    /// content checksum.  Two restages that produce same-size content but
+    /// differ in bytes must yield different signals.
+    #[test]
+    fn index_revision_signal_differs_for_same_size_restage() {
+        let repo = TestRepo::new();
+        // Same-length payloads so `(mtime, size)` may collide on coarse FS.
+        repo.create_file("doc.md", "AAAA\n");
+        repo.git(&["add", "doc.md"]);
+        let sig_a = index_revision_signal(repo.path()).expect("sig a");
+
+        repo.create_file("doc.md", "BBBB\n");
+        repo.git(&["add", "doc.md"]);
+        let sig_b = index_revision_signal(repo.path()).expect("sig b");
+
+        assert_ne!(
+            sig_a, sig_b,
+            "checksum-based index signal must change when staged content changes"
+        );
     }
 
     #[test]

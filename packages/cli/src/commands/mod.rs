@@ -159,15 +159,33 @@ pub fn discover_files(
             "globs": globs,
         }),
         || {
-            let mut files = if globs.is_empty() {
-                discover_default_files(wiki_root, repo_root, source)?
-            } else {
-                Vec::new()
+            let mut files = match source {
+                DocSource::Index | DocSource::Head => {
+                    if globs.is_empty() {
+                        discover_default_files(wiki_root, repo_root, source)?
+                    } else {
+                        // For non-worktree sources we must never read the
+                        // worktree filesystem to satisfy a glob.  Filter the
+                        // source's own path list instead so the candidate set
+                        // is internally consistent with `--source`.
+                        discover_files_by_glob_in_source(
+                            globs, wiki_root, repo_root, source,
+                        )?
+                    }
+                }
+                DocSource::WorkingTree => {
+                    let initial = if globs.is_empty() {
+                        discover_default_files(wiki_root, repo_root, source)?
+                    } else {
+                        Vec::new()
+                    };
+                    if initial.is_empty() || !globs.is_empty() {
+                        discover_files_by_walk(globs, wiki_root, repo_root)?
+                    } else {
+                        initial
+                    }
+                }
             };
-
-            if files.is_empty() || !globs.is_empty() {
-                files = discover_files_by_walk(globs, wiki_root, repo_root)?;
-            }
 
             files.sort();
             files.dedup();
@@ -242,6 +260,43 @@ pub(crate) fn matches_default_discovery_path(
 
     let abs = repo_root.join(path_rel);
     abs.starts_with(wiki_root)
+}
+
+/// Filter a `DocSource`'s path list against the same glob semantics as
+/// `discover_files_by_walk`: globs are normalised to repo-relative form and
+/// matched against the source's repo-relative paths.  Used under
+/// `--source=index|head` so glob discovery never reads the worktree.
+fn discover_files_by_glob_in_source(
+    globs: &[String],
+    _wiki_root: &Path,
+    repo_root: &Path,
+    source: DocSource,
+) -> Result<Vec<PathBuf>> {
+    let mut glob_builder = globset::GlobSetBuilder::new();
+    for glob in globs {
+        let normalized = normalize_repo_relative_path(glob, repo_root);
+        let glob = globset::Glob::new(&normalized)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("invalid glob pattern: {normalized}"))?;
+        glob_builder.add(glob);
+    }
+    let glob_set = glob_builder
+        .build()
+        .into_diagnostic()
+        .wrap_err("failed to build glob set")?;
+
+    let mut files = Vec::new();
+    for path_rel in source.list_paths(repo_root)? {
+        if !path_rel.ends_with(".md") {
+            continue;
+        }
+        if glob_set.is_match(&path_rel) {
+            files.push(repo_root.join(&path_rel));
+        }
+    }
+    files.sort();
+    files.dedup();
+    Ok(files)
 }
 
 fn discover_files_by_walk(
