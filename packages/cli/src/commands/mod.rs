@@ -504,7 +504,7 @@ mod tests {
         let repo = TestRepo::new();
         // No wiki dir created
         let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
-        let err = discover_files(&[], &wiki_root, repo.path()).unwrap_err();
+        let err = discover_files(&[], &wiki_root, repo.path(), DocSource::WorkingTree).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("no wiki pages found"), "got: {msg}");
     }
@@ -514,7 +514,7 @@ mod tests {
         let repo = TestRepo::new();
         let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("wiki/.gitkeep", "");
-        let err = discover_files(&[], &wiki_root, repo.path()).unwrap_err();
+        let err = discover_files(&[], &wiki_root, repo.path(), DocSource::WorkingTree).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("no wiki pages found"), "got: {msg}");
     }
@@ -524,7 +524,7 @@ mod tests {
         let repo = TestRepo::new();
         let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
-        let files = discover_files(&[], &wiki_root, repo.path()).expect("discover");
+        let files = discover_files(&[], &wiki_root, repo.path(), DocSource::WorkingTree).expect("discover");
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("page.md"));
     }
@@ -539,7 +539,7 @@ mod tests {
             "---\ntitle: Docs\nsummary: Component docs.\n---\n",
         );
         repo.create_file("src/component/ordinary.md", "# ordinary\n");
-        let files = discover_files(&[], &wiki_root, repo.path()).expect("discover");
+        let files = discover_files(&[], &wiki_root, repo.path(), DocSource::WorkingTree).expect("discover");
         assert_eq!(files.len(), 2);
         let paths: Vec<_> = files
             .into_iter()
@@ -562,7 +562,7 @@ mod tests {
             "src/component/docs.wiki.md",
             "---\ntitle: Docs\nsummary: Component docs.\n---\n",
         );
-        let files = discover_files(&[], &wiki_root, repo.path()).expect("discover");
+        let files = discover_files(&[], &wiki_root, repo.path(), DocSource::WorkingTree).expect("discover");
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("docs.wiki.md"));
     }
@@ -573,7 +573,7 @@ mod tests {
         let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
         let globs = vec!["wiki/nonexistent/**/*.md".to_string()];
-        let err = discover_files(&globs, &wiki_root, repo.path()).unwrap_err();
+        let err = discover_files(&globs, &wiki_root, repo.path(), DocSource::WorkingTree).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("no wiki pages found"), "got: {msg}");
     }
@@ -586,7 +586,7 @@ mod tests {
         // Create docs/ instead of wiki/
         repo.create_file("docs/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
         let globs = vec!["docs/**/*.md".to_string()];
-        let files = discover_files(&globs, &wiki_root, repo.path())
+        let files = discover_files(&globs, &wiki_root, repo.path(), DocSource::WorkingTree)
             .expect("explicit glob should succeed without WIKI_DIR");
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("page.md"));
@@ -598,7 +598,7 @@ mod tests {
         let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
         let globs = vec!["./wiki/page.md".to_string()];
-        let files = discover_files(&globs, &wiki_root, repo.path()).expect("discover");
+        let files = discover_files(&globs, &wiki_root, repo.path(), DocSource::WorkingTree).expect("discover");
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("wiki/page.md"));
     }
@@ -615,7 +615,7 @@ mod tests {
         );
         // Gitignore the directory — discover_files must not return files from it.
         repo.create_file(".gitignore", "ignored-dir/\n");
-        let files = discover_files(&[], &wiki_root, repo.path()).expect("discover");
+        let files = discover_files(&[], &wiki_root, repo.path(), DocSource::WorkingTree).expect("discover");
         let paths: Vec<_> = files
             .iter()
             .map(|p| p.to_string_lossy().to_string())
@@ -643,7 +643,7 @@ mod tests {
         );
         // Gitignore the worktrees directory (as this repo does in production).
         repo.create_file(".gitignore", ".worktrees\n");
-        let files = discover_files(&[], &wiki_root, repo.path()).expect("discover");
+        let files = discover_files(&[], &wiki_root, repo.path(), DocSource::WorkingTree).expect("discover");
         let paths: Vec<_> = files
             .iter()
             .map(|p| p.to_string_lossy().to_string())
@@ -680,7 +680,7 @@ mod tests {
         repo.create_file(".gitignore", "ignored-dir/\n");
         repo.git(&["add", "-A"]);
 
-        let inventory_files = discover_default_files(&wiki_root, repo.path()).expect("inventory discover");
+        let inventory_files = discover_default_files(&wiki_root, repo.path(), DocSource::WorkingTree).expect("inventory discover");
         let walk_files = discover_files_by_walk(&[], &wiki_root, repo.path()).expect("walk discover");
 
         assert_eq!(inventory_files, walk_files);

@@ -101,7 +101,7 @@ pub fn run(
     no_mesh: bool,
     source: DocSource,
 ) -> Result<i32> {
-    let files = match discover_files(globs, wiki_root, repo_root) {
+    let files = match discover_files(globs, wiki_root, repo_root, source) {
         Ok(f) => f,
         Err(e) => {
             if json {
@@ -127,7 +127,7 @@ pub fn run(
     let index_files = if globs.is_empty() {
         files.clone()
     } else {
-        let raw = discover_files(&[], wiki_root, repo_root).unwrap_or_else(|_| files.clone());
+        let raw = discover_files(&[], wiki_root, repo_root, source).unwrap_or_else(|_| files.clone());
         filter_files_for_source(raw, repo_root, source).unwrap_or_else(|_| files.clone())
     };
 
@@ -198,7 +198,7 @@ pub fn run_multi(
                 continue;
             }
         };
-        let files = match discover_files(globs, wiki_root, repo_root) {
+        let files = match discover_files(globs, wiki_root, repo_root, source) {
             Ok(f) => f,
             Err(e) => {
                 runtime_error = Some(format!("[{label}] {e}"));
@@ -215,7 +215,7 @@ pub fn run_multi(
         let index_files = if globs.is_empty() {
             files.clone()
         } else {
-            let raw = discover_files(&[], wiki_root, repo_root).unwrap_or_else(|_| files.clone());
+            let raw = discover_files(&[], wiki_root, repo_root, source).unwrap_or_else(|_| files.clone());
             filter_files_for_source(raw, repo_root, source).unwrap_or_else(|_| files.clone())
         };
         match collect_for_files(&files, &index_files, wiki_root, repo_root, per_cfg.as_ref(), no_mesh, source) {
@@ -287,12 +287,12 @@ pub fn collect_with_config(
     wiki_config: Option<&WikiConfig>,
     source: DocSource,
 ) -> Result<Vec<CheckDiagnostic>> {
-    let files = discover_files(globs, wiki_root, repo_root)?;
+    let files = discover_files(globs, wiki_root, repo_root, source)?;
     let files = filter_files_for_source(files, repo_root, source)?;
     let index_files = if globs.is_empty() {
         files.clone()
     } else {
-        let raw = discover_files(&[], wiki_root, repo_root).unwrap_or_else(|_| files.clone());
+        let raw = discover_files(&[], wiki_root, repo_root, source).unwrap_or_else(|_| files.clone());
         filter_files_for_source(raw, repo_root, source).unwrap_or_else(|_| files.clone())
     };
     collect_for_files(&files, &index_files, wiki_root, repo_root, wiki_config, false, source)
@@ -624,7 +624,7 @@ fn collect_for_files(
 
                 // Lazily build/fetch the target wiki's title set.
                 let title_set = peer_title_cache.entry(ns.clone()).or_insert_with(|| {
-                    build_peer_title_set(&peer_info.root, repo_root)
+                    build_peer_title_set(&peer_info.root, repo_root, source)
                 });
 
                 let key = wl.title.to_lowercase();
@@ -672,8 +672,9 @@ fn collect_for_files(
 fn build_peer_title_set(
     peer_root: &Path,
     repo_root: &Path,
+    source: DocSource,
 ) -> Option<std::collections::HashSet<String>> {
-    let files = discover_files(&[], peer_root, repo_root).ok()?;
+    let files = discover_files(&[], peer_root, repo_root, source).ok()?;
     let mut set = std::collections::HashSet::new();
     for path in &files {
         let content = match std::fs::read_to_string(path) {

@@ -1161,7 +1161,7 @@ fn discover_index_files(
     repo_root: &Path,
     namespace: Option<&str>,
 ) -> Result<Vec<PathBuf>> {
-    match crate::commands::discover_files(&[], wiki_root, repo_root) {
+    match crate::commands::discover_files(&[], wiki_root, repo_root, DocSource::WorkingTree) {
         Ok(files) => Ok(filter_by_namespace(files, namespace)),
         Err(e) => {
             if e.to_string().contains("no wiki pages found") {

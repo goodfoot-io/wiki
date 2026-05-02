@@ -132,7 +132,7 @@ use super::render;
 
 /// Run the `wiki scaffold` subcommand.
 pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> Result<i32> {
-    let discovered = discover_files(globs, wiki_root, repo_root)?;
+    let discovered = discover_files(globs, wiki_root, repo_root, crate::index::DocSource::WorkingTree)?;
     // Filter test fixtures: `wiki check` legitimately scans them, but a
     // scaffold run that materializes mesh commands for a test wiki would
     // pollute the repo's mesh state on the first commit. Scoped to scaffold.
