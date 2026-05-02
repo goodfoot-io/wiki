@@ -21,6 +21,7 @@ use serde_json::json;
 #[cfg(test)]
 use crate::frontmatter::Frontmatter;
 use crate::git::repo_inventory;
+use crate::index::DocSource;
 use crate::perf;
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
@@ -142,10 +143,15 @@ pub fn find_page_by_path(
 /// When `globs` is empty, the default set is `wiki_root/**/*.md` ∪
 /// `repo_root/**/*.wiki.md`. Explicit globs are matched relative to
 /// `repo_root`. Fail closed: returns an error if zero `.md` files are matched.
+///
+/// `source` controls which tree is used to seed the candidate list when globs
+/// are empty. For `Index` and `Head`, candidate paths are taken from
+/// `source.list_paths()` so files absent from the worktree are still included.
 pub fn discover_files(
     globs: &[String],
     wiki_root: &Path,
     repo_root: &Path,
+    source: DocSource,
 ) -> Result<Vec<PathBuf>> {
     perf::scope_result(
         "discover_files",
@@ -154,7 +160,7 @@ pub fn discover_files(
         }),
         || {
             let mut files = if globs.is_empty() {
-                discover_default_files(wiki_root, repo_root)?
+                discover_default_files(wiki_root, repo_root, source)?
             } else {
                 Vec::new()
             };
@@ -184,7 +190,23 @@ pub fn discover_files(
     )
 }
 
-fn discover_default_files(wiki_root: &Path, repo_root: &Path) -> Result<Vec<PathBuf>> {
+fn discover_default_files(wiki_root: &Path, repo_root: &Path, source: DocSource) -> Result<Vec<PathBuf>> {
+    // For non-worktree sources, seed from the source's own path list so that
+    // files absent from the worktree (deleted locally but present in HEAD or
+    // the index) are still included in the candidate set.
+    match source {
+        DocSource::Index | DocSource::Head => {
+            let all_paths = source.list_paths(repo_root)?;
+            let files: Vec<PathBuf> = all_paths
+                .into_iter()
+                .filter(|p| matches_default_discovery_path(p, wiki_root, repo_root))
+                .map(|p| repo_root.join(p))
+                .collect();
+            return Ok(files);
+        }
+        DocSource::WorkingTree => {}
+    }
+
     let inventory = match repo_inventory(repo_root) {
         Ok(inventory) => inventory,
         Err(_) => return discover_files_by_walk(&[], wiki_root, repo_root),
