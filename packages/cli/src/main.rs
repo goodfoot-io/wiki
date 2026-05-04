@@ -106,7 +106,7 @@ enum Commands {
     /// Wikilinks: target title/alias exists (case-insensitive), unique,
     /// heading fragments resolve. Frontmatter: title required, aliases
     /// and tags valid, no title/alias collisions (case-insensitive).
-    /// Defaults to "$WIKI_DIR/**/*.md".
+    /// Defaults to all wikis in the repository.
     ///
     /// Always verifies that every fragment link with a line range is
     /// covered by a `git mesh` that anchors both the wiki file and the
@@ -124,7 +124,7 @@ enum Commands {
         /// Skip the git mesh coverage check (useful when `git mesh check` runs separately)
         #[arg(long = "no-mesh")]
         no_mesh: bool,
-        /// Target a peer namespace (or `*` for all). Defaults to the current wiki.
+        /// Target a peer namespace (or `*` for all). Defaults to all wikis.
         #[arg(short = 'n', long = "namespace", value_name = "NS")]
         namespace: Option<String>,
     },
@@ -454,6 +454,12 @@ fn run(
         }
         return result;
     }
+
+    // wiki check defaults to all wikis when -n is not specified
+    let effective_namespace = match (&command, &effective_namespace) {
+        (Some(Commands::Check { .. }), None) => Some("*".to_string()),
+        _ => effective_namespace,
+    };
 
     if effective_namespace.as_deref() == Some("*") {
         let cfg = config.as_ref().ok_or_else(|| {

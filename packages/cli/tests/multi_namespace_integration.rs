@@ -194,9 +194,8 @@ fn check_star_runs_rules_across_all_namespaces() {
     // Current wiki: clean; declares peer foo.
     repo.create_file("wiki/wiki.toml", "[peers]\nfoo = \"../foo\"\n");
     repo.create_file("wiki/clean.md", &page("Clean", "ok."));
-    // Peer wiki: contains a broken wikilink — only `wiki check -n '*'`
-    // should surface this since plain `wiki check` only validates the
-    // current namespace.
+    // Peer wiki: contains a broken wikilink — plain `wiki check` now
+    // defaults to all wikis, so both paths surface the peer error.
     repo.create_file("foo/wiki.toml", "namespace = \"foo\"\n");
     repo.create_file(
         "foo/broken.md",
@@ -204,25 +203,30 @@ fn check_star_runs_rules_across_all_namespaces() {
     );
     repo.commit("init");
 
-    // Plain `check` (current namespace only) — passes.
-    let out_single = repo.wiki(&["check"]);
+    // Plain `check` — now defaults to all wikis, so it surfaces the peer's broken wikilink.
+    let out_default = repo.wiki(&["check"]);
+    let stdout_default = String::from_utf8_lossy(&out_default.stdout);
     assert!(
-        out_single.status.success(),
-        "single-ns check should pass: {}",
-        String::from_utf8_lossy(&out_single.stdout)
+        !out_default.status.success(),
+        "expected plain check to surface peer error; stdout: {stdout_default}"
+    );
+    assert!(stdout_default.contains("[foo]"), "expected [foo] label; got: {stdout_default}");
+    assert!(
+        stdout_default.contains("broken_wikilink"),
+        "expected broken_wikilink diagnostic; got: {stdout_default}"
     );
 
-    // `check -n '*'` — should fail because peer has a broken wikilink.
-    let out_multi = repo.wiki(&["-n", "*", "check"]);
-    let stdout = String::from_utf8_lossy(&out_multi.stdout);
+    // `-n '*'` — explicit multi-namespace, same behavior.
+    let out_star = repo.wiki(&["-n", "*", "check"]);
+    let stdout_star = String::from_utf8_lossy(&out_star.stdout);
     assert!(
-        !out_multi.status.success(),
-        "expected -n '*' check to surface peer error; stdout: {stdout}"
+        !out_star.status.success(),
+        "expected -n '*' check to surface peer error; stdout: {stdout_star}"
     );
-    assert!(stdout.contains("[foo]"), "expected [foo] label; got: {stdout}");
+    assert!(stdout_star.contains("[foo]"), "expected [foo] label; got: {stdout_star}");
     assert!(
-        stdout.contains("broken_wikilink"),
-        "expected broken_wikilink diagnostic; got: {stdout}"
+        stdout_star.contains("broken_wikilink"),
+        "expected broken_wikilink diagnostic; got: {stdout_star}"
     );
 }
 
