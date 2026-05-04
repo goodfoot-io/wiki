@@ -24,30 +24,6 @@ Prefer 'fail closed' workflows over 'fail open' workflows.
 Do not include a "Co-Authored-By: Claude ..." message in commits.
 </commit-message>
 
-<bash-tool-env-var-bug>
-A bug prevents env var expansion when followed by a "|" character pipe.
-
-This fails:
-
-```bash
-echo $HOME | cat # returns ''
-```
-
-Do this instead:
-
-```bash
-echo $(printenv HOME) | cat # returns '/home/user'
-
-# or no pipe:
-
-echo $HOME # returns '/home/user'
-
-# or with a redirect:
-
-echo $HOME 2>&1 # returns '/home/user'
-```
-</bash-tool-env-var-bug>
-
 <workspace-information>
 Our workspace uses Yarn 4.x as a package manager. Do not use other package managers such as 'npm'.
 

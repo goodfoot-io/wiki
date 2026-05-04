@@ -1,10 +1,11 @@
 {
   "name": "@goodfoot/wiki",
-  "version": "0.5.42",
+  "version": "0.5.43",
   "bin": "bin/wiki",
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
     "build": "env PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=target/build cargo build --release",
+    "build:local": "env PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS=1 cargo build --release && mkdir -p \"$HOME/.vscode-server/data/User/globalStorage/goodfoot.wiki-extension/bin/0.5.43/linux-arm64\" && ln -sf \"$(pwd)/target/release/wiki\" \"$HOME/.vscode-server/data/User/globalStorage/goodfoot.wiki-extension/bin/0.5.43/linux-arm64/wiki\" && ln -sf \"$(pwd)/target/release/wiki\" \"$HOME/.vscode-server/data/User/globalStorage/goodfoot.wiki-extension/bin/0.5.42/linux-arm64/wiki\"",
     "build:clean": "rm -rf target/build target/lint target/test target/typecheck && env PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=target/build cargo build --release",
     "test": "env PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=target/test cargo test --quiet -- --test-threads=1",
     "lint": "env PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=target/lint cargo clippy --quiet -- -D warnings",
@@ -15,11 +16,11 @@
     "scripts/postinstall.js"
   ],
   "optionalDependencies": {
-    "@goodfoot/wiki-darwin-arm64": "0.5.42",
-    "@goodfoot/wiki-darwin-x64": "0.5.42",
-    "@goodfoot/wiki-linux-arm64": "0.5.42",
-    "@goodfoot/wiki-linux-x64": "0.5.42",
-    "@goodfoot/wiki-win32-x64": "0.5.42"
+    "@goodfoot/wiki-darwin-arm64": "0.5.43",
+    "@goodfoot/wiki-darwin-x64": "0.5.43",
+    "@goodfoot/wiki-linux-arm64": "0.5.43",
+    "@goodfoot/wiki-linux-x64": "0.5.43",
+    "@goodfoot/wiki-win32-x64": "0.5.43"
   },
   "repository": {
     "type": "git",
