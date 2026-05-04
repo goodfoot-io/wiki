@@ -428,7 +428,31 @@ fn run(
             )
         })?;
         let wiki_roots: Vec<PathBuf> = cfg.all().map(|w| w.root.clone()).collect();
-        return commands::mesh::scaffold::run(globs, json, &wiki_roots, &repo_root, source);
+        let command_name = command_name(command.as_ref(), effective_query.as_deref());
+        let perf_root = cfg
+            .all()
+            .next()
+            .map(|w| w.root.as_path())
+            .unwrap_or(repo_root.as_path());
+        perf::init(perf_root, command_name, json);
+        let _command_span = perf::span_for_command(command_name);
+        let started = Instant::now();
+        let result = commands::mesh::scaffold::run(globs, json, &wiki_roots, &repo_root, source);
+        match &result {
+            Ok(code) => perf::finish(
+                command_name,
+                *code,
+                started.elapsed().as_secs_f64() * 1000.0,
+                "ok",
+            ),
+            Err(_) => perf::finish(
+                command_name,
+                2,
+                started.elapsed().as_secs_f64() * 1000.0,
+                "error",
+            ),
+        }
+        return result;
     }
 
     if effective_namespace.as_deref() == Some("*") {

@@ -12,7 +12,31 @@ use regex::Regex;
 use serde::Serialize;
 
 use crate::commands::{discover_files, resolve_link_path};
+use crate::index::DocSource;
 use crate::parser::{LinkKind, parse_fragment_links};
+
+/// Read `path` from the chosen [`DocSource`], routing non-worktree reads
+/// through [`DocSource::read`] so the content snapshot matches the discovery
+/// snapshot.
+fn read_via_source(path: &Path, repo_root: &Path, source: DocSource) -> std::io::Result<String> {
+    match source {
+        DocSource::WorkingTree => fs::read_to_string(path),
+        DocSource::Index | DocSource::Head => {
+            let path_rel = path
+                .strip_prefix(repo_root)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+            match source.read(repo_root, &path_rel) {
+                Ok(Some(s)) => Ok(s),
+                Ok(None) => Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("{path_rel} not present in source {source:?}"),
+                )),
+                Err(e) => Err(std::io::Error::other(e.to_string())),
+            }
+        }
+    }
+}
 
 // ── Parse-error types ─────────────────────────────────────────────────────────
 
@@ -158,7 +182,7 @@ pub fn run(
 
     let mut all_inputs: Vec<LinkInput> = Vec::new();
     for file in &files {
-        let content = match fs::read_to_string(file) {
+        let content = match read_via_source(file, repo_root, source) {
             Ok(s) => s,
             Err(_) => {
                 // Unreadable files are surfaced via parse_errors (classify_frontmatter
@@ -191,7 +215,7 @@ pub fn run(
         std::collections::HashMap::new();
     let mut parse_errors: Vec<ParseError> = Vec::new();
     for f in &files {
-        let (meta, err_kind) = classify_frontmatter(f);
+        let (meta, err_kind) = classify_frontmatter(f, repo_root, source);
         if let Some(kind) = err_kind {
             let rel = path_relative_to(f, repo_root);
             parse_errors.push(ParseError { path: rel, kind });
@@ -451,18 +475,8 @@ struct FileMeta {
 
 /// Classify the frontmatter of a file, returning both the `FileMeta` and an
 /// optional `ParseErrorKind` if the file's `title` could not be extracted.
-fn classify_frontmatter(path: &Path) -> (FileMeta, Option<ParseErrorKind>) {
-    // Step 1: read raw bytes; if IO fails or bytes are not valid UTF-8 → Unreadable.
-    let bytes = match fs::read(path) {
-        Ok(b) => b,
-        Err(e) => {
-            return (
-                FileMeta::default(),
-                Some(ParseErrorKind::Unreadable(e.to_string())),
-            );
-        }
-    };
-    let text = match String::from_utf8(bytes) {
+fn classify_frontmatter(path: &Path, repo_root: &Path, source: DocSource) -> (FileMeta, Option<ParseErrorKind>) {
+    let text = match read_via_source(path, repo_root, source) {
         Ok(s) => s,
         Err(e) => {
             return (
@@ -645,8 +659,9 @@ mod tests {
     fn classify_str(text: &str) -> Option<ParseErrorKind> {
         // Write to a tempfile and run the classifier.
         let tmp = tempfile::NamedTempFile::new().unwrap();
+        let dir = std::env::temp_dir();
         std::fs::write(tmp.path(), text.as_bytes()).unwrap();
-        let (_, kind) = classify_frontmatter(tmp.path());
+        let (_, kind) = classify_frontmatter(tmp.path(), &dir, DocSource::WorkingTree);
         kind
     }
 
@@ -694,7 +709,7 @@ mod tests {
     fn classify_unreadable_non_utf8() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), [0xFF_u8, 0xFE, 0x00]).unwrap();
-        let (_, kind) = classify_frontmatter(tmp.path());
+        let (_, kind) = classify_frontmatter(tmp.path(), &std::env::temp_dir(), DocSource::WorkingTree);
         assert!(
             matches!(kind, Some(ParseErrorKind::Unreadable(_))),
             "expected Unreadable, got {kind:?}"
