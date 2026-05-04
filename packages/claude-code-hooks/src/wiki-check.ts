@@ -62,8 +62,7 @@ export default postToolUseHook(
       logger.info('wiki check failed', { file: filePath, status: result.status });
 
       return postToolUseOutput({
-        continue: false,
-        stopReason: output,
+        systemMessage: output,
         hookSpecificOutput: {
           additionalContext: output
         }

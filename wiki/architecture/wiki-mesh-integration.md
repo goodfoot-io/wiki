@@ -21,7 +21,7 @@ wiki check wiki/architecture/*.md
 wiki check "packages/auth/**/*.wiki.md"
 ```
 
-Extends the existing `wiki check` validation pass with a mesh coverage check. For each internal fragment link with a line range, it runs `git mesh ls <path>#L<s>-L<e> --porcelain` and verifies that at least one returned mesh also anchors the wiki file containing the link. Any uncovered link is reported as an error (non-zero exit).
+Extends the existing `wiki check` validation pass with a mesh coverage check. For each internal fragment link with a line range, it runs `git mesh list <path>#L<s>-L<e> --porcelain` and verifies that at least one returned mesh also anchors the wiki file containing the link. Any uncovered link is reported as an error (non-zero exit).
 
 Mesh coverage is always on; `git mesh` must be installed or `wiki check` fails fast. Glob targeting follows the same rules as bare `wiki check`: omitting globs defaults to `$WIKI_DIR/**/*.md` plus `**/*.wiki.md` (with `$WIKI_DIR` defaulting to `wiki`).
 

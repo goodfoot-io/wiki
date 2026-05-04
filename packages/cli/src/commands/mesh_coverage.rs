@@ -10,7 +10,7 @@ use super::check::CheckDiagnostic;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-/// All mesh data fetched in a single `git-mesh ls --porcelain` call.
+/// All mesh data fetched in a single `git-mesh list --porcelain` call.
 struct MeshIndex {
     /// Code anchor `(path, start, end)` → names of every mesh containing it.
     by_anchor: HashMap<(PathBuf, u32, u32), Vec<String>>,
@@ -41,7 +41,7 @@ impl MeshIndex {
 /// Collect `mesh_uncovered` and `mesh_unavailable` diagnostics for the given
 /// wiki files.
 ///
-/// Invokes `git-mesh ls --porcelain` exactly once to fetch all mesh data, then
+/// Invokes `git-mesh list --porcelain` exactly once to fetch all mesh data, then
 /// performs all coverage lookups in memory.
 ///
 /// Returns `Err` if `git-mesh` fails for any reason other than `NotFound`
@@ -130,7 +130,7 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
     a_components == b_components
 }
 
-/// Shell out to `git-mesh ls --porcelain --batch` with repo-relative wiki file
+/// Shell out to `git-mesh list --porcelain --batch` with repo-relative wiki file
 /// paths piped to stdin, filtering output to only meshes that anchor at least
 /// one of the given paths.
 ///
@@ -145,7 +145,7 @@ fn run_git_mesh_ls_all(
 ) -> Result<Option<MeshIndex>, miette::Error> {
     let mut cmd = Command::new("git-mesh");
     cmd.current_dir(repo_root)
-        .args(["ls", "--porcelain", "--batch"])
+        .args(["list", "--porcelain", "--batch"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -160,7 +160,7 @@ fn run_git_mesh_ls_all(
             });
             return Ok(None);
         }
-        Err(e) => return Err(miette::miette!("git mesh ls failed: {e}")),
+        Err(e) => return Err(miette::miette!("git mesh list failed: {e}")),
         Ok(child) => child,
     };
 
@@ -173,12 +173,12 @@ fn run_git_mesh_ls_all(
 
     let output = child
         .wait_with_output()
-        .map_err(|e| miette::miette!("git mesh ls failed: {e}"))?;
+        .map_err(|e| miette::miette!("git mesh list failed: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(miette::miette!(
-            "git mesh ls exited with status {}: {}",
+            "git mesh list exited with status {}: {}",
             output.status,
             stderr.trim()
         ));
@@ -187,7 +187,7 @@ fn run_git_mesh_ls_all(
     Ok(Some(parse_mesh_ls_output(&stdout)?))
 }
 
-/// Parse the `--porcelain` output of `git mesh ls` into a `MeshIndex`.
+/// Parse the `--porcelain` output of `git mesh list` into a `MeshIndex`.
 ///
 /// Each non-empty line: `<mesh-name>\t<path>\t<start>-<end>`
 ///
@@ -215,13 +215,13 @@ fn parse_mesh_ls_output(stdout: &str) -> Result<MeshIndex, miette::Error> {
             Some(p) => p,
             None => {
                 return Err(miette::miette!(
-                    "git mesh ls: unparseable output line (no tab-separated range): {line:?}"
+                    "git mesh list: unparseable output line (no tab-separated range): {line:?}"
                 ));
             }
         };
         let (start, end) = parse_range_token(range_token).ok_or_else(|| {
             miette::miette!(
-                "git mesh ls: unparseable output line (invalid range token {range_token:?}): {line:?}"
+                "git mesh list: unparseable output line (invalid range token {range_token:?}): {line:?}"
             )
         })?;
         // Peel the path from the right of the prefix
@@ -231,7 +231,7 @@ fn parse_mesh_ls_output(stdout: &str) -> Result<MeshIndex, miette::Error> {
             Some(m) => m,
             None => {
                 return Err(miette::miette!(
-                    "git mesh ls: unparseable output line (no mesh name): {line:?}"
+                    "git mesh list: unparseable output line (no mesh name): {line:?}"
                 ));
             }
         };

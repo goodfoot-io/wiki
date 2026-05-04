@@ -13,7 +13,7 @@ See [[Wiki Mesh Integration]] for the design rationale behind these integrations
 
 ## Commands Currently Used
 
-### `git-mesh ls <anchor> --porcelain`
+### `git-mesh list <anchor> --porcelain`
 
 **Where:** [`mesh_coverage.rs`](packages/cli/src/commands/mesh_coverage.rs#L157-L159)
 
@@ -73,7 +73,7 @@ The line range token (`start-end`) is parsed for format validation only; range f
 
 These commands exist in `git-mesh` but are not yet called by the wiki CLI.
 
-### `git-mesh ls --porcelain` *(no anchor argument)*
+### `git-mesh list --porcelain` *(no anchor argument)*
 
 Omitting the anchor argument lists all meshes in the repo. Would let the wiki CLI detect **orphaned wiki anchors** — wiki files referenced in a mesh that have been deleted or renamed — and **dead meshes** with no wiki coverage.
 
