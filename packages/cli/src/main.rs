@@ -113,7 +113,7 @@ enum Commands {
     /// link target. `git mesh` must be installed; missing the binary
     /// fails the check.
     ///
-    /// Use `-n '*'` to check all wikis in the repo.
+    /// Use `-n <name>` to scope the check to a single namespace.
     Check {
         /// Glob patterns to match wiki pages (default: $WIKI_DIR/**/*.md)
         #[arg(value_name = "glob")]
