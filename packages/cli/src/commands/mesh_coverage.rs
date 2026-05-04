@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::commands::resolve_link_path;
 use crate::parser::{LinkKind, parse_fragment_links};
@@ -52,7 +52,20 @@ pub(super) fn collect_mesh_diagnostics(
 ) -> Result<Vec<CheckDiagnostic>, miette::Error> {
     let mut out: Vec<CheckDiagnostic> = Vec::new();
 
-    let index = match run_git_mesh_ls_all(repo_root, &mut out)? {
+    if files.is_empty() {
+        return Ok(out);
+    }
+
+    let rel_paths: Vec<PathBuf> = files
+        .iter()
+        .map(|p| {
+            p.strip_prefix(repo_root)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|_| p.clone())
+        })
+        .collect();
+
+    let index = match run_git_mesh_ls_all(repo_root, &rel_paths, &mut out)? {
         None => return Ok(out), // git-mesh unavailable; mesh_unavailable diagnostic already pushed
         Some(idx) => idx,
     };
@@ -117,7 +130,9 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
     a_components == b_components
 }
 
-/// Shell out to `git-mesh ls --porcelain` (no anchor) and build a `MeshIndex`.
+/// Shell out to `git-mesh ls --porcelain --batch` with repo-relative wiki file
+/// paths piped to stdin, filtering output to only meshes that anchor at least
+/// one of the given paths.
 ///
 /// Returns `Ok(None)` when git-mesh is not installed, having pushed a
 /// `mesh_unavailable` diagnostic into `out`.
@@ -125,14 +140,17 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
 /// Returns `Err` on any other OS error or non-zero exit.
 fn run_git_mesh_ls_all(
     repo_root: &Path,
+    files: &[PathBuf],
     out: &mut Vec<CheckDiagnostic>,
 ) -> Result<Option<MeshIndex>, miette::Error> {
-    let result = Command::new("git-mesh")
-        .current_dir(repo_root)
-        .args(["ls", "--porcelain"])
-        .output();
+    let mut cmd = Command::new("git-mesh");
+    cmd.current_dir(repo_root)
+        .args(["ls", "--porcelain", "--batch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-    match result {
+    let mut child = match cmd.spawn() {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             out.push(CheckDiagnostic {
                 kind: "mesh_unavailable".into(),
@@ -140,22 +158,33 @@ fn run_git_mesh_ls_all(
                 line: 0,
                 message: "git mesh is required by `wiki check` but was not found on PATH. Install git-mesh and re-run; see https://github.com/goodfoot-io/git-mesh for setup.".into(),
             });
-            Ok(None)
+            return Ok(None);
         }
-        Err(e) => Err(miette::miette!("git mesh ls failed: {e}")),
-        Ok(output) => {
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(miette::miette!(
-                    "git mesh ls exited with status {}: {}",
-                    output.status,
-                    stderr.trim()
-                ));
-            }
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            Ok(Some(parse_mesh_ls_output(&stdout)?))
+        Err(e) => return Err(miette::miette!("git mesh ls failed: {e}")),
+        Ok(child) => child,
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        for path in files {
+            writeln!(stdin, "{}", path.display())
+                .map_err(|e| miette::miette!("failed to write path to git-mesh stdin: {e}"))?;
         }
     }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| miette::miette!("git mesh ls failed: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(miette::miette!(
+            "git mesh ls exited with status {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(Some(parse_mesh_ls_output(&stdout)?))
 }
 
 /// Parse the `--porcelain` output of `git mesh ls` into a `MeshIndex`.
