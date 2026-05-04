@@ -76,7 +76,7 @@ fn mesh_scaffold_byte_equal_with_expected_md() {
     // Run from inside the wiki dir so `WikiConfig::load` walks up and finds
     // `wiki/wiki.toml`.
     let output = Command::new(bin)
-        .args(["scaffold"])
+        .args(["scaffold", "**/*.md"])
         .current_dir(tmp.path().join("wiki"))
         .output()
         .expect("run wiki binary");
@@ -155,7 +155,7 @@ fn mesh_scaffold_parse_error_block() {
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
-        .args(["scaffold"])
+        .args(["scaffold", "**/*.md"])
         .current_dir(&wiki_dir)
         .output()
         .expect("run wiki binary");
@@ -254,7 +254,7 @@ fn mesh_scaffold_only_parse_errors_emits_block_alone() {
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
-        .args(["scaffold"])
+        .args(["scaffold", "**/*.md"])
         .current_dir(&wiki_dir)
         .output()
         .expect("run wiki binary");
@@ -308,7 +308,7 @@ fn mesh_scaffold_json_shape_and_fields() {
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
-        .args(["scaffold", "--format", "json"])
+        .args(["scaffold", "**/*.md", "--format", "json"])
         .current_dir(&wiki_dir)
         .output()
         .expect("run wiki binary");
@@ -380,7 +380,7 @@ fn mesh_scaffold_json_empty_corpus_structured_output() {
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
-        .args(["scaffold", "--format", "json"])
+        .args(["scaffold", "**/*.md", "--format", "json"])
         .current_dir(&wiki_dir)
         .output()
         .expect("run wiki binary");
@@ -420,7 +420,7 @@ fn mesh_scaffold_json_parse_errors_in_output() {
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
-        .args(["scaffold", "--format", "json"])
+        .args(["scaffold", "**/*.md", "--format", "json"])
         .current_dir(&wiki_dir)
         .output()
         .expect("run wiki binary");
@@ -472,7 +472,7 @@ fn mesh_scaffold_json_top_of_file_link_empty_chain() {
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
-        .args(["scaffold", "--format", "json"])
+        .args(["scaffold", "**/*.md", "--format", "json"])
         .current_dir(&wiki_dir)
         .output()
         .expect("run wiki binary");
@@ -520,7 +520,7 @@ fn mesh_scaffold_json_parse_error_page_not_in_pages() {
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
-        .args(["scaffold", "--format", "json"])
+        .args(["scaffold", "**/*.md", "--format", "json"])
         .current_dir(&wiki_dir)
         .output()
         .expect("run wiki binary");
@@ -597,7 +597,7 @@ fn mesh_scaffold_json_unreadable_file_in_parse_errors() {
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
-        .args(["scaffold", "--format", "json"])
+        .args(["scaffold", "**/*.md", "--format", "json"])
         .current_dir(&wiki_dir)
         .output()
         .expect("run wiki binary");

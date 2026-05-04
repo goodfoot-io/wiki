@@ -131,18 +131,30 @@ use super::group;
 use super::render;
 
 /// Run the `wiki scaffold` subcommand.
-pub fn run(globs: &[String], json: bool, wiki_root: &Path, repo_root: &Path) -> Result<i32> {
-    let discovered = discover_files(globs, wiki_root, repo_root, crate::index::DocSource::WorkingTree)?;
-    // Filter test fixtures: `wiki check` legitimately scans them, but a
-    // scaffold run that materializes mesh commands for a test wiki would
-    // pollute the repo's mesh state on the first commit. Scoped to scaffold.
-    let files: Vec<PathBuf> = discovered
-        .into_iter()
-        .filter(|p| {
-            let s = p.to_string_lossy();
-            !s.contains("/tests/fixtures/") && !s.contains("\\tests\\fixtures\\")
-        })
-        .collect();
+pub fn run(
+    globs: &[String],
+    json: bool,
+    wiki_roots: &[PathBuf],
+    repo_root: &Path,
+    source: crate::index::DocSource,
+) -> Result<i32> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    for wiki_root in wiki_roots {
+        let discovered = discover_files(globs, wiki_root, repo_root, source)?;
+        // Filter test fixtures: `wiki check` legitimately scans them, but a
+        // scaffold run that materializes mesh commands for a test wiki would
+        // pollute the repo's mesh state on the first commit. Scoped to scaffold.
+        for f in discovered {
+            let s = f.to_string_lossy();
+            if !s.contains("/tests/fixtures/") && !s.contains("\\tests\\fixtures\\") {
+                files.push(f);
+            }
+        }
+    }
+    // Deduplicate across wikis (each discover_files call already deduplicates
+    // internally, but the same file may be matched through multiple wiki roots).
+    files.sort();
+    files.dedup();
 
     let mut all_inputs: Vec<LinkInput> = Vec::new();
     for file in &files {

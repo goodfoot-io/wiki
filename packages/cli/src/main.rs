@@ -248,10 +248,11 @@ enum Commands {
     },
 
     /// Generate a shell script of `git mesh add` / `git mesh why` commands
-    /// for every fragment link found in the wiki corpus.
+    /// for every fragment link found in the given files or globs.
+    /// Operates across all wikis in the repository regardless of the -n flag.
     Scaffold {
-        /// Glob patterns to match wiki pages (default: <wiki-root>/**/*.md)
-        #[arg(value_name = "glob")]
+        /// Wiki page files or glob patterns (required)
+        #[arg(value_name = "glob", num_args = 1..)]
         globs: Vec<String>,
     },
 
@@ -418,6 +419,17 @@ fn run(
         (None, Some(q), Some(cfg)) => apply_at_sugar(q, cfg, namespace.as_deref()),
         _ => (namespace.clone(), query.clone()),
     };
+
+    // Scaffold always operates across all wikis, regardless of -n.
+    if let Some(Commands::Scaffold { globs }) = &command {
+        let cfg = config.as_ref().ok_or_else(|| {
+            miette::miette!(
+                "wiki scaffold requires a wiki.toml (no wiki found)"
+            )
+        })?;
+        let wiki_roots: Vec<PathBuf> = cfg.all().map(|w| w.root.clone()).collect();
+        return commands::mesh::scaffold::run(globs, json, &wiki_roots, &repo_root, source);
+    }
 
     if effective_namespace.as_deref() == Some("*") {
         let cfg = config.as_ref().ok_or_else(|| {
@@ -603,14 +615,16 @@ fn run(
             codex_home.as_deref(),
             &git_ref,
         ),
-        Some(Commands::Scaffold { globs }) => {
-            commands::mesh::scaffold::run(&globs, json, wiki_root, &repo_root)
-        }
         Some(Commands::Namespaces) => {
             commands::namespaces::run(&cwd, &repo_root, json)
         }
         Some(Commands::Init { namespace }) => {
             commands::init::run(&cwd, namespace.as_deref())
+        }
+        // Scaffold is handled before the single-wiki resolution block above,
+        // so this arm is unreachable.
+        Some(Commands::Scaffold { .. }) => {
+            unreachable!("scaffold is dispatched before namespace resolution")
         }
         None => match effective_query.as_deref() {
             Some(query) => {
