@@ -153,4 +153,12 @@ if [ -f "$MARKETPLACE_JSON" ] && command -v jq &> /dev/null; then
     fi
 fi
 
+	# --- Wiki validation on all wiki pages ---
+	WIKI_BIN=$(command -v wiki || true)
+	if [ -n "$WIKI_BIN" ]; then
+	    "$WIKI_BIN" check --no-mesh || {
+	        exit 1
+	    }
+	fi
+
 exit 0

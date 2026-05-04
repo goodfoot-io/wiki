@@ -16,10 +16,16 @@ fi
 # --- Wiki + mesh validation (informational) ---
 WIKI_BIN=$(command -v wiki || true)
 if [ -n "$WIKI_BIN" ]; then
-  COMMITTED_MD=$(git diff-tree --no-commit-id --name-only -r HEAD --diff-filter=d | grep '\.md$' || true)
-  if [ -n "$COMMITTED_MD" ]; then
-    echo "Running wiki check (informational)..."
-    "$WIKI_BIN" check --no-exit-code --no-mesh
+  WIKI_JSON=$("$WIKI_BIN" check --format json --no-exit-code 2>&1) || true
+
+  if command -v jq >/dev/null 2>&1 && [ -n "$WIKI_JSON" ]; then
+    MESH_FILES=$(echo "$WIKI_JSON" | jq -r '[.errors[] | select(.kind == "mesh_uncovered") | .file] | unique | .[]' 2>/dev/null || true)
+    if [ -n "$MESH_FILES" ]; then
+      MESH_ARGS=$(echo "$MESH_FILES" | tr '
+' ' ')
+      # shellcheck disable=SC2086
+      "$WIKI_BIN" scaffold $MESH_ARGS
+    fi
   fi
 fi
 if command -v git-mesh >/dev/null 2>&1; then

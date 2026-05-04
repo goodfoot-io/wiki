@@ -79,3 +79,5 @@ yarn-error.log*
 *.lock
 
 scripts/ssh
+
+.devcontainer/utilities/deepseek
