@@ -125,7 +125,8 @@ document.addEventListener('click', (e: MouseEvent) => {
     const decoded = decodeURIComponent(href.replace(/^\//, ''));
     const hashIdx = decoded.indexOf('#');
     const pageName = hashIdx >= 0 ? decoded.slice(0, hashIdx) : decoded;
-    post({ type: 'navigate', pageName, split });
+    const namespace = anchor.getAttribute('data-namespace') ?? undefined;
+    post({ type: 'navigate', pageName, namespace, split });
   }
 });
 
@@ -162,6 +163,9 @@ onHostMessage((message: HostMessage) => {
         for (const entry of message.refs) {
           if ('title' in entry) {
             refsMap.set(entry.wikilink.toLowerCase(), entry);
+            if (entry.namespace) {
+              refsMap.set(`${entry.namespace}:${entry.wikilink}`.toLowerCase(), entry);
+            }
           }
         }
       }

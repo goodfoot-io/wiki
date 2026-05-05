@@ -13,7 +13,7 @@ import * as vscode from 'vscode';
 import { render } from '../rendering/MarkdownRenderer.js';
 import { runWikiCommand } from '../utils/wikiBinary.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
-import type { HostMessage, RefEntry, WebviewMessage } from '../webviews/wiki/types.js';
+import type { HostMessage, RefEntry, ResolvedRefEntry, WebviewMessage } from '../webviews/wiki/types.js';
 import type { NamespaceCache } from '../wiki/namespaceCache.js';
 
 // ---------------------------------------------------------------------------
@@ -189,8 +189,11 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
         }
 
         case 'navigate': {
+          // If the webview provided a namespace, construct a qualified page name.
+          // _resolvePageUri already handles "ns:Title" qualified wikilinks.
+          const resolvedPageName = message.namespace ? `${message.namespace}:${message.pageName}` : message.pageName;
           // Resolve the target page URI via wiki summary.
-          const targetUri = await this._resolvePageUri(message.pageName, document.uri);
+          const targetUri = await this._resolvePageUri(resolvedPageName, document.uri);
           if (targetUri == null) {
             // Fallback: treat as a workspace-relative file or directory path when
             // the name looks like a path (contains a slash).
@@ -355,6 +358,14 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     if (refsResult != null && refsResult.exitCode === 0 && refsResult.stdout.trim() !== '') {
       try {
         refs = JSON.parse(refsResult.stdout) as RefEntry[];
+        // Tag each resolved entry with the current document's namespace so the
+        // webview can use namespace-qualified keys in refsMap for deduplication.
+        const currentNs = this._namespaceCache?.resolveNamespaceForFile(uri.fsPath) ?? 'default';
+        for (const entry of refs) {
+          if ('title' in entry) {
+            (entry as ResolvedRefEntry).namespace = currentNs;
+          }
+        }
       } catch (parseErr) {
         console.warn('[wiki-extension] Failed to parse wiki refs JSON:', parseErr);
       }

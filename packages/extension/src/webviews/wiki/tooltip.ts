@@ -46,12 +46,16 @@ export function initTooltip(): void {
 export function showTooltip(anchor: HTMLElement, entry: ResolvedRefEntry): void {
   if (bodyEl == null) return;
 
+  // Show qualified namespace:Title in the tooltip header for cross-namespace links.
+  const namespace = anchor.getAttribute('data-namespace');
+  const titleHtml = namespace ? `${escapeHtml(namespace)}: ${escapeHtml(entry.title)}` : escapeHtml(entry.title);
+
   const tagsHtml =
     entry.tags.length > 0
       ? `<div class="wiki-tooltip-tags">${entry.tags.map((t) => `<vscode-badge>${escapeHtml(t)}</vscode-badge>`).join('')}</div>`
       : '';
 
-  bodyEl.innerHTML = `<div class="wiki-tooltip-title">${escapeHtml(entry.title)}</div><div class="wiki-tooltip-summary">${escapeHtml(entry.summary)}</div>${tagsHtml}`;
+  bodyEl.innerHTML = `<div class="wiki-tooltip-title">${titleHtml}</div><div class="wiki-tooltip-summary">${escapeHtml(entry.summary)}</div>${tagsHtml}`;
   positionAndShow(anchor);
 }
 

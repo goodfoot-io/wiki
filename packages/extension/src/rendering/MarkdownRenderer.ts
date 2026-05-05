@@ -168,15 +168,25 @@ const pluginWikilinks: MarkdownIt.PluginSimple = (md) => {
             t.content = part;
             newChildren.push(t);
           } else {
-            // Wikilink inner content, e.g. "Page Name" or "Target|Display"
-            const pipeIdx = part.indexOf('|');
+            // Wikilink inner content, e.g. "Page Name", "Target|Display", or
+            // "ns:Title" / "ns:Title|Display" for cross-namespace links.
+            // Extract optional namespace prefix matching [A-Za-z0-9_-]+:
+            let namespace: string | undefined;
+            let content = part;
+            const nsMatch = content.match(/^([A-Za-z0-9_-]+):/);
+            if (nsMatch) {
+              namespace = nsMatch[1]!;
+              content = content.slice(nsMatch[0].length);
+            }
+
+            const pipeIdx = content.indexOf('|');
             let target: string;
             let display: string;
             if (pipeIdx >= 0) {
-              target = part.slice(0, pipeIdx).trim();
-              display = part.slice(pipeIdx + 1).trim();
+              target = content.slice(0, pipeIdx).trim();
+              display = content.slice(pipeIdx + 1).trim();
             } else {
-              target = part.trim();
+              target = content.trim();
               display = target;
             }
 
@@ -188,11 +198,13 @@ const pluginWikilinks: MarkdownIt.PluginSimple = (md) => {
             if (hashIdx >= 0) {
               page = target.slice(0, hashIdx);
               const heading = target.slice(hashIdx + 1);
-              href = `/${encodeURIComponent(page)}#${encodeURIComponent(heading)}`;
+              const qualified = namespace ? `${namespace}:${page}` : page;
+              href = `/${encodeURIComponent(qualified)}#${encodeURIComponent(heading)}`;
               if (pipeIdx < 0) display = page;
             } else {
               page = target;
-              href = `/${encodeURIComponent(target)}`;
+              const qualified = namespace ? `${namespace}:${page}` : page;
+              href = `/${encodeURIComponent(qualified)}`;
             }
 
             // Skip wikilinks with an empty page title (e.g. [[#heading]]) —
@@ -206,6 +218,10 @@ const pluginWikilinks: MarkdownIt.PluginSimple = (md) => {
 
             const linkOpen = new state.Token('link_open', 'a', 1);
             linkOpen.attrSet('href', href);
+            if (namespace != null) {
+              linkOpen.attrSet('data-namespace', namespace);
+              linkOpen.attrJoin('class', 'wikilink-cross-namespace');
+            }
             const text = new state.Token('text', '', 0);
             text.content = display;
             const linkClose = new state.Token('link_close', 'a', -1);

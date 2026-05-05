@@ -12,6 +12,7 @@ export type ResolvedRefEntry = {
   title: string;
   file: string;
   summary: string;
+  namespace: string;
   aliases: string[];
   tags: string[];
 };
@@ -26,7 +27,7 @@ export type HostMessage =
 
 // Webview -> Host messages
 export type WebviewMessage =
-  | { type: 'navigate'; pageName: string; split: boolean }
+  | { type: 'navigate'; pageName: string; namespace?: string; split: boolean }
   | { type: 'scrollPosition'; y: number }
   | { type: 'openInEditor'; split: boolean }
   | { type: 'openFile'; uri: string; split: boolean }
