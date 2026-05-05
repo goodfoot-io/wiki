@@ -1,6 +1,6 @@
 {
   "name": "@goodfoot/wiki-linux-arm64",
-  "version": "0.5.43",
+  "version": "0.5.44",
   "description": "Platform-specific binary for @goodfoot/wiki",
   "license": "MIT",
   "os": [
