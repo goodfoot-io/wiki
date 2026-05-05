@@ -120,7 +120,7 @@ fn rule5_undeclared_namespace_in_wiki_md_exits_1() {
         "expected exit 1; stdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
-        stdout.contains("namespace_undeclared"),
+        stdout.contains("Namespace Undeclared"),
         "expected namespace_undeclared diagnostic; stdout: {stdout}"
     );
 }
@@ -149,7 +149,7 @@ fn rule5_namespace_matches_current_wiki_is_valid() {
         "expected exit 0; stdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
-        !stdout.contains("namespace_undeclared"),
+        !stdout.contains("Namespace Undeclared"),
         "namespace matching current wiki must not produce namespace_undeclared; stdout: {stdout}"
     );
 }
@@ -180,7 +180,7 @@ fn rule5_namespace_matches_declared_peer_is_valid() {
         "expected exit 0 (namespace matches declared peer); stdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
-        !stdout.contains("namespace_undeclared"),
+        !stdout.contains("Namespace Undeclared"),
         "namespace matching declared peer must not produce namespace_undeclared; stdout: {stdout}"
     );
 }
@@ -207,7 +207,7 @@ fn rule6_unknown_peer_namespace_in_wikilink_exits_1() {
         "expected exit 1; stdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
-        stdout.contains("cross_namespace_wikilink_unresolved"),
+        stdout.contains("Cross Namespace Wikilink Unresolved"),
         "expected cross_namespace_wikilink_unresolved; stdout: {stdout}"
     );
 }
@@ -236,7 +236,7 @@ fn rule6_peer_exists_but_article_missing_exits_1() {
         "expected exit 1; stdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
-        stdout.contains("cross_namespace_wikilink_unresolved"),
+        stdout.contains("Cross Namespace Wikilink Unresolved"),
         "expected cross_namespace_wikilink_unresolved; stdout: {stdout}"
     );
 }
@@ -266,7 +266,7 @@ fn f3_same_ns_qualified_wikilink_missing_target_exits_1() {
         "[[current_ns:Missing]] must produce an error; stdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
-        stdout.contains("broken_wikilink"),
+        stdout.contains("Broken Wikilink"),
         "expected broken_wikilink diagnostic; stdout: {stdout}"
     );
 }
@@ -292,7 +292,7 @@ fn f3_same_ns_qualified_wikilink_existing_target_is_valid() {
         "[[current_ns:Existing]] must be valid; stdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
-        !stdout.contains("broken_wikilink"),
+        !stdout.contains("Broken Wikilink"),
         "valid same-ns qualified link must not produce broken_wikilink; stdout: {stdout}"
     );
 }
@@ -321,7 +321,7 @@ fn rule6_peer_exists_and_article_exists_is_valid() {
         "expected exit 0 for valid cross-namespace wikilink; stdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
-        !stdout.contains("cross_namespace_wikilink_unresolved"),
+        !stdout.contains("Cross Namespace Wikilink Unresolved"),
         "valid cross-namespace link must not produce diagnostic; stdout: {stdout}"
     );
 }

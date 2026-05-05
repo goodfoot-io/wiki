@@ -85,6 +85,43 @@ pub struct CheckDiagnostic {
     pub message: String,
 }
 
+/// Convert a snake_case diagnostic kind to Title Case.
+fn kind_title_case(kind: &str) -> String {
+    kind.split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Render one diagnostic in the human-readable hook format.
+///
+/// ```text
+/// Error: <Title Case Kind>
+/// - <file>:<line>
+/// - <message>
+///
+/// ---
+///
+/// ```
+///
+/// The `<file>:<line>` bullet is suppressed when the file is empty (e.g.
+/// repo-wide diagnostics like `mesh_unavailable`).
+fn format_diagnostic(kind: &str, file: &str, line: usize, message: &str) -> String {
+    let mut out = format!("Error: {}\n", kind_title_case(kind));
+    if !file.is_empty() {
+        out.push_str(&format!("- {file}:{line}\n"));
+    }
+    out.push_str(&format!("- {message}\n"));
+    out.push_str("\n---\n\n");
+    out
+}
+
 // ── Public entry points ───────────────────────────────────────────────────────
 
 /// Run the check command.
@@ -150,7 +187,7 @@ pub fn run(
         );
     } else {
         for d in &diagnostics {
-            println!("**{}** — `{}:{}`\n{}\n", d.kind, d.file, d.line, d.message);
+            print!("{}", format_diagnostic(&d.kind, &d.file, d.line, &d.message));
         }
     }
 
@@ -278,10 +315,8 @@ pub fn run_multi(
     } else {
         for (label, diags) in &all {
             for d in diags {
-                println!(
-                    "**[{label}] {}** — `{}:{}`\n{}\n",
-                    d.kind, d.file, d.line, d.message
-                );
+                let message = format!("[{label}] {}", d.message);
+                print!("{}", format_diagnostic(&d.kind, &d.file, d.line, &message));
             }
         }
     }

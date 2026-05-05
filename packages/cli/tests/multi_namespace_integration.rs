@@ -212,8 +212,8 @@ fn check_star_runs_rules_across_all_namespaces() {
     );
     assert!(stdout_default.contains("[foo]"), "expected [foo] label; got: {stdout_default}");
     assert!(
-        stdout_default.contains("broken_wikilink"),
-        "expected broken_wikilink diagnostic; got: {stdout_default}"
+        stdout_default.contains("Broken Wikilink"),
+        "expected Broken Wikilink diagnostic; got: {stdout_default}"
     );
 
     // `-n '*'` — explicit multi-namespace, same behavior.
@@ -225,8 +225,8 @@ fn check_star_runs_rules_across_all_namespaces() {
     );
     assert!(stdout_star.contains("[foo]"), "expected [foo] label; got: {stdout_star}");
     assert!(
-        stdout_star.contains("broken_wikilink"),
-        "expected broken_wikilink diagnostic; got: {stdout_star}"
+        stdout_star.contains("Broken Wikilink"),
+        "expected Broken Wikilink diagnostic; got: {stdout_star}"
     );
 }
 
