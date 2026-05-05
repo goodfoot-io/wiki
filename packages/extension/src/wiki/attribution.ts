@@ -36,10 +36,11 @@ export function attributeFileToNamespace(filePath: string, workspaceRoot: string
   }
 
   // Walk parent directories toward the workspace root looking for wiki.toml.
+  // Walks from the file's directory up to and including the workspace root.
   const resolvedRoot = path.resolve(workspaceRoot);
   let dir = path.dirname(path.resolve(filePath));
 
-  while (dir.startsWith(resolvedRoot) || dir.length > resolvedRoot.length) {
+  while (true) {
     const wikiTomlPath = path.join(dir, 'wiki.toml');
     try {
       if (fs.existsSync(wikiTomlPath)) {
@@ -60,6 +61,9 @@ export function attributeFileToNamespace(filePath: string, workspaceRoot: string
       // Ignore individual file errors and continue walking up.
       void 0;
     }
+
+    // Stop at the workspace root — do not ascend past it.
+    if (dir === resolvedRoot) break;
 
     const parent = path.dirname(dir);
     if (parent === dir) break; // Reached filesystem root.

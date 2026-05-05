@@ -7,6 +7,7 @@
  * @summary CustomTextEditorProvider that renders wiki markdown in a webview panel.
  */
 
+import * as fs from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
@@ -16,6 +17,7 @@ import { runWikiCommand } from '../utils/wikiBinary.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
 import type { HostMessage, RefEntry, ResolvedRefEntry, WebviewMessage } from '../webviews/wiki/types.js';
 import type { NamespaceCache } from '../wiki/namespaceCache.js';
+import { parseQualifiedWikilink } from '../wiki/wikilinkParser.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -109,6 +111,23 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
       }
     }
 
+    // When the namespace cache is still populating, fall back to a synchronous
+    // parent-directory walk looking for wiki.toml. This catches peer-namespace
+    // files (e.g. mesh/) that would otherwise be missed by the hardcoded wiki/ prefix.
+    {
+      let dir = path.dirname(uri.fsPath);
+      const workspaceRoot = this._workspaceRoot();
+      while (workspaceRoot != null && dir.startsWith(workspaceRoot)) {
+        if (fs.existsSync(path.join(dir, 'wiki.toml'))) {
+          return true;
+        }
+        if (dir === workspaceRoot) break;
+        const parentDir = path.dirname(dir);
+        if (parentDir === dir) break; // Reached filesystem root
+        dir = parentDir;
+      }
+    }
+
     // Fall back to legacy single-wiki default path.
     const wikiDir = this._wikiDir();
     if (wikiDir == null) return false;
@@ -190,9 +209,13 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
         }
 
         case 'navigate': {
-          // If the webview provided a namespace, construct a qualified page name.
-          // _resolvePageUri already handles "ns:Title" qualified wikilinks.
-          const resolvedPageName = message.namespace ? `${message.namespace}:${message.pageName}` : message.pageName;
+          // If the webview provided a namespace and pageName is not already qualified,
+          // prepend the namespace. The webview click handler may already decode
+          // a namespace prefix into pageName (e.g. "default:Wiki CLI").
+          const resolvedPageName =
+            message.namespace && !message.pageName.includes(':')
+              ? `${message.namespace}:${message.pageName}`
+              : message.pageName;
           // Resolve the target page URI via wiki summary.
           const targetUri = await this._resolvePageUri(resolvedPageName, document.uri);
           if (targetUri == null) {
@@ -381,8 +404,8 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
    * Resolve a wiki page name to a VS Code URI by running `wiki summary`.
    * Returns null if the page cannot be found.
    *
-   * Qualified wikilinks (`ns:Title`) are split at the first colon; the
-   * namespace portion becomes the `-n` argument. Unqualified page names
+   * Qualified wikilinks (`ns:Title`) are parsed via `parseQualifiedWikilink`;
+   * the namespace portion becomes the `-n` argument. Unqualified page names
    * inherit the namespace of the source document.
    *
    * @param pageName - Decoded wiki page title to resolve.
@@ -394,11 +417,11 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
 
     let ns: string;
     let resolvedPageName: string;
-    const colonIndex = pageName.indexOf(':');
-    if (colonIndex > 0) {
+    const parsed = parseQualifiedWikilink(pageName);
+    if (parsed.namespace != null) {
       // Qualified wikilink: "ns:Title" → namespace "ns", title "Title".
-      ns = pageName.substring(0, colonIndex);
-      resolvedPageName = pageName.substring(colonIndex + 1);
+      ns = parsed.namespace;
+      resolvedPageName = parsed.title;
     } else {
       // Unqualified: inherit namespace from the source document.
       ns = this._namespaceCache?.resolveNamespaceForFile(documentUri.fsPath) ?? 'default';

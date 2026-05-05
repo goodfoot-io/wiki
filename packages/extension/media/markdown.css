@@ -277,3 +277,23 @@ pre {
 	border-radius: 4px;
 	background-color: rgba(220, 38, 38, 0.1);
 }
+
+/* Cross-namespace wikilinks — distinguished by a dashed underline
+   and a subtle namespace badge shown after the link text. */
+.wikilink-cross-namespace {
+	border-bottom: 1px dashed var(--vscode-textLink-foreground, #3794ff);
+	text-decoration: none;
+}
+
+.wikilink-cross-namespace:hover {
+	border-bottom-style: solid;
+}
+
+.wikilink-cross-namespace::after {
+	content: attr(data-namespace);
+	font-size: 0.7em;
+	opacity: 0.6;
+	margin-left: 0.3em;
+	vertical-align: super;
+	line-height: 1;
+}

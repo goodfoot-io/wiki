@@ -10,6 +10,7 @@
  */
 
 import * as vscode from 'vscode';
+import { getSourceArgs } from '../utils/sourceMode.js';
 import { runWikiCommand } from '../utils/wikiBinary.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
 
@@ -92,7 +93,12 @@ export async function wikiScaffold(binaryManager: WikiBinaryManager): Promise<vo
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
   // Run scaffold across all wiki roots (no -n flag — operates globally).
-  const result = await runWikiCommand(binaryPath, ['scaffold', '--format', 'json'], undefined, workspaceRoot);
+  const result = await runWikiCommand(
+    binaryPath,
+    [...getSourceArgs(), 'scaffold', '--format', 'json'],
+    undefined,
+    workspaceRoot
+  );
   if (result.exitCode !== 0) {
     void vscode.window.showErrorMessage(
       `Wiki scaffold failed: ${result.stderr.trim() || `exit code ${result.exitCode}`}`
