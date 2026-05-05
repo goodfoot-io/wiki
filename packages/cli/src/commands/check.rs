@@ -212,6 +212,30 @@ pub fn run_multi(
                 break;
             }
         };
+        // When the user passed explicit globs, restrict to files inside this
+        // namespace's wiki_root (keeping *.wiki.md files, which attach to a
+        // namespace by frontmatter and can live anywhere in the repo).
+        // Without this, an explicit file path is validated under every
+        // namespace iteration, causing un-namespaced wikilinks to be reported
+        // broken against indexes that can't possibly contain them.
+        let files: Vec<PathBuf> = if globs.is_empty() {
+            files
+        } else {
+            let canon_root = std::fs::canonicalize(wiki_root)
+                .unwrap_or_else(|_| wiki_root.to_path_buf());
+            files
+                .into_iter()
+                .filter(|p| {
+                    p.to_string_lossy().ends_with(".wiki.md")
+                        || std::fs::canonicalize(p)
+                            .unwrap_or_else(|_| p.clone())
+                            .starts_with(&canon_root)
+                })
+                .collect()
+        };
+        if files.is_empty() {
+            continue;
+        }
         let index_files = if globs.is_empty() {
             files.clone()
         } else {
