@@ -275,7 +275,7 @@ export async function wikiQuickPick(binaryManager: WikiBinaryManager): Promise<v
           qp.busy = false;
         }
         if (!isNamespaceMode(qp.value)) return;
-        const filter = query.slice(1).toLowerCase();
+        const filter = qp.value.slice(1).toLowerCase();
         qp.items = namespaceItems.filter((item) => item.label.toLowerCase().includes(filter));
       })();
       return;
