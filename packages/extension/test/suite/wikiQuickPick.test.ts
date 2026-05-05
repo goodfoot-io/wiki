@@ -72,4 +72,8 @@ describe('wikiQuickPick', () => {
       assert.strictEqual(filtered.length, 2);
     });
   });
-});
+
+  it('wiki.scaffold command is registered', async () => {
+    const commands = await vscode.commands.getCommands();
+    assert.ok(commands.includes('wiki.scaffold'), 'wiki.scaffold not registered');
+  });

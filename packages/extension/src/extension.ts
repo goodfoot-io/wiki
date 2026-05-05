@@ -134,7 +134,7 @@ export function activate(context: vscode.ExtensionContext): void {
       webviewOptions: { retainContextWhenHidden: true, enableFindWidget: true }
     }),
 
-    vscode.commands.registerCommand('wiki.search', () => wikiQuickPick(binaryManager)),
+    vscode.commands.registerCommand('wiki.search', () => wikiQuickPick(binaryManager, namespaceCache)),
 
     vscode.commands.registerCommand('wiki.retryInstall', async () => {
       try {

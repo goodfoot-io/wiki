@@ -14,6 +14,7 @@
 import * as vscode from 'vscode';
 import { runWikiCommand } from '../utils/wikiBinary.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
+import type { NamespaceCache } from '../wiki/namespaceCache.js';
 
 /** Item returned by `wiki list --format json`. */
 interface WikiListItem {
@@ -111,15 +112,62 @@ function workspaceRoot(): string | undefined {
 }
 
 /**
+ * Derive the namespace from the active text editor, falling back to `'*'`
+ * (all namespaces) when no document is active or no cache is available.
+ *
+ * @param cache - Optional NamespaceCache for file-to-namespace resolution.
+ * @returns The namespace label to pass via `-n`.
+ */
+function deriveNamespace(cache?: NamespaceCache): string {
+  if (cache != null) {
+    const editor = vscode.window.activeTextEditor;
+    if (editor != null) {
+      return cache.resolveNamespaceForFile(editor.document.uri.fsPath) ?? 'default';
+    }
+  }
+  return '*';
+}
+
+/**
+ * Parse a quick-pick query to extract an `@namespace` prefix.
+ *
+ * When the query starts with `@<name>` (e.g. `@mesh something`), returns
+ * the namespace portion and the remainder as the clean query. Without a
+ * prefix, derives the namespace from the active document (or `'*'`).
+ *
+ * @param query - Raw query text from the quick-pick input.
+ * @param cache - Optional NamespaceCache for file-to-namespace resolution.
+ * @returns The resolved namespace and the cleaned query string.
+ */
+function parseNamespaceQuery(query: string, cache?: NamespaceCache): { ns: string; cleanQuery: string } {
+  // @namespace prefix overrides any active-document namespace.
+  const atMatch = query.match(/^@(\S+)\s+(.*)/);
+  if (atMatch != null) {
+    return { ns: atMatch[1]!, cleanQuery: atMatch[2]! };
+  }
+  // No prefix — use the active document's namespace.
+  if (cache != null) {
+    const editor = vscode.window.activeTextEditor;
+    if (editor != null) {
+      const ns = cache.resolveNamespaceForFile(editor.document.uri.fsPath) ?? 'default';
+      return { ns, cleanQuery: query };
+    }
+  }
+  return { ns: '*', cleanQuery: query };
+}
+
+/**
  * Load all wiki pages for the initial (empty-query) state.
  * Shows a VS Code error notification and returns an empty array on failure.
  *
  * @param binaryPath - Absolute path to the resolved wiki CLI binary.
+ * @param cache - Optional NamespaceCache to scope the query to a namespace.
  * @returns All wiki pages as QuickPickItems, or an empty array on error.
  */
-async function loadAllPages(binaryPath: string): Promise<WikiQuickPickItem[]> {
+async function loadAllPages(binaryPath: string, cache?: NamespaceCache): Promise<WikiQuickPickItem[]> {
+  const ns = deriveNamespace(cache);
   try {
-    const result = await runWikiCommand(binaryPath, ['list', '--format', 'json'], undefined, workspaceRoot());
+    const result = await runWikiCommand(binaryPath, ['-n', ns, 'list', '--format', 'json'], undefined, workspaceRoot());
     if (result.exitCode !== 0) {
       const message = result.stderr.trim() || `wiki list exited with code ${result.exitCode}`;
       console.warn('[wiki-extension] wiki list failed:', message);
@@ -167,14 +215,30 @@ async function loadNamespaces(binaryPath: string): Promise<WikiQuickPickItem[]> 
  * Search wiki pages for the given query.
  * Shows a VS Code error notification and returns an empty array on failure.
  *
+ * Supports an `@namespace` prefix: when the query starts with `@<name>`,
+ * the search is scoped to that namespace. Without a prefix, the active
+ * document's namespace is used (or all namespaces if no document is open).
+ *
  * @param binaryPath - Absolute path to the resolved wiki CLI binary.
  * @param query - The search query to pass to the wiki CLI.
  * @param signal - AbortSignal used to cancel the underlying wiki process.
+ * @param cache - Optional NamespaceCache for namespace derivation.
  * @returns Matching wiki pages as QuickPickItems, or an empty array on error.
  */
-async function searchPages(binaryPath: string, query: string, signal: AbortSignal): Promise<WikiQuickPickItem[]> {
+async function searchPages(
+  binaryPath: string,
+  query: string,
+  signal: AbortSignal,
+  cache?: NamespaceCache
+): Promise<WikiQuickPickItem[]> {
+  const { ns, cleanQuery } = parseNamespaceQuery(query, cache);
   try {
-    const result = await runWikiCommand(binaryPath, [query, '--format', 'json'], signal, workspaceRoot());
+    const result = await runWikiCommand(
+      binaryPath,
+      ['-n', ns, cleanQuery, '--format', 'json'],
+      signal,
+      workspaceRoot()
+    );
     // If the signal was aborted, the process was killed intentionally — not an error.
     if (signal.aborted) {
       return [];
@@ -226,8 +290,9 @@ export function isNamespaceMode(value: string): boolean {
  * An empty query lists all pages; a non-empty query performs a ranked search.
  *
  * @param binaryManager - Service that resolves or installs the wiki CLI.
+ * @param cache - Optional NamespaceCache to scope queries to a namespace.
  */
-export async function wikiQuickPick(binaryManager: WikiBinaryManager): Promise<void> {
+export async function wikiQuickPick(binaryManager: WikiBinaryManager, cache?: NamespaceCache): Promise<void> {
   let binaryPath: string;
   try {
     binaryPath = (
@@ -247,7 +312,7 @@ export async function wikiQuickPick(binaryManager: WikiBinaryManager): Promise<v
   qp.busy = true;
 
   // Load all pages immediately for the initial empty state.
-  const initialItems = await loadAllPages(binaryPath);
+  const initialItems = await loadAllPages(binaryPath, cache);
   qp.items = initialItems;
   qp.busy = false;
 
@@ -286,7 +351,7 @@ export async function wikiQuickPick(binaryManager: WikiBinaryManager): Promise<v
     qp.busy = true;
 
     void (async () => {
-      const results = await searchPages(binaryPath, query.trimStart(), abort.signal);
+      const results = await searchPages(binaryPath, query.trim(), abort.signal, cache);
       if (!abort.signal.aborted) {
         qp.items = results;
         qp.busy = false;

@@ -190,7 +190,7 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
 
         case 'navigate': {
           // Resolve the target page URI via wiki summary.
-          const targetUri = await this._resolvePageUri(message.pageName);
+          const targetUri = await this._resolvePageUri(message.pageName, document.uri);
           if (targetUri == null) {
             // Fallback: treat as a workspace-relative file or directory path when
             // the name looks like a path (contains a slash).
@@ -313,14 +313,23 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
 
     try {
       const handle = await this._binaryManager.ready();
+      const ns = this._namespaceCache?.resolveNamespaceForFile(uri.fsPath) ?? 'default';
       // Read file content, run summary, and pre-fetch tooltip refs concurrently.
       // refs is best-effort: its failure is caught inline so it never rejects the Promise.all.
       [text, summaryResult, refsResult] = await Promise.all([
         this._readDocumentText(uri),
-        runWikiCommand(handle.path, ['summary', uri.fsPath, '--format', 'json'], undefined, this._workspaceRoot()),
-        runWikiCommand(handle.path, ['refs', uri.fsPath, '--format', 'json'], undefined, this._workspaceRoot()).catch(
-          () => null
-        )
+        runWikiCommand(
+          handle.path,
+          ['-n', ns, 'summary', uri.fsPath, '--format', 'json'],
+          undefined,
+          this._workspaceRoot()
+        ),
+        runWikiCommand(
+          handle.path,
+          ['-n', ns, 'refs', uri.fsPath, '--format', 'json'],
+          undefined,
+          this._workspaceRoot()
+        ).catch(() => null)
       ]);
     } catch (err) {
       // File read error or spawn error (e.g. ENOENT — binary not found after initial check).
@@ -359,14 +368,33 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
    * Resolve a wiki page name to a VS Code URI by running `wiki summary`.
    * Returns null if the page cannot be found.
    *
+   * Qualified wikilinks (`ns:Title`) are split at the first colon; the
+   * namespace portion becomes the `-n` argument. Unqualified page names
+   * inherit the namespace of the source document.
+   *
    * @param pageName - Decoded wiki page title to resolve.
+   * @param documentUri - URI of the document the navigation originated from.
    * @returns The VS Code URI for the page's file, or null if not found.
    */
-  private async _resolvePageUri(pageName: string): Promise<vscode.Uri | null> {
+  private async _resolvePageUri(pageName: string, documentUri: vscode.Uri): Promise<vscode.Uri | null> {
     const handle = await this._binaryManager.ready();
+
+    let ns: string;
+    let resolvedPageName: string;
+    const colonIndex = pageName.indexOf(':');
+    if (colonIndex > 0) {
+      // Qualified wikilink: "ns:Title" → namespace "ns", title "Title".
+      ns = pageName.substring(0, colonIndex);
+      resolvedPageName = pageName.substring(colonIndex + 1);
+    } else {
+      // Unqualified: inherit namespace from the source document.
+      ns = this._namespaceCache?.resolveNamespaceForFile(documentUri.fsPath) ?? 'default';
+      resolvedPageName = pageName;
+    }
+
     const result = await runWikiCommand(
       handle.path,
-      ['summary', pageName, '--format', 'json'],
+      ['-n', ns, 'summary', resolvedPageName, '--format', 'json'],
       undefined,
       this._workspaceRoot()
     );
