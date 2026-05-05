@@ -32,6 +32,13 @@ interface WikiSearchItem {
   snippets: Array<{ line: number; text: string }>;
 }
 
+/** Item returned by `wiki namespaces --format json`. */
+interface NamespaceEntry {
+  namespace: string | null;
+  path: string;
+  abs_path: string;
+}
+
 /** A QuickPickItem extended with the resolved file path. */
 type WikiQuickPickItem = vscode.QuickPickItem & { file: string };
 
@@ -75,6 +82,24 @@ function toSearchQuickPickItem(item: WikiSearchItem): WikiQuickPickItem {
 }
 
 /**
+ * Convert a namespace entry to a QuickPickItem.
+ *
+ * The namespace name is the label; the filesystem path is the detail.
+ * The file path is included as a sentinel for type compatibility — namespace
+ * selection prefills the input rather than opening a file.
+ *
+ * @param item - A namespace entry from `wiki namespaces --format json`.
+ * @returns A QuickPickItem with namespace as label and path as detail.
+ */
+function toNamespaceQuickPickItem(item: NamespaceEntry): WikiQuickPickItem {
+  return {
+    label: item.namespace!,
+    detail: item.path,
+    file: item.abs_path
+  };
+}
+
+/**
  * Return the filesystem path of the first VS Code workspace folder, or undefined
  * if no folder is open. The wiki CLI requires a cwd inside the git repo to
  * discover repository boundaries.
@@ -106,6 +131,33 @@ async function loadAllPages(binaryPath: string): Promise<WikiQuickPickItem[]> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[wiki-extension] Failed to load wiki pages:', err);
+    void vscode.window.showErrorMessage(`Wiki: ${message}`);
+    return [];
+  }
+}
+
+/**
+ * Load all available wiki namespaces for the @-prefix namespace selector.
+ * Filters out the null-namespace (default wiki) entry.
+ * Shows a VS Code error notification and returns an empty array on failure.
+ *
+ * @param binaryPath - Absolute path to the resolved wiki CLI binary.
+ * @returns All named namespaces as QuickPickItems, or an empty array on error.
+ */
+async function loadNamespaces(binaryPath: string): Promise<WikiQuickPickItem[]> {
+  try {
+    const result = await runWikiCommand(binaryPath, ['namespaces', '--format', 'json'], undefined, workspaceRoot());
+    if (result.exitCode !== 0) {
+      const message = result.stderr.trim() || `wiki namespaces exited with code ${result.exitCode}`;
+      console.warn('[wiki-extension] wiki namespaces failed:', message);
+      void vscode.window.showErrorMessage(`Wiki: ${message}`);
+      return [];
+    }
+    const items = JSON.parse(result.stdout) as NamespaceEntry[];
+    return items.filter((item) => item.namespace != null).map(toNamespaceQuickPickItem);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[wiki-extension] Failed to load wiki namespaces:', err);
     void vscode.window.showErrorMessage(`Wiki: ${message}`);
     return [];
   }
@@ -158,6 +210,18 @@ async function openWikiFile(file: string): Promise<void> {
 }
 
 /**
+ * Returns true when the input value represents a namespace-list query,
+ * i.e. starts with `@` and does not yet contain a space (the user is
+ * still typing or selecting a namespace name).
+ *
+ * @param value - The current QuickPick input value.
+ * @returns True when the picker should show namespace items.
+ */
+export function isNamespaceMode(value: string): boolean {
+  return value.startsWith('@') && !value.includes(' ');
+}
+
+/**
  * Show a QuickPick that lets the user browse and search wiki pages.
  * An empty query lists all pages; a non-empty query performs a ranked search.
  *
@@ -187,6 +251,9 @@ export async function wikiQuickPick(binaryManager: WikiBinaryManager): Promise<v
   qp.items = initialItems;
   qp.busy = false;
 
+  // Namespace items loaded lazily on first @-prefix input.
+  let namespaceItems: WikiQuickPickItem[] = [];
+
   let activeAbort: AbortController | undefined;
 
   qp.onDidChangeValue((query) => {
@@ -194,6 +261,20 @@ export async function wikiQuickPick(binaryManager: WikiBinaryManager): Promise<v
 
     if (query.trim() === '') {
       qp.items = initialItems;
+      return;
+    }
+
+    // @-prefix without space: namespace list mode — filter namespaces client-side.
+    if (isNamespaceMode(query)) {
+      void (async () => {
+        if (namespaceItems.length === 0) {
+          qp.busy = true;
+          namespaceItems = await loadNamespaces(binaryPath);
+          qp.busy = false;
+        }
+        const filter = query.slice(1).toLowerCase();
+        qp.items = namespaceItems.filter((item) => item.label.toLowerCase().includes(filter));
+      })();
       return;
     }
 
@@ -213,6 +294,13 @@ export async function wikiQuickPick(binaryManager: WikiBinaryManager): Promise<v
   qp.onDidAccept(async () => {
     const selected = qp.selectedItems[0];
     if (selected == null) return;
+
+    // NamespaceList mode: prefill input and keep picker open.
+    if (isNamespaceMode(qp.value)) {
+      qp.value = `@${selected.label} `;
+      return;
+    }
+
     qp.hide();
     await openWikiFile(selected.file);
   });
