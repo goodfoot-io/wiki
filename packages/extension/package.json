@@ -78,11 +78,6 @@
         "command": "wiki.retryInstall",
         "title": "Retry CLI Install",
         "category": "Wiki"
-      },
-      {
-        "command": "wiki.scaffold",
-        "title": "Scaffold Mesh from Fragment Links",
-        "category": "Wiki"
       }
     ],
     "keybindings": [

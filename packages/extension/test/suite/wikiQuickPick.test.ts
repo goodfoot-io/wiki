@@ -10,7 +10,7 @@
 
 import * as assert from 'node:assert';
 import * as vscode from 'vscode';
-import { isNamespaceMode } from '../../src/commands/wikiQuickPick.js';
+import { isNamespaceMode, toNamespaceQuickPickItem } from '../../src/commands/wikiQuickPick.js';
 
 describe('wikiQuickPick', () => {
   it('wiki.search command is registered', async () => {
@@ -28,11 +28,6 @@ describe('wikiQuickPick', () => {
     assert.ok(commands.includes('wiki.retryInstall'), 'wiki.retryInstall not registered');
   });
 
-  it('wiki.scaffold command is registered', async () => {
-    const commands = await vscode.commands.getCommands();
-    assert.ok(commands.includes('wiki.scaffold'), 'wiki.scaffold not registered');
-  });
-
   describe('wiki namespaces', () => {
     it('isNamespaceMode detects @-prefix without space', () => {
       assert.strictEqual(isNamespaceMode('@'), true);
@@ -47,14 +42,11 @@ describe('wikiQuickPick', () => {
 
     it('converts namespace entry to quick pick item', () => {
       const entry = { namespace: 'engineering', path: 'wiki/engineering', abs_path: '/repo/wiki/engineering' };
-      const item = {
-        label: entry.namespace,
-        detail: entry.path,
-        file: entry.abs_path
-      };
+      const item = toNamespaceQuickPickItem(entry);
       assert.strictEqual(item.label, 'engineering');
       assert.strictEqual(item.detail, 'wiki/engineering');
       assert.strictEqual(item.file, '/repo/wiki/engineering');
+      assert.strictEqual(item.alwaysShow, true);
     });
 
     it('filters namespace items case-insensitively by substring', () => {

@@ -93,10 +93,11 @@ function toSearchQuickPickItem(item: WikiSearchItem): WikiQuickPickItem {
  * @param item - A namespace entry from `wiki namespaces --format json`.
  * @returns A QuickPickItem with namespace as label and path as detail.
  */
-function toNamespaceQuickPickItem(item: NamespaceEntry): WikiQuickPickItem {
+export function toNamespaceQuickPickItem(item: NamespaceEntry): WikiQuickPickItem {
   return {
     label: item.namespace!,
     detail: item.path,
+    alwaysShow: true,
     file: item.abs_path
   };
 }
