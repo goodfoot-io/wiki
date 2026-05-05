@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node $CLAUDE_PLUGIN_ROOT/hooks/bin/wiki-check.98175995.mjs",
+            "command": "node $CLAUDE_PLUGIN_ROOT/hooks/bin/wiki-check.9c19705d.mjs",
             "timeout": 30000
           }
         ],
@@ -15,8 +15,8 @@
   },
   "__generated": {
     "files": [
-      "wiki-check.98175995.mjs"
+      "wiki-check.9c19705d.mjs"
     ],
-    "timestamp": "2026-05-05T02:56:40.742Z"
+    "timestamp": "2026-05-05T21:58:05.802Z"
   }
 }

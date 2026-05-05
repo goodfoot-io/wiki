@@ -70,9 +70,9 @@ export default postToolUseHook(
       logger.info('wiki check failed', { file: filePath, status: result.status });
 
       return postToolUseOutput({
-        systemMessage: output,
+        systemMessage: `<wiki>\n${output}\n</wiki>`,
         hookSpecificOutput: {
-          additionalContext: output
+          additionalContext: `<wiki>\n${output}\n</wiki>`
         }
       });
     } catch {
