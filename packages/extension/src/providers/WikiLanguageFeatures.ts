@@ -9,6 +9,8 @@
  * @summary Editor language features for wiki files.
  */
 
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { getSourceArgs } from '../utils/sourceMode.js';
 import { runWikiCommand } from '../utils/wikiBinary.js';
@@ -137,6 +139,23 @@ export class WikiLanguageFeatures {
     for (const ns of all) {
       if (uri.fsPath.startsWith(ns.absPath)) {
         return true;
+      }
+    }
+
+    // When the namespace cache is still populating, fall back to a synchronous
+    // parent-directory walk looking for wiki.toml. This catches peer-namespace
+    // files (e.g. mesh/) that would otherwise be missed by the hardcoded wiki/ prefix.
+    {
+      let dir = path.dirname(uri.fsPath);
+      const workspaceRoot = this._workspaceRoot();
+      while (workspaceRoot != null && dir.startsWith(workspaceRoot)) {
+        if (fs.existsSync(path.join(dir, 'wiki.toml'))) {
+          return true;
+        }
+        if (dir === workspaceRoot) break;
+        const parentDir = path.dirname(dir);
+        if (parentDir === dir) break; // Reached filesystem root
+        dir = parentDir;
       }
     }
 
