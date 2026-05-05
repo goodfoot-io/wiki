@@ -16,6 +16,11 @@ if [ -x "$ORIGINAL_HOOK" ]; then
   fi
 fi
 
+if command -v git-mesh >/dev/null 2>&1; then
+  echo "$STDIN_DATA" | git mesh rewrite
+  git mesh stale --compact --auto-follow --no-exit-code
+fi
+
 # Log file path baked at installation time; env var takes precedence at runtime
 export CARDS_GIT_WORKSPACE_REPO_HOOKS_LOG_FILE="${CARDS_GIT_WORKSPACE_REPO_HOOKS_LOG_FILE:-/home/node/wiki/.cards/logs/git-workspace-repo-hooks.log}"
 
