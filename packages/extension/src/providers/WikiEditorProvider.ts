@@ -14,6 +14,7 @@ import { render } from '../rendering/MarkdownRenderer.js';
 import { runWikiCommand } from '../utils/wikiBinary.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
 import type { HostMessage, RefEntry, WebviewMessage } from '../webviews/wiki/types.js';
+import type { NamespaceCache } from '../wiki/namespaceCache.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -40,7 +41,8 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
   constructor(
     private readonly _extensionUri: vscode.Uri,
     private readonly _binaryManager: WikiBinaryManager,
-    private readonly _context: vscode.ExtensionContext
+    private readonly _context: vscode.ExtensionContext,
+    private readonly _namespaceCache?: NamespaceCache
   ) {}
 
   /**
@@ -95,6 +97,18 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
   isWikiFile(uri: vscode.Uri): boolean {
     if (uri.fsPath.endsWith('.wiki.md')) return true;
     if (!uri.fsPath.endsWith('.md')) return false;
+
+    // Check against all known wiki roots (multi-wiki support).
+    if (this._namespaceCache != null) {
+      const all = this._namespaceCache.getAll();
+      for (const ns of all) {
+        if (uri.fsPath.startsWith(ns.absPath)) {
+          return true;
+        }
+      }
+    }
+
+    // Fall back to legacy single-wiki default path.
     const wikiDir = this._wikiDir();
     if (wikiDir == null) return false;
     return uri.fsPath.startsWith(wikiDir);
