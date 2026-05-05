@@ -12,6 +12,7 @@
 import * as vscode from 'vscode';
 import { wikiQuickPick } from './commands/wikiQuickPick.js';
 import { WikiEditorProvider } from './providers/WikiEditorProvider.js';
+import { WikiLanguageFeatures } from './providers/WikiLanguageFeatures.js';
 import { WikiBinaryManager, wasManagedInstall } from './utils/wikiInstaller.js';
 import { attributeFileToNamespace } from './wiki/attribution.js';
 import { NamespaceCache } from './wiki/namespaceCache.js';
@@ -52,6 +53,12 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(diagnosticsCollection);
 
   const namespaceCache = new NamespaceCache(binaryManager, diagnosticsCollection);
+
+  // ---------------------------------------------------------------------------
+  // Language feature providers (completions, hover, diagnostics, references, rename)
+  // ---------------------------------------------------------------------------
+  const languageFeatures = new WikiLanguageFeatures(binaryManager, namespaceCache);
+  context.subscriptions.push(...languageFeatures.register());
 
   const provider = new WikiEditorProvider(context.extensionUri, binaryManager, context, namespaceCache);
 

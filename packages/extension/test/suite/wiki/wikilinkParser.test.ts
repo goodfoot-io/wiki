@@ -9,21 +9,48 @@
  */
 
 import * as assert from 'node:assert';
+import { parseQualifiedWikilink } from '../../../src/wiki/wikilinkParser.js';
 
 describe('parseQualifiedWikilink', () => {
-  it.skip('parses [[ns:Title]] into namespace and title', () => {
-    assert.fail('Not Implemented');
+  it('parses [[ns:Title]] into namespace and title', () => {
+    const result = parseQualifiedWikilink('ns:Title');
+    assert.strictEqual(result.namespace, 'ns');
+    assert.strictEqual(result.title, 'Title');
+    assert.strictEqual(result.fragment, null);
   });
 
-  it.skip('parses [[ns:Title#fragment]] into namespace, title, and fragment', () => {
-    assert.fail('Not Implemented');
+  it('parses [[ns:Title#fragment]] into namespace, title, and fragment', () => {
+    const result = parseQualifiedWikilink('ns:Title#fragment');
+    assert.strictEqual(result.namespace, 'ns');
+    assert.strictEqual(result.title, 'Title');
+    assert.strictEqual(result.fragment, 'fragment');
   });
 
-  it.skip('parses bare [[Title]] with null namespace', () => {
-    assert.fail('Not Implemented');
+  it('parses bare [[Title]] with null namespace', () => {
+    const result = parseQualifiedWikilink('Title');
+    assert.strictEqual(result.namespace, null);
+    assert.strictEqual(result.title, 'Title');
+    assert.strictEqual(result.fragment, null);
   });
 
-  it.skip('parses [[Title|Display]] pipe syntax', () => {
-    assert.fail('Not Implemented');
+  it('parses [[Title|Display]] pipe syntax', () => {
+    const result = parseQualifiedWikilink('Title|Display');
+    assert.strictEqual(result.namespace, null);
+    assert.strictEqual(result.title, 'Title');
+    assert.strictEqual(result.fragment, null);
+  });
+
+  it('parses [[ns:Title|Display]] with namespace and pipe', () => {
+    const result = parseQualifiedWikilink('ns:Title|Display');
+    assert.strictEqual(result.namespace, 'ns');
+    assert.strictEqual(result.title, 'Title');
+    assert.strictEqual(result.fragment, null);
+  });
+
+  it('parses [[Title#fragment|Display]] with fragment and pipe', () => {
+    const result = parseQualifiedWikilink('Title#fragment|Display');
+    assert.strictEqual(result.namespace, null);
+    assert.strictEqual(result.title, 'Title');
+    assert.strictEqual(result.fragment, 'fragment');
   });
 });
