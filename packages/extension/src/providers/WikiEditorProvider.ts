@@ -11,6 +11,7 @@ import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { render } from '../rendering/MarkdownRenderer.js';
+import { getSourceArgs } from '../utils/sourceMode.js';
 import { runWikiCommand } from '../utils/wikiBinary.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
 import type { HostMessage, RefEntry, ResolvedRefEntry, WebviewMessage } from '../webviews/wiki/types.js';
@@ -317,19 +318,20 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     try {
       const handle = await this._binaryManager.ready();
       const ns = this._namespaceCache?.resolveNamespaceForFile(uri.fsPath) ?? 'default';
+      const sourceArgs = getSourceArgs();
       // Read file content, run summary, and pre-fetch tooltip refs concurrently.
       // refs is best-effort: its failure is caught inline so it never rejects the Promise.all.
       [text, summaryResult, refsResult] = await Promise.all([
         this._readDocumentText(uri),
         runWikiCommand(
           handle.path,
-          ['-n', ns, 'summary', uri.fsPath, '--format', 'json'],
+          [...sourceArgs, '-n', ns, 'summary', uri.fsPath, '--format', 'json'],
           undefined,
           this._workspaceRoot()
         ),
         runWikiCommand(
           handle.path,
-          ['-n', ns, 'refs', uri.fsPath, '--format', 'json'],
+          [...sourceArgs, '-n', ns, 'refs', uri.fsPath, '--format', 'json'],
           undefined,
           this._workspaceRoot()
         ).catch(() => null)
@@ -403,9 +405,10 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
       resolvedPageName = pageName;
     }
 
+    const sourceArgs = getSourceArgs();
     const result = await runWikiCommand(
       handle.path,
-      ['-n', ns, 'summary', resolvedPageName, '--format', 'json'],
+      [...sourceArgs, '-n', ns, 'summary', resolvedPageName, '--format', 'json'],
       undefined,
       this._workspaceRoot()
     );

@@ -10,6 +10,7 @@
  */
 
 import * as vscode from 'vscode';
+import { getSourceArgs } from '../utils/sourceMode.js';
 import { runWikiCommand } from '../utils/wikiBinary.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
 import type { NamespaceCache } from '../wiki/namespaceCache.js';
@@ -223,7 +224,8 @@ export class WikiLanguageFeatures {
     const wsRoot = this._workspaceRoot();
     try {
       const handle = await this._binaryManager.ready();
-      const result = await runWikiCommand(handle.path, args, undefined, wsRoot);
+      const sourceArgs = getSourceArgs();
+      const result = await runWikiCommand(handle.path, [...sourceArgs, ...args], undefined, wsRoot);
       if (result.exitCode !== 0 || result.stdout.trim() === '') {
         return null;
       }

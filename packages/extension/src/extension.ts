@@ -11,6 +11,7 @@
 
 import * as vscode from 'vscode';
 import { wikiQuickPick } from './commands/wikiQuickPick.js';
+import { wikiScaffold } from './commands/wikiScaffold.js';
 import { WikiEditorProvider } from './providers/WikiEditorProvider.js';
 import { WikiLanguageFeatures } from './providers/WikiLanguageFeatures.js';
 import { WikiBinaryManager, wasManagedInstall } from './utils/wikiInstaller.js';
@@ -142,6 +143,8 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand('wiki.search', () => wikiQuickPick(binaryManager, namespaceCache)),
+
+    vscode.commands.registerCommand('wiki.scaffold', () => wikiScaffold(binaryManager)),
 
     vscode.commands.registerCommand('wiki.retryInstall', async () => {
       try {

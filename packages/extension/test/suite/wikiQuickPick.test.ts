@@ -28,6 +28,11 @@ describe('wikiQuickPick', () => {
     assert.ok(commands.includes('wiki.retryInstall'), 'wiki.retryInstall not registered');
   });
 
+  it('wiki.scaffold command is registered', async () => {
+    const commands = await vscode.commands.getCommands();
+    assert.ok(commands.includes('wiki.scaffold'), 'wiki.scaffold not registered');
+  });
+
   describe('wiki namespaces', () => {
     it('isNamespaceMode detects @-prefix without space', () => {
       assert.strictEqual(isNamespaceMode('@'), true);
@@ -72,8 +77,4 @@ describe('wikiQuickPick', () => {
       assert.strictEqual(filtered.length, 2);
     });
   });
-
-  it('wiki.scaffold command is registered', async () => {
-    const commands = await vscode.commands.getCommands();
-    assert.ok(commands.includes('wiki.scaffold'), 'wiki.scaffold not registered');
-  });
+});

@@ -29,6 +29,16 @@
           "type": "boolean",
           "default": false,
           "description": "Allow the extension to use a wiki binary already on PATH instead of the managed install. Intended for development and advanced setups."
+        },
+        "wiki.sourceMode": {
+          "type": "string",
+          "enum": [
+            "worktree",
+            "index",
+            "head"
+          ],
+          "default": "worktree",
+          "description": "Source mode for wiki CLI commands. 'worktree' reads from the filesystem, 'index' reads from the git staging area, 'head' reads from the HEAD commit."
         }
       }
     },
@@ -67,6 +77,11 @@
       {
         "command": "wiki.retryInstall",
         "title": "Retry CLI Install",
+        "category": "Wiki"
+      },
+      {
+        "command": "wiki.scaffold",
+        "title": "Scaffold Mesh from Fragment Links",
         "category": "Wiki"
       }
     ],

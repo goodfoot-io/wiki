@@ -12,6 +12,7 @@
  */
 
 import * as vscode from 'vscode';
+import { getSourceArgs } from '../utils/sourceMode.js';
 import { runWikiCommand } from '../utils/wikiBinary.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
 import type { NamespaceCache } from '../wiki/namespaceCache.js';
@@ -166,8 +167,14 @@ function parseNamespaceQuery(query: string, cache?: NamespaceCache): { ns: strin
  */
 async function loadAllPages(binaryPath: string, cache?: NamespaceCache): Promise<WikiQuickPickItem[]> {
   const ns = deriveNamespace(cache);
+  const sourceArgs = getSourceArgs();
   try {
-    const result = await runWikiCommand(binaryPath, ['-n', ns, 'list', '--format', 'json'], undefined, workspaceRoot());
+    const result = await runWikiCommand(
+      binaryPath,
+      [...sourceArgs, '-n', ns, 'list', '--format', 'json'],
+      undefined,
+      workspaceRoot()
+    );
     if (result.exitCode !== 0) {
       const message = result.stderr.trim() || `wiki list exited with code ${result.exitCode}`;
       console.warn('[wiki-extension] wiki list failed:', message);
@@ -232,10 +239,11 @@ async function searchPages(
   cache?: NamespaceCache
 ): Promise<WikiQuickPickItem[]> {
   const { ns, cleanQuery } = parseNamespaceQuery(query, cache);
+  const sourceArgs = getSourceArgs();
   try {
     const result = await runWikiCommand(
       binaryPath,
-      ['-n', ns, cleanQuery, '--format', 'json'],
+      [...sourceArgs, '-n', ns, cleanQuery, '--format', 'json'],
       signal,
       workspaceRoot()
     );
