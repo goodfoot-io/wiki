@@ -44,6 +44,11 @@ export default postToolUseHook(
       if (!output) return null;
 
       if (output.includes('mesh_uncovered')) {
+        const filtered = output
+          .split('\n')
+          .filter((line) => !line.includes('mesh_uncovered'))
+          .join('\n')
+          .trim();
         try {
           const scaffoldResult = spawnSync('wiki', ['scaffold', filePath], {
             cwd: input.cwd,
@@ -51,13 +56,16 @@ export default postToolUseHook(
             timeout: 25000,
             env: { ...process.env }
           });
-          if (scaffoldResult.status === 0 && scaffoldResult.stdout) {
-            output = [output, scaffoldResult.stdout.trim()].filter(Boolean).join('\n\n');
-          }
+          const scaffoldOutput =
+            scaffoldResult.status === 0 && scaffoldResult.stdout ? scaffoldResult.stdout.trim() : '';
+          output = [filtered, scaffoldOutput].filter(Boolean).join('\n\n');
         } catch {
           logger.warn('wiki scaffold unavailable; using check output as-is');
+          output = filtered;
         }
       }
+
+      if (!output) return null;
 
       logger.info('wiki check failed', { file: filePath, status: result.status });
 

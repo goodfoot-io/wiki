@@ -49,8 +49,9 @@ pub(crate) fn augment(links: &[FragmentLink], content: &str) -> Vec<AugmentedLin
                 .get(link.source_line.saturating_sub(1))
                 .cloned()
                 .unwrap_or_default();
-            let (section_heading, section_opening, _degenerate, _had_code_lead, section_opening_lines) =
+            let (section_heading, section_opening, _degenerate, _had_code_lead, _) =
                 extract_section_opening(meta.as_ref(), &raw_lines, &scrubbed_lines);
+            let section_opening_lines = link_context_window(&raw_lines, link.source_line);
             AugmentedLink {
                 link: link.clone(),
                 heading_chain,
@@ -60,6 +61,22 @@ pub(crate) fn augment(links: &[FragmentLink], content: &str) -> Vec<AugmentedLin
             }
         })
         .collect()
+}
+
+/// Return the source line containing the link plus one line above and one below,
+/// preserving original markup. `source_line` is 1-based; out-of-range neighbors
+/// are simply omitted (not padded).
+fn link_context_window(raw_lines: &[&str], source_line: usize) -> Vec<String> {
+    if raw_lines.is_empty() || source_line == 0 {
+        return Vec::new();
+    }
+    let idx = source_line.saturating_sub(1);
+    if idx >= raw_lines.len() {
+        return Vec::new();
+    }
+    let start = idx.saturating_sub(1);
+    let end = (idx + 1).min(raw_lines.len() - 1);
+    raw_lines[start..=end].iter().map(|s| s.to_string()).collect()
 }
 
 /// (heading_level, heading_line_idx_0based, heading_text) for the deepest heading
