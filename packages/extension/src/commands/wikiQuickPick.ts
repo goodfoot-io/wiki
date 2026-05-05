@@ -253,6 +253,7 @@ export async function wikiQuickPick(binaryManager: WikiBinaryManager): Promise<v
 
   // Namespace items loaded lazily on first @-prefix input.
   let namespaceItems: WikiQuickPickItem[] = [];
+  let namespacesLoaded = false;
 
   let activeAbort: AbortController | undefined;
 
@@ -267,11 +268,13 @@ export async function wikiQuickPick(binaryManager: WikiBinaryManager): Promise<v
     // @-prefix without space: namespace list mode — filter namespaces client-side.
     if (isNamespaceMode(query)) {
       void (async () => {
-        if (namespaceItems.length === 0) {
+        if (!namespacesLoaded) {
           qp.busy = true;
+          namespacesLoaded = true;
           namespaceItems = await loadNamespaces(binaryPath);
           qp.busy = false;
         }
+        if (!isNamespaceMode(qp.value)) return;
         const filter = query.slice(1).toLowerCase();
         qp.items = namespaceItems.filter((item) => item.label.toLowerCase().includes(filter));
       })();
@@ -283,7 +286,7 @@ export async function wikiQuickPick(binaryManager: WikiBinaryManager): Promise<v
     qp.busy = true;
 
     void (async () => {
-      const results = await searchPages(binaryPath, query.trim(), abort.signal);
+      const results = await searchPages(binaryPath, query.trimStart(), abort.signal);
       if (!abort.signal.aborted) {
         qp.items = results;
         qp.busy = false;
@@ -296,7 +299,7 @@ export async function wikiQuickPick(binaryManager: WikiBinaryManager): Promise<v
     if (selected == null) return;
 
     // NamespaceList mode: prefill input and keep picker open.
-    if (isNamespaceMode(qp.value)) {
+    if (isNamespaceMode(qp.value) && namespaceItems.length > 0) {
       qp.value = `@${selected.label} `;
       return;
     }
