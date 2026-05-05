@@ -22,6 +22,9 @@ import { NamespaceCache } from '../../../src/wiki/namespaceCache.js';
  *
  * Uses a double type assertion because WikiBinaryManager has private members
  * which prevent plain object literals from being structurally assignable.
+ *
+ * @param binaryPath - Absolute path to the wiki CLI binary the manager should resolve.
+ * @returns A minimal WikiBinaryManager that always returns a ready handle for the given path.
  */
 function createTestManager(binaryPath: string): WikiBinaryManager {
   const handle = { path: binaryPath, source: 'path' as const };
@@ -36,6 +39,10 @@ function createTestManager(binaryPath: string): WikiBinaryManager {
 /**
  * Write a fixture binary at `binaryPath` that outputs `outputJson` on stdout
  * and exits with `exitCode`.
+ *
+ * @param binaryPath - Absolute path where the fixture script should be written.
+ * @param outputJson  - JSON string the fixture writes to stdout when executed.
+ * @param exitCode     - Exit code the fixture process returns (default 0).
  */
 function writeFixture(binaryPath: string, outputJson: string, exitCode = 0): void {
   fs.writeFileSync(
@@ -54,6 +61,10 @@ process.exit(${exitCode});
 /**
  * Create a NamespaceCache, provision a fixture binary that outputs `entries`,
  * and call refresh().
+ *
+ * @param tempDir - Temporary directory for the fixture binary.
+ * @param entries - Namespace entries the fixture binary writes to stdout.
+ * @returns A refreshed NamespaceCache populated with the given entries.
  */
 async function createCache(
   tempDir: string,
