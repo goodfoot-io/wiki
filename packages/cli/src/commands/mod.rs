@@ -447,6 +447,26 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_link_path_bare_image_path_resolves_page_relative() {
+        // A bare path like `images/screenshot.png` in
+        // `![screenshot](images/screenshot.png)` must resolve relative to the
+        // source page's directory, not the repo root.
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path();
+        let source = root.join("marketing/design/pages/example.md");
+        let image_dir = root.join("marketing/design/pages/images");
+        fs::create_dir_all(&image_dir).expect("create image dir");
+        fs::write(image_dir.join("screenshot.png"), "fake").expect("write image");
+
+        let result = resolve_link_path("images/screenshot.png", &source, root);
+        assert_eq!(
+            result,
+            PathBuf::from("marketing/design/pages/images/screenshot.png"),
+            "bare image path must resolve relative to the source page's directory, not the repo root"
+        );
+    }
+
+    #[test]
     fn test_looks_like_path_with_slash() {
         assert!(looks_like_path("wiki/page.md"));
         assert!(looks_like_path("./wiki/page.md"));
