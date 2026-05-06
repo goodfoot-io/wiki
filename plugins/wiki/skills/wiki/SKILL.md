@@ -17,8 +17,10 @@ wiki "auth policy"          # ranked search; the default subcommand
 
 A file is a wiki page if **either**:
 
-- it has the `*.wiki.md` extension, anywhere in the repo, **or**
-- it is an `*.md` file under a directory whose ancestor contains a `wiki.toml`.
+- it lives under a directory tree whose ancestor contains a `wiki.toml` — then a plain `*.md` extension is enough (no `namespace` frontmatter needed; the namespace is inherited from the `wiki.toml` root), **or**
+- it lives outside any such tree — then it must use the `*.wiki.md` extension. A `namespace` frontmatter field is optional and assigns the page to a peer wiki.
+
+In short: `*.md` is for pages under a `wiki.toml`; `*.wiki.md` is for wiki pages anywhere else (e.g. a package `README.wiki.md`).
 
 ## Frontmatter
 
@@ -39,14 +41,30 @@ namespace: platform   # *.wiki.md only — assigns the page to a peer wiki
 - `title` may not be a reserved command name: `check`, `pin`, `stale`, `links`, `list`, `summary`, `print`. (`wiki <title>` dispatches to the subcommand if it collides.)
 - `namespace` is meaningful **only on `*.wiki.md` files**; pages under a `wiki.toml` inherit their namespace from the root.
 
+## Default namespace vs named namespaces
+
+A repo has at most **one default (anonymous) namespace** — the wiki whose `wiki.toml` omits the `namespace` field. All other wikis are **named peers** (`namespace = "marketing"`, etc.).
+
+- An empty `wiki.toml` (or one without a `namespace` key) → that wiki **is** the default namespace. Don't add `namespace = "wiki"` "to name it" — that demotes it to a named peer and breaks bare `[[Title]]` links from any page that was relying on the default.
+- The literal value `namespace = "default"` is **reserved and rejected**. Omit the field to declare the default.
+- Bare `[[Title]]` links resolve within the current page's namespace; the default namespace has no special "fallback" status for cross-namespace lookups.
+- `*.wiki.md` files outside any `wiki.toml` tree may set `namespace` to join a named peer; omitting it places them in the default namespace.
+
 ## Wikilinks
 
 ```markdown
 See [[Authorization]] or [[AuthZ]] for the policy model.
 Jump to [[Authorization#Role checks]] for the heading.
+See [[platform:Authorization]] to link into a peer namespace.
 ```
 
-Resolution is by `title` or any `alias`, case-insensitive. `wiki check` verifies the target exists, is unique, and that any `#Heading` resolves.
+Resolution is by `title` or any `alias`, case-insensitive, **within a single namespace**. `wiki check` verifies the target exists, is unique, and that any `#Heading` resolves.
+
+### Namespaces and cross-namespace links
+
+Each `wiki.toml` (and each `*.wiki.md` file's `namespace`) defines a separate corpus. A bare `[[Title]]` only resolves inside the current page's namespace. To link into a peer wiki, qualify with `[[ns:Title]]` — e.g. `[[marketing:Pricing]]` from the `wiki` namespace.
+
+**Common misconception:** changing a page from `*.md` to `*.wiki.md` does **not** make it "globally accessible" or fix cross-namespace broken links. The extension only governs whether a file *outside* a `wiki.toml` tree counts as a wiki page; it has no effect on namespace membership or wikilink resolution. A page already under a `wiki.toml` keeps its inherited namespace regardless of extension. Fix cross-namespace broken wikilinks with `[[ns:Title]]` syntax (or by consolidating namespaces), not by renaming files.
 
 ## Fragment links — prefer line ranges
 
