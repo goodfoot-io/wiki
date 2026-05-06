@@ -65,32 +65,6 @@ pub fn resolve_link_path(link_path: &str, source_file: &Path, repo_root: &Path) 
         Some(std::path::Component::CurDir) | Some(std::path::Component::ParentDir)
     );
     if !is_explicitly_relative {
-        // Try resolving as page-relative first.  If the file exists at the
-        // page-relative path, return it.  If not, fall back to repo-relative
-        // (the original default) so that bare repo-relative paths like
-        // `packages/wiki/src/commands/serve.rs` continue to work when the
-        // page-relative path does not correspond to an existing file.
-        let source_dir = source_file.parent().unwrap_or_else(|| Path::new("."));
-        let combined = source_dir.join(path);
-        let mut components = Vec::new();
-        for component in combined.components() {
-            match component {
-                std::path::Component::ParentDir => {
-                    components.pop();
-                }
-                std::path::Component::CurDir => {}
-                _ => {
-                    components.push(component);
-                }
-            }
-        }
-        let normalized: PathBuf = components.into_iter().collect();
-        if normalized.exists() {
-            return normalized
-                .strip_prefix(repo_root)
-                .map(|p| p.to_path_buf())
-                .unwrap_or(normalized);
-        }
         return PathBuf::from(link_path);
     }
 
@@ -473,22 +447,19 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_link_path_bare_image_path_resolves_page_relative() {
-        // A bare path like `images/screenshot.png` in
-        // `![screenshot](images/screenshot.png)` must resolve relative to the
-        // source page's directory, not the repo root.
+    fn test_resolve_link_path_bare_path_stays_repo_relative() {
+        // Bare paths (without `./` or `../` prefix) are repo-relative by
+        // convention.  They are NOT rewritten relative to the source page's
+        // directory.  The `wiki check` diagnostic guides users to use the
+        // correct repo-relative path when the file is not found.
         let dir = TempDir::new().expect("tempdir");
         let root = dir.path();
         let source = root.join("marketing/design/pages/example.md");
-        let image_dir = root.join("marketing/design/pages/images");
-        fs::create_dir_all(&image_dir).expect("create image dir");
-        fs::write(image_dir.join("screenshot.png"), "fake").expect("write image");
-
         let result = resolve_link_path("images/screenshot.png", &source, root);
         assert_eq!(
             result,
-            PathBuf::from("marketing/design/pages/images/screenshot.png"),
-            "bare image path must resolve relative to the source page's directory, not the repo root"
+            PathBuf::from("images/screenshot.png"),
+            "bare paths must stay repo-relative; the check diagnostic guides users to the correct path"
         );
     }
 

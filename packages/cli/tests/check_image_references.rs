@@ -91,26 +91,24 @@ fn make_wiki_page(title: &str, body: &str) -> String {
     )
 }
 
-// ── Bare image path (known bug) ───────────────────────────────────────────────
+// ── Bare image path (repo-relative guidance) ────────────────────────────────
 
-/// A bare image path like `images/screenshot.png` is treated as repo-relative
-/// by `resolve_link_path`, so the check reports "Missing File" even when the
-/// file exists at the page-relative path.
-///
-/// THIS TEST FAILS because the bug causes `wiki check` to exit 1.
-/// Once `resolve_link_path` is fixed to resolve bare paths from the page
-/// directory, this test will pass (exit 0).
+/// Bare paths (without `./` prefix) are repo-relative by convention.  When
+/// a bare path does not exist at the repo root, `wiki check` must report the
+/// error with guidance suggesting the correct repo-relative path.
 #[test]
-fn bare_image_path_should_not_produce_missing_file() {
+fn bare_image_path_reports_error_with_repo_relative_guidance() {
     let repo = TestRepo::new();
-    // Create a wiki with a page referencing an image via bare path:
+    // Page at wiki/design/pages/example.md references an image via bare path:
     //   `![screenshot](images/screenshot.png)`
     repo.create_file("wiki/wiki.toml", "");
     repo.create_file(
         "wiki/design/pages/example.md",
         &make_wiki_page("Example", "![screenshot](images/screenshot.png)"),
     );
-    // The image exists at the page-relative path
+    // The image exists at the page-relative path, but the bare path
+    // `images/screenshot.png` resolves to `<repo_root>/images/screenshot.png`,
+    // which does not exist.
     repo.create_file("wiki/design/pages/images/screenshot.png", "");
     repo.commit("init");
 
@@ -118,16 +116,20 @@ fn bare_image_path_should_not_produce_missing_file() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
-    // THIS ASSERTION FAILS because resolve_link_path treats bare paths as
-    // repo-relative.  It looks for `<repo_root>/images/screenshot.png`
-    // instead of `<repo_root>/wiki/design/pages/images/screenshot.png`.
     assert!(
-        out.status.success(),
-        "BUG: bare image path 'images/screenshot.png' should resolve from the \
-         page directory but resolve_link_path treats it as repo-relative.\n\
-         The file exists at 'wiki/design/pages/images/screenshot.png' but the \
-         check looks for it at '<repo_root>/images/screenshot.png'.\n\
+        !out.status.success(),
+        "bare path must produce an error because it resolves from repo root.\n\
          stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Paths without a `./` prefix"),
+        "error must explain the repo-relative resolution rule.\n\
+         stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("wiki/design/pages/images/screenshot.png"),
+        "error must suggest the correct repo-relative path.\n\
+         stdout:\n{stdout}"
     );
 }
 

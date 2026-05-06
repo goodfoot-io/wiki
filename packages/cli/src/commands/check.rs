@@ -473,13 +473,23 @@ fn collect_for_files(
                     if abs.is_dir() {
                         continue;
                     }
+                    let suggestion = {
+                        let page_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+                        let page_dir_rel = page_dir
+                            .strip_prefix(repo_root)
+                            .unwrap_or(page_dir);
+                        page_dir_rel.join(&link.path)
+                    };
                     diagnostics.push(CheckDiagnostic {
                         kind: "missing_file".into(),
                         file: path.display().to_string(),
                         line: link.source_line,
                         message: format!(
-                            "File `{}` not found. Check the path or update the link.",
-                            link.path
+                            "File `{}` not found. Paths without a `./` prefix are resolved from \
+                             the repository root, not from the page directory. Use \
+                             `{}` instead.",
+                            link.path,
+                            suggestion.display()
                         ),
                     });
                 }
