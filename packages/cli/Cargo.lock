@@ -4752,7 +4752,7 @@ dependencies = [
 
 [[package]]
 name = "wiki"
-version = "0.5.46"
+version = "0.5.48"
 dependencies = [
  "clap",
  "fs4",

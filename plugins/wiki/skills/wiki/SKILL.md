@@ -77,7 +77,7 @@ The config struct is in [config.ts](../packages/api/config.ts#L1-L42).
 
 Whole-file links (no `#L…` suffix) are valid but discouraged: coverage falls back to the `0-0` sentinel and you lose line-level drift signal.
 
-Path resolution is repo-relative from the wiki page. `http://` / `https://` links are not validated and don't participate in mesh coverage.
+Path resolution follows standard markdown: a bare path (`images/foo.png`) or `./` / `../` prefix resolves relative to the wiki page's directory; a leading `/` (e.g. `/packages/api/client.ts`) resolves from the repository root. `http://` / `https://` links are not validated and don't participate in mesh coverage.
 
 ## Validate: `wiki check`
 
