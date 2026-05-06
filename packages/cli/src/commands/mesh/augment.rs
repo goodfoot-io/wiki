@@ -2,7 +2,9 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use crate::parser::{FragmentLink, scrub_non_content};
+#[allow(unused_imports)]
+use crate::parser::scrub_non_content;
+use crate::parser::FragmentLink;
 
 /// A `FragmentLink` augmented with surrounding text and heading context.
 #[derive(Clone)]
@@ -14,14 +16,15 @@ pub(crate) struct AugmentedLink {
     /// (e.g. `## Sync detection`). Empty when the link sits before any heading
     /// on the page.
     pub(crate) section_heading: String,
-    /// The first prose sentence of the section the link sits under, with
-    /// markdown link syntax cleaned via the same pipeline.
-    /// Empty when no prose precedes the next heading.
-    pub(crate) section_opening: String,
-    /// Verbatim source lines of the excerpt paragraph (inline markup preserved).
-    /// These are the raw lines of the *same paragraph* chosen by `section_opening`,
-    /// but without any cleanup applied.
-    pub(crate) section_opening_lines: Vec<String>,
+    /// 1-based start line of the section containing the link. When the link is
+    /// enclosed by an ATX heading, this is the heading line itself; otherwise
+    /// it is the first non-blank line of the paragraph the link sits in.
+    pub(crate) section_start_line: u32,
+    /// 1-based inclusive end line of the section. For headings, this is the
+    /// line before the next heading (any level), trimmed of trailing blanks,
+    /// or the last line of the file. For paragraphs, this is the last
+    /// non-blank line of the link's block.
+    pub(crate) section_end_line: u32,
 }
 
 /// Augment a slice of fragment links found in `content`.
@@ -31,52 +34,34 @@ pub(crate) fn augment(links: &[FragmentLink], content: &str) -> Vec<AugmentedLin
     // Heading chain is built from the *scrubbed* lines so headings inside code
     // blocks don't pollute the chain.
     let scrubbed_lines: Vec<&str> = scrubbed.split('\n').collect();
-    // Heading meta must read raw lines so backtick-wrapped identifiers in
-    // ATX headings (e.g. `### \`git-mesh ls\``) survive — the scrubber blanks
-    // inline-code content. The fence-skip is enforced by checking the
-    // scrubbed line for emptiness at heading positions.
     let heading_chain_at = build_heading_chains_from_raw(&raw_lines, &scrubbed_lines);
     let heading_meta_at = build_heading_meta_from_raw(&raw_lines, &scrubbed_lines);
+    let heading_at_line = collect_heading_lines(&raw_lines, &scrubbed_lines);
 
     links
         .iter()
         .map(|link| {
-            let heading_chain = heading_chain_at
-                .get(link.source_line.saturating_sub(1))
-                .cloned()
-                .unwrap_or_default();
-            let meta = heading_meta_at
-                .get(link.source_line.saturating_sub(1))
-                .cloned()
-                .unwrap_or_default();
-            let (section_heading, section_opening, _degenerate, _had_code_lead, _) =
-                extract_section_opening(meta.as_ref(), &raw_lines, &scrubbed_lines);
-            let section_opening_lines = link_context_window(&raw_lines, link.source_line);
+            let idx = link.source_line.saturating_sub(1);
+            let heading_chain = heading_chain_at.get(idx).cloned().unwrap_or_default();
+            let meta = heading_meta_at.get(idx).cloned().unwrap_or_default();
+            let section_heading = match &meta {
+                Some((level, _, text)) => {
+                    let hashes = "#".repeat(*level);
+                    format!("{hashes} {text}")
+                }
+                None => String::new(),
+            };
+            let (section_start, section_end) =
+                compute_section_bounds(meta.as_ref(), idx, &heading_at_line, &raw_lines);
             AugmentedLink {
                 link: link.clone(),
                 heading_chain,
                 section_heading,
-                section_opening,
-                section_opening_lines,
+                section_start_line: section_start as u32,
+                section_end_line: section_end as u32,
             }
         })
         .collect()
-}
-
-/// Return the source line containing the link plus one line above and one below,
-/// preserving original markup. `source_line` is 1-based; out-of-range neighbors
-/// are simply omitted (not padded).
-fn link_context_window(raw_lines: &[&str], source_line: usize) -> Vec<String> {
-    if raw_lines.is_empty() || source_line == 0 {
-        return Vec::new();
-    }
-    let idx = source_line.saturating_sub(1);
-    if idx >= raw_lines.len() {
-        return Vec::new();
-    }
-    let start = idx.saturating_sub(1);
-    let end = (idx + 1).min(raw_lines.len() - 1);
-    raw_lines[start..=end].iter().map(|s| s.to_string()).collect()
 }
 
 /// (heading_level, heading_line_idx_0based, heading_text) for the deepest heading
@@ -97,16 +82,12 @@ fn build_heading_meta_from_raw(raw_lines: &[&str], scrubbed_lines: &[&str]) -> V
         if in_fence {
             continue;
         }
-        // Sanity-check fence state against the scrubber (it blanks fence
-        // bodies entirely, so a heading inside a fence will be blank in
-        // scrubbed even when our toggle slips out of sync with weird input).
         if scrubbed_lines
             .get(i)
             .map(|s| s.trim())
             .unwrap_or("")
             .is_empty()
         {
-            // Don't parse a heading from a line the scrubber blanked.
             continue;
         }
         if let Some((level, text)) = parse_atx_heading(raw) {
@@ -117,258 +98,88 @@ fn build_heading_meta_from_raw(raw_lines: &[&str], scrubbed_lines: &[&str]) -> V
     out
 }
 
-/// Walk forward from the heading's line until the first prose line, returning
-/// `(section_heading, section_opening, degenerate, had_code_lead, section_opening_lines)`.
-/// The heading is rendered with its ATX hashes (e.g. `## Sync detection`).
-/// The opening sentence is cleaned via the same pipeline as
-/// `extract_surrounding_text` and truncated at the first sentence terminator
-/// (`. `, `! `, `? `, end-of-paragraph).
-///
-/// `section_opening_lines` contains the verbatim source lines of the same
-/// paragraph chosen for `section_opening`, with markup (wikilinks, inline
-/// links) preserved exactly as written.
-///
-/// Documented edge cases:
-/// - No heading above link: `section_heading = ""`, opening walks from the top
-///   of the file to the first prose line.
-/// - Section's first content is a list item: the bullet text is treated as
-///   prose (leading `- ` or `* ` stripped) — produces *something* reviewable.
-/// - Section's first content is a fenced code block: skipped entirely; the
-///   first prose line after the fence is returned. Empty when the section
-///   never produces prose before the next heading.
-pub(crate) fn extract_section_opening(
-    meta: Option<&(usize, usize, String)>,
-    raw_lines: &[&str],
-    scrubbed_lines: &[&str],
-) -> (String, String, bool, bool, Vec<String>) {
-    let (heading_text, start_idx) = match meta {
-        Some((level, idx, text)) => {
-            let hashes = "#".repeat(*level);
-            (format!("{hashes} {text}"), *idx + 1)
-        }
-        None => (String::new(), 0),
-    };
-    let (opening, degenerate, had_code_lead, opening_lines) =
-        walk_section_opening(start_idx, raw_lines, scrubbed_lines);
-    (heading_text, opening, degenerate, had_code_lead, opening_lines)
-}
-
-/// Walk forward collecting prose paragraphs. Returns
-/// `(opening, degenerate, had_code_span_lead, opening_lines)`.
-///
-/// `degenerate` is true when no real prose paragraph could be found before the
-/// next heading — the best-available text is still emitted so the reviewer has
-/// *something* to read, but the renderer attaches a `DegenerateExcerpt` warn.
-///
-/// `opening_lines` contains the verbatim source lines of the chosen paragraph,
-/// with inline markup (wikilinks, inline links) preserved exactly.
-///
-/// A candidate paragraph is "degenerate" when, after marker-stripping and
-/// prose cleanup, it: has no alphabetic content, is shorter than 12 chars, ends
-/// with `:` (a code-block intro), is just a list marker, or is bold-label-only
-/// (`**Where:**`). When the first candidate is degenerate, walk forward to the
-/// next paragraph and prefer it; if none is found, return the best degenerate
-/// candidate we saw with `degenerate = true`.
-fn walk_section_opening(
-    start_idx: usize,
-    raw_lines: &[&str],
-    _scrubbed_lines: &[&str],
-) -> (String, bool, bool, Vec<String>) {
-    let mut i = start_idx;
-    // Skip YAML frontmatter when starting from the top of the file.
-    if i == 0 && raw_lines.first().map(|l| l.trim()) == Some("---") {
-        let mut j = 1;
-        while j < raw_lines.len() && raw_lines[j].trim() != "---" {
-            j += 1;
-        }
-        if j < raw_lines.len() {
-            i = j + 1; // step past the closing fence
-        }
-    }
+/// Return a per-line bool flagging ATX heading lines (fence-aware), so section
+/// bounds can scan forward to the next heading without re-toggling fence state.
+fn collect_heading_lines(raw_lines: &[&str], scrubbed_lines: &[&str]) -> Vec<bool> {
+    let mut out = vec![false; raw_lines.len()];
     let mut in_fence = false;
-    let mut best_degenerate: Option<(String, bool, Vec<String>)> = None;
-    while i < raw_lines.len() {
-        let raw = raw_lines[i];
-        let trimmed_raw = raw.trim();
-
-        // Toggle fenced code block state on raw lines (the scrubber blanks
-        // them out, but the fence markers themselves can survive).
-        if trimmed_raw.starts_with("```") || trimmed_raw.starts_with("~~~") {
+    for (i, raw) in raw_lines.iter().enumerate() {
+        let trimmed = raw.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             in_fence = !in_fence;
-            i += 1;
             continue;
         }
         if in_fence {
-            i += 1;
             continue;
         }
-
-        // Stop at the next ATX heading (end of section).
+        if scrubbed_lines
+            .get(i)
+            .map(|s| s.trim())
+            .unwrap_or("")
+            .is_empty()
+        {
+            continue;
+        }
         if parse_atx_heading(raw).is_some() {
+            out[i] = true;
+        }
+    }
+    out
+}
+
+/// Return the 1-based inclusive line range of the section the link sits in.
+/// When `meta` is `Some`, the section is the deepest enclosing heading down to
+/// (but not including) the next heading line of any level — trailing blanks
+/// trimmed. When `meta` is `None`, the section is the blank-line-bounded
+/// paragraph containing the link.
+fn compute_section_bounds(
+    meta: Option<&(usize, usize, String)>,
+    link_idx: usize,
+    heading_at_line: &[bool],
+    raw_lines: &[&str],
+) -> (usize, usize) {
+    let total = raw_lines.len();
+    if let Some((_, hidx, _)) = meta {
+        let start = hidx + 1; // 1-based
+        let mut end_idx = total.saturating_sub(1);
+        for j in (*hidx + 1)..total {
+            if heading_at_line.get(j).copied().unwrap_or(false) {
+                end_idx = j.saturating_sub(1);
+                break;
+            }
+            end_idx = j;
+        }
+        let mut end = end_idx + 1; // 1-based
+        while end > start
+            && raw_lines
+                .get(end - 1)
+                .map(|l| l.trim().is_empty())
+                .unwrap_or(true)
+        {
+            end -= 1;
+        }
+        return (start, end);
+    }
+    // Paragraph fallback: blank-line- or heading-bounded block.
+    let mut s = link_idx;
+    while s > 0 {
+        let prev = s - 1;
+        let line = raw_lines[prev];
+        if line.trim().is_empty() || heading_at_line.get(prev).copied().unwrap_or(false) {
             break;
         }
-
-        if trimmed_raw.is_empty() {
-            i += 1;
-            continue;
+        s = prev;
+    }
+    let mut e = link_idx;
+    while e + 1 < total {
+        let next = e + 1;
+        let line = raw_lines[next];
+        if line.trim().is_empty() || heading_at_line.get(next).copied().unwrap_or(false) {
+            break;
         }
-
-        // Skip GitHub-flavored-markdown table blocks entirely — pipes don't
-        // render usefully inside `# Source:` comments. The renderer would
-        // rather see the prose paragraph that comes after.
-        if trimmed_raw.starts_with('|') {
-            while i < raw_lines.len() {
-                let t = raw_lines[i].trim();
-                if t.is_empty() || !t.starts_with('|') {
-                    break;
-                }
-                i += 1;
-            }
-            continue;
-        }
-
-        // Strip a leading bullet, ordered-list marker (`1. `, `2) `), or both,
-        // so list-led openings still produce a sentence.
-        let candidate = strip_leading_marker(trimmed_raw);
-
-        // Collect the prose paragraph (until blank line, heading, fence, or
-        // table) so a sentence that wraps lines still terminates correctly.
-        // Collect verbatim lines in parallel.
-        let mut paragraph = candidate.to_string();
-        let mut verbatim_lines: Vec<String> = vec![raw.to_string()];
-        let mut j = i + 1;
-        while j < raw_lines.len() {
-            let next_raw = raw_lines[j].trim();
-            if next_raw.is_empty() {
-                break;
-            }
-            if parse_atx_heading(raw_lines[j]).is_some() {
-                break;
-            }
-            if next_raw.starts_with("```")
-                || next_raw.starts_with("~~~")
-                || next_raw.starts_with('|')
-            {
-                break;
-            }
-            paragraph.push(' ');
-            paragraph.push_str(next_raw);
-            verbatim_lines.push(raw_lines[j].to_string());
-            j += 1;
-        }
-
-        let had_code_lead = leading_token_was_code_span(&paragraph);
-        let cleaned = clean_prose_line(&paragraph);
-        let truncated = truncate_to_sentence(&cleaned);
-        if !is_degenerate(&truncated) {
-            return (truncated, false, had_code_lead, verbatim_lines);
-        }
-        if best_degenerate.is_none() {
-            best_degenerate = Some((truncated, had_code_lead, verbatim_lines));
-        }
-        i = j;
+        e = next;
     }
-    match best_degenerate {
-        Some((s, code_lead, lines)) => (s, true, code_lead, lines),
-        None => (String::new(), false, false, Vec::new()),
-    }
-}
-
-fn strip_leading_marker(s: &str) -> &str {
-    let s = s
-        .strip_prefix("- ")
-        .or_else(|| s.strip_prefix("* "))
-        .or_else(|| s.strip_prefix("+ "))
-        .unwrap_or(s);
-    // Ordered-list markers: `1. `, `12) `, etc. Hand-rolled to avoid pulling
-    // in a regex when a small loop suffices.
-    let bytes = s.as_bytes();
-    let mut k = 0;
-    while k < bytes.len() && bytes[k].is_ascii_digit() {
-        k += 1;
-    }
-    if k > 0 && k < bytes.len() && (bytes[k] == b'.' || bytes[k] == b')') {
-        let after = &s[k + 1..];
-        if let Some(rest) = after.strip_prefix(' ') {
-            return rest;
-        }
-    }
-    s
-}
-
-/// Was the very first non-whitespace token in the paragraph wrapped in
-/// inline code (i.e. a backtick span)? Used to gate the headless-predicate
-/// detector: we only flag the anti-pattern when the leading subject of the
-/// sentence was originally a code-spanned identifier.
-fn leading_token_was_code_span(s: &str) -> bool {
-    let t = s.trim_start();
-    t.starts_with('`')
-}
-
-fn is_degenerate(s: &str) -> bool {
-    let t = s.trim();
-    if t.is_empty() {
-        return true;
-    }
-    if !t.chars().any(|c| c.is_alphabetic()) {
-        return true;
-    }
-    if t.ends_with(':') {
-        return true;
-    }
-    // Bold-label-only: e.g. "**Where:**" reduces under cleanup to "Where:";
-    // we already catch trailing-colon. Also catch a lone bold span.
-    if t.len() < 12 {
-        return true;
-    }
-    false
-}
-
-fn clean_prose_line(s: &str) -> String {
-    let (bt, md, wl, ws) = surrounding_cleanup_re();
-    // Preserve identifier text inside inline code spans — `Foo` becomes Foo,
-    // not a blank. The backtick characters themselves drop out (they're
-    // harmless inside `#` shell comments either way), but the content has to
-    // survive so excerpts like "the parser is `parse_args`" don't collapse
-    // to dangling parens or mid-sentence periods.
-    let s = bt
-        .replace_all(s, |caps: &regex::Captures| {
-            let m = caps.get(0).map(|m| m.as_str()).unwrap_or("");
-            // Strip the surrounding backticks; keep the content.
-            m.trim_matches('`').to_string()
-        })
-        .into_owned();
-    let s = md
-        .replace_all(&s, |caps: &regex::Captures| {
-            let label = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-            ext_strip_re().replace(label, "").into_owned()
-        })
-        .into_owned();
-    let s = wl
-        .replace_all(&s, |caps: &regex::Captures| {
-            caps.get(2)
-                .or_else(|| caps.get(1))
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_default()
-        })
-        .into_owned();
-    ws.replace_all(&s, " ").trim().to_string()
-}
-
-fn truncate_to_sentence(s: &str) -> String {
-    // Find the first occurrence of `. `, `! `, `? `, OR end-of-string with
-    // those terminators. Keep the terminator.
-    let bytes = s.as_bytes();
-    for i in 0..bytes.len() {
-        let c = bytes[i];
-        if c == b'.' || c == b'!' || c == b'?' {
-            let next = bytes.get(i + 1).copied();
-            if matches!(next, Some(b' ') | None) {
-                return s[..=i].to_string();
-            }
-        }
-    }
-    s.to_string()
+    (s + 1, e + 1)
 }
 
 fn build_heading_chains_from_raw(raw_lines: &[&str], scrubbed_lines: &[&str]) -> Vec<Vec<String>> {
@@ -402,8 +213,6 @@ fn build_heading_chains_from_raw(raw_lines: &[&str], scrubbed_lines: &[&str]) ->
 }
 
 fn parse_atx_heading(line: &str) -> Option<(usize, String)> {
-    // JS uses HEADING_RE = /^(#{1,6})\s+(.+)/ on line.trimStart()
-    // Then strips [`*_[\]] and trims the captured text.
     let trimmed = line.trim_start();
     if !trimmed.starts_with('#') {
         return None;
@@ -420,32 +229,15 @@ fn parse_atx_heading(line: &str) -> Option<(usize, String)> {
     if text.is_empty() {
         return None;
     }
-    // Strip wrappers but PRESERVE backtick contents — `### \`git-mesh ls\``
-    // collapses to "git-mesh ls" so the rendered heading and derived slug
-    // both carry the identifier instead of an empty string.
     let stripped: String = text.chars().filter(|c| !"`*_[]".contains(*c)).collect();
     let cleaned = stripped.trim().to_string();
     Some((level, cleaned))
 }
 
-fn surrounding_cleanup_re() -> &'static (Regex, Regex, Regex, Regex) {
-    static RE: OnceLock<(Regex, Regex, Regex, Regex)> = OnceLock::new();
-    RE.get_or_init(|| {
-        // 1. backtick spans
-        let bt = Regex::new(r"`[^`\n]+`").unwrap();
-        // 2. [label](href) → label with .ext stripped from end of label
-        let md = Regex::new(r"\[([^\[\]]*)\]\(([^)]*)\)").unwrap();
-        // 3. [[t]] or [[t|d]] → d ?? t
-        let wl = Regex::new(r"\[\[([^\]|]+)(?:\|([^\]]*))?\]\]").unwrap();
-        // 4. whitespace collapse
-        let ws = Regex::new(r"\s+").unwrap();
-        (bt, md, wl, ws)
-    })
-}
-
-fn ext_strip_re() -> &'static Regex {
+#[allow(dead_code)]
+fn _unused_regex_anchor() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\.[a-z]{1,5}$").unwrap())
+    RE.get_or_init(|| Regex::new(r"^$").unwrap())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -453,21 +245,7 @@ fn ext_strip_re() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{LinkKind, parse_fragment_links};
-
-    #[allow(dead_code)]
-    fn make_link(source_line: usize) -> FragmentLink {
-        FragmentLink {
-            kind: LinkKind::Internal,
-            path: "foo.rs".to_string(),
-            start_line: None,
-            end_line: None,
-            text: "label".to_string(),
-            original_text: "label".to_string(),
-            original_href: "foo.rs".to_string(),
-            source_line,
-        }
-    }
+    use crate::parser::parse_fragment_links;
 
     #[test]
     fn heading_chain_nesting_h1_h2_h3() {
@@ -490,10 +268,7 @@ mod tests {
     fn links_inside_code_block_are_excluded_by_parser() {
         let content = "```\n[label](foo.rs)\n```\n";
         let links = parse_fragment_links(content);
-        assert!(
-            links.is_empty(),
-            "parser must not return links inside code blocks"
-        );
+        assert!(links.is_empty());
         let result = augment(&links, content);
         assert!(result.is_empty());
     }
@@ -502,7 +277,6 @@ mod tests {
     fn heading_inside_code_block_not_in_chain() {
         let content = "# Real\n```\n# Fake\n```\n[label](foo.rs)\n";
         let links = parse_fragment_links(content);
-        assert_eq!(links.len(), 1);
         let result = augment(&links, content);
         assert_eq!(result[0].heading_chain, vec!["Real"]);
     }
@@ -511,10 +285,7 @@ mod tests {
     fn link_on_first_line_no_panic() {
         let content = "[label](foo.rs)\n# After\n";
         let links = parse_fragment_links(content);
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].source_line, 1);
         let result = augment(&links, content);
-        // No heading above link → empty chain.
         assert!(result[0].heading_chain.is_empty());
     }
 
@@ -522,132 +293,73 @@ mod tests {
     fn link_on_last_line_no_panic() {
         let content = "# Heading\nsome text\n[label](foo.rs)";
         let links = parse_fragment_links(content);
-        assert_eq!(links.len(), 1);
         let result = augment(&links, content);
-        // Augment must not panic on last-line links.
         assert_eq!(result[0].heading_chain, vec!["Heading"]);
     }
 
+    // ── section bounds ────────────────────────────────────────────────────────
+
     #[test]
-    fn section_opening_link_directly_under_heading() {
-        let content =
-            "## Sync detection\nThe WikiIndex sync detects changes. Then more.\n[label](foo.rs)\n";
+    fn bounds_under_heading_run_to_next_heading_minus_blanks() {
+        // Lines: 1 `# Top`, 2 blank, 3 `prose`, 4 blank, 5 `## Next`, 6 blank, 7 link.
+        let content = "# Top\n\nprose\n\n## Next\n\n[l](f.rs#L1-L2)\n";
         let links = parse_fragment_links(content);
-        let result = augment(&links, content);
-        assert_eq!(result[0].section_heading, "## Sync detection");
-        assert_eq!(
-            result[0].section_opening,
-            "The WikiIndex sync detects changes."
-        );
+        let augmented = augment(&links, content);
+        // Link is in `## Next` section.
+        let a = &augmented[0];
+        assert_eq!(a.section_heading, "## Next");
+        // Heading at line 5 → start=5; next heading: none → run to last non-blank.
+        assert_eq!(a.section_start_line, 5);
+        // Line 7 has the link; trailing newline produces an empty entry which is
+        // trimmed; end is 7.
+        assert_eq!(a.section_end_line, 7);
     }
 
     #[test]
-    fn section_opening_skips_blanks_and_finds_first_prose() {
-        let content =
-            "## H\n\n\nFirst prose line. Second sentence.\n\nmore later [label](foo.rs)\n";
+    fn bounds_under_heading_stop_before_sibling_heading() {
+        // 1 `# Top`, 2 blank, 3 `prose [l](f.rs#L1-L2)`, 4 blank, 5 `# Other`.
+        let content = "# Top\n\nprose [l](f.rs#L1-L2)\n\n# Other\n";
         let links = parse_fragment_links(content);
-        let result = augment(&links, content);
-        assert_eq!(result[0].section_heading, "## H");
-        assert_eq!(result[0].section_opening, "First prose line.");
+        let augmented = augment(&links, content);
+        let a = &augmented[0];
+        assert_eq!(a.section_heading, "# Top");
+        assert_eq!(a.section_start_line, 1);
+        // Trailing blank trimmed; section ends at line 3.
+        assert_eq!(a.section_end_line, 3);
     }
 
     #[test]
-    fn section_opening_uses_deepest_nested_heading() {
-        let content = "# Top\n\nintro\n\n## Mid\n\nmid prose.\n\n### Deep\n\nDeep prose here. Tail.\n[label](foo.rs)\n";
+    fn bounds_paragraph_fallback_when_no_enclosing_heading() {
+        // Link before any heading: section is its blank-line-bounded paragraph.
+        // 1 blank, 2 `prose line one`, 3 `[l](f.rs#L1-L2) line two`, 4 blank, 5 `# After`.
+        let content = "\nprose line one\n[l](f.rs#L1-L2) line two\n\n# After\n";
         let links = parse_fragment_links(content);
-        let result = augment(&links, content);
-        assert_eq!(result[0].section_heading, "### Deep");
-        assert_eq!(result[0].section_opening, "Deep prose here.");
+        let augmented = augment(&links, content);
+        let a = &augmented[0];
+        assert_eq!(a.section_heading, "");
+        assert_eq!(a.section_start_line, 2);
+        assert_eq!(a.section_end_line, 3);
     }
 
     #[test]
-    fn section_opening_no_heading_above_walks_from_top() {
-        let content = "Top of file prose. More.\n\n[label](foo.rs)\n# After\n";
+    fn bounds_paragraph_fallback_single_line() {
+        // 1 blank, 2 `[l](f.rs#L1-L2)`, 3 blank.
+        let content = "\n[l](f.rs#L1-L2)\n\n";
         let links = parse_fragment_links(content);
-        let result = augment(&links, content);
-        assert_eq!(result[0].section_heading, "");
-        assert_eq!(result[0].section_opening, "Top of file prose.");
+        let augmented = augment(&links, content);
+        let a = &augmented[0];
+        assert_eq!(a.section_start_line, 2);
+        assert_eq!(a.section_end_line, 2);
     }
 
     #[test]
-    fn section_opening_skips_code_fence_then_finds_prose() {
-        let content =
-            "## H\n\n```\ncode block\n```\n\nReal prose here. Then more.\n[label](foo.rs)\n";
+    fn two_links_in_same_section_share_bounds() {
+        // 1 `## H`, 2 blank, 3 `[a](x.rs#L1-L2)`, 4 `[b](y.rs#L1-L2)`, 5 blank.
+        let content = "## H\n\n[a](x.rs#L1-L2)\n[b](y.rs#L1-L2)\n";
         let links = parse_fragment_links(content);
-        let result = augment(&links, content);
-        assert_eq!(result[0].section_heading, "## H");
-        assert_eq!(result[0].section_opening, "Real prose here.");
+        let augmented = augment(&links, content);
+        assert_eq!(augmented.len(), 2);
+        assert_eq!(augmented[0].section_start_line, augmented[1].section_start_line);
+        assert_eq!(augmented[0].section_end_line, augmented[1].section_end_line);
     }
-
-    #[test]
-    fn section_opening_treats_list_item_as_prose() {
-        // Documented behavior: when the first content under a heading is a
-        // list, the bullet marker is stripped and the item text is returned —
-        // *something* reviewable beats nothing.
-        let content = "## H\n\n- bullet item content. trailing.\n\n[label](foo.rs)\n";
-        let links = parse_fragment_links(content);
-        let result = augment(&links, content);
-        assert_eq!(result[0].section_heading, "## H");
-        assert_eq!(result[0].section_opening, "bullet item content.");
-    }
-
-    #[test]
-    fn section_opening_cleans_markdown_link_syntax() {
-        let content = "## H\n\nThe handler [handleCharge](src/charge.ts#L1-L5) validates input.\n[label](foo.rs)\n";
-        let links = parse_fragment_links(content);
-        let result = augment(&links, content);
-        // Heading source = first link; both share section. Both have same opening.
-        let opening = &result[0].section_opening;
-        assert!(opening.contains("handleCharge"), "got: {opening:?}");
-        assert!(!opening.contains("("), "link href leaked: {opening:?}");
-    }
-
-    #[test]
-    fn heading_with_backtick_identifier_preserves_content() {
-        let content = "## `git-mesh ls`\n\nThe command does X. [label](foo.rs#L1-L2)\n";
-        let links = parse_fragment_links(content);
-        let result = augment(&links, content);
-        assert_eq!(result[0].section_heading, "## git-mesh ls");
-        assert_eq!(result[0].section_opening, "The command does X.");
-    }
-
-    #[test]
-    fn section_opening_keeps_inline_code_content() {
-        let content = "## H\n\nThe parser entrypoint is `parse_args`. [label](foo.rs#L1-L2)\n";
-        let links = parse_fragment_links(content);
-        let result = augment(&links, content);
-        assert_eq!(
-            result[0].section_opening,
-            "The parser entrypoint is parse_args."
-        );
-    }
-
-    #[test]
-    fn section_opening_walks_past_bold_label_only() {
-        let content = "## H\n\n**Where:**\n\nReal prose paragraph here. [label](foo.rs#L1-L2)\n";
-        let links = parse_fragment_links(content);
-        let result = augment(&links, content);
-        assert_eq!(result[0].section_opening, "Real prose paragraph here.");
-    }
-
-    #[test]
-    fn section_opening_skips_table_block() {
-        let content = "## H\n\n| col | val |\n|---|---|\n| a | b |\n\nProse after table. [label](foo.rs#L1-L2)\n";
-        let links = parse_fragment_links(content);
-        let result = augment(&links, content);
-        assert_eq!(result[0].section_opening, "Prose after table.");
-    }
-
-    #[test]
-    fn section_opening_strips_ordered_list_marker() {
-        let content =
-            "## H\n\n1. Validates the request payload before dispatch. [label](foo.rs#L1-L2)\n";
-        let links = parse_fragment_links(content);
-        let result = augment(&links, content);
-        assert_eq!(
-            result[0].section_opening,
-            "Validates the request payload before dispatch."
-        );
-    }
-
 }

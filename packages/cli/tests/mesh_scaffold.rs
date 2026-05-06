@@ -342,15 +342,16 @@ fn mesh_scaffold_json_shape_and_fields() {
     assert_eq!(chain.len(), 1, "leading 'Billing' should be trimmed, got chain: {chain:?}");
     assert_eq!(chain[0], "Charge handler");
 
-    // sectionOpening must be an array.
-    assert!(mesh["sectionOpening"].is_array(), "sectionOpening must be array:\n{stdout}");
+    // sectionOpening field must be absent — heading chain alone identifies the section.
+    assert!(mesh.get("sectionOpening").is_none(), "sectionOpening field must be absent:\n{stdout}");
 
-    // anchors must be structured objects.
+    // anchors must be structured objects, with the page section anchor first.
     let anchors = mesh["anchors"].as_array().unwrap();
-    assert!(!anchors.is_empty());
-    assert!(anchors[0]["path"].is_string(), "anchor.path must be string:\n{stdout}");
+    assert!(anchors.len() >= 2, "anchors must contain page section + targets:\n{stdout}");
+    assert_eq!(anchors[0]["path"], "wiki/billing.md", "anchors[0] must be the page section anchor:\n{stdout}");
     assert!(anchors[0]["startLine"].is_number(), "anchor.startLine must be number:\n{stdout}");
     assert!(anchors[0]["endLine"].is_number(), "anchor.endLine must be number:\n{stdout}");
+    assert_eq!(anchors[1]["path"], "src/charge.rs", "anchors[1] must be the target:\n{stdout}");
 
     // Legacy fields must be absent.
     assert!(mesh["name"].is_null(), "legacy 'name' field must be absent:\n{stdout}");
@@ -536,20 +537,20 @@ fn mesh_scaffold_json_parse_error_page_not_in_pages() {
     // bad.md must be in parseErrors.
     let errors = v["parseErrors"].as_array().unwrap();
     assert!(
-        errors.iter().any(|e| e["path"].as_str().map_or(false, |p| p.contains("bad.md"))),
+        errors.iter().any(|e| e["path"].as_str().is_some_and(|p| p.contains("bad.md"))),
         "bad.md must appear in parseErrors:\n{stdout}"
     );
 
     // bad.md must NOT be in pages.
     let pages = v["pages"].as_array().unwrap();
     assert!(
-        !pages.iter().any(|p| p["path"].as_str().map_or(false, |pp| pp.contains("bad.md"))),
+        !pages.iter().any(|p| p["path"].as_str().is_some_and(|pp| pp.contains("bad.md"))),
         "bad.md must not appear in pages[]:\n{stdout}"
     );
 
     // clean.md must be in pages.
     assert!(
-        pages.iter().any(|p| p["path"].as_str().map_or(false, |pp| pp.contains("clean.md"))),
+        pages.iter().any(|p| p["path"].as_str().is_some_and(|pp| pp.contains("clean.md"))),
         "clean.md must appear in pages[]:\n{stdout}"
     );
 }
@@ -614,7 +615,7 @@ fn mesh_scaffold_json_unreadable_file_in_parse_errors() {
     // parseErrors must contain the unreadable file with category "unreadable".
     let errors = v["parseErrors"].as_array().unwrap();
     let unreadable_entry = errors.iter().find(|e| {
-        e["path"].as_str().map_or(false, |p| p.contains("unreadable.md"))
+        e["path"].as_str().is_some_and(|p| p.contains("unreadable.md"))
     });
     assert!(
         unreadable_entry.is_some(),
@@ -629,7 +630,7 @@ fn mesh_scaffold_json_unreadable_file_in_parse_errors() {
     // The unreadable file must NOT appear in pages[].
     let pages = v["pages"].as_array().unwrap();
     let bad_page = pages.iter().find(|p| {
-        p["path"].as_str().map_or(false, |pp| pp.contains("unreadable.md"))
+        p["path"].as_str().is_some_and(|pp| pp.contains("unreadable.md"))
     });
     assert!(
         bad_page.is_none(),

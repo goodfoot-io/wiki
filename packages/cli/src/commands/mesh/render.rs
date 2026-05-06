@@ -118,21 +118,8 @@ fn render_mesh_block(out: &mut String, m: &MeshDraft) {
     if !m.heading_chain.is_empty() {
         let chain_str = m.heading_chain.join(" → ");
         let _ = writeln!(out, "## {chain_str}");
+        out.push('\n');
     }
-    // When chain is empty, omit the ## line entirely.
-
-    // Multi-line verbatim blockquote.
-    if m.section_opening_lines.is_empty() {
-        // Fallback: emit cleaned single-line opening if verbatim lines unavailable.
-        if !m.section_opening.is_empty() {
-            let _ = writeln!(out, "> {}", m.section_opening);
-        }
-    } else {
-        for line in &m.section_opening_lines {
-            let _ = writeln!(out, "> {line}");
-        }
-    }
-    out.push('\n');
 
     let _ = writeln!(out, "```bash");
     let _ = writeln!(out, "git mesh add {} \\", m.slug);
@@ -161,7 +148,6 @@ mod tests {
         page_path: &str,
         slug: &str,
         heading_chain: Vec<&str>,
-        section_opening_lines: Vec<&str>,
         anchors: Vec<&str>,
     ) -> MeshDraft {
         MeshDraft {
@@ -169,9 +155,7 @@ mod tests {
             slug: slug.to_string(),
             anchors: anchors.iter().map(|s| s.to_string()).collect(),
             structured_anchors: Vec::new(),
-            section_opening: String::new(),
             heading_chain: heading_chain.iter().map(|s| s.to_string()).collect(),
-            section_opening_lines: section_opening_lines.iter().map(|s| s.to_string()).collect(),
             consolidated_count: 1,
         }
     }
@@ -191,24 +175,20 @@ mod tests {
             "wiki/page1.md",
             "wiki/foo",
             vec![],
-            vec!["Some text."],
-            vec!["wiki/page1.md", "src/a.rs#L1-L5"],
+            vec!["wiki/page1.md#L1-L5", "src/a.rs#L1-L5"],
         );
         let d2 = make_draft(
             "wiki/page2.md",
             "wiki/bar",
             vec![],
-            vec!["Other text."],
-            vec!["wiki/page2.md", "src/b.rs#L1-L5"],
+            vec!["wiki/page2.md#L1-L5", "src/b.rs#L1-L5"],
         );
         let mut titles = HashMap::new();
         titles.insert("wiki/page1.md".to_string(), Some("Page 1".to_string()));
         titles.insert("wiki/page2.md".to_string(), Some("Page 2".to_string()));
         let out = render_markdown(&[d1, d2], &titles, &[], &HashSet::new());
 
-        // Interior separator present.
         assert!(out.contains("\n---\n"), "interior separator missing:\n{out}");
-        // Terminal section (page 2) does not end with `---`.
         assert!(!out.trim_end().ends_with("---"), "terminal --- must be absent:\n{out}");
     }
 
@@ -218,24 +198,20 @@ mod tests {
             "wiki/page1.md",
             "wiki/foo",
             vec![],
-            vec!["Some text."],
-            vec!["wiki/page1.md", "src/a.rs#L1-L5"],
+            vec!["wiki/page1.md#L1-L5", "src/a.rs#L1-L5"],
         );
         let titles = HashMap::new();
         let out = render_markdown(&[d], &titles, &[], &HashSet::new());
         assert!(!out.contains("\n---\n"), "no separator for single page:\n{out}");
     }
 
-    // ── top-of-file link (empty chain) ────────────────────────────────────────
-
     #[test]
-    fn top_of_file_link_omits_heading_line() {
+    fn empty_chain_omits_heading_line() {
         let d = make_draft(
             "wiki/page.md",
             "wiki/foo",
-            vec![],  // empty chain (already trimmed)
-            vec!["Top of file prose."],
-            vec!["wiki/page.md", "src/a.rs#L1-L5"],
+            vec![],
+            vec!["wiki/page.md#L1-L5", "src/a.rs#L1-L5"],
         );
         let titles = HashMap::new();
         let out = render_markdown(&[d], &titles, &[], &HashSet::new());
@@ -243,53 +219,28 @@ mod tests {
             !out.contains("## "),
             "## line must be absent for empty chain:\n{out}"
         );
-        assert!(out.contains("> Top of file prose."), "blockquote missing:\n{out}");
+        // No blockquote — section_opening removed from output entirely.
+        assert!(!out.contains("> "), "blockquote must be absent:\n{out}");
     }
 
-    // ── multi-line verbatim blockquote ────────────────────────────────────────
-
     #[test]
-    fn multi_line_excerpt_with_inline_markup_preserved() {
+    fn page_section_anchor_renders_first_in_block() {
         let d = make_draft(
             "wiki/page.md",
             "wiki/foo",
             vec!["Section"],
             vec![
-                "See [[SomePage]] for details.",
-                "Also [handleCharge](src/charge.ts#L1-L5) does dispatch.",
+                "wiki/page.md#L10-L20",
+                "src/a.rs#L1-L5",
+                "src/b.rs#L1-L5",
             ],
-            vec!["wiki/page.md", "src/a.rs#L1-L5"],
-        );
-        let mut titles = HashMap::new();
-        titles.insert("wiki/page.md".to_string(), Some("My Page".to_string()));
-        let out = render_markdown(&[d], &titles, &[], &HashSet::new());
-        assert!(
-            out.contains("> See [[SomePage]] for details."),
-            "wikilink not preserved:\n{out}"
-        );
-        assert!(
-            out.contains("> Also [handleCharge](src/charge.ts#L1-L5) does dispatch."),
-            "inline link not preserved:\n{out}"
-        );
-    }
-
-    // ── blockquote nesting when source line starts with > ─────────────────────
-
-    #[test]
-    fn source_line_starting_with_blockquote_nests() {
-        let d = make_draft(
-            "wiki/page.md",
-            "wiki/foo",
-            vec!["Section"],
-            vec!["> This is a nested quote."],
-            vec!["wiki/page.md", "src/a.rs#L1-L5"],
         );
         let titles = HashMap::new();
         let out = render_markdown(&[d], &titles, &[], &HashSet::new());
-        assert!(
-            out.contains("> > This is a nested quote."),
-            "nested blockquote not rendered:\n{out}"
-        );
+        let add_idx = out.find("git mesh add wiki/foo").expect("add line present");
+        let page_idx = out[add_idx..].find("wiki/page.md#L10-L20").expect("page anchor present");
+        let target_idx = out[add_idx..].find("src/a.rs#L1-L5").expect("target present");
+        assert!(page_idx < target_idx, "page anchor must precede targets:\n{out}");
     }
 
     // ── parse-error block integration ─────────────────────────────────────────
@@ -321,8 +272,7 @@ mod tests {
             "wiki/page.md",
             "wiki/foo",
             vec![],
-            vec!["Some text."],
-            vec!["wiki/page.md", "src/a.rs#L1-L5"],
+            vec!["wiki/page.md#L1-L5", "src/a.rs#L1-L5"],
         );
         let errors = vec![make_error("wiki/bad.md", ParseErrorKind::NoFrontmatter)];
         let titles = HashMap::new();
@@ -389,15 +339,13 @@ mod tests {
             "wiki/bad.md",
             "wiki/bad-slug",
             vec![],
-            vec!["Bad page content."],
-            vec!["wiki/bad.md", "src/a.rs#L1-L5"],
+            vec!["wiki/bad.md#L1-L5", "src/a.rs#L1-L5"],
         );
         let good = make_draft(
             "wiki/good.md",
             "wiki/good-slug",
             vec![],
-            vec!["Good page content."],
-            vec!["wiki/good.md", "src/b.rs#L1-L5"],
+            vec!["wiki/good.md#L1-L5", "src/b.rs#L1-L5"],
         );
         let errors = vec![make_error("wiki/bad.md", ParseErrorKind::NoFrontmatter)];
         let mut parse_error_paths = HashSet::new();

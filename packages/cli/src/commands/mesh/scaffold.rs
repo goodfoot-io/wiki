@@ -106,7 +106,6 @@ struct PageJson {
 struct MeshJson {
     slug: String,
     heading_chain: Vec<String>,
-    section_opening: Vec<String>,
     anchors: Vec<AnchorJson>,
 }
 
@@ -309,7 +308,6 @@ fn build_pages_json(
                     MeshJson {
                         slug: d.slug.clone(),
                         heading_chain: d.heading_chain.clone(),
-                        section_opening: d.section_opening_lines.clone(),
                         anchors: d
                             .structured_anchors
                             .iter()
@@ -387,44 +385,75 @@ fn build_meshes(inputs: &[LinkInput], repo_root: &Path) -> Vec<MeshDraft> {
             .push(input);
     }
 
-    // Stage 1: build drafts per page.
+    // Stage 1: per-page section grouping → one draft per section.
     let mut all_drafts: Vec<MeshDraft> = Vec::new();
     let mut page_spans: Vec<(usize, usize)> = Vec::with_capacity(page_order.len());
     for page in &page_order {
         let entries = by_page.get(page).expect("page tracked in order");
         let page_rel = path_relative_to(page, repo_root);
-        let augs: Vec<AugmentedLink> = entries.iter().map(|i| i.augmented.clone()).collect();
-        let target_anchors: Vec<Vec<String>> = entries
-            .iter()
-            .map(|i| {
-                let link = &i.augmented.link;
-                let resolved = resolve_link_path(&link.path, &i.wiki_file, repo_root);
+
+        // Group entries by (section_start, section_end) preserving first-occurrence order.
+        let mut section_order: Vec<(u32, u32)> = Vec::new();
+        let mut by_section: std::collections::HashMap<(u32, u32), Vec<&LinkInput>> =
+            std::collections::HashMap::new();
+        for entry in entries {
+            let key = (
+                entry.augmented.section_start_line,
+                entry.augmented.section_end_line,
+            );
+            if !by_section.contains_key(&key) {
+                section_order.push(key);
+            }
+            by_section.entry(key).or_default().push(entry);
+        }
+
+        type GroupTuple<'a> = (
+            &'a AugmentedLink,
+            u32,
+            u32,
+            Vec<String>,
+            Vec<draft::StructuredAnchor>,
+        );
+        let mut groups_storage: Vec<GroupTuple<'_>> = Vec::with_capacity(section_order.len());
+        for key in &section_order {
+            let section_entries = by_section.get(key).expect("tracked");
+            let leader = &section_entries[0].augmented;
+            let mut seen: std::collections::HashSet<(String, u32, u32)> =
+                std::collections::HashSet::new();
+            let mut target_anchors: Vec<String> = Vec::new();
+            let mut structured_targets: Vec<draft::StructuredAnchor> = Vec::new();
+            for entry in section_entries {
+                let link = &entry.augmented.link;
+                let resolved = resolve_link_path(&link.path, &entry.wiki_file, repo_root);
                 let anchor_rel = path_relative_to(&resolved, repo_root);
                 let anchor_rel =
                     locate_existing_suffix(&anchor_rel, repo_root).unwrap_or(anchor_rel);
                 let start = link.start_line.unwrap_or(0);
                 let end = link.end_line.unwrap_or(start);
-                vec![format!("{anchor_rel}#L{start}-L{end}")]
-            })
-            .collect();
-        let structured_anchors: Vec<Vec<draft::StructuredAnchor>> = entries
-            .iter()
-            .map(|i| {
-                let link = &i.augmented.link;
-                let resolved = resolve_link_path(&link.path, &i.wiki_file, repo_root);
-                let anchor_rel = path_relative_to(&resolved, repo_root);
-                let anchor_rel =
-                    locate_existing_suffix(&anchor_rel, repo_root).unwrap_or(anchor_rel);
-                let start = link.start_line.unwrap_or(0);
-                let end = link.end_line.unwrap_or(start);
-                vec![draft::StructuredAnchor {
+                let triple = (anchor_rel.clone(), start, end);
+                if !seen.insert(triple) {
+                    continue;
+                }
+                target_anchors.push(format!("{anchor_rel}#L{start}-L{end}"));
+                structured_targets.push(draft::StructuredAnchor {
                     path: anchor_rel,
                     start_line: start,
                     end_line: end,
-                }]
+                });
+            }
+            groups_storage.push((leader, key.0, key.1, target_anchors, structured_targets));
+        }
+        let groups: Vec<draft::SectionGroup<'_>> = groups_storage
+            .iter()
+            .map(|(leader, s, e, ta, st)| draft::SectionGroup {
+                leader,
+                section_start: *s,
+                section_end: *e,
+                target_anchors: ta.clone(),
+                structured_targets: st.clone(),
             })
             .collect();
-        let drafts = draft::build(&page_rel, &augs, &target_anchors, &structured_anchors, repo_root);
+        let drafts = draft::build(&page_rel, &groups, repo_root);
         let start = all_drafts.len();
         all_drafts.extend(drafts);
         page_spans.push((start, all_drafts.len()));

@@ -1,7 +1,9 @@
 //! Within-page anchor grouping:
 //!
 //! Identical-anchor-set siblings on the same page are merged into one mesh.
-//! All other drafts stay separate.
+//! All other drafts stay separate. After section-level grouping happens
+//! upstream, this is largely a safety net for pages whose sections produce
+//! byte-identical anchor lists.
 //!
 //! Operates on drafts from a *single* page. The caller chunks by page first.
 
@@ -12,8 +14,6 @@ use super::draft::MeshDraft;
 /// Merge identical-anchor-set siblings. Returns drafts in the order their
 /// first occurrence appeared in the input.
 pub(crate) fn consolidate_within_page(drafts: Vec<MeshDraft>) -> Vec<MeshDraft> {
-    // ── Phase 1: identical-anchor-set merge ────────────────────────────────
-    // Key: the full anchor list, joined with `\n` (anchors carry no newlines).
     let mut order: Vec<String> = Vec::new();
     let mut by_key: BTreeMap<String, Vec<MeshDraft>> = BTreeMap::new();
     for d in drafts {
@@ -41,16 +41,22 @@ pub(crate) fn consolidate_within_page(drafts: Vec<MeshDraft>) -> Vec<MeshDraft> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::draft::StructuredAnchor;
 
-    fn draft(slug: &str, _heading: &str, anchors: &[&str]) -> MeshDraft {
+    fn draft(slug: &str, anchors: &[&str]) -> MeshDraft {
         MeshDraft {
-            page_path: anchors[0].to_string(),
+            page_path: anchors[0].split('#').next().unwrap().to_string(),
             slug: slug.to_string(),
             anchors: anchors.iter().map(|s| s.to_string()).collect(),
-            structured_anchors: Vec::new(),
-            section_opening: String::new(),
+            structured_anchors: anchors
+                .iter()
+                .map(|_| StructuredAnchor {
+                    path: String::new(),
+                    start_line: 0,
+                    end_line: 0,
+                })
+                .collect(),
             heading_chain: Vec::new(),
-            section_opening_lines: Vec::new(),
             consolidated_count: 1,
         }
     }
@@ -60,13 +66,11 @@ mod tests {
         let drafts = vec![
             draft(
                 "wiki/cli/parser",
-                "# CLI parser",
-                &["wiki/cli/parser.md", "src/parser.rs#L2-L4"],
+                &["wiki/cli/parser.md#L1-L10", "src/parser.rs#L2-L4"],
             ),
             draft(
                 "wiki/cli/parser-2",
-                "# CLI parser",
-                &["wiki/cli/parser.md", "src/parser.rs#L2-L4"],
+                &["wiki/cli/parser.md#L1-L10", "src/parser.rs#L2-L4"],
             ),
         ];
         let out = consolidate_within_page(drafts);
@@ -79,13 +83,11 @@ mod tests {
         let drafts = vec![
             draft(
                 "wiki/perf/sync-detection",
-                "## Sync detection",
-                &["wiki/perf/indexing.md", "src/index.rs#L10-L20"],
+                &["wiki/perf/indexing.md#L10-L15", "src/index.rs#L10-L20"],
             ),
             draft(
                 "wiki/perf/apply-phase",
-                "## Apply phase",
-                &["wiki/perf/indexing.md", "src/index.rs#L25-L40"],
+                &["wiki/perf/indexing.md#L16-L20", "src/index.rs#L25-L40"],
             ),
         ];
         let out = consolidate_within_page(drafts);
