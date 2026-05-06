@@ -1,27 +1,26 @@
 /**
- * Reproduction test for wiki webview links to workspace files by bare filename.
+ * Regression test for wiki webview links to workspace files by bare filename.
  *
- * ## Bug
- * Links like `[CLAUDE.md](CLAUDE.md)` or `[CLAUDE.md](CLAUDE.md#L63-L74)` render
- * as `<a href="CLAUDE.md#L63-L74">` — a bare path with no `file:///` scheme.
- * The webview click handler at `src/webviews/wiki/index.ts:116-130` classifies
- * this as a wikilink (it does not start with `file:///`, `http://`, `https://`,
- * or `mailto:`) and posts a `navigate` message instead of `openFile`, causing
- * "Could not find wiki page: CLAUDE.md".
+ * ## Behavior
+ * Links like `[CLAUDE.md](CLAUDE.md)` or `[CLAUDE.md](CLAUDE.md#L63-L74)` in
+ * markdown are rendered with bare hrefs (e.g. `<a href="CLAUDE.md#L63-L74">`).
+ * The renderer does NOT produce `file:///` hrefs — it has no filesystem or
+ * workspace context, and markdown-it preserves the bare path. It is the host's
+ * navigate handler that resolves bare paths against the workspace root.
  *
- * ## Hypothesis
- * The markdown renderer (MarkdownRenderer.ts) uses markdown-it with default link
- * rendering. For `[text](CLAUDE.md#L63-L74)`, markdown-it produces a bare href
- * with no scheme. The renderer should detect when a link target names a workspace
- * file and produce a `file:///` href — but it currently has no workspace context
- * to do so.
+ * ## Data flow
+ * 1. Renderer: `[text](CLAUDE.md)` → `<a href="CLAUDE.md">` (bare path)
+ * 2. Webview click handler: href lacks `file:///` → posts `navigate` message
+ * 3. Host: resolves pageName as wiki page → not found → workspace fallback
+ *    (WikiEditorProvider.ts:225-246) constructs `file:///` URI from workspace
+ *    root and opens the file.
  *
  * ## Test
- * This test MUST FAIL against the current unfixed code, proving the hypothesis
- * that the renderer produces wikilink-style hrefs (bare paths without scheme)
- * for workspace-file links.
+ * This test verifies that the renderer preserves bare hrefs (its correct
+ * behavior). The host-side resolution is tested by
+ * wikiEditorProvider.workspaceFallback.test.ts.
  *
- * @summary Reproduction test for bare-filename workspace links in wiki webview.
+ * @summary Regression test for bare-filename workspace links in wiki webview.
  * @module test/suite/markdownRenderer.workspaceFileLinks.test
  */
 
@@ -30,28 +29,16 @@ import { render } from '../../src/rendering/MarkdownRenderer.js';
 
 describe('MarkdownRenderer — workspace file links', () => {
   describe('render()', () => {
-    it('produces file:/// hrefs for bare filename links to workspace files', () => {
+    it('preserves bare hrefs for filename links without a scheme', () => {
       const html = render('See [CLAUDE.md](CLAUDE.md#L63-L74) for details.\n');
 
-      // Current (broken) output:
-      //   <a href="CLAUDE.md#L63-L74">CLAUDE.md</a>
-      //
-      // Expected output:
-      //   <a href="file:///CLAUDE.md#L63-L74">CLAUDE.md</a>
-      //
-      // Without the file:/// prefix, the webview click handler at
-      // src/webviews/wiki/index.ts:116-130 falls through to the wikilink branch:
-      //
-      //   1. href.startsWith('file:///') → false
-      //   2. starts with http/https/mailto → false
-      //   3. else → post({ type: 'navigate', ... })
-      //
-      // This causes "Could not find wiki page: CLAUDE.md".
+      // The renderer preserves the bare path — it does not have workspace
+      // context. The host-side navigate handler resolves bare paths against
+      // the workspace root (see wikiEditorProvider.workspaceFallback.test.ts).
       assert.ok(
-        html.includes('file:///'),
-        'Expected file:/// href for workspace file link. ' +
-          'Current output has bare href without scheme, proving the renderer ' +
-          'produces wikilink-style hrefs for workspace-file links.'
+        html.includes('href="CLAUDE.md#L63-L74"'),
+        'Expected bare href without scheme, matching markdown-it default behavior. ' +
+          'The host resolves workspace paths, not the renderer.'
       );
     });
   });

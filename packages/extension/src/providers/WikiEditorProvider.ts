@@ -219,10 +219,9 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
           // Resolve the target page URI via wiki summary.
           const targetUri = await this._resolvePageUri(resolvedPageName, document.uri);
           if (targetUri == null) {
-            // Fallback: treat as a workspace-relative file or directory path when
-            // the name looks like a path (contains a slash).
+            // Fallback: treat as a workspace-relative file or directory path.
             const workspaceRoot = this._workspaceRoot();
-            if (workspaceRoot != null && message.pageName.includes('/')) {
+            if (workspaceRoot != null) {
               const candidateUri = vscode.Uri.file(path.join(workspaceRoot, message.pageName));
               try {
                 const stat = await vscode.workspace.fs.stat(candidateUri);
