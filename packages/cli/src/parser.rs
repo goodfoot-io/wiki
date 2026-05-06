@@ -21,7 +21,10 @@ fn wikilink_re() -> &'static Regex {
 
 fn url_scheme_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-.]*://").unwrap())
+    // RFC 3986: scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
+    // followed by ":" — this covers both hierarchical (scheme://) and
+    // opaque (e.g. mailto:, tel:) URI schemes.
+    RE.get_or_init(|| Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-.]*:").unwrap())
 }
 
 // ── Public types ──────────────────────────────────────────────────────────────
