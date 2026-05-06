@@ -15,7 +15,7 @@ See [[Wiki Mesh Integration]] for the design rationale behind these integrations
 
 ### `git-mesh list <anchor> --porcelain`
 
-**Where:** [`mesh_coverage.rs`](packages/cli/src/commands/mesh_coverage.rs#L157-L159)
+**Where:** [`mesh_coverage.rs`](/packages/cli/src/commands/mesh_coverage.rs#L157-L159)
 
 **Invoked by:** `wiki check`
 
@@ -29,19 +29,19 @@ See [[Wiki Mesh Integration]] for the design rationale behind these integrations
 ```
 Sentinel `no meshes` (no tabs) when no meshes cover the anchor.
 
-**Subset extracted and used** ([`parse_mesh_ls_output`](packages/cli/src/commands/mesh_coverage.rs#L205-L246)):
+**Subset extracted and used** ([`parse_mesh_ls_output`](/packages/cli/src/commands/mesh_coverage.rs#L205-L246)):
 - `mesh` — mesh name (everything left of the rightmost two tab-delimited fields)
 - `path` — repo-relative file path of each anchor in the mesh
 
 The line range token (`start-end`) is parsed for format validation only; range filtering is applied server-side by `git-mesh`. The range values themselves are not used by the wiki application.
 
-**Coverage rule** ([`is_covered`](packages/cli/src/commands/mesh_coverage.rs#L117-L125)): A fragment link is covered iff at least one mesh `M` exists such that `M` anchors the code file region **and** `M` also has the wiki file as an anchor.
+**Coverage rule** ([`is_covered`](/packages/cli/src/commands/mesh_coverage.rs#L117-L125)): A fragment link is covered iff at least one mesh `M` exists such that `M` anchors the code file region **and** `M` also has the wiki file as an anchor.
 
 ---
 
 ### `git-mesh add <name> <anchor>...` *(generated, not invoked)*
 
-**Where:** [`render.rs`](packages/cli/src/commands/mesh/render.rs#L137-L146)
+**Where:** [`render.rs`](/packages/cli/src/commands/mesh/render.rs#L137-L146)
 
 **Invoked by:** `wiki scaffold` — emits markdown output, does **not** shell out to `git-mesh`.
 
@@ -51,7 +51,7 @@ The line range token (`start-end`) is parsed for format validation only; range f
 
 ### `git-mesh why <name> -m "<message>"` *(generated, not invoked)*
 
-**Where:** [`render.rs`](packages/cli/src/commands/mesh/render.rs#L147-L147)
+**Where:** [`render.rs`](/packages/cli/src/commands/mesh/render.rs#L147-L147)
 
 **Invoked by:** `wiki scaffold` — emits markdown output, does **not** shell out to `git-mesh`.
 
@@ -61,7 +61,7 @@ The line range token (`start-end`) is parsed for format validation only; range f
 
 ### `git-mesh commit` *(test fixture only)*
 
-**Where:** [`check.rs`](packages/cli/src/commands/check.rs#L681) (also lines 712, 741, 771)
+**Where:** [`check.rs`](/packages/cli/src/commands/check.rs#L681) (also lines 712, 741, 771)
 
 **Invoked by:** Integration tests (via `repo.git_mesh(&["commit"])`) to commit staged meshes into the test repo before running `wiki check`.
 

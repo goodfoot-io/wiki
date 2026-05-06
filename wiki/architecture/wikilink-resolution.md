@@ -7,15 +7,15 @@ Wikilinks are the mechanism by which wiki pages reference each other. The resolu
 
 ## Indexing and Storage
 
-When the [WikiIndex](packages/cli/src/index.rs#L567-L577&9b91dfb) is constructed, it scans wiki pages to extract titles, optional aliases, and [[Wiki CLI|fragment links]]. This data is indexed in a SQLite database to support O(1) wikilink resolution and unified incoming-link discovery via the `wiki links` command.
+When the [WikiIndex](/packages/cli/src/index.rs#L567-L577&9b91dfb) is constructed, it scans wiki pages to extract titles, optional aliases, and [[Wiki CLI|fragment links]]. This data is indexed in a SQLite database to support O(1) wikilink resolution and unified incoming-link discovery via the `wiki links` command.
 
 ## Collision Detection
 
-The [check command](packages/cli/src/commands/check.rs#L28-L29&628d6f9) validates that no two pages share the same title or alias. Title collisions would create ambiguity in wikilink resolution and break the assumption that each concept has exactly one canonical home.
+The [check command](/packages/cli/src/commands/check.rs#L28-L29&628d6f9) validates that no two pages share the same title or alias. Title collisions would create ambiguity in wikilink resolution and break the assumption that each concept has exactly one canonical home.
 
 ## Wikilink Extraction and Resolution
 
-The [extract command](packages/cli/src/commands/extract.rs#e2b1474) reads text from stdin, parses all `[[wikilink]]` references using a parser that operates on scrubbed content (code blocks and inline code are blanked out to avoid false matches), and outputs the canonical title and summary for each resolved page. Unresolved wikilinks are reported to stderr with exit code 1, signaling an error that should be fixed.
+The [extract command](/packages/cli/src/commands/extract.rs#e2b1474) reads text from stdin, parses all `[[wikilink]]` references using a parser that operates on scrubbed content (code blocks and inline code are blanked out to avoid false matches), and outputs the canonical title and summary for each resolved page. Unresolved wikilinks are reported to stderr with exit code 1, signaling an error that should be fixed.
 
 ## Fragment Link Anchoring
 

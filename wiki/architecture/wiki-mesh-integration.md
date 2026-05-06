@@ -76,7 +76,7 @@ Omitting globs is equivalent to:
 wiki scaffold "$WIKI_DIR/**/*.md" "**/*.wiki.md"
 ```
 
-where `$WIKI_DIR` defaults to `wiki`. This matches the default discovery behavior used by all other wiki commands (see [discover_files](packages/cli/src/commands/mod.rs#L141-L183&9b91dfb)).
+where `$WIKI_DIR` defaults to `wiki`. This matches the default discovery behavior used by all other wiki commands (see [discover_files](/packages/cli/src/commands/mod.rs#L141-L183&9b91dfb)).
 
 ## Workflow
 
@@ -96,4 +96,4 @@ wiki check
 
 ## References
 
-- [discover_files](packages/cli/src/commands/mod.rs#L141-L183&9b91dfb)
+- [discover_files](/packages/cli/src/commands/mod.rs#L141-L183&9b91dfb)

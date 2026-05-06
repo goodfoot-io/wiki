@@ -9,11 +9,11 @@ The wiki CLI validates and maintains fragment links between wiki pages and sourc
 
 ## Fragment Link Parsing
 
-The [parser](packages/cli/src/parser.rs#L6-L12&628d6f9) extracts two link types from markdown content: fragment links (`[label](path#sha-L10-L20)`) and wikilinks (`[[Title]]`). Both parsers operate on scrubbed content — code blocks, inline code, and HTML comments are blanked out before extraction to avoid false matches.
+The [parser](/packages/cli/src/parser.rs#L6-L12&628d6f9) extracts two link types from markdown content: fragment links (`[label](path#sha-L10-L20)`) and wikilinks (`[[Title]]`). Both parsers operate on scrubbed content — code blocks, inline code, and HTML comments are blanked out before extraction to avoid false matches.
 
 ## Validation Pipeline
 
-The [check command](packages/cli/src/commands/check.rs#L28-L29&628d6f9) runs a full validation pass: frontmatter parsing, title/alias collision detection, wikilink resolution, and fragment link verification (file existence and line range bounds at the pinned SHA). With `--fix`, unpinned fragment links are pinned automatically rather than reported as errors — already-pinned links are never touched.
+The [check command](/packages/cli/src/commands/check.rs#L28-L29&628d6f9) runs a full validation pass: frontmatter parsing, title/alias collision detection, wikilink resolution, and fragment link verification (file existence and line range bounds at the pinned SHA). With `--fix`, unpinned fragment links are pinned automatically rather than reported as errors — already-pinned links are never touched.
 
 ## Extract
 
@@ -21,17 +21,17 @@ The extract command (`packages/cli/src/commands/extract.rs`) reads arbitrary tex
 
 ## PostToolUse Hook
 
-The [hook command](packages/cli/src/commands/hook_check.rs#L16-L63&ac38802) integrates the wiki with external tools like Claude Code. It processes `PostToolUse` JSON events from stdin: when a `.md` file inside the wiki directory is written or edited, it runs `wiki check` on that file and emits a JSON `systemMessage` envelope if validation errors remain, so the AI can address them immediately.
+The [hook command](/packages/cli/src/commands/hook_check.rs#L16-L63&ac38802) integrates the wiki with external tools like Claude Code. It processes `PostToolUse` JSON events from stdin: when a `.md` file inside the wiki directory is written or edited, it runs `wiki check` on that file and emits a JSON `systemMessage` envelope if validation errors remain, so the AI can address them immediately.
 
 ## Navigation and Discovery
 
 Several commands support navigating and searching the wiki from the command line:
 
-- **Incoming Links**: The [links command](packages/cli/src/commands/links.rs#3d1c3e6) finds all wiki pages that reference a given target, whether that target resolves as a wiki page, a workspace file, or both.
-- **Search**: The [search command](packages/cli/src/commands/search.rs#e2b1474) is the primary entrypoint for finding wiki content. It performs a weighted search that ranks exact title matches, repo-relative path matches, and full-text matches (BM25) in a single unified flow.
+- **Incoming Links**: The [links command](/packages/cli/src/commands/links.rs#3d1c3e6) finds all wiki pages that reference a given target, whether that target resolves as a wiki page, a workspace file, or both.
+- **Search**: The [search command](/packages/cli/src/commands/search.rs#e2b1474) is the primary entrypoint for finding wiki content. It performs a weighted search that ranks exact title matches, repo-relative path matches, and full-text matches (BM25) in a single unified flow.
 - **Suggest**: The suggest command (used internally by the hook) finds the best matches for a query with a minimum score threshold, prioritizing titles and aliases.
-- **Summary**: The [summary command](packages/cli/src/commands/summary.rs#e2b1474) outputs a page's frontmatter-defined summary along with a repo-relative path to its source file.
-- **Print**: The [print command](packages/cli/src/commands/print.rs#e2b1474) outputs the full raw markdown content of a wiki page to stdout.
+- **Summary**: The [summary command](/packages/cli/src/commands/summary.rs#e2b1474) outputs a page's frontmatter-defined summary along with a repo-relative path to its source file.
+- **Print**: The [print command](/packages/cli/src/commands/print.rs#e2b1474) outputs the full raw markdown content of a wiki page to stdout.
 
 ## Rendering
 
@@ -39,4 +39,4 @@ The CLI does not render markdown. HTML rendering is owned entirely by the VS Cod
 
 ## Frontmatter
 
-The [frontmatter module](packages/cli/src/frontmatter.rs#L45-L50) parses and validates YAML frontmatter from wiki pages. It reserves certain titles (`check`, `pin`, `stale`, `links`, `list`, `summary`, `print`) to prevent ambiguity with command-line dispatch.
+The [frontmatter module](/packages/cli/src/frontmatter.rs#L45-L50) parses and validates YAML frontmatter from wiki pages. It reserves certain titles (`check`, `pin`, `stale`, `links`, `list`, `summary`, `print`) to prevent ambiguity with command-line dispatch.
