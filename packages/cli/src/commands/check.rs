@@ -1278,6 +1278,28 @@ mod tests {
     }
 
     #[test]
+    fn mailto_link_does_not_produce_missing_file() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "Contact [us](mailto:someone@example.com)."),
+        );
+        repo.commit("add files");
+
+        let diagnostics = collect(&[], &wiki_root, repo.path()).expect("collect");
+        let missing_file: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.kind == "missing_file")
+            .collect();
+        assert!(
+            missing_file.is_empty(),
+            "mailto: links must not produce missing_file: {diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn mesh_unavailable_emits_warning_and_exits_1() {
         let repo = TestRepo::new();
         let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");

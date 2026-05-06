@@ -378,6 +378,14 @@ mod tests {
     }
 
     #[test]
+    fn test_mailto_link_external() {
+        let links = parse_fragment_links("[Email](mailto:someone@example.com)");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].kind, LinkKind::External);
+        assert_eq!(links[0].path, "mailto:someone@example.com");
+    }
+
+    #[test]
     fn test_internal_link_with_range() {
         let links = parse_fragment_links("[Foo](src/foo.rs#L10-L20)");
         assert_eq!(links.len(), 1);
