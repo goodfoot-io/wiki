@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Wiki documentation system with CLI and VSCode extension",
-    "version": "1.0.23",
+    "version": "1.0.24",
     "pluginRoot": "./plugins"
   },
   "plugins": [
     {
       "name": "wiki",
-      "version": "0.5.47",
+      "version": "0.5.48",
       "source": "./plugins/wiki",
       "description": "Wiki documentation system — fragment-linked documentation with change detection, full-text search, and automated maintenance",
       "author": {

@@ -17,45 +17,62 @@ function readTrackedFiles(sessionId: string): string[] {
     .filter(Boolean);
 }
 
-function checkWikiFile(filePath: string, cwd: string): { ok: boolean; output: string } {
+function checkWikiFile(
+  filePath: string,
+  cwd: string,
+  logger: { warn: (msg: string, data?: Record<string, unknown>) => void }
+): { ok: boolean; output: string } {
+  let result: ReturnType<typeof spawnSync>;
   try {
-    const result = spawnSync('wiki', ['check', filePath], {
+    result = spawnSync('wiki', ['check', filePath], {
       cwd,
       encoding: 'utf8',
       timeout: 25000,
       env: { ...process.env }
     });
-
-    if (result.error || result.status === 0) return { ok: true, output: '' };
-
-    let output = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
-    if (!output) return { ok: true, output: '' };
-
-    if (output.includes('mesh_uncovered')) {
-      const filtered = output
-        .split('\n')
-        .filter((line) => !line.includes('mesh_uncovered'))
-        .join('\n')
-        .trim();
-      try {
-        const scaffoldResult = spawnSync('wiki', ['scaffold', filePath], {
-          cwd,
-          encoding: 'utf8',
-          timeout: 25000,
-          env: { ...process.env }
-        });
-        const scaffoldOutput = scaffoldResult.status === 0 && scaffoldResult.stdout ? scaffoldResult.stdout.trim() : '';
-        output = [filtered, scaffoldOutput].filter(Boolean).join('\n\n');
-      } catch {
-        output = filtered;
-      }
-    }
-
-    if (!output) return { ok: true, output: '' };
-    return { ok: false, output };
-  } catch {
-    return { ok: true, output: '' };
+  } catch (err) {
+    logger.warn('wiki check spawn failed; blocking stop to avoid silent bypass', {
+      file: filePath,
+      error: String(err)
+    });
+    return { ok: false, output: 'wiki check infrastructure unavailable: unable to spawn wiki CLI' };
   }
+
+  if (result.error) {
+    logger.warn('wiki check infrastructure error; blocking stop to avoid silent bypass', {
+      file: filePath,
+      error: result.error.message
+    });
+    return { ok: false, output: `wiki check infrastructure unavailable: ${result.error.message}` };
+  }
+
+  if (result.status === 0) return { ok: true, output: '' };
+
+  let output = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
+  if (!output) return { ok: true, output: '' };
+
+  if (output.includes('mesh_uncovered')) {
+    const filtered = output
+      .split('\n')
+      .filter((line) => !line.includes('mesh_uncovered'))
+      .join('\n')
+      .trim();
+    try {
+      const scaffoldResult = spawnSync('wiki', ['scaffold', filePath], {
+        cwd,
+        encoding: 'utf8',
+        timeout: 25000,
+        env: { ...process.env }
+      });
+      const scaffoldOutput = scaffoldResult.status === 0 && scaffoldResult.stdout ? scaffoldResult.stdout.trim() : '';
+      output = [filtered, scaffoldOutput].filter(Boolean).join('\n\n');
+    } catch {
+      output = filtered;
+    }
+  }
+
+  if (!output) return { ok: true, output: '' };
+  return { ok: false, output };
 }
 
 export default stopHook({}, (input, { logger }) => {
@@ -68,7 +85,7 @@ export default stopHook({}, (input, { logger }) => {
 
   const failures: { file: string; output: string }[] = [];
   for (const filePath of existing) {
-    const result = checkWikiFile(filePath, cwd);
+    const result = checkWikiFile(filePath, cwd, logger);
     if (!result.ok) {
       failures.push({ file: filePath, output: result.output });
     }
