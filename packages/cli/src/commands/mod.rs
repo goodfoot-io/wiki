@@ -55,17 +55,11 @@ pub fn resolve_link_path(link_path: &str, source_file: &Path, repo_root: &Path) 
         return path
             .strip_prefix(repo_root)
             .map(|p| p.to_path_buf())
-            .unwrap_or_else(|_| path.to_path_buf());
-    }
-
-    // If the path doesn't start with `.` or `..`, it's repo-relative by convention.
-    let first = path.components().next();
-    let is_explicitly_relative = matches!(
-        first,
-        Some(std::path::Component::CurDir) | Some(std::path::Component::ParentDir)
-    );
-    if !is_explicitly_relative {
-        return PathBuf::from(link_path);
+            .unwrap_or_else(|_| {
+                path.strip_prefix("/")
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|_| path.to_path_buf())
+            });
     }
 
     // Treat as relative to the source file.
@@ -422,17 +416,17 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_link_path_bare_nonexistent_stays_repo_relative() {
-        // A bare path like `packages/wiki/src/commands/serve.rs` that doesn't exist on disk
-        // must NOT be rewritten as relative to the source file.
+    fn test_resolve_link_path_bare_nonexistent_is_page_relative() {
+        // A bare path like `packages/wiki/src/commands/serve.rs` now resolves
+        // relative to the source page's directory, regardless of file existence.
         let dir = TempDir::new().expect("tempdir");
         let root = dir.path();
         let source = root.join("wiki/guides/page.md");
         let result = resolve_link_path("packages/wiki/src/commands/serve.rs", &source, root);
         assert_eq!(
             result,
-            PathBuf::from("packages/wiki/src/commands/serve.rs"),
-            "bare repo-relative path must not be rewritten even when the file is absent"
+            PathBuf::from("wiki/guides/packages/wiki/src/commands/serve.rs"),
+            "bare path must be resolved relative to the source page's directory"
         );
     }
 
@@ -447,19 +441,46 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_link_path_bare_path_stays_repo_relative() {
-        // Bare paths (without `./` or `../` prefix) are repo-relative by
-        // convention.  They are NOT rewritten relative to the source page's
-        // directory.  The `wiki check` diagnostic guides users to use the
-        // correct repo-relative path when the file is not found.
+    fn test_resolve_link_path_bare_path_is_page_relative() {
+        // Bare paths (without `./` or `../` prefix) are now resolved relative to
+        // the source page's directory, matching standard markdown behavior.
         let dir = TempDir::new().expect("tempdir");
         let root = dir.path();
         let source = root.join("marketing/design/pages/example.md");
         let result = resolve_link_path("images/screenshot.png", &source, root);
         assert_eq!(
             result,
-            PathBuf::from("images/screenshot.png"),
-            "bare paths must stay repo-relative; the check diagnostic guides users to the correct path"
+            PathBuf::from("marketing/design/pages/images/screenshot.png"),
+            "bare paths must be resolved relative to the source page's directory"
+        );
+    }
+
+    #[test]
+    fn test_resolve_link_path_slash_prefix_is_repo_relative() {
+        // A `/`-prefixed path resolves relative to the repository root.
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path();
+        let source = root.join("wiki/guides/page.md");
+        let result = resolve_link_path("/packages/cli/src/main.rs", &source, root);
+        assert_eq!(
+            result,
+            PathBuf::from("packages/cli/src/main.rs"),
+            "/-prefixed paths must be resolved relative to the repository root"
+        );
+    }
+
+    #[test]
+    fn test_resolve_link_path_slash_prefix_absolute_under_repo_root() {
+        // An absolute path that falls under repo_root is still stripped to repo-relative.
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path();
+        let source = root.join("wiki/guides/page.md");
+        let absolute_path = root.join("packages/cli/src/main.rs");
+        let result = resolve_link_path(absolute_path.to_str().unwrap(), &source, root);
+        assert_eq!(
+            result,
+            PathBuf::from("packages/cli/src/main.rs"),
+            "absolute paths under repo_root must be stripped to repo-relative"
         );
     }
 

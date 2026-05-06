@@ -2,23 +2,13 @@
 //!
 //! Markdown image references like `![screenshot](images/screenshot.png)` use
 //! bare (not explicitly relative) paths.  The `resolve_link_path` function
-//! treats bare paths as repo-relative instead of page-relative, so the image
-//! file is reported as missing even when it exists at the expected
-//! page-relative path.
+//! resolves bare paths relative to the source page's directory (page-relative),
+//! matching standard markdown behavior.
 //!
-//! Bug trace:
-//!   1. `parse_fragment_links` in `parser.rs` extracts `images/screenshot.png`
-//!      from `![screenshot](images/screenshot.png)`.
-//!   2. `resolve_link_path` in `commands/mod.rs` checks whether the path
-//!      starts with `.` or `..`.  `images/` does not, so it is treated as
-//!      repo-relative and returned unchanged.
-//!   3. The caller in `collect_for_files` (check.rs:467) prepends
-//!      `repo_root`, yielding `<repo_root>/images/screenshot.png`.
-//!   4. The file actually lives at `<repo_root>/wiki/design/pages/images/screenshot.png`.
-//!   5. `read_via_source` fails → `missing_file` diagnostic.
-//!
-//! With `./images/screenshot.png` the path starts with `.`, is resolved from
-//! the page directory, and is found correctly.
+//! Resolution rules:
+//!   - Bare paths (`images/screenshot.png`) → page-relative
+//!   - `./` and `../` paths → page-relative (unchanged)
+//!   - `/`-prefixed paths (`/images/screenshot.png`) → repo-relative
 
 use std::fs;
 use std::process::{Command, Output};
@@ -91,13 +81,13 @@ fn make_wiki_page(title: &str, body: &str) -> String {
     )
 }
 
-// ── Bare image path (repo-relative guidance) ────────────────────────────────
+// ── Bare image path (page-relative resolution, found) ─────────────────────────
 
-/// Bare paths (without `./` prefix) are repo-relative by convention.  When
-/// a bare path does not exist at the repo root, `wiki check` must report the
-/// error with guidance suggesting the correct repo-relative path.
+/// Bare paths (without `./` or `/` prefix) resolve relative to the page
+/// directory.  When the image exists at the page-relative location, `wiki check`
+/// must succeed.
 #[test]
-fn bare_image_path_reports_error_with_repo_relative_guidance() {
+fn bare_image_path_found_at_page_relative_location() {
     let repo = TestRepo::new();
     // Page at wiki/design/pages/example.md references an image via bare path:
     //   `![screenshot](images/screenshot.png)`
@@ -106,9 +96,9 @@ fn bare_image_path_reports_error_with_repo_relative_guidance() {
         "wiki/design/pages/example.md",
         &make_wiki_page("Example", "![screenshot](images/screenshot.png)"),
     );
-    // The image exists at the page-relative path, but the bare path
-    // `images/screenshot.png` resolves to `<repo_root>/images/screenshot.png`,
-    // which does not exist.
+    // The image exists at the page-relative path
+    // (`wiki/design/pages/images/screenshot.png`), so the bare path resolves
+    // correctly and no error is produced.
     repo.create_file("wiki/design/pages/images/screenshot.png", "");
     repo.commit("init");
 
@@ -117,18 +107,89 @@ fn bare_image_path_reports_error_with_repo_relative_guidance() {
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     assert!(
-        !out.status.success(),
-        "bare path must produce an error because it resolves from repo root.\n\
+        out.status.success(),
+        "bare path must resolve page-relative and find the image.\n\
          stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        stdout.contains("Paths without a `./` prefix"),
-        "error must explain the repo-relative resolution rule.\n\
+        !stdout.contains("Missing File"),
+        "bare path resolving page-relative must not produce 'Missing File'.\n\
+         stdout:\n{stdout}"
+    );
+}
+
+// ── Bare image path missing page-relative but present repo-relative ───────────
+
+/// When a bare path doesn't exist at the page-relative location but does exist
+/// at the repo-relative location, `wiki check` must report the error and
+/// suggest using the `/` prefix for repo-relative paths.
+#[test]
+fn bare_image_path_suggests_slash_prefix_when_repo_relative_exists() {
+    let repo = TestRepo::new();
+    // Page at wiki/design/pages/example.md references an image via bare path:
+    //   `![screenshot](images/screenshot.png)`
+    repo.create_file("wiki/wiki.toml", "");
+    repo.create_file(
+        "wiki/design/pages/example.md",
+        &make_wiki_page("Example", "![screenshot](images/screenshot.png)"),
+    );
+    // The image exists at the repo root level but NOT at the page-relative
+    // location (`wiki/design/pages/images/screenshot.png`).
+    repo.create_file("images/screenshot.png", "");
+    repo.commit("init");
+
+    let out = repo.run_check_from("wiki");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        !out.status.success(),
+        "bare path with image only at repo root must produce an error.\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("not found at page-relative path"),
+        "error must mention page-relative resolution.\n\
          stdout:\n{stdout}"
     );
     assert!(
-        stdout.contains("wiki/design/pages/images/screenshot.png"),
-        "error must suggest the correct repo-relative path.\n\
+        stdout.contains("use `/images/screenshot.png`"),
+        "error must suggest the /-prefixed repo-relative path.\n\
+         stdout:\n{stdout}"
+    );
+}
+
+// ── `/`-prefixed image path (repo-relative resolution) ────────────────────────
+
+/// A `/`-prefixed path resolves relative to the repository root.  When the
+/// image exists at the repo root, `wiki check` must succeed.
+#[test]
+fn slash_prefixed_image_path_found_at_repo_relative_location() {
+    let repo = TestRepo::new();
+    // Page at wiki/design/pages/example.md references an image via `/`-prefixed
+    // path: `![screenshot](/images/screenshot.png)`
+    repo.create_file("wiki/wiki.toml", "");
+    repo.create_file(
+        "wiki/design/pages/example.md",
+        &make_wiki_page("Example", "![screenshot](/images/screenshot.png)"),
+    );
+    // The image exists at the repo root level (`<repo>/images/screenshot.png`),
+    // so the /-prefixed path resolves correctly and no error is produced.
+    repo.create_file("images/screenshot.png", "");
+    repo.commit("init");
+
+    let out = repo.run_check_from("wiki");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        out.status.success(),
+        "/-prefixed path must resolve repo-relative and find the image.\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("Missing File"),
+        "/-prefixed path must not produce 'Missing File'.\n\
          stdout:\n{stdout}"
     );
 }

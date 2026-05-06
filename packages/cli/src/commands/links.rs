@@ -237,7 +237,7 @@ mod tests {
         repo.create_file("packages/foo/bar.ts", "export const x = 1;");
         repo.create_file(
             "wiki/page.md",
-            "---\ntitle: Foo Bar\nsummary: Describes the foo bar module.\n---\nSee [bar](packages/foo/bar.ts) for details.\n",
+            "---\ntitle: Foo Bar\nsummary: Describes the foo bar module.\n---\nSee [bar](/packages/foo/bar.ts) for details.\n",
         );
 
         let code = run("packages/foo/bar.ts", false, &wiki_root, repo.path(), crate::index::DocSource::WorkingTree).expect("run");
@@ -267,7 +267,7 @@ mod tests {
         );
         repo.create_file(
             "wiki/reference.md",
-            "---\ntitle: Reference Page\nsummary: References the target file.\n---\nRead [the file](wiki/target.md) directly.\n",
+            "---\ntitle: Reference Page\nsummary: References the target file.\n---\nRead [the file](/wiki/target.md) directly.\n",
         );
 
         let results = WikiIndex::prepare(&wiki_root, repo.path())
