@@ -65,6 +65,32 @@ pub fn resolve_link_path(link_path: &str, source_file: &Path, repo_root: &Path) 
         Some(std::path::Component::CurDir) | Some(std::path::Component::ParentDir)
     );
     if !is_explicitly_relative {
+        // Try resolving as page-relative first.  If the file exists at the
+        // page-relative path, return it.  If not, fall back to repo-relative
+        // (the original default) so that bare repo-relative paths like
+        // `packages/wiki/src/commands/serve.rs` continue to work when the
+        // page-relative path does not correspond to an existing file.
+        let source_dir = source_file.parent().unwrap_or_else(|| Path::new("."));
+        let combined = source_dir.join(path);
+        let mut components = Vec::new();
+        for component in combined.components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    components.pop();
+                }
+                std::path::Component::CurDir => {}
+                _ => {
+                    components.push(component);
+                }
+            }
+        }
+        let normalized: PathBuf = components.into_iter().collect();
+        if normalized.exists() {
+            return normalized
+                .strip_prefix(repo_root)
+                .map(|p| p.to_path_buf())
+                .unwrap_or(normalized);
+        }
         return PathBuf::from(link_path);
     }
 
