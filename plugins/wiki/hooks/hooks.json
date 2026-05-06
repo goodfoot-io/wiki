@@ -1,11 +1,21 @@
 {
   "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $CLAUDE_PLUGIN_ROOT/hooks/bin/stop.ac124a9e.mjs"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "node $CLAUDE_PLUGIN_ROOT/hooks/bin/wiki-check.9c19705d.mjs",
+            "command": "node $CLAUDE_PLUGIN_ROOT/hooks/bin/post-tool-use.a72c3af9.mjs",
             "timeout": 30000
           }
         ],
@@ -15,8 +25,9 @@
   },
   "__generated": {
     "files": [
-      "wiki-check.9c19705d.mjs"
+      "stop.ac124a9e.mjs",
+      "post-tool-use.a72c3af9.mjs"
     ],
-    "timestamp": "2026-05-05T21:58:05.802Z"
+    "timestamp": "2026-05-06T13:17:24.639Z"
   }
 }
