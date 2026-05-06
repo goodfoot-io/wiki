@@ -504,6 +504,16 @@ fn collect_for_files(
                     });
                 }
                 Ok(ref_content) => {
+                    if is_wiki_file(&abs, repo_root, wiki_config) {
+                        diagnostics.push(build_markdown_link_to_wiki_diag(
+                            path,
+                            link,
+                            &abs,
+                            &ref_content,
+                            &pages,
+                        ));
+                        continue;
+                    }
                     if let Some(start) = link.start_line {
                         if start == 0 {
                             diagnostics.push(CheckDiagnostic {
@@ -741,6 +751,120 @@ fn collect_for_files(
     }
 
     Ok(diagnostics)
+}
+
+// ── Markdown-link-to-wiki rule helpers ────────────────────────────────────────
+
+/// True when `resolved_abs` points at a wiki page: either it has the
+/// `.wiki.md` suffix, lives under any wiki root declared in `wiki_config`, or
+/// has an ancestor (within `repo_root`) that contains a `wiki.toml`.
+fn is_wiki_file(resolved_abs: &Path, repo_root: &Path, wiki_config: Option<&WikiConfig>) -> bool {
+    let lossy = resolved_abs.to_string_lossy();
+    // Wiki pages are markdown documents. Non-markdown files inside a wiki
+    // directory (images, attachments) are not wiki pages.
+    if !lossy.ends_with(".md") {
+        return false;
+    }
+    if lossy.ends_with(".wiki.md") {
+        return true;
+    }
+    if let Some(cfg) = wiki_config {
+        let canon_target = std::fs::canonicalize(resolved_abs)
+            .unwrap_or_else(|_| resolved_abs.to_path_buf());
+        for w in cfg.all() {
+            let canon_root = std::fs::canonicalize(&w.root).unwrap_or_else(|_| w.root.clone());
+            if canon_target.starts_with(&canon_root) {
+                return true;
+            }
+        }
+    }
+    let canon_repo = std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    let canon_target = std::fs::canonicalize(resolved_abs)
+        .unwrap_or_else(|_| resolved_abs.to_path_buf());
+    let mut cur = canon_target.parent();
+    while let Some(dir) = cur {
+        if dir.join("wiki.toml").is_file() {
+            return true;
+        }
+        if dir == canon_repo {
+            break;
+        }
+        cur = dir.parent();
+    }
+    false
+}
+
+/// Return the text of the heading whose section encloses `line` in `content`,
+/// i.e. the deepest ATX heading appearing at or before `line`.
+fn nearest_enclosing_heading(content: &str, line: u32) -> Option<String> {
+    extract_headings(content)
+        .into_iter()
+        .filter(|h| (h.line as u32) <= line)
+        .max_by_key(|h| h.line)
+        .map(|h| h.text)
+}
+
+/// Look up the target page's frontmatter title, parsing `ref_content` on
+/// demand when the page is not already in the index. Falls back to the file
+/// stem when no title is available.
+fn resolve_target_title(
+    abs: &Path,
+    ref_content: &str,
+    pages: &[(PathBuf, crate::frontmatter::Frontmatter)],
+) -> String {
+    if let Some((_, fm)) = pages.iter().find(|(p, _)| p == abs) {
+        return fm.title.clone();
+    }
+    if let Ok(Some(fm)) = crate::frontmatter::parse_frontmatter(ref_content, abs) {
+        return fm.title;
+    }
+    abs.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| abs.display().to_string())
+}
+
+fn build_markdown_link_to_wiki_diag(
+    source_path: &Path,
+    link: &crate::parser::FragmentLink,
+    abs: &Path,
+    ref_content: &str,
+    pages: &[(PathBuf, crate::frontmatter::Frontmatter)],
+) -> CheckDiagnostic {
+    let title = resolve_target_title(abs, ref_content, pages);
+    let heading = link
+        .start_line
+        .and_then(|start| nearest_enclosing_heading(ref_content, start));
+    let no_heading_note = link.start_line.is_some() && heading.is_none();
+
+    let inner = match heading {
+        Some(h) => format!("{title}#{h}"),
+        None => title.clone(),
+    };
+    let suggestion = if !link.original_text.is_empty() && link.original_text != title {
+        format!("[[{inner}|{}]]", link.original_text)
+    } else {
+        format!("[[{inner}]]")
+    };
+
+    let mut message = format!(
+        "Markdown link `[{}]({})` points at wiki page `{}`. \
+         Wiki-to-wiki references must use wikilink syntax: `{suggestion}`.",
+        link.original_text,
+        link.original_href,
+        abs.display(),
+    );
+    if no_heading_note {
+        message.push_str(
+            " (No heading encloses the linked line range; suggesting bare wikilink.)",
+        );
+    }
+
+    CheckDiagnostic {
+        kind: "markdown_link_to_wiki".into(),
+        file: source_path.display().to_string(),
+        line: link.source_line,
+        message,
+    }
 }
 
 // ── Peer title-set builder ────────────────────────────────────────────────────
@@ -1479,6 +1603,110 @@ mod tests {
         unsafe { std::env::set_var("PATH", &original_path) };
 
         assert_eq!(code, 2, "git-mesh non-zero exit must produce exit code 2 (runtime error)");
+    }
+
+    // ── markdown_link_to_wiki tests ───────────────────────────────────────────
+
+    #[test]
+    fn markdown_link_to_wiki_page_in_same_wiki_emits_diag() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        repo.create_file("wiki/target.md", &make_wiki_page("Auth", "## Token Flow\nbody"));
+        repo.create_file(
+            "wiki/source.md",
+            &make_wiki_page("Source", "See [Auth](target.md) for details."),
+        );
+        repo.commit("add pages");
+
+        let diags = collect(&[], &wiki_root, repo.path()).expect("collect");
+        let m: Vec<_> = diags.iter().filter(|d| d.kind == "markdown_link_to_wiki").collect();
+        assert_eq!(m.len(), 1, "expected one markdown_link_to_wiki: {diags:?}");
+        assert!(m[0].message.contains("[[Auth]]"), "expected wikilink suggestion, got: {}", m[0].message);
+    }
+
+    #[test]
+    fn markdown_link_to_wiki_with_line_range_uses_nearest_heading() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        // Lines: 1=---, 2=title, 3=summary, 4=---, 5=intro, 6=blank, 7=## Token Flow, 8=blank, 9=detail, 10=blank, 11=## Other
+        repo.create_file(
+            "wiki/target.md",
+            "---\ntitle: Auth\nsummary: Auth page.\n---\nintro\n\n## Token Flow\n\ndetail line\n\n## Other\n",
+        );
+        repo.create_file(
+            "wiki/source.md",
+            &make_wiki_page("Source", "See [details](target.md#L9-L9)."),
+        );
+        repo.commit("add pages");
+
+        let diags = collect(&[], &wiki_root, repo.path()).expect("collect");
+        let m: Vec<_> = diags.iter().filter(|d| d.kind == "markdown_link_to_wiki").collect();
+        assert_eq!(m.len(), 1, "expected one markdown_link_to_wiki: {diags:?}");
+        assert!(
+            m[0].message.contains("[[Auth#Token Flow|details]]"),
+            "expected suggestion `[[Auth#Token Flow|details]]`, got: {}",
+            m[0].message
+        );
+    }
+
+    #[test]
+    fn markdown_link_to_wiki_dot_wiki_md_outside_wiki_root() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        repo.create_file("packages/cli/notes.wiki.md", &make_wiki_page("Notes", "body"));
+        repo.create_file(
+            "wiki/source.md",
+            &make_wiki_page("Source", "See [Notes](/packages/cli/notes.wiki.md)."),
+        );
+        repo.commit("add pages");
+
+        let diags = collect(&[], &wiki_root, repo.path()).expect("collect");
+        let m: Vec<_> = diags.iter().filter(|d| d.kind == "markdown_link_to_wiki").collect();
+        assert_eq!(m.len(), 1, "expected diag for .wiki.md target: {diags:?}");
+    }
+
+    #[test]
+    fn markdown_link_to_non_wiki_file_does_not_emit_diag() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        repo.create_file("src/code.rs", "fn a() {}\n");
+        repo.create_file(
+            "wiki/source.md",
+            &make_wiki_page("Source", "See [code](/src/code.rs)."),
+        );
+        repo.commit("add pages");
+
+        let diags = collect(&[], &wiki_root, repo.path()).expect("collect");
+        let m: Vec<_> = diags.iter().filter(|d| d.kind == "markdown_link_to_wiki").collect();
+        assert!(m.is_empty(), "non-wiki target must not emit markdown_link_to_wiki: {diags:?}");
+    }
+
+    #[test]
+    fn markdown_link_to_wiki_skips_line_range_check() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        repo.create_file("wiki/target.md", &make_wiki_page("Target", "only a few lines"));
+        repo.create_file(
+            "wiki/source.md",
+            // L9999 is way out of range — but rule fires before line_range check
+            &make_wiki_page("Source", "See [Target](target.md#L9999-L9999)."),
+        );
+        repo.commit("add pages");
+
+        let diags = collect(&[], &wiki_root, repo.path()).expect("collect");
+        assert!(
+            diags.iter().any(|d| d.kind == "markdown_link_to_wiki"),
+            "expected markdown_link_to_wiki: {diags:?}"
+        );
+        assert!(
+            diags.iter().all(|d| d.kind != "line_range"),
+            "line_range must be suppressed when wiki rule fires: {diags:?}"
+        );
     }
 
     /// Finding 2 regression: `--source=index` must validate the staged
