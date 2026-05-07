@@ -94,10 +94,12 @@ fn parse_heading_line(line: &str) -> Option<&str> {
 
 /// Check whether `fragment` matches any heading in `headings`.
 ///
-/// Matching is done by comparing the fragment (treated as a GitHub slug) against
-/// all computed heading slugs, case-insensitively.
+/// The fragment is slugified before comparison, so both the slug form
+/// (`my-section`) and the raw heading text (`My Section`) resolve to the
+/// same heading. Duplicate-suffix slugs (`foo-1`) survive slugification
+/// unchanged and continue to match.
 pub fn resolve_heading(fragment: &str, headings: &[Heading]) -> bool {
-    let fragment_slug = fragment.to_lowercase();
+    let fragment_slug = github_slug(fragment);
     headings.iter().any(|h| h.slug == fragment_slug)
 }
 
@@ -275,6 +277,27 @@ mod tests {
         let content = "## My Section\n";
         let headings = extract_headings(content);
         assert!(resolve_heading("my-section", &headings));
+    }
+
+    #[test]
+    fn test_resolve_heading_raw_text_accepted() {
+        // Raw heading text — what the `Markdown Link To Wiki` suggester emits —
+        // must resolve, not just the slug form.
+        let content = "### Code layout: six bounded-context packages\n";
+        let headings = extract_headings(content);
+        assert!(resolve_heading("Code layout: six bounded-context packages", &headings));
+        assert!(resolve_heading("code-layout-six-bounded-context-packages", &headings));
+        // The colon-retained form also resolves: the colon is stripped during
+        // slugification, leaving the same `code-layout-six-...` slug.
+        assert!(resolve_heading("code-layout:-six-bounded-context-packages", &headings));
+    }
+
+    #[test]
+    fn test_resolve_heading_plain_raw_text() {
+        let content = "## Plain heading\n";
+        let headings = extract_headings(content);
+        assert!(resolve_heading("Plain heading", &headings));
+        assert!(resolve_heading("plain-heading", &headings));
     }
 
     #[test]
