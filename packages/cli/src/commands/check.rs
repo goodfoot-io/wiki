@@ -599,11 +599,7 @@ fn collect_for_files(
                 }
                 Ok(ref_content) => {
                     if is_wiki_file(&abs, repo_root, wiki_config) {
-                        // Only suggest the wikilink form when the target page
-                        // is part of the source's own scope index. Cross-scope
-                        // targets are not resolvable as bare `[[Title]]` from
-                        // this scope, so the path-style markdown link is the
-                        // canonical reference shape for them.
+                        // Same-scope: suggest the bare `[[Title]]` form.
                         if pages.iter().any(|(p, _)| p == &abs) {
                             diagnostics.push(build_markdown_link_to_wiki_diag(
                                 path,
@@ -611,6 +607,23 @@ fn collect_for_files(
                                 &abs,
                                 &ref_content,
                                 &pages,
+                                None,
+                            ));
+                            continue;
+                        }
+                        // Cross-scope: if the target lives in a peer wiki,
+                        // suggest the qualified `[[ns:Title]]` form so the
+                        // suggestion resolves from the source's scope.
+                        if let Some(ns) =
+                            cross_scope_peer_for_target(&abs, wiki_root, wiki_config)
+                        {
+                            diagnostics.push(build_markdown_link_to_wiki_diag(
+                                path,
+                                link,
+                                &abs,
+                                &ref_content,
+                                &pages,
+                                Some(&ns),
                             ));
                             continue;
                         }
@@ -924,12 +937,40 @@ fn resolve_target_title(
         .unwrap_or_else(|| abs.display().to_string())
 }
 
+/// Find the peer namespace whose root encloses `target_abs`, excluding the
+/// source's own `source_root`. Returns the namespace key (`DEFAULT_KEY` for
+/// the default wiki) so callers can build a `[[ns:Title]]` suggestion.
+fn cross_scope_peer_for_target(
+    target_abs: &Path,
+    source_root: &Path,
+    wiki_config: Option<&WikiConfig>,
+) -> Option<String> {
+    let cfg = wiki_config?;
+    let canon_target = std::fs::canonicalize(target_abs).unwrap_or_else(|_| target_abs.to_path_buf());
+    let canon_source = std::fs::canonicalize(source_root).unwrap_or_else(|_| source_root.to_path_buf());
+    let mut best: Option<(usize, String)> = None;
+    for (key, info) in &cfg.wikis {
+        let canon_root = std::fs::canonicalize(&info.root).unwrap_or_else(|_| info.root.clone());
+        if canon_root == canon_source {
+            continue;
+        }
+        if canon_target.starts_with(&canon_root) {
+            let depth = canon_root.components().count();
+            if best.as_ref().is_none_or(|(d, _)| depth > *d) {
+                best = Some((depth, key.clone()));
+            }
+        }
+    }
+    best.map(|(_, k)| k)
+}
+
 fn build_markdown_link_to_wiki_diag(
     source_path: &Path,
     link: &crate::parser::FragmentLink,
     abs: &Path,
     ref_content: &str,
     pages: &[(PathBuf, crate::frontmatter::Frontmatter)],
+    target_ns: Option<&str>,
 ) -> CheckDiagnostic {
     let title = resolve_target_title(abs, ref_content, pages);
     let heading = link
@@ -937,9 +978,13 @@ fn build_markdown_link_to_wiki_diag(
         .and_then(|start| nearest_enclosing_heading(ref_content, start));
     let no_heading_note = link.start_line.is_some() && heading.is_none();
 
-    let inner = match heading {
+    let core = match heading {
         Some(h) => format!("{title}#{h}"),
         None => title.clone(),
+    };
+    let inner = match target_ns {
+        Some(ns) => format!("{ns}:{core}"),
+        None => core,
     };
     let suggestion = if !link.original_text.is_empty() && link.original_text != title {
         format!("[[{inner}|{}]]", link.original_text)
