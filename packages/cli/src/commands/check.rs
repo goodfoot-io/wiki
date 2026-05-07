@@ -5,7 +5,8 @@ use miette::Result;
 use serde::Serialize;
 
 use crate::commands::discover_files;
-use crate::frontmatter::{Frontmatter, build_index, parse_frontmatter, parse_title};
+use crate::frontmatter::{Frontmatter, build_index, parse_frontmatter, parse_namespace, parse_title};
+use crate::wiki_config::DEFAULT_KEY;
 use crate::git::resolve_ref;
 use crate::headings::extract_headings;
 use crate::index::DocSource;
@@ -71,6 +72,77 @@ fn filter_files_for_source(
             listed.contains(&rel)
         })
         .collect())
+}
+
+/// Determine which namespace key in `cfg` owns `file`.
+///
+/// - `*.wiki.md` floats: routed by frontmatter `namespace:`. A declared
+///   namespace that is not a known wiki falls back to `DEFAULT_KEY` so the
+///   existing `namespace_undeclared` rule fires once. An untagged float (no
+///   `namespace:` field, or empty string) is owned by the default wiki.
+/// - Regular `.md` files: owned by the wiki whose root is the deepest
+///   ancestor of the file.
+///
+/// Returns `None` only when no wiki in `cfg` can own the file (e.g. an
+/// untagged float in a repo that declares no default wiki).
+fn owning_namespace_key(file: &Path, repo_root: &Path, cfg: &WikiConfig) -> Option<String> {
+    let lossy = file.to_string_lossy();
+    let canon_target = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+
+    // Deepest enclosing wiki root, if any.
+    let mut enclosing: Option<(usize, String)> = None;
+    for (key, info) in &cfg.wikis {
+        let canon_root = std::fs::canonicalize(&info.root).unwrap_or_else(|_| info.root.clone());
+        if canon_target.starts_with(&canon_root) {
+            let depth = canon_root.components().count();
+            if enclosing.as_ref().is_none_or(|(d, _)| depth > *d) {
+                enclosing = Some((depth, key.clone()));
+            }
+        }
+    }
+
+    if lossy.ends_with(".wiki.md") {
+        let content = read_via_source(file, repo_root, DocSource::WorkingTree)
+            .or_else(|_| std::fs::read_to_string(file))
+            .unwrap_or_default();
+        let declared = parse_namespace(&content);
+        if let Some(ns) = declared {
+            if cfg.wikis.contains_key(&ns) {
+                return Some(ns);
+            }
+            // Unknown namespace: route to the deepest enclosing wiki if the
+            // float lives under one, else to default. The existing
+            // namespace_undeclared rule then fires once in that iteration.
+            return enclosing
+                .map(|(_, k)| k)
+                .or_else(|| cfg.default().map(|_| DEFAULT_KEY.to_string()));
+        }
+        // Untagged: a *.wiki.md nested inside a wiki root is owned by that
+        // wiki; otherwise it belongs to the default wiki.
+        return enclosing
+            .map(|(_, k)| k)
+            .or_else(|| cfg.default().map(|_| DEFAULT_KEY.to_string()));
+    }
+
+    // Regular `.md`: deepest ancestor wiki root wins.
+    enclosing.map(|(_, k)| k)
+}
+
+/// Filter `files` to those owned by the namespace keyed `current_key` in `cfg`.
+fn filter_files_to_owning_namespace(
+    files: Vec<PathBuf>,
+    current_key: &str,
+    repo_root: &Path,
+    cfg: &WikiConfig,
+) -> Vec<PathBuf> {
+    files
+        .into_iter()
+        .filter(|p| {
+            owning_namespace_key(p, repo_root, cfg)
+                .as_deref()
+                == Some(current_key)
+        })
+        .collect()
 }
 
 use super::mesh_coverage;
@@ -238,8 +310,16 @@ pub fn run_multi(
         let files = match discover_files(globs, wiki_root, repo_root, source) {
             Ok(f) => f,
             Err(e) => {
-                runtime_error = Some(format!("[{label}] {e}"));
-                break;
+                // A glob that resolves outside this namespace legitimately
+                // yields zero files for this iteration; owning-ns routing
+                // sends the file to its actual owner. Treat it as empty
+                // rather than failing the whole multi-run.
+                if e.to_string().contains("no wiki pages found") {
+                    Vec::new()
+                } else {
+                    runtime_error = Some(format!("[{label}] {e}"));
+                    break;
+                }
             }
         };
         let files = match filter_files_for_source(files, repo_root, source) {
@@ -270,6 +350,15 @@ pub fn run_multi(
                 })
                 .collect()
         };
+        // Owning-namespace routing: a file is evaluated only under the wiki
+        // that owns it. *.wiki.md floats are routed by frontmatter namespace
+        // (with a default-wiki fallback for untagged or unknown-tag floats);
+        // regular pages are routed by the deepest ancestor wiki root.
+        let files: Vec<PathBuf> = if let Some(cfg) = per_cfg.as_ref() {
+            filter_files_to_owning_namespace(files, label, repo_root, cfg)
+        } else {
+            files
+        };
         if files.is_empty() {
             continue;
         }
@@ -277,7 +366,12 @@ pub fn run_multi(
             files.clone()
         } else {
             let raw = discover_files(&[], wiki_root, repo_root, source).unwrap_or_else(|_| files.clone());
-            filter_files_for_source(raw, repo_root, source).unwrap_or_else(|_| files.clone())
+            let raw = filter_files_for_source(raw, repo_root, source).unwrap_or_else(|_| files.clone());
+            if let Some(cfg) = per_cfg.as_ref() {
+                filter_files_to_owning_namespace(raw, label, repo_root, cfg)
+            } else {
+                raw
+            }
         };
         match collect_for_files(&files, &index_files, wiki_root, repo_root, per_cfg.as_ref(), no_mesh, source) {
             Ok(d) => all.push((label.clone(), d)),

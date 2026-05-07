@@ -163,7 +163,22 @@ pub fn run(
 ) -> Result<i32> {
     let mut files: Vec<PathBuf> = Vec::new();
     for wiki_root in wiki_roots {
-        let discovered = discover_files(globs, wiki_root, repo_root, source)?;
+        // Per-iteration discovery operates against this wiki's root: a glob
+        // that resolves outside this root may legitimately yield zero files
+        // here while still matching under another iteration. Treat that as
+        // empty rather than failing the whole scaffold run; the caller
+        // surfaces a real "no wiki pages found" error only if every
+        // iteration produces zero files (see the post-loop check below).
+        let discovered = match discover_files(globs, wiki_root, repo_root, source) {
+            Ok(v) => v,
+            Err(e) => {
+                if e.to_string().contains("no wiki pages found") {
+                    Vec::new()
+                } else {
+                    return Err(e);
+                }
+            }
+        };
         // Filter test fixtures: `wiki check` legitimately scans them, but a
         // scaffold run that materializes mesh commands for a test wiki would
         // pollute the repo's mesh state on the first commit. Scoped to scaffold.

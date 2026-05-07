@@ -91,6 +91,20 @@ pub fn parse_title(content: &str) -> Option<String> {
     }
 }
 
+/// Extract only the `namespace` field from frontmatter, without full validation.
+///
+/// Returns `None` if there is no frontmatter block, the YAML is unparseable,
+/// or the `namespace` field is absent. Treats an empty-string namespace as
+/// untagged (returns `None`) so `namespace: ""` behaves like an omitted field.
+pub fn parse_namespace(content: &str) -> Option<String> {
+    let yaml = extract_yaml_block(content)?;
+    let raw: RawFrontmatter = serde_yaml::from_str(yaml).ok()?;
+    match raw.namespace? {
+        serde_yaml::Value::String(s) if !s.is_empty() => Some(s),
+        _ => None,
+    }
+}
+
 /// Extract and parse YAML frontmatter from `content`.
 ///
 /// Returns `None` if the content does not begin with a `---` fence.

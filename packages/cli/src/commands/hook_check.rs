@@ -39,12 +39,35 @@ pub fn run(input: &str, _wiki_root: &Path, repo_root: &Path, source: DocSource) 
         Ok(c) => c,
         Err(_) => return Ok(0),
     };
-    // Pick the wiki whose root is an ancestor of the edited file. If none
-    // matches (file is outside any wiki), silently no-op.
+    // Pick the wiki that owns the edited file. For `*.wiki.md` floats this is
+    // the namespace declared in frontmatter (or the default wiki when the
+    // float is untagged); for regular pages it is the deepest ancestor wiki
+    // root. Silently no-op when no wiki can own the file.
     let canon_walk = std::fs::canonicalize(walk_start).unwrap_or_else(|_| walk_start.to_path_buf());
-    let target_wiki = cfg
-        .all()
-        .find(|w| canon_walk.starts_with(&w.root));
+    let target_wiki: Option<&crate::wiki_config::WikiInfo> = {
+        // Deepest enclosing wiki root, if any.
+        let enclosing = cfg
+            .all()
+            .filter(|w| canon_walk.starts_with(&w.root))
+            .max_by_key(|w| w.root.components().count());
+        if file_path.ends_with(".wiki.md") {
+            let content = std::fs::read_to_string(&abs_file).unwrap_or_default();
+            match crate::frontmatter::parse_namespace(&content) {
+                // Tagged float: route to the declared namespace, falling back
+                // to the enclosing wiki and then to default.
+                Some(ns) => cfg
+                    .wikis
+                    .get(&ns)
+                    .or(enclosing)
+                    .or_else(|| cfg.default()),
+                // Untagged float: prefer the enclosing wiki so a float nested
+                // under a peer root is owned by that peer; otherwise default.
+                None => enclosing.or_else(|| cfg.default()),
+            }
+        } else {
+            enclosing
+        }
+    };
     let Some(target_wiki) = target_wiki else {
         return Ok(0);
     };

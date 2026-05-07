@@ -39,12 +39,42 @@ pub fn looks_like_path(s: &str) -> bool {
 pub fn normalize_repo_relative_path(input: &str, repo_root: &Path) -> String {
     let path = Path::new(input);
     if path.is_absolute() {
-        path.strip_prefix(repo_root)
+        return path
+            .strip_prefix(repo_root)
             .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| input.to_string())
-    } else {
-        input.trim_start_matches("./").to_string()
+            .unwrap_or_else(|_| input.to_string());
     }
+    // Resolve cwd-relative paths (including those with `..` segments) by
+    // joining against the current working directory and re-stripping the
+    // repo root. Falls back to the literal input when canonicalization
+    // fails or the path escapes the repo entirely.
+    if input.contains("..")
+        && let Ok(cwd) = std::env::current_dir()
+    {
+        let joined = cwd.join(input);
+        let mut components = Vec::new();
+        for component in joined.components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    components.pop();
+                }
+                std::path::Component::CurDir => {}
+                c => components.push(c),
+            }
+        }
+        let normalized: PathBuf = components.into_iter().collect();
+        if let Ok(stripped) = normalized.strip_prefix(repo_root) {
+            return stripped.to_string_lossy().into_owned();
+        }
+        if let (Ok(c1), Ok(c2)) = (
+            std::fs::canonicalize(&normalized),
+            std::fs::canonicalize(repo_root),
+        ) && let Ok(stripped) = c1.strip_prefix(&c2)
+        {
+            return stripped.to_string_lossy().into_owned();
+        }
+    }
+    input.trim_start_matches("./").to_string()
 }
 
 /// Resolve a fragment link path relative to the file it was found in,
