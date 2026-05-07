@@ -1709,6 +1709,78 @@ mod tests {
         );
     }
 
+    /// Regression for main-32: when a `*.wiki.md` source page in scope A
+    /// links to a wiki page that lives in scope B (a different `wiki.toml`
+    /// root), `markdown_link_to_wiki` must not suggest a bare `[[Title]]`
+    /// that the source's own scope cannot resolve. Applying the suggestion
+    /// must not introduce a new `broken_wikilink` error in the same scope.
+    #[test]
+    fn markdown_link_to_wiki_cross_scope_suggestion_is_resolvable_in_source_scope() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        // Two independent wikis (two `wiki.toml` roots).
+        let wiki_a = crate::test_support::write_wiki_toml(repo.path(), "wiki-a");
+        let _wiki_b = crate::test_support::write_wiki_toml(repo.path(), "wiki-b");
+        // Target page lives in wiki-b only.
+        repo.create_file(
+            "wiki-b/page-b.md",
+            &make_wiki_page("Page B", "Body of B."),
+        );
+        // Source `.wiki.md` attaches to wiki-a (through discovery) and links
+        // cross-scope into wiki-b via path-style markdown.
+        repo.create_file(
+            "packages/foo/notes.wiki.md",
+            &make_wiki_page("Notes", "See [Page B](/wiki-b/page-b.md) for details."),
+        );
+        repo.commit("seed cross-scope link");
+
+        // Run check scoped to wiki-a (the source's scope).
+        let diags = collect(&[], &wiki_a, repo.path()).expect("collect");
+        let m: Vec<_> = diags
+            .iter()
+            .filter(|d| d.kind == "markdown_link_to_wiki")
+            .collect();
+
+        // If a markdown_link_to_wiki diag is emitted for a cross-scope
+        // target, its suggestion must be resolvable in the source's scope.
+        // The current bug: it suggests `[[Page B]]`, which wiki-a's index
+        // does not contain.
+        if let Some(d) = m.first() {
+            // Mechanically apply the suggestion: replace the markdown link
+            // with the bare-wikilink form named in the message.
+            let suggested_wikilink = "[[Page B]]";
+            assert!(
+                d.message.contains(suggested_wikilink),
+                "unexpected suggestion shape: {}",
+                d.message
+            );
+            let source_rel = "packages/foo/notes.wiki.md";
+            let source_abs = repo.path().join(source_rel);
+            let original = std::fs::read_to_string(&source_abs).expect("read source");
+            let rewritten = original.replace(
+                "[Page B](/wiki-b/page-b.md)",
+                suggested_wikilink,
+            );
+            assert_ne!(
+                original, rewritten,
+                "expected to apply the suggested wikilink rewrite"
+            );
+            std::fs::write(&source_abs, rewritten).expect("write source");
+
+            let diags2 = collect(&[], &wiki_a, repo.path()).expect("collect after fix");
+            let broken: Vec<_> = diags2
+                .iter()
+                .filter(|d| d.kind == "broken_wikilink")
+                .collect();
+            assert!(
+                broken.is_empty(),
+                "applying the linter's suggested fix introduced \
+                 broken_wikilink diagnostics — the suggestion is not \
+                 resolvable in the source's scope: {broken:?}"
+            );
+        }
+    }
+
     /// Finding 2 regression: `--source=index` must validate the staged
     /// content, not the worktree.  Worktree is clean, but the index has a
     /// broken wikilink — `wiki check --source=index` must report it.
