@@ -505,14 +505,21 @@ fn collect_for_files(
                 }
                 Ok(ref_content) => {
                     if is_wiki_file(&abs, repo_root, wiki_config) {
-                        diagnostics.push(build_markdown_link_to_wiki_diag(
-                            path,
-                            link,
-                            &abs,
-                            &ref_content,
-                            &pages,
-                        ));
-                        continue;
+                        // Only suggest the wikilink form when the target page
+                        // is part of the source's own scope index. Cross-scope
+                        // targets are not resolvable as bare `[[Title]]` from
+                        // this scope, so the path-style markdown link is the
+                        // canonical reference shape for them.
+                        if pages.iter().any(|(p, _)| p == &abs) {
+                            diagnostics.push(build_markdown_link_to_wiki_diag(
+                                path,
+                                link,
+                                &abs,
+                                &ref_content,
+                                &pages,
+                            ));
+                            continue;
+                        }
                     }
                     if let Some(start) = link.start_line {
                         if start == 0 {
