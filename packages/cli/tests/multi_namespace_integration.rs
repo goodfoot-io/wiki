@@ -411,3 +411,91 @@ fn f5_namespace_mutation_removes_stale_row_from_prior_index() {
         "float must appear in default index after removing namespace; stdout: {stdout_default}"
     );
 }
+
+// ── F6: search for a float surfaces exactly once under the owning namespace ─
+
+/// `wiki -n '*' <query>` over an untagged float must return exactly one hit,
+/// attributed to the float's owning namespace (default). Locks `search`'s
+/// owning-ns behavior in place so a future fix to `wiki check`'s fan-out
+/// doesn't accidentally introduce the inverse regression here.
+#[test]
+fn f6_search_star_for_float_attributes_once_to_owning_ns() {
+    let repo = TestRepo::new();
+    repo.create_file("wiki/wiki.toml", "[peers]\nfoo = \"../foo\"\n");
+    repo.create_file("wiki/page.md", &page("Default Page", "default body."));
+    repo.create_file("foo/wiki.toml", "namespace = \"foo\"\n");
+    repo.create_file("foo/page.md", &page("Foo Page", "foo body."));
+    // Untagged float — owned by default.
+    repo.create_file(
+        "floats/notes.wiki.md",
+        "---\ntitle: Float Notes\nsummary: A float about widgets.\n---\nBody about widgets.\n",
+    );
+    repo.commit("init");
+
+    let out = repo.wiki(&["--format", "json", "-n", "*", "widgets"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "stdout: {stdout}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    let arr = v.as_array().expect("array");
+    let float_hits: Vec<&serde_json::Value> = arr
+        .iter()
+        .filter(|e| e["title"].as_str() == Some("Float Notes"))
+        .collect();
+    assert_eq!(
+        float_hits.len(),
+        1,
+        "expected exactly one hit for the float; got: {arr:?}"
+    );
+    assert_eq!(
+        float_hits[0]["namespace"].as_str(),
+        Some("default"),
+        "untagged float must be attributed to default; got: {:?}",
+        float_hits[0]
+    );
+}
+
+// ── F7: refs for a float resolve in the owning namespace ─────────────────────
+
+/// `wiki refs <float>` must resolve the float's wikilinks against its owning
+/// namespace's index. An untagged float linking `[[Foo Page]]` (which exists
+/// only in peer foo) resolves to "not found" under default. The result must
+/// be reported once, attributed to the float's owning namespace.
+#[test]
+fn f7_refs_for_float_attributes_to_owning_ns() {
+    let repo = TestRepo::new();
+    repo.create_file("wiki/wiki.toml", "[peers]\nfoo = \"../foo\"\n");
+    repo.create_file("wiki/page.md", &page("Default Page", "."));
+    repo.create_file("foo/wiki.toml", "namespace = \"foo\"\n");
+    repo.create_file("foo/page.md", &page("Foo Page", "."));
+    repo.create_file(
+        "floats/notes.wiki.md",
+        "---\ntitle: Float Notes\nsummary: F.\n---\nSee [[Foo Page]].\n",
+    );
+    repo.commit("init");
+
+    let out = repo.wiki(&["-n", "*", "refs", "Float Notes", "--format", "json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "stdout: {stdout}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    let arr = v.as_array().expect("array");
+    assert_eq!(arr.len(), 1, "expected one refs entry; got: {arr:?}");
+    assert_eq!(
+        arr[0]["namespace"].as_str(),
+        Some("default"),
+        "refs for an untagged float must report under default; got: {:?}",
+        arr[0]
+    );
+    assert_eq!(
+        arr[0]["wikilink"].as_str(),
+        Some("Foo Page"),
+        "expected the wikilink target to be `Foo Page`; got: {:?}",
+        arr[0]
+    );
+    // The wikilink resolves against default's index where `Foo Page` does not
+    // exist — must be reported as not-found, not as a successful resolution.
+    assert!(
+        arr[0].get("error").is_some() || arr[0]["resolved"] == serde_json::Value::Bool(false),
+        "expected unresolved status under default; got: {:?}",
+        arr[0]
+    );
+}

@@ -637,3 +637,88 @@ fn mesh_scaffold_json_unreadable_file_in_parse_errors() {
         "unreadable.md must not appear in pages[]:\n{stdout}"
     );
 }
+
+/// `wiki scaffold <float>` against a `*.wiki.md` file outside any wiki root
+/// must succeed. Today the multi-namespace dispatch evaluates the path
+/// against every peer's discovery glob; peers whose roots don't enclose the
+/// float report "no wiki pages found" and the run fails. Owning-ns routing
+/// should send the float to its single owning namespace and skip the others.
+#[test]
+fn mesh_scaffold_handles_float_outside_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::create_dir_all(root.join("foo")).unwrap();
+    std::fs::create_dir_all(root.join("floats")).unwrap();
+    std::fs::write(root.join("wiki/wiki.toml"), "[peers]\nfoo = \"../foo\"\n").unwrap();
+    std::fs::write(
+        root.join("wiki/index.md"),
+        "---\ntitle: Default Index\nsummary: D.\n---\nHi.\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("foo/wiki.toml"), "namespace = \"foo\"\n").unwrap();
+    std::fs::write(
+        root.join("foo/index.md"),
+        "---\ntitle: Foo Index\nsummary: F.\n---\nHi.\n",
+    )
+    .unwrap();
+    // Untagged float — owned by default. Body has a fragment link so the
+    // scaffold has something to emit.
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/code.rs"), "fn x() {}\n").unwrap();
+    std::fs::write(
+        root.join("floats/notes.wiki.md"),
+        "---\ntitle: Notes\nsummary: N.\n---\nSee [code](../src/code.rs#L1-L1).\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "add",
+            "-A",
+        ],
+    );
+    git(
+        root,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "../floats/notes.wiki.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("run wiki scaffold");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "scaffold against an out-of-root float must succeed; \
+         status={:?}\nstdout: {stdout}\nstderr: {stderr}",
+        output.status
+    );
+    // Scaffold must emit a `git mesh add` line that anchors the float to its
+    // fragment-link target — if the run silently became a no-op the success
+    // assertion alone would not catch it.
+    assert!(
+        stdout.contains("git mesh add") && stdout.contains("src/code.rs#L1-L1"),
+        "scaffold must emit a mesh entry covering the float's fragment link; \
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+}

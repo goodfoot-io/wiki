@@ -228,3 +228,60 @@ fn explicit_relative_image_path_does_not_produce_missing_file() {
          stdout:\n{stdout}"
     );
 }
+
+// ── Multi-namespace owning-ns routing for image references ──────────────────
+
+/// An image reference (`![alt](nonexistent.png)`) inside an untagged
+/// `*.wiki.md` float must produce a `missing_file` diagnostic exactly once,
+/// attributed to the float's owning namespace (default). Today the
+/// diagnostic fans out across every configured peer.
+///
+/// Demonstrates the same scope-routing bug as `check_link_scope::k2`, but
+/// via the image-reference code path.
+#[test]
+fn image_reference_in_float_reported_only_in_owning_ns() {
+    let repo = TestRepo::new();
+    repo.create_file("wiki/wiki.toml", "[peers]\nfoo = \"../foo\"\n");
+    repo.create_file(
+        "wiki/index.md",
+        &make_wiki_page("Default Index", "Hi."),
+    );
+    repo.create_file("foo/wiki.toml", "namespace = \"foo\"\n");
+    repo.create_file("foo/index.md", &make_wiki_page("Foo Index", "Hi."));
+    repo.create_file(
+        "floats/illustrated.wiki.md",
+        "---\ntitle: Illustrated\nsummary: S.\n---\n\n![alt](nonexistent.png)\n",
+    );
+    repo.commit("init");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_wiki"));
+    cmd.current_dir(repo.dir.path().join("wiki"))
+        .env("WIKI_BACKGROUND_FTS", "0")
+        .args(["check", "--no-mesh", "--format", "json"]);
+    let out = cmd.output().expect("run wiki check");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    let v: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("parse json: {e}; stdout: {stdout}"));
+    let errs = v
+        .get("errors")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let missing_file: Vec<&serde_json::Value> = errs
+        .iter()
+        .filter(|e| e["kind"].as_str() == Some("missing_file"))
+        .collect();
+    assert_eq!(
+        missing_file.len(),
+        1,
+        "expected exactly one missing_file diagnostic for the float's image \
+         reference; got: {missing_file:?}"
+    );
+    assert_eq!(
+        missing_file[0]["namespace"].as_str(),
+        Some("default"),
+        "diagnostic must be attributed to the float's owning namespace; got: {:?}",
+        missing_file[0]
+    );
+}
