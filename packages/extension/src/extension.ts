@@ -77,6 +77,73 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const provider = new WikiEditorProvider(context.extensionUri, binaryManager, context, namespaceCache, markOpenAsText);
 
+  // ---------------------------------------------------------------------------
+  // Reentrancy guard: prevents duplicate openWith calls for the same URI while
+  // a swap is already in flight (each openWith fires onDidChangeVisibleTextEditors).
+  // ---------------------------------------------------------------------------
+  const inFlightSwaps = new Set<string>();
+
+  /**
+   * Swap all visible text-editor tabs for wiki .md files to the webview.
+   * Shared by the onDidChangeVisibleTextEditors observer and the
+   * onDidChangeConfiguration handler so the logic lives in one place.
+   *
+   * @param editors - The set of text editors to inspect.
+   */
+  async function swapVisibleEditorsToWebview(editors: readonly vscode.TextEditor[]): Promise<void> {
+    for (const editor of editors) {
+      const uri = editor.document.uri;
+      if (uri.scheme !== 'file') continue;
+      if (!uri.fsPath.endsWith('.md')) continue;
+
+      const uriKey = uri.toString();
+
+      // If the user explicitly chose text, leave alone (entry persists until tab closes).
+      if (openAsTextOnce.has(uriKey)) continue;
+
+      if (!vscode.workspace.getConfiguration('wiki').get<boolean>('openFilesInViewer', true)) continue;
+      if (!provider.isWikiFile(uri)) continue;
+
+      // Collect ALL text tabs for this URI across all tab groups (F6).
+      const matchingTabs: vscode.Tab[] = [];
+      for (const group of vscode.window.tabGroups.all) {
+        for (const tab of group.tabs) {
+          if (tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === uriKey) {
+            matchingTabs.push(tab);
+          }
+        }
+      }
+      if (matchingTabs.length === 0) continue;
+
+      // Swap each matching text tab to a webview (F6: handle all split groups).
+      for (const foundTab of matchingTabs) {
+        // Reentrancy guard: skip if a swap for this URI is already in flight.
+        if (inFlightSwaps.has(uriKey)) continue;
+        inFlightSwaps.add(uriKey);
+
+        const wasPinned = foundTab.isPinned;
+        try {
+          // Open as webview first — this focuses the new tab, making pinEditor reliable.
+          await vscode.commands.executeCommand('vscode.openWith', uri, 'wiki.viewer', {
+            viewColumn: foundTab.group.viewColumn,
+            preview: foundTab.isPreview
+          });
+
+          // Pin immediately after openWith (which focuses the tab) and BEFORE
+          // closing the old text tab to preserve focus for the pin command.
+          if (wasPinned) {
+            await vscode.commands.executeCommand('workbench.action.pinEditor');
+          }
+
+          // Close the now-redundant text tab last.
+          await vscode.window.tabGroups.close(foundTab);
+        } finally {
+          inFlightSwaps.delete(uriKey);
+        }
+      }
+    }
+  }
+
   // Remove skip-set entries when their corresponding text tab closes.
   context.subscriptions.push(
     vscode.window.tabGroups.onDidChangeTabs((event) => {
@@ -195,87 +262,15 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     ),
 
-    vscode.window.onDidChangeVisibleTextEditors(async (editors) => {
-      for (const editor of editors) {
-        const uri = editor.document.uri;
-        if (uri.scheme !== 'file') continue;
-        if (!uri.fsPath.endsWith('.md')) continue;
-
-        const uriKey = uri.toString();
-
-        // If the user explicitly chose text, leave alone (entry persists until tab closes).
-        if (openAsTextOnce.has(uriKey)) continue;
-
-        if (!vscode.workspace.getConfiguration('wiki').get<boolean>('openFilesInViewer', true)) continue;
-        if (!provider.isWikiFile(uri)) continue;
-
-        // Collect ALL text tabs for this URI across all tab groups (F6).
-        const matchingTabs: vscode.Tab[] = [];
-        for (const group of vscode.window.tabGroups.all) {
-          for (const tab of group.tabs) {
-            if (tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === uriKey) {
-              matchingTabs.push(tab);
-            }
-          }
-        }
-        if (matchingTabs.length === 0) continue;
-
-        // Swap each matching text tab to a webview (F6: handle all split groups).
-        for (const foundTab of matchingTabs) {
-          const wasPinned = foundTab.isPinned;
-
-          // Open as webview before closing the text tab to preserve the tab group.
-          await vscode.commands.executeCommand('vscode.openWith', uri, 'wiki.viewer', {
-            viewColumn: foundTab.group.viewColumn,
-            preview: foundTab.isPreview
-          });
-          await vscode.window.tabGroups.close(foundTab);
-
-          // Re-pin the new webview tab if the text tab was pinned (F3).
-          if (wasPinned) {
-            await vscode.commands.executeCommand('workbench.action.pinEditor');
-          }
-        }
-      }
+    vscode.window.onDidChangeVisibleTextEditors((editors) => {
+      void swapVisibleEditorsToWebview(editors);
     }),
 
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (!e.affectsConfiguration('wiki.openFilesInViewer')) return;
-      // Re-run observer logic over currently visible text editors so that
+      // Re-run swap logic over currently visible text editors so that
       // newly-enabled viewer state swaps existing wiki text tabs immediately (F4).
-      void (async () => {
-        for (const editor of vscode.window.visibleTextEditors) {
-          const uri = editor.document.uri;
-          if (uri.scheme !== 'file') continue;
-          if (!uri.fsPath.endsWith('.md')) continue;
-
-          const uriKey = uri.toString();
-          if (openAsTextOnce.has(uriKey)) continue;
-          if (!vscode.workspace.getConfiguration('wiki').get<boolean>('openFilesInViewer', true)) continue;
-          if (!provider.isWikiFile(uri)) continue;
-
-          const matchingTabs: vscode.Tab[] = [];
-          for (const group of vscode.window.tabGroups.all) {
-            for (const tab of group.tabs) {
-              if (tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === uriKey) {
-                matchingTabs.push(tab);
-              }
-            }
-          }
-
-          for (const foundTab of matchingTabs) {
-            const wasPinned = foundTab.isPinned;
-            await vscode.commands.executeCommand('vscode.openWith', uri, 'wiki.viewer', {
-              viewColumn: foundTab.group.viewColumn,
-              preview: foundTab.isPreview
-            });
-            await vscode.window.tabGroups.close(foundTab);
-            if (wasPinned) {
-              await vscode.commands.executeCommand('workbench.action.pinEditor');
-            }
-          }
-        }
-      })();
+      void swapVisibleEditorsToWebview(vscode.window.visibleTextEditors);
     })
   );
 }
