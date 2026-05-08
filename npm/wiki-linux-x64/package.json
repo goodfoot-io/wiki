@@ -1,6 +1,6 @@
 {
   "name": "@goodfoot/wiki-linux-x64",
-  "version": "0.5.52",
+  "version": "0.5.53",
   "description": "Platform-specific binary for @goodfoot/wiki",
   "license": "MIT",
   "os": [
