@@ -45,7 +45,8 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     private readonly _extensionUri: vscode.Uri,
     private readonly _binaryManager: WikiBinaryManager,
     private readonly _context: vscode.ExtensionContext,
-    private readonly _namespaceCache?: NamespaceCache
+    private readonly _namespaceCache?: NamespaceCache,
+    private readonly _markOpenAsText?: (uri: vscode.Uri) => void
   ) {}
 
   /**
@@ -151,19 +152,6 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
       return;
     }
 
-    // Only render files that actually belong to the wiki:
-    //   • any *.wiki.md file (anywhere in the workspace), or
-    //   • *.md files inside <workspaceRoot>/wiki/ — i.e. $WIKI_DIR, whose
-    //     default is the "wiki" subdirectory of the git root (parent of .git).
-    // Files that match the manifest selector but fall outside $WIKI_DIR
-    // (e.g. /home/node/wiki/README.md when the git root IS ~/wiki/) are
-    // redirected to the text editor so they open normally.
-    if (!this.isWikiFile(document.uri)) {
-      webviewPanel.dispose();
-      await vscode.window.showTextDocument(document.uri, { preview: false });
-      return;
-    }
-
     // Set the tab icon to the library codicon.
     webviewPanel.iconPath = new vscode.ThemeIcon('library');
 
@@ -263,6 +251,7 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
 
         case 'openInEditor': {
           const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
+          this._markOpenAsText?.(document.uri);
           await vscode.commands.executeCommand('wiki.openInEditor', document.uri, { viewColumn, preview: false });
           break;
         }
@@ -275,6 +264,7 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
               await vscode.commands.executeCommand('wiki.openInEditor', fileUri, { viewColumn, preview: false });
             } else {
               const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
+              this._markOpenAsText?.(fileUri);
               await vscode.window.showTextDocument(fileUri, { viewColumn, preview: false });
             }
           } catch (err) {

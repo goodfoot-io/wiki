@@ -60,7 +60,20 @@ export function activate(context: vscode.ExtensionContext): void {
   const languageFeatures = new WikiLanguageFeatures(binaryManager, namespaceCache);
   context.subscriptions.push(...languageFeatures.register());
 
-  const provider = new WikiEditorProvider(context.extensionUri, binaryManager, context, namespaceCache);
+  // ---------------------------------------------------------------------------
+  // Skip set: URIs the user explicitly chose to open as text.
+  // The observer consumes (deletes) the entry on the next pass so subsequent
+  // re-opens route normally.
+  // ---------------------------------------------------------------------------
+  const openAsTextOnce = new Set<string>();
+
+  const provider = new WikiEditorProvider(
+    context.extensionUri,
+    binaryManager,
+    context,
+    namespaceCache,
+    (uri: vscode.Uri) => openAsTextOnce.add(uri.toString())
+  );
 
   // ---------------------------------------------------------------------------
   // Status bar item
@@ -162,11 +175,51 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(
       'wiki.openInEditor',
       (uri: vscode.Uri, options?: vscode.TextDocumentShowOptions | vscode.ViewColumn) => {
+        openAsTextOnce.add(uri.toString());
         const showOptions: vscode.TextDocumentShowOptions =
           typeof options === 'number' ? { viewColumn: options, preview: false } : (options ?? { preview: false });
         return vscode.window.showTextDocument(uri, showOptions);
       }
-    )
+    ),
+
+    vscode.window.onDidChangeVisibleTextEditors(async (editors) => {
+      for (const editor of editors) {
+        const uri = editor.document.uri;
+        if (uri.scheme !== 'file') continue;
+        if (!uri.fsPath.endsWith('.md')) continue;
+
+        // Find the owning tab; skip non-text tabs (diff, merge, custom editors).
+        let foundTab: vscode.Tab | undefined;
+        for (const group of vscode.window.tabGroups.all) {
+          for (const tab of group.tabs) {
+            if (tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === uri.toString()) {
+              foundTab = tab;
+              break;
+            }
+          }
+          if (foundTab != null) break;
+        }
+        if (foundTab == null) continue;
+
+        const uriKey = uri.toString();
+
+        // If the user explicitly chose text, consume the entry and leave alone.
+        if (openAsTextOnce.has(uriKey)) {
+          openAsTextOnce.delete(uriKey);
+          continue;
+        }
+
+        if (!vscode.workspace.getConfiguration('wiki').get<boolean>('openFilesInViewer', true)) continue;
+        if (!provider.isWikiFile(uri)) continue;
+
+        // Open as webview before closing the text tab to preserve the tab group.
+        await vscode.commands.executeCommand('vscode.openWith', uri, 'wiki.viewer', {
+          viewColumn: foundTab.group.viewColumn,
+          preview: foundTab.isPreview
+        });
+        await vscode.window.tabGroups.close(foundTab);
+      }
+    })
   );
 }
 

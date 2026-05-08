@@ -54,13 +54,10 @@
         "displayName": "Wiki Viewer",
         "selector": [
           {
-            "filenamePattern": "**/wiki/**/*.md"
-          },
-          {
-            "filenamePattern": "**/*.wiki.md"
+            "filenamePattern": "**/*.__wiki_viewer_never_match__"
           }
         ],
-        "priority": "default"
+        "priority": "option"
       }
     ],
     "commands": [
