@@ -100,7 +100,6 @@ Install **Wiki Viewer** from the [VS Code Marketplace](https://marketplace.visua
 - Rendered Markdown webview with wikilink navigation, backlinks, and fragment support
 - Ranked wiki search (`Shift+Cmd+L` / `wiki.search`)
 - Seamless switch between rendered and source views (`wiki.openInEditor`)
-- Configurable via `wiki.openFilesInViewer`
 - Syntax-highlighted code blocks, morphdom-powered incremental updates
 
 ## Monorepo layout

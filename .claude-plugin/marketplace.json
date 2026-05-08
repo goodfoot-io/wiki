@@ -12,7 +12,7 @@
   "plugins": [
     {
       "name": "wiki",
-      "version": "0.5.53",
+      "version": "0.5.54",
       "source": "./plugins/wiki",
       "description": "Wiki documentation system — fragment-linked documentation with change detection, full-text search, and automated maintenance",
       "author": {

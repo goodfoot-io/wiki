@@ -45,8 +45,7 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     private readonly _extensionUri: vscode.Uri,
     private readonly _binaryManager: WikiBinaryManager,
     private readonly _context: vscode.ExtensionContext,
-    private readonly _namespaceCache?: NamespaceCache,
-    private readonly _markOpenAsText?: (uri: vscode.Uri) => void
+    private readonly _namespaceCache?: NamespaceCache
   ) {}
 
   /**
@@ -144,14 +143,6 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     webviewPanel: vscode.WebviewPanel,
     _token: vscode.CancellationToken
   ): Promise<void> {
-    // If the user has disabled the wiki viewer, open the file as a text document instead.
-    const openInViewer = vscode.workspace.getConfiguration('wiki').get<boolean>('openFilesInViewer', true);
-    if (!openInViewer) {
-      webviewPanel.dispose();
-      await vscode.window.showTextDocument(document.uri, { preview: false });
-      return;
-    }
-
     // Guard against user-level workbench.editorAssociations routing non-wiki .md files here.
     if (!this.isWikiFile(document.uri)) {
       webviewPanel.dispose();
@@ -258,7 +249,6 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
 
         case 'openInEditor': {
           const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
-          this._markOpenAsText?.(document.uri);
           await vscode.commands.executeCommand('wiki.openInEditor', document.uri, { viewColumn, preview: false });
           break;
         }
@@ -271,7 +261,6 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
               await vscode.commands.executeCommand('wiki.openInEditor', fileUri, { viewColumn, preview: false });
             } else {
               const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
-              this._markOpenAsText?.(fileUri);
               await vscode.window.showTextDocument(fileUri, { viewColumn, preview: false });
             }
           } catch (err) {
