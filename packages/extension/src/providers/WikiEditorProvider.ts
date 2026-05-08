@@ -152,6 +152,13 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
       return;
     }
 
+    // Guard against user-level workbench.editorAssociations routing non-wiki .md files here.
+    if (!this.isWikiFile(document.uri)) {
+      webviewPanel.dispose();
+      await vscode.window.showTextDocument(document.uri, { preview: false });
+      return;
+    }
+
     // Set the tab icon to the library codicon.
     webviewPanel.iconPath = new vscode.ThemeIcon('library');
 
@@ -244,7 +251,7 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
               viewColumn: vscode.ViewColumn.Beside
             });
           } else {
-            await vscode.commands.executeCommand('vscode.open', targetUri, vscode.ViewColumn.Active);
+            await vscode.commands.executeCommand('vscode.openWith', targetUri, 'wiki.viewer', vscode.ViewColumn.Active);
           }
           break;
         }

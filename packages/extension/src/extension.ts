@@ -62,17 +62,30 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // ---------------------------------------------------------------------------
   // Skip set: URIs the user explicitly chose to open as text.
-  // The observer consumes (deletes) the entry on the next pass so subsequent
-  // re-opens route normally.
+  // Entries are NOT consumed by the observer; they persist for the lifetime of
+  // the text tab. A tab-close listener removes the entry when the text tab closes.
+  // Only .md URIs are accepted to prevent unbounded growth (non-.md URIs cannot
+  // be cleaned up by the tab-close listener which filters on .md-ending paths).
   // ---------------------------------------------------------------------------
   const openAsTextOnce = new Set<string>();
 
-  const provider = new WikiEditorProvider(
-    context.extensionUri,
-    binaryManager,
-    context,
-    namespaceCache,
-    (uri: vscode.Uri) => openAsTextOnce.add(uri.toString())
+  const markOpenAsText = (uri: vscode.Uri): void => {
+    if (uri.fsPath.endsWith('.md')) {
+      openAsTextOnce.add(uri.toString());
+    }
+  };
+
+  const provider = new WikiEditorProvider(context.extensionUri, binaryManager, context, namespaceCache, markOpenAsText);
+
+  // Remove skip-set entries when their corresponding text tab closes.
+  context.subscriptions.push(
+    vscode.window.tabGroups.onDidChangeTabs((event) => {
+      for (const tab of event.closed) {
+        if (tab.input instanceof vscode.TabInputText && tab.input.uri.fsPath.endsWith('.md')) {
+          openAsTextOnce.delete(tab.input.uri.toString());
+        }
+      }
+    })
   );
 
   // ---------------------------------------------------------------------------
@@ -175,7 +188,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(
       'wiki.openInEditor',
       (uri: vscode.Uri, options?: vscode.TextDocumentShowOptions | vscode.ViewColumn) => {
-        openAsTextOnce.add(uri.toString());
+        markOpenAsText(uri);
         const showOptions: vscode.TextDocumentShowOptions =
           typeof options === 'number' ? { viewColumn: options, preview: false } : (options ?? { preview: false });
         return vscode.window.showTextDocument(uri, showOptions);
@@ -188,37 +201,81 @@ export function activate(context: vscode.ExtensionContext): void {
         if (uri.scheme !== 'file') continue;
         if (!uri.fsPath.endsWith('.md')) continue;
 
-        // Find the owning tab; skip non-text tabs (diff, merge, custom editors).
-        let foundTab: vscode.Tab | undefined;
-        for (const group of vscode.window.tabGroups.all) {
-          for (const tab of group.tabs) {
-            if (tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === uri.toString()) {
-              foundTab = tab;
-              break;
-            }
-          }
-          if (foundTab != null) break;
-        }
-        if (foundTab == null) continue;
-
         const uriKey = uri.toString();
 
-        // If the user explicitly chose text, consume the entry and leave alone.
-        if (openAsTextOnce.has(uriKey)) {
-          openAsTextOnce.delete(uriKey);
-          continue;
-        }
+        // If the user explicitly chose text, leave alone (entry persists until tab closes).
+        if (openAsTextOnce.has(uriKey)) continue;
 
         if (!vscode.workspace.getConfiguration('wiki').get<boolean>('openFilesInViewer', true)) continue;
         if (!provider.isWikiFile(uri)) continue;
 
-        // Open as webview before closing the text tab to preserve the tab group.
-        await vscode.commands.executeCommand('vscode.openWith', uri, 'wiki.viewer', {
-          viewColumn: foundTab.group.viewColumn,
-          preview: foundTab.isPreview
-        });
-        await vscode.window.tabGroups.close(foundTab);
+        // Collect ALL text tabs for this URI across all tab groups (F6).
+        const matchingTabs: vscode.Tab[] = [];
+        for (const group of vscode.window.tabGroups.all) {
+          for (const tab of group.tabs) {
+            if (tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === uriKey) {
+              matchingTabs.push(tab);
+            }
+          }
+        }
+        if (matchingTabs.length === 0) continue;
+
+        // Swap each matching text tab to a webview (F6: handle all split groups).
+        for (const foundTab of matchingTabs) {
+          const wasPinned = foundTab.isPinned;
+
+          // Open as webview before closing the text tab to preserve the tab group.
+          await vscode.commands.executeCommand('vscode.openWith', uri, 'wiki.viewer', {
+            viewColumn: foundTab.group.viewColumn,
+            preview: foundTab.isPreview
+          });
+          await vscode.window.tabGroups.close(foundTab);
+
+          // Re-pin the new webview tab if the text tab was pinned (F3).
+          if (wasPinned) {
+            await vscode.commands.executeCommand('workbench.action.pinEditor');
+          }
+        }
       }
+    }),
+
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (!e.affectsConfiguration('wiki.openFilesInViewer')) return;
+      // Re-run observer logic over currently visible text editors so that
+      // newly-enabled viewer state swaps existing wiki text tabs immediately (F4).
+      void (async () => {
+        for (const editor of vscode.window.visibleTextEditors) {
+          const uri = editor.document.uri;
+          if (uri.scheme !== 'file') continue;
+          if (!uri.fsPath.endsWith('.md')) continue;
+
+          const uriKey = uri.toString();
+          if (openAsTextOnce.has(uriKey)) continue;
+          if (!vscode.workspace.getConfiguration('wiki').get<boolean>('openFilesInViewer', true)) continue;
+          if (!provider.isWikiFile(uri)) continue;
+
+          const matchingTabs: vscode.Tab[] = [];
+          for (const group of vscode.window.tabGroups.all) {
+            for (const tab of group.tabs) {
+              if (tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === uriKey) {
+                matchingTabs.push(tab);
+              }
+            }
+          }
+
+          for (const foundTab of matchingTabs) {
+            const wasPinned = foundTab.isPinned;
+            await vscode.commands.executeCommand('vscode.openWith', uri, 'wiki.viewer', {
+              viewColumn: foundTab.group.viewColumn,
+              preview: foundTab.isPreview
+            });
+            await vscode.window.tabGroups.close(foundTab);
+            if (wasPinned) {
+              await vscode.commands.executeCommand('workbench.action.pinEditor');
+            }
+          }
+        }
+      })();
     })
   );
 }
