@@ -49,7 +49,13 @@ export class NamespaceCache {
 
     try {
       const handle = await this._binaryManager.ready();
-      const { stdout, stderr, exitCode } = await runWikiCommand(handle.path, ['namespaces', '--format', 'json']);
+      const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      const { stdout, stderr, exitCode } = await runWikiCommand(
+        handle.path,
+        ['namespaces', '--format', 'json'],
+        undefined,
+        cwd
+      );
 
       if (exitCode !== 0) {
         this._diagnostics.set(DIAGNOSTIC_URI, [
