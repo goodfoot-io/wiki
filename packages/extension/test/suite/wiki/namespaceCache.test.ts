@@ -204,6 +204,49 @@ describe('NamespaceCache', () => {
     }
   });
 
+  it('invokes the wiki binary with a workspace cwd so namespace discovery works on Remote-SSH hosts', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ns-test-'));
+    const diagnostics = vscode.languages.createDiagnosticCollection('test');
+    try {
+      const binaryPath = path.join(tempDir, 'wiki-ns');
+      const cwdLogPath = path.join(tempDir, 'cwd.log');
+      // Fixture records its process.cwd() so we can verify the cache passes a
+      // workspace cwd rather than letting the binary inherit the extension-host
+      // cwd (which on Remote-SSH lives outside any wiki repo).
+      fs.writeFileSync(
+        binaryPath,
+        Buffer.from(
+          `#!/usr/bin/env node
+require('node:fs').writeFileSync(${JSON.stringify(cwdLogPath)}, process.cwd());
+process.stdout.write('[]');
+process.exit(0);
+`,
+          'utf-8'
+        ),
+        { mode: 0o755 }
+      );
+
+      const cache = new NamespaceCache(createTestManager(binaryPath), diagnostics);
+      await cache.refresh();
+
+      assert.ok(fs.existsSync(cwdLogPath), 'Expected fixture binary to have been invoked');
+      const recordedCwd = fs.readFileSync(cwdLogPath, 'utf-8');
+
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      assert.ok(workspaceFolders != null && workspaceFolders.length > 0, 'Test requires an open workspace folder');
+      const expectedCwd = workspaceFolders[0]!.uri.fsPath;
+
+      assert.strictEqual(
+        recordedCwd,
+        expectedCwd,
+        `Expected NamespaceCache.refresh to invoke the wiki binary with cwd=${expectedCwd}, got cwd=${recordedCwd}`
+      );
+    } finally {
+      diagnostics.dispose();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('surfaces non-zero exit as a workspace diagnostic', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ns-test-'));
     const diagnostics = vscode.languages.createDiagnosticCollection('test');
