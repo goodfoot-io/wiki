@@ -1,10 +1,10 @@
 # Charge handler notes • src/notes.wiki.md
 
 ```bash
-git mesh add src/charge-handler-notes \
+git mesh add wiki/charge-handler-notes \
   src/notes.wiki.md#L6-L8 \
   src/charge.ts#L2-L7
-git mesh why src/charge-handler-notes -m "[why]"
+git mesh why wiki/charge-handler-notes -m "[why]"
 ```
 
 ---

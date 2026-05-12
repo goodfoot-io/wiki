@@ -427,7 +427,8 @@ fn run(
                 "wiki scaffold requires a wiki.toml (no wiki found)"
             )
         })?;
-        let wiki_roots: Vec<PathBuf> = cfg.all().map(|w| w.root.clone()).collect();
+        let wiki_infos: Vec<wiki_config::WikiInfo> = cfg.all().cloned().collect();
+        let wiki_roots: Vec<PathBuf> = wiki_infos.iter().map(|w| w.root.clone()).collect();
         let command_name = command_name(command.as_ref(), effective_query.as_deref());
         let perf_root = cfg
             .all()
@@ -437,7 +438,7 @@ fn run(
         perf::init(perf_root, command_name, json);
         let _command_span = perf::span_for_command(command_name);
         let started = Instant::now();
-        let result = commands::mesh::scaffold::run(globs, json, &wiki_roots, &repo_root, source);
+        let result = commands::mesh::scaffold::run(globs, json, &wiki_roots, &wiki_infos, &repo_root, source);
         match &result {
             Ok(code) => perf::finish(
                 command_name,

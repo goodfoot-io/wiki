@@ -722,3 +722,141 @@ fn mesh_scaffold_handles_float_outside_root() {
          stdout: {stdout}\nstderr: {stderr}"
     );
 }
+
+/// Slugs for pages in a *named-namespace* wiki must start with
+/// `wiki/<namespace>/`, and the namespace name must not appear a second time
+/// even when the wiki root directory happens to match the namespace.
+#[test]
+fn mesh_scaffold_namespaced_wiki_slug_prefix() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    // A named-namespace wiki at `mesh/` (namespace == directory name, as is
+    // typical in this repo). The fact that the dir and namespace share a name
+    // is exactly the case where the no-repeat rule has to kick in.
+    std::fs::create_dir_all(root.join("mesh/sub")).unwrap();
+    std::fs::write(root.join("mesh/wiki.toml"), "namespace = \"mesh\"\n").unwrap();
+    std::fs::write(
+        root.join("mesh/charge.md"),
+        "---\ntitle: Charge\nsummary: c\n---\n\n## Handler\n\nSee [code](../src/charge.rs#L1-L5).\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("mesh/sub/leaf.md"),
+        "---\ntitle: Leaf\nsummary: l\n---\n\n## Inner\n\nSee [bit](../../src/leaf.rs#L1-L2).\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/charge.rs"), "// charge\n").unwrap();
+    std::fs::write(root.join("src/leaf.rs"), "// leaf\n").unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "**/*.md"])
+        .current_dir(root.join("mesh"))
+        .output()
+        .expect("run wiki scaffold");
+    assert!(
+        output.status.success(),
+        "scaffold failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Top-level page in the namespaced wiki → wiki/mesh/<noun>.
+    assert!(
+        stdout.contains("git mesh add wiki/mesh/handler"),
+        "expected wiki/mesh/handler slug; got:\n{stdout}"
+    );
+    // No double-namespace segment from the wiki root dir matching the
+    // namespace name.
+    assert!(
+        !stdout.contains("wiki/mesh/mesh/"),
+        "namespace must not be repeated in slug; got:\n{stdout}"
+    );
+
+    // Subdir within the namespaced wiki → wiki/mesh/sub/<noun>.
+    assert!(
+        stdout.contains("git mesh add wiki/mesh/sub/inner"),
+        "expected wiki/mesh/sub/inner slug; got:\n{stdout}"
+    );
+}
+
+/// Float `.wiki.md` pages outside any `wiki.toml` tree must use their
+/// frontmatter `namespace` field to choose the slug prefix:
+///   * no `namespace` → `wiki/<noun>` (default namespace),
+///   * `namespace: foo` → `wiki/foo/<noun>` (named peer),
+/// regardless of where on disk the file sits.
+#[test]
+fn mesh_scaffold_float_uses_frontmatter_namespace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    // Default-namespace wiki anchor so `WikiConfig::load` has something to find.
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::write(root.join("wiki/wiki.toml"), "").unwrap();
+    std::fs::write(
+        root.join("wiki/index.md"),
+        "---\ntitle: Index\nsummary: i\n---\n\nNo links.\n",
+    )
+    .unwrap();
+    // Named-namespace wiki for the float to opt into.
+    std::fs::create_dir_all(root.join("mesh")).unwrap();
+    std::fs::write(root.join("mesh/wiki.toml"), "namespace = \"mesh\"\n").unwrap();
+    std::fs::write(
+        root.join("mesh/anchor.md"),
+        "---\ntitle: Anchor\nsummary: a\n---\n\nNo links.\n",
+    )
+    .unwrap();
+
+    // Two floats in `src/`: one default (no fm namespace), one tagged `mesh`.
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/x.rs"), "// x\n").unwrap();
+    std::fs::write(root.join("src/y.rs"), "// y\n").unwrap();
+    std::fs::write(
+        root.join("src/default.wiki.md"),
+        "---\ntitle: Default Notes\nsummary: d\n---\n\n## Plain\n\nSee [code](x.rs#L1-L2).\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/tagged.wiki.md"),
+        "---\ntitle: Tagged Notes\nsummary: t\nnamespace: mesh\n---\n\n## Peer\n\nSee [code](y.rs#L1-L2).\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "**/*.md", "**/*.wiki.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("run wiki scaffold");
+    assert!(
+        output.status.success(),
+        "scaffold failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // The default-ns float drops its parent directory and gets the bare
+    // `wiki/` prefix.
+    assert!(
+        stdout.contains("git mesh add wiki/plain"),
+        "expected wiki/plain slug for untagged float; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("wiki/src/"),
+        "default-ns float must not carry the on-disk `src/` segment; got:\n{stdout}"
+    );
+
+    // The frontmatter-tagged float adopts the peer namespace.
+    assert!(
+        stdout.contains("git mesh add wiki/mesh/peer"),
+        "expected wiki/mesh/peer slug for `namespace: mesh` float; got:\n{stdout}"
+    );
+}

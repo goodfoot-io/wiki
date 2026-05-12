@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use super::augment::AugmentedLink;
+use super::scaffold::PageNamespace;
 
 /// Structured anchor triple — path and line range, before stringification.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,11 +58,12 @@ pub(crate) fn build(
     page_path: &str,
     groups: &[SectionGroup<'_>],
     _repo_root: &Path,
+    page_ns: &PageNamespace,
 ) -> Vec<MeshDraft> {
     groups
         .iter()
         .map(|g| {
-            let slug = derive_slug(page_path, g.leader);
+            let slug = derive_slug(page_ns, g.leader);
             let page_anchor_str = format!(
                 "{page_path}#L{start}-L{end}",
                 start = g.section_start,
@@ -90,27 +92,48 @@ pub(crate) fn build(
         .collect()
 }
 
-/// Slug = `<category>/<noun>`. Category is the page's parent directory; for
-/// `wiki/<sub>/file.md` that's `wiki/<sub>`, for `wiki/file.md` it's `wiki`,
-/// for any other path it's the first path segment. Noun is the deepest section
-/// heading kebab-cased; falls back to the link label, then the target file stem.
-fn derive_slug(page_path: &str, aug: &AugmentedLink) -> String {
-    let category = derive_category(page_path);
+/// Slug = `<prefix>/<inner-subdir>/<noun>`, where:
+///   - `<prefix>` is `wiki` for default-namespace pages and `wiki/<ns>` for
+///     pages in a named-namespace wiki;
+///   - `<inner-subdir>` is the page's directory relative to its owning wiki
+///     root (empty for pages at the wiki root, and empty for `.wiki.md`
+///     floats that have no owning root);
+///   - `<noun>` comes from the deepest section heading kebab-cased, falling
+///     back to the link label, then the target file stem.
+///
+/// The `wiki/` and `wiki/<ns>/` prefixes are added exactly once and never
+/// repeated inside the slug: any inner-subdir segment equal to `wiki` (or to
+/// the namespace, when set) is stripped before concatenation, so that a page
+/// at `wiki/wiki/foo.md` or `mesh/mesh/foo.md` does not produce duplicate
+/// prefix segments.
+fn derive_slug(page_ns: &PageNamespace, aug: &AugmentedLink) -> String {
     let noun = derive_noun(aug);
-    if category.is_empty() {
-        noun
-    } else {
-        format!("{category}/{noun}")
-    }
+    build_slug(page_ns, &noun)
 }
 
-fn derive_category(page_path: &str) -> String {
-    let parts: Vec<&str> = page_path.split('/').collect();
-    if parts.len() <= 1 {
-        return String::new();
+/// Compose the slug from a `PageNamespace` and a kebab-cased noun, applying
+/// the no-repeat invariant on `wiki` and the namespace name.
+pub(crate) fn build_slug(page_ns: &PageNamespace, noun: &str) -> String {
+    let mut parts: Vec<String> = vec!["wiki".to_string()];
+    if let Some(ns) = page_ns.namespace.as_deref() {
+        parts.push(ns.to_string());
     }
-    let dirs = &parts[..parts.len() - 1];
-    dirs.join("/")
+    let reserved: std::collections::HashSet<&str> = {
+        let mut s = std::collections::HashSet::new();
+        s.insert("wiki");
+        if let Some(ns) = page_ns.namespace.as_deref() {
+            s.insert(ns);
+        }
+        s
+    };
+    for seg in page_ns.subdir.split('/') {
+        if seg.is_empty() || reserved.contains(seg) {
+            continue;
+        }
+        parts.push(seg.to_string());
+    }
+    parts.push(noun.to_string());
+    parts.join("/")
 }
 
 fn derive_noun(aug: &AugmentedLink) -> String {
@@ -211,24 +234,59 @@ mod tests {
         }
     }
 
-    #[test]
-    fn category_for_nested_wiki_page() {
-        assert_eq!(derive_category("wiki/perf/indexing.md"), "wiki/perf");
+    fn ns(namespace: Option<&str>, subdir: &str) -> PageNamespace {
+        PageNamespace {
+            namespace: namespace.map(|s| s.to_string()),
+            subdir: subdir.to_string(),
+        }
     }
 
     #[test]
-    fn category_for_top_level_wiki_page() {
-        assert_eq!(derive_category("wiki/billing.md"), "wiki");
+    fn slug_default_namespace_top_level() {
+        assert_eq!(build_slug(&ns(None, ""), "billing"), "wiki/billing");
     }
 
     #[test]
-    fn category_for_non_wiki_page() {
-        assert_eq!(derive_category("src/notes.wiki.md"), "src");
+    fn slug_default_namespace_with_subdir() {
+        assert_eq!(
+            build_slug(&ns(None, "perf"), "sync-detection"),
+            "wiki/perf/sync-detection"
+        );
     }
 
     #[test]
-    fn category_empty_for_bare_filename() {
-        assert_eq!(derive_category("README.md"), "");
+    fn slug_named_namespace_top_level() {
+        assert_eq!(build_slug(&ns(Some("mesh"), ""), "foo"), "wiki/mesh/foo");
+    }
+
+    #[test]
+    fn slug_named_namespace_with_subdir() {
+        assert_eq!(
+            build_slug(&ns(Some("mesh"), "sub"), "bar"),
+            "wiki/mesh/sub/bar"
+        );
+    }
+
+    #[test]
+    fn slug_strips_repeated_wiki_segment() {
+        // A page at wiki/wiki/foo.md in the default-ns wiki at wiki/ would
+        // produce subdir "wiki" — drop it so the prefix is not repeated.
+        assert_eq!(build_slug(&ns(None, "wiki"), "foo"), "wiki/foo");
+    }
+
+    #[test]
+    fn slug_strips_repeated_namespace_segment() {
+        // A page at mesh/mesh/foo.md in the mesh-ns wiki at mesh/ would
+        // produce subdir "mesh" — drop it so the namespace is not repeated.
+        assert_eq!(build_slug(&ns(Some("mesh"), "mesh"), "foo"), "wiki/mesh/foo");
+    }
+
+    #[test]
+    fn slug_strips_repeats_anywhere_in_subdir() {
+        assert_eq!(
+            build_slug(&ns(Some("mesh"), "wiki/mesh/sub"), "leaf"),
+            "wiki/mesh/sub/leaf"
+        );
     }
 
     #[test]
@@ -270,7 +328,8 @@ mod tests {
                 end_line: 20,
             }],
         };
-        let drafts = build("wiki/perf/indexing.md", &[group], Path::new("/"));
+        let page_ns = ns(None, "perf");
+        let drafts = build("wiki/perf/indexing.md", &[group], Path::new("/"), &page_ns);
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].slug, "wiki/perf/sync-detection");
         assert_eq!(

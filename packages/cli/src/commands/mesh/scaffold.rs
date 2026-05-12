@@ -14,6 +14,7 @@ use serde::Serialize;
 use crate::commands::{discover_files, resolve_link_path};
 use crate::index::DocSource;
 use crate::parser::{LinkKind, parse_fragment_links};
+use crate::wiki_config::WikiInfo;
 
 /// Read `path` from the chosen [`DocSource`], routing non-worktree reads
 /// through [`DocSource::read`] so the content snapshot matches the discovery
@@ -158,6 +159,7 @@ pub fn run(
     globs: &[String],
     json: bool,
     wiki_roots: &[PathBuf],
+    wiki_infos: &[WikiInfo],
     repo_root: &Path,
     source: crate::index::DocSource,
 ) -> Result<i32> {
@@ -241,10 +243,16 @@ pub fn run(
     // Build the page-title lookup keyed by repo-root-relative path strings.
     let mut page_titles: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
+    // Parallel map: per-page slug namespace context (owning wiki + subdir).
+    let mut page_namespaces: std::collections::HashMap<String, PageNamespace> =
+        std::collections::HashMap::new();
     for f in &files {
         let rel = path_relative_to(f, repo_root);
         let title = wiki_meta_cache.get(f).and_then(|m| m.title.clone());
-        page_titles.insert(rel, title);
+        let fm_ns = wiki_meta_cache.get(f).and_then(|m| m.namespace.clone());
+        page_titles.insert(rel.clone(), title);
+        let ns = resolve_page_namespace(f, repo_root, wiki_infos, fm_ns.as_deref());
+        page_namespaces.insert(rel, ns);
     }
 
     // Collect parse-error paths for exclusion from pages output.
@@ -253,7 +261,7 @@ pub fn run(
 
     // ── Unified build/group pipeline (both modes) ─────────────────────────
     // Trim heading chains once here so both renderers consume pre-trimmed data.
-    let mut consolidated = build_meshes(&all_inputs, repo_root);
+    let mut consolidated = build_meshes(&all_inputs, repo_root, &page_namespaces);
     trim_chains_in_place(&mut consolidated, &page_titles);
 
     if json {
@@ -385,7 +393,11 @@ pub(crate) fn normalize_heading_text(s: &str) -> String {
 
 /// Three-stage build/group/annotate pipeline that produces the final list of
 /// meshes (in per-page declaration order) ready for shell rendering.
-fn build_meshes(inputs: &[LinkInput], repo_root: &Path) -> Vec<MeshDraft> {
+fn build_meshes(
+    inputs: &[LinkInput],
+    repo_root: &Path,
+    page_namespaces: &std::collections::HashMap<String, PageNamespace>,
+) -> Vec<MeshDraft> {
     // Group inputs by source page (preserving discovery order).
     let mut page_order: Vec<PathBuf> = Vec::new();
     let mut by_page: std::collections::HashMap<PathBuf, Vec<&LinkInput>> =
@@ -468,7 +480,15 @@ fn build_meshes(inputs: &[LinkInput], repo_root: &Path) -> Vec<MeshDraft> {
                 structured_targets: st.clone(),
             })
             .collect();
-        let drafts = draft::build(&page_rel, &groups, repo_root);
+        // Look up the owning wiki for slug derivation. A page should always
+        // be in the map (every discovered file is registered above), but fall
+        // back to a default-namespace empty-subdir context so a missing entry
+        // can never panic — the slug still gets the `wiki/` prefix.
+        let page_ns = page_namespaces
+            .get(&page_rel)
+            .cloned()
+            .unwrap_or_default();
+        let drafts = draft::build(&page_rel, &groups, repo_root, &page_ns);
         let start = all_drafts.len();
         all_drafts.extend(drafts);
         page_spans.push((start, all_drafts.len()));
@@ -515,6 +535,58 @@ struct LinkInput {
 #[derive(Debug, Clone, Default)]
 struct FileMeta {
     title: Option<String>,
+    /// Frontmatter `namespace` field, when present. Used as the slug
+    /// namespace for `.wiki.md` pages that live outside any wiki root.
+    namespace: Option<String>,
+}
+
+/// Per-page slug context: which wiki namespace owns the page (`None` for the
+/// default-namespace wiki) and the page's directory path relative to its
+/// owning wiki root (forward slashes, no leading or trailing slash; empty
+/// when the page sits directly at the wiki root).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PageNamespace {
+    pub(crate) namespace: Option<String>,
+    pub(crate) subdir: String,
+}
+
+/// Resolve which wiki owns a page and the page's directory within that wiki.
+///
+/// Pages under a `wiki.toml` tree inherit that wiki's namespace; the longest
+/// containing root wins (a nested wiki shadows an outer one). Pages outside
+/// every root fall back to their frontmatter `namespace` field (a `.wiki.md`
+/// float opting into a peer wiki). When no enclosing root and no frontmatter
+/// declaration apply, the page is treated as default-namespace with an empty
+/// subdir — the slug becomes `wiki/<noun>` so the prefix invariant holds
+/// regardless of where the page sits on disk.
+pub(crate) fn resolve_page_namespace(
+    page_abs: &Path,
+    repo_root: &Path,
+    wiki_infos: &[WikiInfo],
+    fm_namespace: Option<&str>,
+) -> PageNamespace {
+    // Pick the longest wiki root that contains this page (deeper roots win).
+    let owner = wiki_infos
+        .iter()
+        .filter(|w| page_abs.starts_with(&w.root))
+        .max_by_key(|w| w.root.components().count());
+    if let Some(w) = owner {
+        let rel = page_abs.strip_prefix(&w.root).unwrap_or(page_abs);
+        let parent = rel.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let subdir = parent.to_string_lossy().replace('\\', "/");
+        return PageNamespace {
+            namespace: w.namespace.clone(),
+            subdir,
+        };
+    }
+    // Float page: honor frontmatter `namespace`. Drop the file's directory
+    // path — float pages don't carry a wiki-root path component, only the
+    // declared namespace.
+    let _ = repo_root; // kept in signature for symmetry; unused on the float path
+    PageNamespace {
+        namespace: fm_namespace.map(|s| s.to_string()),
+        subdir: String::new(),
+    }
 }
 
 /// Classify the frontmatter of a file, returning both the `FileMeta` and an
@@ -593,7 +665,12 @@ fn classify_frontmatter(path: &Path, repo_root: &Path, source: DocSource) -> (Fi
         return (FileMeta::default(), Some(ParseErrorKind::Malformed));
     }
 
-    let meta = FileMeta { title };
+    // `namespace` is optional and only meaningful for `.wiki.md` float pages;
+    // pages under a `wiki.toml` inherit their namespace from the root and the
+    // field is ignored. Read it eagerly so the resolver can use it later.
+    let namespace = parse_frontmatter_field(&text, "namespace");
+
+    let meta = FileMeta { title, namespace };
     (meta, None)
 }
 
