@@ -275,7 +275,7 @@ fn mesh_scaffold_only_parse_errors_emits_block_alone() {
         "separator must be absent when only parse errors:\n{stdout}"
     );
     assert!(
-        !stdout.contains("No uncovered fragment links"),
+        !stdout.contains("No internal fragment links with line ranges were found"),
         "success line must be absent when only parse errors:\n{stdout}"
     );
     assert!(

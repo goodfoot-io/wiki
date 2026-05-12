@@ -85,9 +85,13 @@ pub(crate) fn render_empty_markdown(parse_errors: &[ParseError]) -> String {
     use std::fmt::Write as _;
     let _ = writeln!(out, "# wiki scaffold");
     out.push('\n');
+    // Precondition: `scaffold::run` reached this branch because `all_inputs`
+    // was empty after the link-collection loop — i.e. no internal fragment
+    // link with a parsed line range was discovered. No coverage probe runs
+    // before this branch, so the message must not claim coverage.
     let _ = writeln!(
         out,
-        "No uncovered fragment links — every link is already covered by a mesh."
+        "No internal fragment links with line ranges were found in the discovered wiki pages."
     );
     out
 }
