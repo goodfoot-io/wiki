@@ -860,3 +860,83 @@ fn mesh_scaffold_float_uses_frontmatter_namespace() {
         "expected wiki/mesh/peer slug for `namespace: mesh` float; got:\n{stdout}"
     );
 }
+
+/// When the base slug a scaffold run would emit already names a mesh
+/// committed in the repo, the collision resolver picks a semantically
+/// disambiguated slug — prepending the page title or a parent heading —
+/// instead of falling straight through to a numeric suffix.
+#[test]
+fn mesh_scaffold_renames_on_existing_mesh_collision() {
+    // Skip silently when `git-mesh` is not on PATH. The unit tests cover the
+    // resolver logic; this integration test only exercises the live probe.
+    if Command::new("git-mesh").arg("--version").output().is_err() {
+        eprintln!("skipping: git-mesh not installed");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::write(root.join("wiki/wiki.toml"), "").unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/charge.ts"), "// charge\n").unwrap();
+    // Page's frontmatter title is "Billing"; the deepest heading is
+    // "Charge handler", which yields the colliding base slug
+    // `wiki/charge-handler`.
+    std::fs::write(
+        root.join("wiki/billing.md"),
+        "---\ntitle: Billing\nsummary: bill\n---\n\n## Charge handler\n\nSee [code](../src/charge.ts#L1-L1).\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    // Pre-stage a mesh at the exact slug scaffold would otherwise pick.
+    let stage = |args: &[&str]| {
+        let status = Command::new("git")
+            .arg("mesh")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git mesh available");
+        assert!(
+            status.status.success(),
+            "git mesh {args:?} failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    };
+    stage(&["add", "wiki/charge-handler", "src/charge.ts#L1-L1"]);
+    stage(&["why", "wiki/charge-handler", "-m", "pre-existing"]);
+    stage(&["commit", "wiki/charge-handler"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("run wiki scaffold");
+    assert!(
+        output.status.success(),
+        "scaffold failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Base slug is taken — the resolver must rename. With no heading-chain
+    // ancestors (the section is top-level), the page's frontmatter title
+    // ("Billing") is the first available semantic qualifier.
+    assert!(
+        !stdout.contains("git mesh add wiki/charge-handler "),
+        "scaffold reused the existing slug; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("git mesh add wiki/charge-handler-2"),
+        "scaffold fell through to a digit suffix instead of a semantic rename; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("git mesh add wiki/billing/charge-handler"),
+        "expected resolver to prepend the page title; got:\n{stdout}"
+    );
+}

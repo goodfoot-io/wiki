@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use miette::{IntoDiagnostic, Result};
 use regex::Regex;
@@ -264,6 +265,15 @@ pub fn run(
     let mut consolidated = build_meshes(&all_inputs, repo_root, &page_namespaces);
     trim_chains_in_place(&mut consolidated, &page_titles);
 
+    // Resolve slug collisions against both already-assigned slugs in this run
+    // and any meshes that already live in the repo. The probe shells out to
+    // `git mesh <slug>` per candidate; missing `git-mesh` is treated as "no
+    // collisions" so scaffold still works without it. The probe runs after
+    // heading-chain trimming so the page-title duplicates we just dropped
+    // aren't reintroduced as qualifiers.
+    let probe = |slug: &str| mesh_exists(repo_root, slug);
+    resolve_slug_collisions(&mut consolidated, &page_titles, &probe);
+
     if json {
         let parse_errors_json: Vec<ParseErrorJson> = parse_errors
             .iter()
@@ -494,34 +504,119 @@ fn build_meshes(
         page_spans.push((start, all_drafts.len()));
     }
 
-    // Stage 2a: per-page consolidation FIRST. Identical-anchor-set siblings
-    // collapse into one survivor; only then does the global dedup pass see
-    // contiguous slug counts. Doing this in the reverse order leaks suffix
-    // gaps (`foo`, `foo-3`, no `foo-2`) into the footer's `git mesh commit`
-    // lines whenever consolidation prunes a duplicate the dedup already
-    // suffixed.
+    // Stage 2: per-page consolidation. Identical-anchor-set siblings collapse
+    // into one survivor; only then does the collision resolver (run from
+    // [`run`] after heading-chain trimming) see contiguous slugs. Doing this
+    // in the reverse order leaks suffix gaps (`foo`, `foo-3`, no `foo-2`)
+    // into the footer's `git mesh commit` lines whenever consolidation
+    // prunes a duplicate the dedup already suffixed.
     let mut consolidated: Vec<MeshDraft> = Vec::new();
     for (start, end) in page_spans {
         let page_drafts: Vec<MeshDraft> = all_drafts[start..end].to_vec();
         consolidated.extend(group::consolidate_within_page(page_drafts));
     }
 
-    // Stage 2b: global slug dedup over the merge survivors.
-    dedup_slugs(&mut consolidated);
-
     consolidated
 }
 
-/// First occurrence keeps the original slug; subsequent duplicates get
-/// `-2`, `-3`, … suffixes.
-fn dedup_slugs(drafts: &mut [MeshDraft]) {
-    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+/// Probe whether a mesh with `slug` already exists in `repo_root` by invoking
+/// `git mesh <slug>` and inspecting the exit code. Treats any error (missing
+/// `git-mesh` binary, non-mesh repo, signal-killed child) as "does not exist"
+/// so scaffold remains usable in environments without `git-mesh` installed.
+fn mesh_exists(repo_root: &Path, slug: &str) -> bool {
+    Command::new("git")
+        .args(["mesh", slug])
+        .current_dir(repo_root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Resolve slug collisions by progressively prepending semantic qualifiers
+/// drawn from the section's heading chain and the page title.
+///
+/// Each draft starts with its base slug. If that slug collides with either
+/// an earlier-assigned slug in this run or a pre-existing mesh (`mesh_exists`
+/// returns `true`), the resolver tries successively longer qualifier sets:
+///
+/// 1. The immediate parent heading (`heading_chain.last()`), then grandparent,
+///    great-grandparent, … each new heading prepended outer→inner so the slug
+///    reads top-down like a path.
+/// 2. After the heading chain is exhausted, the page's frontmatter title
+///    (kebab-cased) is prepended ahead of the full chain.
+/// 3. Only when *all* semantic qualifiers fail does the resolver fall back to
+///    numeric `-2`, `-3`, … suffixes appended to the last unique semantic
+///    candidate.
+///
+/// Duplicate candidate slugs (caused by [`draft::build_slug_with_qualifiers`]
+/// dropping a reserved qualifier) are skipped so the search makes monotonic
+/// progress instead of looping on the same string.
+pub(crate) fn resolve_slug_collisions(
+    drafts: &mut [MeshDraft],
+    page_titles: &std::collections::HashMap<String, Option<String>>,
+    mesh_exists: &dyn Fn(&str) -> bool,
+) {
+    let mut assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
     for d in drafts.iter_mut() {
-        let count = seen.entry(d.slug.clone()).or_insert(0);
-        *count += 1;
-        if *count > 1 {
-            d.slug = format!("{}-{}", d.slug, *count);
+        // Inner→outer chain in kebab form, dropping empties and any entry
+        // equal to the noun (the deepest entry in `heading_chain` is the
+        // section heading itself, which already supplied the noun — using it
+        // as a qualifier would just re-emit `wiki/foo/foo`).
+        let chain_kebab: Vec<String> = d
+            .heading_chain
+            .iter()
+            .map(|h| draft::kebab(h))
+            .filter(|s| !s.is_empty() && s != &d.noun)
+            .collect();
+        let title_kebab = page_titles
+            .get(&d.page_path)
+            .and_then(|t| t.as_deref())
+            .filter(|t| !t.is_empty())
+            .map(draft::kebab)
+            .filter(|s| !s.is_empty() && s != &d.noun);
+
+        // Candidate qualifier sets to try, in priority order.
+        let mut candidates: Vec<Vec<String>> = Vec::new();
+        candidates.push(Vec::new());
+        for k in 1..=chain_kebab.len() {
+            let slice = &chain_kebab[chain_kebab.len() - k..];
+            candidates.push(slice.to_vec());
         }
+        if let Some(title) = &title_kebab {
+            let mut with_title: Vec<String> = vec![title.clone()];
+            with_title.extend(chain_kebab.iter().cloned());
+            candidates.push(with_title);
+        }
+
+        let mut tried: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut last_unique: Option<String> = None;
+        let mut resolved: Option<String> = None;
+        for quals in &candidates {
+            let slug = draft::build_slug_with_qualifiers(&d.page_ns, quals, &d.noun);
+            if !tried.insert(slug.clone()) {
+                continue;
+            }
+            last_unique = Some(slug.clone());
+            if !assigned.contains(&slug) && !mesh_exists(&slug) {
+                resolved = Some(slug);
+                break;
+            }
+        }
+        let final_slug = resolved.unwrap_or_else(|| {
+            let base = last_unique.unwrap_or_else(|| d.slug.clone());
+            let mut n: u32 = 2;
+            loop {
+                let cand = format!("{base}-{n}");
+                if !assigned.contains(&cand) && !mesh_exists(&cand) {
+                    break cand;
+                }
+                n += 1;
+            }
+        });
+        assigned.insert(final_slug.clone());
+        d.slug = final_slug;
     }
 }
 
@@ -841,5 +936,194 @@ mod tests {
     fn classify_clean_file() {
         let kind = classify_str("---\ntitle: Hello\nsummary: World\n---\n\nbody\n");
         assert!(kind.is_none(), "expected no error, got {kind:?}");
+    }
+
+    // ── resolve_slug_collisions ──────────────────────────────────────────────
+
+    use super::super::draft::StructuredAnchor;
+
+    fn make_draft(
+        page_path: &str,
+        noun: &str,
+        page_ns: PageNamespace,
+        heading_chain: Vec<&str>,
+    ) -> MeshDraft {
+        let slug = super::super::draft::build_slug(&page_ns, noun);
+        MeshDraft {
+            page_path: page_path.to_string(),
+            slug,
+            anchors: Vec::new(),
+            structured_anchors: vec![StructuredAnchor {
+                path: page_path.to_string(),
+                start_line: 1,
+                end_line: 1,
+            }],
+            heading_chain: heading_chain.iter().map(|s| s.to_string()).collect(),
+            consolidated_count: 1,
+            noun: noun.to_string(),
+            page_ns,
+        }
+    }
+
+    fn ns(namespace: Option<&str>, subdir: &str) -> PageNamespace {
+        PageNamespace {
+            namespace: namespace.map(|s| s.to_string()),
+            subdir: subdir.to_string(),
+        }
+    }
+
+    #[test]
+    fn collision_resolver_keeps_unique_slugs() {
+        let mut drafts = vec![make_draft(
+            "wiki/billing.md",
+            "charge-handler",
+            ns(None, ""),
+            vec![],
+        )];
+        let titles: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        let exists = |_slug: &str| false;
+        resolve_slug_collisions(&mut drafts, &titles, &exists);
+        assert_eq!(drafts[0].slug, "wiki/charge-handler");
+    }
+
+    #[test]
+    fn collision_resolver_adds_parent_heading_on_clash() {
+        let mut drafts = vec![make_draft(
+            "wiki/billing.md",
+            "charge-handler",
+            ns(None, ""),
+            vec!["Checkout"],
+        )];
+        let titles: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        let existing: std::collections::HashSet<String> = ["wiki/charge-handler".to_string()]
+            .into_iter()
+            .collect();
+        let exists = |slug: &str| existing.contains(slug);
+        resolve_slug_collisions(&mut drafts, &titles, &exists);
+        assert_eq!(drafts[0].slug, "wiki/checkout/charge-handler");
+    }
+
+    #[test]
+    fn collision_resolver_walks_chain_outer_to_inner() {
+        // chain is outer→inner. Base slug clashes; +inner-most ("Checkout")
+        // also clashes; the resolver must try adding the next ancestor up
+        // ("Payments") before falling back further.
+        let mut drafts = vec![make_draft(
+            "wiki/billing.md",
+            "charge-handler",
+            ns(None, ""),
+            vec!["Payments", "Checkout"],
+        )];
+        let titles: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        let existing: std::collections::HashSet<String> = [
+            "wiki/charge-handler".to_string(),
+            "wiki/checkout/charge-handler".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let exists = |slug: &str| existing.contains(slug);
+        resolve_slug_collisions(&mut drafts, &titles, &exists);
+        assert_eq!(drafts[0].slug, "wiki/payments/checkout/charge-handler");
+    }
+
+    #[test]
+    fn collision_resolver_uses_page_title_after_chain_exhausted() {
+        let mut drafts = vec![make_draft(
+            "wiki/billing.md",
+            "charge-handler",
+            ns(None, ""),
+            vec!["Checkout"],
+        )];
+        let mut titles: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        titles.insert("wiki/billing.md".to_string(), Some("Billing Service".to_string()));
+        let existing: std::collections::HashSet<String> = [
+            "wiki/charge-handler".to_string(),
+            "wiki/checkout/charge-handler".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let exists = |slug: &str| existing.contains(slug);
+        resolve_slug_collisions(&mut drafts, &titles, &exists);
+        assert_eq!(
+            drafts[0].slug,
+            "wiki/billing-service/checkout/charge-handler"
+        );
+    }
+
+    #[test]
+    fn collision_resolver_falls_back_to_digit_suffix() {
+        let mut drafts = vec![make_draft(
+            "wiki/billing.md",
+            "charge-handler",
+            ns(None, ""),
+            vec![],
+        )];
+        let titles: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        let existing: std::collections::HashSet<String> = ["wiki/charge-handler".to_string()]
+            .into_iter()
+            .collect();
+        let exists = |slug: &str| existing.contains(slug);
+        resolve_slug_collisions(&mut drafts, &titles, &exists);
+        // No chain, no title — only the base slug is a unique candidate,
+        // so the digit fallback runs against it.
+        assert_eq!(drafts[0].slug, "wiki/charge-handler-2");
+    }
+
+    #[test]
+    fn collision_resolver_dedups_within_run() {
+        // Two drafts with the same base slug and no semantic disambiguators
+        // available; the second must get a digit suffix.
+        let mut drafts = vec![
+            make_draft("wiki/a.md", "foo", ns(None, ""), vec![]),
+            make_draft("wiki/b.md", "foo", ns(None, ""), vec![]),
+        ];
+        let titles: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        let exists = |_slug: &str| false;
+        resolve_slug_collisions(&mut drafts, &titles, &exists);
+        assert_eq!(drafts[0].slug, "wiki/foo");
+        assert_eq!(drafts[1].slug, "wiki/foo-2");
+    }
+
+    #[test]
+    fn collision_resolver_intra_run_uses_semantic_qualifier_first() {
+        let mut drafts = vec![
+            make_draft("wiki/a.md", "foo", ns(None, ""), vec!["First"]),
+            make_draft("wiki/b.md", "foo", ns(None, ""), vec!["Second"]),
+        ];
+        let titles: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        let exists = |_slug: &str| false;
+        resolve_slug_collisions(&mut drafts, &titles, &exists);
+        assert_eq!(drafts[0].slug, "wiki/foo");
+        // Second clashes only with the first draft (in-run); the parent
+        // heading "Second" resolves it without needing a digit.
+        assert_eq!(drafts[1].slug, "wiki/second/foo");
+    }
+
+    #[test]
+    fn collision_resolver_skips_duplicate_candidates_from_reserved_drop() {
+        // Page lives in namespace "mesh" at root; parent heading is also "mesh",
+        // so the +parent candidate collapses back to the base slug. The resolver
+        // must skip that duplicate and try the next strategy (page title).
+        let mut drafts = vec![make_draft(
+            "mesh/page.md",
+            "leaf",
+            ns(Some("mesh"), ""),
+            vec!["Mesh"],
+        )];
+        let mut titles: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        titles.insert("mesh/page.md".to_string(), Some("Outer".to_string()));
+        let existing: std::collections::HashSet<String> =
+            ["wiki/mesh/leaf".to_string()].into_iter().collect();
+        let exists = |slug: &str| existing.contains(slug);
+        resolve_slug_collisions(&mut drafts, &titles, &exists);
+        assert_eq!(drafts[0].slug, "wiki/mesh/outer/leaf");
     }
 }

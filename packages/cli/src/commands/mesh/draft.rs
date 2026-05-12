@@ -40,6 +40,14 @@ pub(crate) struct MeshDraft {
     /// Number of identical-anchor-set siblings merged into this draft. Starts
     /// at 1.
     pub(crate) consolidated_count: usize,
+    /// Kebab-cased noun derived for this draft (deepest section heading,
+    /// link label, or file stem fallback). Retained so the collision
+    /// resolver can rebuild the slug with extra qualifiers.
+    pub(crate) noun: String,
+    /// Snapshot of the page's namespace context at draft-build time. Used by
+    /// the collision resolver to reapply [`build_slug_with_qualifiers`] when
+    /// the base slug clashes with an existing mesh.
+    pub(crate) page_ns: PageNamespace,
 }
 
 /// One section's worth of input: the leader (used to derive slug and
@@ -63,7 +71,8 @@ pub(crate) fn build(
     groups
         .iter()
         .map(|g| {
-            let slug = derive_slug(page_ns, g.leader);
+            let noun = derive_noun(g.leader);
+            let slug = build_slug(page_ns, &noun);
             let page_anchor_str = format!(
                 "{page_path}#L{start}-L{end}",
                 start = g.section_start,
@@ -87,11 +96,16 @@ pub(crate) fn build(
                 structured_anchors,
                 heading_chain: g.leader.heading_chain.clone(),
                 consolidated_count: 1,
+                noun,
+                page_ns: page_ns.clone(),
             }
         })
         .collect()
 }
 
+/// Compose the slug from a `PageNamespace` and a kebab-cased noun, applying
+/// the no-repeat invariant on `wiki` and the namespace name.
+///
 /// Slug = `<prefix>/<inner-subdir>/<noun>`, where:
 ///   - `<prefix>` is `wiki` for default-namespace pages and `wiki/<ns>` for
 ///     pages in a named-namespace wiki;
@@ -106,37 +120,51 @@ pub(crate) fn build(
 /// the namespace, when set) is stripped before concatenation, so that a page
 /// at `wiki/wiki/foo.md` or `mesh/mesh/foo.md` does not produce duplicate
 /// prefix segments.
-fn derive_slug(page_ns: &PageNamespace, aug: &AugmentedLink) -> String {
-    let noun = derive_noun(aug);
-    build_slug(page_ns, &noun)
+pub(crate) fn build_slug(page_ns: &PageNamespace, noun: &str) -> String {
+    build_slug_with_qualifiers(page_ns, &[], noun)
 }
 
-/// Compose the slug from a `PageNamespace` and a kebab-cased noun, applying
-/// the no-repeat invariant on `wiki` and the namespace name.
-pub(crate) fn build_slug(page_ns: &PageNamespace, noun: &str) -> String {
+/// Like [`build_slug`], but inserts extra **qualifier** segments
+/// (outer→inner) between the subdir and the final noun. Used by the
+/// collision resolver to disambiguate by adding heading-chain or page-title
+/// context when the base slug clashes with an existing mesh.
+///
+/// Qualifiers are subject to the same no-repeat invariant: any qualifier
+/// segment equal to `wiki`, the namespace, or already present in `parts` is
+/// silently dropped so we never emit `wiki/foo/foo/bar`.
+pub(crate) fn build_slug_with_qualifiers(
+    page_ns: &PageNamespace,
+    qualifiers: &[String],
+    noun: &str,
+) -> String {
     let mut parts: Vec<String> = vec!["wiki".to_string()];
     if let Some(ns) = page_ns.namespace.as_deref() {
         parts.push(ns.to_string());
     }
-    let reserved: std::collections::HashSet<&str> = {
-        let mut s = std::collections::HashSet::new();
-        s.insert("wiki");
-        if let Some(ns) = page_ns.namespace.as_deref() {
-            s.insert(ns);
-        }
-        s
-    };
+    let mut reserved: std::collections::HashSet<String> = std::collections::HashSet::new();
+    reserved.insert("wiki".to_string());
+    if let Some(ns) = page_ns.namespace.as_deref() {
+        reserved.insert(ns.to_string());
+    }
     for seg in page_ns.subdir.split('/') {
         if seg.is_empty() || reserved.contains(seg) {
             continue;
         }
         parts.push(seg.to_string());
+        reserved.insert(seg.to_string());
+    }
+    for q in qualifiers {
+        if q.is_empty() || reserved.contains(q) {
+            continue;
+        }
+        parts.push(q.clone());
+        reserved.insert(q.clone());
     }
     parts.push(noun.to_string());
     parts.join("/")
 }
 
-fn derive_noun(aug: &AugmentedLink) -> String {
+pub(crate) fn derive_noun(aug: &AugmentedLink) -> String {
     let heading = aug
         .section_heading
         .trim_start_matches(|c: char| c == '#' || c.is_whitespace())
@@ -189,7 +217,7 @@ fn file_stem_of(p: &str) -> String {
         .unwrap_or_default()
 }
 
-fn kebab(s: &str) -> String {
+pub(crate) fn kebab(s: &str) -> String {
     let s = strip_leading_ordinal(s);
     let mut out = String::with_capacity(s.len());
     let mut prev_dash = true;
@@ -286,6 +314,55 @@ mod tests {
         assert_eq!(
             build_slug(&ns(Some("mesh"), "wiki/mesh/sub"), "leaf"),
             "wiki/mesh/sub/leaf"
+        );
+    }
+
+    #[test]
+    fn qualifiers_insert_between_subdir_and_noun() {
+        assert_eq!(
+            build_slug_with_qualifiers(
+                &ns(None, "perf"),
+                &["bootstrap".to_string()],
+                "sync-detection"
+            ),
+            "wiki/perf/bootstrap/sync-detection"
+        );
+    }
+
+    #[test]
+    fn qualifiers_preserve_outer_to_inner_order() {
+        assert_eq!(
+            build_slug_with_qualifiers(
+                &ns(None, ""),
+                &["billing".to_string(), "checkout".to_string()],
+                "charge-handler"
+            ),
+            "wiki/billing/checkout/charge-handler"
+        );
+    }
+
+    #[test]
+    fn qualifiers_drop_reserved_segments() {
+        // `wiki` is reserved (prefix); `perf` is already in subdir.
+        assert_eq!(
+            build_slug_with_qualifiers(
+                &ns(None, "perf"),
+                &["wiki".to_string(), "perf".to_string(), "extra".to_string()],
+                "leaf"
+            ),
+            "wiki/perf/extra/leaf"
+        );
+    }
+
+    #[test]
+    fn qualifiers_drop_namespace_repeats() {
+        assert_eq!(
+            build_slug_with_qualifiers(
+                &ns(Some("mesh"), ""),
+                &["mesh".to_string(), "inner".to_string()],
+                "leaf"
+            ),
+            "wiki/mesh/inner/leaf"
         );
     }
 
