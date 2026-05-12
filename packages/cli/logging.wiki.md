@@ -7,7 +7,7 @@ summary: Documents all logging and performance tracing points in the wiki CLI.
 
 The wiki CLI uses two complementary logging systems:
 
-1. **Perf Instrumentation** (`perf::scope_result` and `perf::scope_async_result`): Measures performance and records operational metrics to `wiki.log` (or path specified by `WIKI_DIR` env var). Outputs structured JSON events with timing, status, and metadata.
+1. **Perf Instrumentation** ([`perf::scope_result`](./src/perf.rs#L119-L129) and [`perf::scope_async_result`](./src/perf.rs#L131-L140)): Measures performance and records operational metrics to `wiki.log` (or path specified by `WIKI_DIR` env var). Outputs structured JSON events with timing, status, and metadata.
 
 2. **Direct Output** (`println!` and `eprintln!`): Writes user-facing messages to stdout/stderr for command results, errors, and status messages.
 
@@ -174,11 +174,11 @@ Perf scope events measure execution time and record success/error status. They a
 
 | Line | Message | Purpose |
 |------|---------|---------|
-| 741 | `"wiki install: enabled [features].codex_hooks in {path}"` | Reports that the installer flipped `codex_hooks` from `false` to `true` in `$CODEX_HOME/config.toml` |
-| `print_install_header` | `"wiki install --codex"` banner + "Downloading from: …/Installing into: …" | Install-start header shown in both real-run and dry-run (dry-run appends "(preview — nothing will be downloaded or written)") |
-| `print_planned_files` | Grouped "New files" / "Merged into existing files" sections with per-file explanations | Natural-language description of every file the installer touches; status suffixes (`new`/`updated`/`unchanged`) are appended on real runs |
-| `print_summary` | "Backups written:" list + "Manifest: {path}" | Post-install tail listing any backups and the manifest path |
-| `codex_extension_footer` | "VS Code extension:" + marketplace URLs | Trailing block printed on both real-run and dry-run pointing users at the companion extension |
+| 741 | `"wiki install: enabled [features].codex_hooks in {path}"` | Reports that the installer flipped `codex_hooks` from `false` to `true` in `$CODEX_HOME/config.toml` (see [ensure_codex_hooks_flag](./src/commands/install.rs#L679-L679)) |
+| [`print_install_header`](./src/commands/install.rs#L927-L927) | `"wiki install --codex"` banner + "Downloading from: …/Installing into: …" | Install-start header shown in both real-run and dry-run (dry-run appends "(preview — nothing will be downloaded or written)") |
+| [`print_planned_files`](./src/commands/install.rs#L946-L946) | Grouped "New files" / "Merged into existing files" sections with per-file explanations | Natural-language description of every file the installer touches; status suffixes (`new`/`updated`/`unchanged`) are appended on real runs |
+| [`print_summary`](./src/commands/install.rs#L991-L991) | "Backups written:" list + "Manifest: {path}" | Post-install tail listing any backups and the manifest path |
+| [`codex_extension_footer`](./src/commands/install.rs#L1024-L1024) | "VS Code extension:" + marketplace URLs | Trailing block printed on both real-run and dry-run pointing users at the companion extension |
 
 ### commands/hook.rs
 
@@ -214,8 +214,8 @@ Events written to `wiki.log` follow this JSON schema:
 
 Two special events mark command execution boundaries:
 
-- **command_start**: Logged at initialization with command name, json_output flag, and repo_root
-- **command_finish**: Logged at completion with exit code and total runtime
+- **command_start**: Logged at [initialization](./src/perf.rs#L67-L96) with command name, json_output flag, and repo_root
+- **command_finish**: Logged at [completion](./src/perf.rs#L98-L108) with exit code and total runtime
 
 ### Log Rotation
 

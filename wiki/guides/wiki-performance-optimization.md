@@ -7,7 +7,7 @@ The wiki CLI maintains performance through caching, incremental indexing, and pa
 
 ## Strategy: Index Everything, Query Locally
 
-To keep wiki interactions fast, the `wiki` tool maintains a local SQLite index (`wiki/.index.db`). This index caches page titles, aliases, summaries, and full-text content. Most CLI commands query this index rather than parsing markdown files on every invocation.
+To keep wiki interactions fast, the `wiki` tool maintains a local [SQLite index](/packages/cli/src/index.rs#L234-L248) (`wiki/.index.db`). This index caches page titles, aliases, summaries, and full-text content. Most CLI commands query this index rather than parsing markdown files on every invocation.
 
 ## Optimizations
 

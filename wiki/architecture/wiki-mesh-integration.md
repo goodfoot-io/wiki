@@ -21,7 +21,7 @@ wiki check wiki/architecture/*.md
 wiki check "packages/auth/**/*.wiki.md"
 ```
 
-Extends the existing `wiki check` validation pass with a mesh coverage check. For each internal fragment link with a line range, it runs `git mesh list <path>#L<s>-L<e> --porcelain` and verifies that at least one returned mesh also anchors the wiki file containing the link. Any uncovered link is reported as an error (non-zero exit).
+Extends the existing `wiki check` validation pass with a [mesh coverage check](/packages/cli/src/commands/mesh_coverage.rs#L49-L52). For each internal fragment link with a line range, it [runs `git mesh list`](/packages/cli/src/commands/mesh_coverage.rs#L141-L141) `<path>#L<s>-L<e> --porcelain` and verifies that at least one returned mesh also anchors the wiki file containing the link. Any uncovered link is reported as an error ([non-zero exit](/packages/cli/src/commands/mesh_coverage.rs#L100-L110)).
 
 Mesh coverage is always on; `git mesh` must be installed or `wiki check` fails fast. Glob targeting follows the same rules as bare `wiki check`: omitting globs defaults to `$WIKI_DIR/**/*.md` plus `**/*.wiki.md` (with `$WIKI_DIR` defaulting to `wiki`).
 
@@ -33,7 +33,7 @@ wiki scaffold wiki/architecture/*.md
 wiki scaffold "packages/auth/**/*.wiki.md"
 ```
 
-Scans the same file set as `wiki check` and emits a markdown document containing the `git mesh add` / `git mesh why` / `git mesh commit` commands needed to create a mesh for every fragment link not yet covered. Output is printed to stdout — nothing is staged or committed.
+[Scans the same file set as `wiki check`](/packages/cli/src/commands/mesh/scaffold.rs#L159-L166) and emits a markdown document containing the `git mesh add` / `git mesh why` / `git mesh commit` commands needed to create a mesh for every fragment link not yet covered. Output is printed to stdout — nothing is staged or committed.
 
 For each uncovered link the scaffold emits a section under the source page with the section heading the link sits under, the opening prose sentence as a blockquote, and a fenced bash block:
 
@@ -56,7 +56,7 @@ The trailing `[why]` placeholder is intentional — every why is meant to be rew
 Names follow the `wiki/<page-title-slug>/<target-slug>` convention:
 
 - **Page title slug** — derived from the wiki page's frontmatter `title` field (falling back to the filename stem). This keeps names stable across file renames.
-- **Target slug** — derived from the link label (truncated at five words, falling back to the target file stem for long or path-style labels).
+- **Target slug** — derived from the link label ([truncated at five words](/packages/cli/src/commands/mesh/draft.rs#L167-L167), falling back to the target file stem for long or path-style labels).
 
 Names are topical, not path-derived: one wiki page will typically produce several meshes covering different subsystems. Authors are expected to rename generated slugs to match the conceptual relationship before committing.
 

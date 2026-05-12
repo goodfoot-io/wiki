@@ -17,7 +17,7 @@ See [[Wiki Mesh Integration]] for the design rationale behind these integrations
 
 **Where:** [`mesh_coverage.rs`](/packages/cli/src/commands/mesh_coverage.rs#L157-L159)
 
-**Invoked by:** `wiki check`
+**Invoked by:** [`wiki check`](/packages/cli/src/commands/check.rs#L203-L270)
 
 **Purpose:** Query all mesh subsystems that include a given file anchor. Used to determine whether a fragment link (`path#Lstart-Lend`) in a wiki article has a covering mesh that also anchors the wiki file itself.
 
@@ -43,7 +43,7 @@ The line range token (`start-end`) is parsed for format validation only; range f
 
 **Where:** [`render.rs`](/packages/cli/src/commands/mesh/render.rs#L137-L146)
 
-**Invoked by:** `wiki scaffold` — emits markdown output, does **not** shell out to `git-mesh`.
+**Invoked by:** [`wiki scaffold`](/packages/cli/src/commands/mesh/scaffold.rs#L159-L200) — emits markdown output, does **not** shell out to `git-mesh`.
 
 **Purpose:** Scaffold command for adding anchors (wiki file + code file/range) to a named mesh subsystem.
 
@@ -53,7 +53,7 @@ The line range token (`start-end`) is parsed for format validation only; range f
 
 **Where:** [`render.rs`](/packages/cli/src/commands/mesh/render.rs#L147-L147)
 
-**Invoked by:** `wiki scaffold` — emits markdown output, does **not** shell out to `git-mesh`.
+**Invoked by:** [`wiki scaffold`](/packages/cli/src/commands/mesh/scaffold.rs#L159-L200) — emits markdown output, does **not** shell out to `git-mesh`.
 
 **Purpose:** Scaffold command for setting the human-readable description of a mesh subsystem.
 
@@ -63,7 +63,7 @@ The line range token (`start-end`) is parsed for format validation only; range f
 
 **Where:** [`check.rs`](/packages/cli/src/commands/check.rs#L681) (also lines 712, 741, 771)
 
-**Invoked by:** Integration tests (via `repo.git_mesh(&["commit"])`) to commit staged meshes into the test repo before running `wiki check`.
+**Invoked by:** Integration tests (via [`repo.git_mesh(&["commit"])`](/packages/cli/src/commands/check.rs#L1109-L1130)) to commit staged meshes into the test repo before running [`wiki check`](/packages/cli/src/commands/check.rs#L203-L270).
 
 **Purpose:** Not used in production code; exists only to set up fixture state for mesh coverage tests.
 

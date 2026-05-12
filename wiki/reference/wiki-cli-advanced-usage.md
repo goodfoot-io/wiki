@@ -9,7 +9,7 @@ tags:
 
 ## Listing Pages
 
-`wiki list` enumerates all pages with their title, summary, aliases, tags, and file path.
+[`wiki list`](/packages/cli/src/commands/list.rs#L65-L100) enumerates all pages with their title, summary, aliases, tags, and file path.
 
 ```bash
 # List every page
@@ -21,7 +21,7 @@ wiki list --tag api
 
 ## Finding Incoming Links
 
-`wiki links` shows which pages link to a given target. It accepts page titles, aliases, and file paths, and path-like inputs can return both wiki-page links and fragment-link references in one result set.
+[`wiki links`](/packages/cli/src/commands/links.rs#L115-L150) shows which pages link to a given target. It accepts page titles, aliases, and file paths, and path-like inputs can return both wiki-page links and fragment-link references in one result set.
 
 ```bash
 wiki links "My Page"
@@ -44,7 +44,7 @@ wiki check --fix
 
 ## Stdin and Path Input
 
-`wiki`, `wiki summary`, and `wiki links` each accept a file path in addition to a page title or alias:
+[`wiki`](/packages/cli/src/commands/search.rs#L61-L90), [`wiki summary`](/packages/cli/src/commands/summary.rs#L130-L158), and [`wiki links`](/packages/cli/src/commands/links.rs#L115-L150) each accept a file path in addition to a page title or alias:
 
 ```bash
 # Path argument
@@ -69,7 +69,7 @@ When multiple inputs are provided via stdin, the exit code reflects the worst re
 
 ## Targeting Specific Files
 
-All commands accept explicit glob patterns instead of scanning `WIKI_DIR`:
+All commands accept explicit glob patterns instead of scanning [`WIKI_DIR`](/packages/cli/src/main.rs#L118-L120):
 
 ```bash
 wiki check wiki/some-section/**/*.md
@@ -77,7 +77,7 @@ wiki check wiki/some-section/**/*.md
 
 ## JSON Output
 
-Every command accepts `--format json` for scripting:
+Every command accepts [`--format json`](/packages/cli/src/main.rs#L48-L50) for scripting:
 
 ```bash
 wiki check --format json

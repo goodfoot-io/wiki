@@ -17,7 +17,7 @@ For the design behind the integration, see [[Wiki Mesh Integration]]. For the co
 wiki check
 ```
 
-Each `mesh_uncovered` finding names the wiki file, the fragment link, and the line range that lacks a covering mesh. Skim the list before scripting anything: it tells you which subsystems will dominate the work, and it reveals duplicates (the same anchor appearing in two sections of the same page).
+Each [`mesh_uncovered`](/packages/cli/src/commands/mesh_coverage.rs#L41-L50) finding names the wiki file, the fragment link, and the line range that lacks a covering mesh. Skim the list before scripting anything: it tells you which subsystems will dominate the work, and it reveals duplicates (the same anchor appearing in two sections of the same page).
 
 ## 2. Scaffold per page
 
@@ -25,7 +25,7 @@ Each `mesh_uncovered` finding names the wiki file, the fragment link, and the li
 wiki scaffold wiki/architecture/wiki-cli.md
 ```
 
-The output is a markdown document — one section per fragment link, each ending in a fenced bash block of `git mesh add` and `git mesh why` commands, plus a trailing "Commit Changes After Review" block that lists every `git mesh commit` line. The whole document is **a starting point, not a finished artifact**. The scaffold derives:
+The output is a [markdown document](/packages/cli/src/commands/mesh/render.rs#L15-L71) — one section per fragment link, each ending in a fenced bash block of [`git mesh add`](/packages/cli/src/commands/mesh/render.rs#L124-L134) and `git mesh why` commands, plus a trailing "Commit Changes After Review" block that lists every `git mesh commit` line. The whole document is **a starting point, not a finished artifact**. The scaffold derives:
 
 - **Mesh names** from the page title slug and the link label.
 - **Whys** from the prose sentence that contains the link, with markdown stripped.
@@ -97,7 +97,7 @@ A first-time commit fails if no `why` is staged — that's the normal flow. Erro
 wiki check
 ```
 
-Expect zero `mesh_uncovered` findings on real wiki pages. Test fixtures that intentionally exercise the uncovered code path (e.g. `packages/cli/tests/fixtures/mesh-scaffold/`) will keep showing up — leave them.
+Expect zero `mesh_uncovered` findings on real wiki pages. Test fixtures that intentionally exercise the uncovered code path (e.g. [`packages/cli/tests/fixtures/mesh-scaffold/`](/packages/cli/src/commands/mesh/scaffold.rs#L185-L189)) will keep showing up — leave them.
 
 ## Things worth knowing before you start
 

@@ -9,15 +9,15 @@ The wiki CLI validates and maintains fragment links between wiki pages and sourc
 
 ## Fragment Link Parsing
 
-The [parser](/packages/cli/src/parser.rs#L6-L12) extracts two link types from markdown content: fragment links (`[label](path#sha-L10-L20)`) and wikilinks (`[[Title]]`). Both parsers operate on scrubbed content — code blocks, inline code, and HTML comments are blanked out before extraction to avoid false matches.
+The [parser](/packages/cli/src/parser.rs#L6-L12) extracts two link types from markdown content: [fragment links](/packages/cli/src/parser.rs#L213-L213) (`[label](path#sha-L10-L20)`) and [wikilinks](/packages/cli/src/parser.rs#L304-L304) (`[[Title]]`). Both parsers operate on [scrubbed content](/packages/cli/src/parser.rs#L79-L79) — code blocks, inline code, and HTML comments are blanked out before extraction to avoid false matches.
 
 ## Validation Pipeline
 
-The [check command](/packages/cli/src/commands/check.rs#L28-L29) runs a full validation pass: frontmatter parsing, title/alias collision detection, wikilink resolution, and fragment link verification (file existence and line range bounds at the pinned SHA). With `--fix`, unpinned fragment links are pinned automatically rather than reported as errors — already-pinned links are never touched.
+The [check command](/packages/cli/src/commands/check.rs#L28-L29) runs a full validation pass: [frontmatter parsing](/packages/cli/src/frontmatter.rs#L56-L56), title/alias collision detection, wikilink resolution, and fragment link verification (file existence and line range bounds at the pinned SHA). With `--fix`, unpinned fragment links are pinned automatically rather than reported as errors — already-pinned links are never touched.
 
 ## Extract
 
-The extract command (`packages/cli/src/commands/extract.rs`) reads arbitrary text from stdin, parses all `[[wikilink]]` references, and outputs the canonical title and summary for each resolved page. Wikilink extraction runs before any file I/O — if no wikilinks are found, the command exits immediately with no output. Unresolved wikilinks are reported to stderr and cause exit code 1.
+The [extract command](/packages/cli/src/commands/extract.rs#L17-L17) (`packages/cli/src/commands/extract.rs`) reads arbitrary text from stdin, parses all `[[wikilink]]` references, and outputs the [canonical title and summary](/packages/cli/src/commands/extract.rs#L10-L15) for each resolved page. Wikilink extraction runs before any file I/O — if no wikilinks are found, the command [exits immediately with no output](/packages/cli/src/commands/extract.rs#L28-L33). Unresolved wikilinks are reported to stderr and cause exit code 1.
 
 ## PostToolUse Hook
 
@@ -30,8 +30,8 @@ Several commands support navigating and searching the wiki from the command line
 - **Incoming Links**: The [links command](/packages/cli/src/commands/links.rs) finds all wiki pages that reference a given target, whether that target resolves as a wiki page, a workspace file, or both.
 - **Search**: The [search command](/packages/cli/src/commands/search.rs) is the primary entrypoint for finding wiki content. It performs a weighted search that ranks exact title matches, repo-relative path matches, and full-text matches (BM25) in a single unified flow.
 - **Suggest**: The suggest command (used internally by the hook) finds the best matches for a query with a minimum score threshold, prioritizing titles and aliases.
-- **Summary**: The [summary command](/packages/cli/src/commands/summary.rs) outputs a page's frontmatter-defined summary along with a repo-relative path to its source file.
-- **Print**: The [print command](/packages/cli/src/commands/print.rs) outputs the full raw markdown content of a wiki page to stdout.
+- **Summary**: The [summary command](/packages/cli/src/commands/summary.rs#L130-L130) outputs a page's frontmatter-defined summary along with a repo-relative path to its source file.
+- **Print**: The [print command](/packages/cli/src/commands/print.rs#L9-L9) outputs the full raw markdown content of a wiki page to stdout.
 
 ## Rendering
 
@@ -39,4 +39,4 @@ The CLI does not render markdown. HTML rendering is owned entirely by the VS Cod
 
 ## Frontmatter
 
-The [frontmatter module](/packages/cli/src/frontmatter.rs#L45-L50) parses and validates YAML frontmatter from wiki pages. It reserves certain titles (`check`, `pin`, `stale`, `links`, `list`, `summary`, `print`) to prevent ambiguity with command-line dispatch.
+The [frontmatter module](/packages/cli/src/frontmatter.rs#L45-L50) parses and validates YAML frontmatter from wiki pages. It [reserves certain titles](/packages/cli/src/frontmatter.rs#L48-L50) (`check`, `pin`, `stale`, `links`, `list`, `summary`, `print`) to prevent ambiguity with command-line dispatch.

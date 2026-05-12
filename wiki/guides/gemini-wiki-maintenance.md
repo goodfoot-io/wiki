@@ -13,25 +13,25 @@ The repository runs an automated wiki maintenance pass after every commit on the
 
 ## When It Runs
 
-The [example post-commit hook](/examples/githooks/gemini-post-commit.sh) fires the script in a background process (`&`) after every commit. A guard on the `GEMINI_WIKI_ACTIVE` environment variable prevents it from recursing into its own wiki commits.
+The [example post-commit hook](/examples/githooks/gemini-post-commit.sh) fires the script in a background process (`&`) after every commit. A guard on the [`GEMINI_WIKI_ACTIVE`](/examples/githooks/scripts/gemini-wiki-maintenance.sh#L13-L17) environment variable prevents it from recursing into its own wiki commits.
 
-A fail-closed lockfile under `$GIT_COMMON_DIR/wiki-maintenance.lock` ensures only one run is active at a time. Stale locks (from crashed processes) are detected by checking whether the PID is still alive.
+A [fail-closed lockfile under `$GIT_COMMON_DIR/wiki-maintenance.lock`](/examples/githooks/scripts/gemini-wiki-maintenance.sh#L37-L62) ensures only one run is active at a time. [Stale locks (from crashed processes) are detected by checking whether the PID is still alive](/examples/githooks/scripts/gemini-wiki-maintenance.sh#L41-L56).
 
-The script exits immediately (before the expensive worktree setup) if `wiki check` reports no validation errors.
+The script [exits immediately (before the expensive worktree setup) if `wiki stale` reports no stale links](/examples/githooks/scripts/gemini-wiki-maintenance.sh#L31-L35).
 
 ## What It Does
 
-1. **Creates an isolated git worktree** on a temporary branch (`wiki-maintenance/<timestamp>`) pointing to the current `HEAD`. Gemini works inside this worktree — its changes are committed there before being merged back.
+1. **[Creates an isolated git worktree](/examples/githooks/scripts/gemini-wiki-maintenance.sh#L87-L92)** on a temporary branch (`wiki-maintenance/<timestamp>`) pointing to the current `HEAD`. Gemini works inside this worktree — its changes are committed there before being merged back.
 
-2. **Runs Gemini** inside the worktree with an explicit admin-level policy file and a structured multi-step prompt that enforces [**fragment link discipline**](/examples/githooks/scripts/gemini-wiki-maintenance.sh#L183-L193). Gemini's home directory is isolated (`$ISOLATED_HOME`) and its environment is strictly controlled, though `PATH` is forwarded so the `wiki` binary and other essential tools remain available. It uses separate credentials and cannot write outside the worktree.
+2. **[Runs Gemini](/examples/githooks/scripts/gemini-wiki-maintenance.sh#L104-L149)** inside the worktree with an explicit admin-level policy file and a structured multi-step prompt that enforces [**fragment link discipline**](/examples/githooks/scripts/gemini-wiki-maintenance.sh#L120-L124). Gemini's home directory is [isolated (`$ISOLATED_HOME`)](/examples/githooks/scripts/gemini-wiki-maintenance.sh#L94-L100) and its environment is strictly controlled, though `PATH` is forwarded so the `wiki` binary and other essential tools remain available. It uses separate credentials and cannot write outside the worktree.
 
-3. **Verifies the result** with `wiki check` before accepting any changes. If the wiki is invalid after Gemini runs, the maintenance is aborted.
+3. **[Verifies the result](/examples/githooks/scripts/gemini-wiki-maintenance.sh#L151-L155)** with `wiki check` before accepting any changes. If the wiki is invalid after Gemini runs, the maintenance is aborted.
 
-4. **Merges or patches** back into the main working tree:
-   - **Clean working directory** — `git merge` (fast-forward) from the temp branch.
-   - **Dirty working directory** — `git apply` of the patch, followed by an automatic `git commit` of the affected files using the generated message.
+4. **[Merges or patches](/examples/githooks/scripts/gemini-wiki-maintenance.sh#L182-L202)** back into the main working tree:
+   - **Clean working directory** — [`git merge` (fast-forward) from the temp branch](/examples/githooks/scripts/gemini-wiki-maintenance.sh#L185-L187).
+   - **Dirty working directory** — [`git apply` of the patch, followed by an automatic `git commit` of the affected files](/examples/githooks/scripts/gemini-wiki-maintenance.sh#L188-L201) using the generated message.
 
-5. **Cleans up** the worktree, temp branch, lockfile, and temp files in an `EXIT` trap.
+5. **[Cleans up](/examples/githooks/scripts/gemini-wiki-maintenance.sh#L68-L85)** the worktree, temp branch, lockfile, and temp files in an `EXIT` trap.
 
 ## Policy Engine
 
@@ -49,11 +49,11 @@ The `commandRegex` field generates an `argsPattern` of the form `"command":"<reg
 
 ## Commit Message
 
-Step 6 of the prompt instructs Gemini to write the commit message to `$WORKTREE_DIR/gemini-commit-message.txt` via `write_file`. The script uses that file if it exists and is non-empty; otherwise it falls back to `"wiki: maintenance pass — automated wiki maintenance"`.
+[Step 4 of the prompt instructs Gemini to write the commit message](/examples/githooks/scripts/gemini-wiki-maintenance.sh#L136-L145) to `$WORKTREE_DIR/gemini-commit-message.txt` via `write_file`. The script [uses that file if it exists and is non-empty; otherwise it falls back to `"wiki: maintenance pass — automated wiki maintenance"`](/examples/githooks/scripts/gemini-wiki-maintenance.sh#L167-L173).
 
 ## Logging
 
-All output (stdout and stderr) is tee'd to `/workspace/.cards/logs/gemini-wiki-maintenance.log`. Each run is delimited by timestamp+PID banners. Failures include the exit code.
+All output (stdout and stderr) is [tee'd to a log file](/examples/githooks/scripts/gemini-wiki-maintenance.sh#L25-L29). Each run is delimited by timestamp+PID banners. Failures include the exit code.
 
 ```
 --- 2026-04-08 19:35:47 wiki maintenance run started (PID 88769, cwd=/workspace) ---

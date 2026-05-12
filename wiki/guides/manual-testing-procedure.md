@@ -6,7 +6,7 @@ tags: [testing, cli, guide]
 
 # Manual Testing Procedure
 
-A linear walkthrough that exercises every `wiki` CLI subcommand and flag from a clean state. Each step prints the command, the expected outcome, and (where relevant) the expected exit code. Copy-paste into a shell, top to bottom.
+A linear walkthrough that exercises every [`wiki`](/packages/cli/src/main.rs#L40-L60) CLI subcommand and flag from a clean state. Each step prints the command, the expected outcome, and (where relevant) the expected exit code. Copy-paste into a shell, top to bottom.
 
 Assumes `wiki` is on `PATH` (`which wiki` should resolve). Does not require an existing repo — the procedure builds one.
 
@@ -26,7 +26,7 @@ Expect: `git init` reports a new repo. `pwd` is the temp dir. No `wiki.toml` exi
 wiki "anything" ; echo "exit:$?"
 ```
 
-Expect: error `no wiki.toml found under <WORK>; run 'wiki init' …`, exit `2`.
+Expect: error [`no wiki.toml found under <WORK>; run 'wiki init' …`](/packages/cli/src/wiki_config.rs#L79-L84), exit `2`.
 
 ```bash
 wiki namespaces ; echo "exit:$?"
@@ -52,7 +52,7 @@ Expect: `created <…>/docs/wiki.toml`. `wiki.toml` is empty (default namespace)
 ( cd docs && wiki init ) ; echo "exit:$?"
 ```
 
-Expect: `wiki.toml already exists … remove it first if you want to reinitialise`. Exit `2`.
+Expect: [`wiki.toml already exists … remove it first if you want to reinitialise`](/packages/cli/src/commands/init.rs#L21-L26). Exit `2`.
 
 ### 2c. named namespace
 
@@ -70,7 +70,7 @@ mkdir bad2 && ( cd bad2 && wiki init "bad name" ) ; echo "exit:$?"
 mkdir bad3 && ( cd bad3 && wiki init "" )         ; echo "exit:$?"
 ```
 
-Expect: each errors with the relevant rule (`reserved`, `only ASCII letters, digits, _, -`, `must not be empty`). Each exits `2`.
+Expect: each errors with the relevant rule ([`reserved`](/packages/cli/src/wiki_config.rs#L34-L38), [`only ASCII letters, digits, _, -`](/packages/cli/src/wiki_config.rs#L39-L43), [`must not be empty`](/packages/cli/src/wiki_config.rs#L31-L33)). Each exits `2`.
 
 ## 3. `wiki namespaces`
 
@@ -85,7 +85,7 @@ default	<WORK>/docs
 scratch	<WORK>/notes
 ```
 
-`default` always sorts first; remaining namespaces are alphabetical.
+[`default` always sorts first; remaining namespaces are alphabetical](/packages/cli/src/commands/namespaces.rs#L74-L84).
 
 ### 3a. JSON
 
@@ -250,7 +250,7 @@ Expect: rows labelled by namespace; both wikis searched.
 wiki -n unknown "x" ; echo "exit:$?"
 ```
 
-Expect: `unknown namespace 'unknown'. Known: [default, scratch]`. Exit `2`.
+Expect: [`unknown namespace 'unknown'. Known: [default, scratch]`](/packages/cli/src/wiki_config.rs#L161-L164). Exit `2`.
 
 ### 6f. JSON
 
@@ -360,7 +360,7 @@ head -20 /tmp/scaffold.md
 
 Expect: a markdown document with one section per fragment-link group — each section carries the source heading, the opening sentence as a blockquote, and a fenced bash block of `git mesh add <slug> <anchor>` / `git mesh why <slug> -m "[why]"` commands. A trailing "Commit Changes After Review" block lists every `git mesh commit` line. The document is safe to inspect; copying the bash blocks into your shell stages mesh data (do this only if you have `git mesh` installed).
 
-When the wiki has no uncovered fragment links, the output is a single-paragraph markdown notice (`# wiki scaffold` + "No uncovered fragment links — every link is already covered by a mesh."), not the document above.
+When the wiki has no uncovered fragment links, the output is a single-paragraph markdown notice ([`# wiki scaffold` + "No uncovered fragment links — every link is already covered by a mesh."](/packages/cli/src/commands/mesh/render.rs#L85-L92)), not the document above.
 
 ## 14. `wiki install`
 
@@ -381,7 +381,7 @@ Options:
       --ref <REF>      Git ref (branch, tag, or SHA) to install from [default: main]
 ```
 
-`--codex` writes the Codex integration files; `--claude` is informational only — it prints setup instructions for Claude Code and does not touch the filesystem. There is no `gemini` target. Skip running `--codex` in this throwaway repo unless you also want to verify the Codex install.
+[`--codex` writes the Codex integration files; `--claude` is informational only](/packages/cli/src/commands/install.rs#L1102-L1119) — it prints setup instructions for Claude Code and does not touch the filesystem. There is no `gemini` target. Skip running `--codex` in this throwaway repo unless you also want to verify the Codex install.
 
 ## 15. `--perf` and exit-code conventions
 
@@ -390,7 +390,7 @@ WIKI_PERF=1 wiki "Authentication" 2>/tmp/perf.log >/dev/null
 head -5 /tmp/perf.log
 ```
 
-Expect: per-event timing lines on stderr; query result on stdout.
+Expect: [per-event timing lines on stderr](/packages/cli/src/perf.rs#L50-L61); query result on stdout.
 
 Exit-code summary across the suite:
 
