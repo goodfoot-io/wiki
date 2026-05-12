@@ -48,6 +48,12 @@ pub(crate) struct MeshDraft {
     /// the collision resolver to reapply [`build_slug_with_qualifiers`] when
     /// the base slug clashes with an existing mesh.
     pub(crate) page_ns: PageNamespace,
+    /// When `Some(name)`, the draft extends a pre-existing mesh whose anchors
+    /// already include this page section. Rendering switches to "extend mode":
+    /// the slug is `name`, the page-section anchor and any code anchors that
+    /// `name` already carries are dropped from the emission, and the `git mesh
+    /// why` line is suppressed (the mesh already has a why).
+    pub(crate) extends_existing: Option<String>,
 }
 
 /// One section's worth of input: the leader (used to derive slug and
@@ -98,6 +104,7 @@ pub(crate) fn build(
                 consolidated_count: 1,
                 noun,
                 page_ns: page_ns.clone(),
+                extends_existing: None,
             }
         })
         .collect()

@@ -224,26 +224,13 @@ pub fn run(
         };
         let raw_links = parse_fragment_links(&content);
         let augmented = augment(&raw_links, &content);
-        let wiki_rel_str = path_relative_to(file, repo_root);
-        let wiki_rel = PathBuf::from(&wiki_rel_str);
         // Filter to internal links with a parsed line range — mirrors the JS
         // which skips URL-scheme links and links lacking `#`.
         for aug in augmented {
             if aug.link.kind != LinkKind::Internal {
                 continue;
             }
-            let Some(start) = aug.link.start_line else {
-                continue;
-            };
-            let end = aug.link.end_line.unwrap_or(start);
-            // Skip when an existing mesh already covers the
-            // `(code-path, start, end) ↔ wiki-page` anchor pair. Uses the same
-            // predicate as `wiki check`'s `mesh_uncovered` rule.
-            let resolved = resolve_link_path(&aug.link.path, file, repo_root);
-            let resolved_rel = path_relative_to(&resolved, repo_root);
-            let resolved_rel = locate_existing_suffix(&resolved_rel, repo_root)
-                .unwrap_or(resolved_rel);
-            if mesh_index.is_covered(Path::new(&resolved_rel), start, end, &wiki_rel) {
+            if aug.link.start_line.is_none() {
                 continue;
             }
             all_inputs.push(LinkInput {
@@ -292,12 +279,17 @@ pub fn run(
     let mut consolidated = build_meshes(&all_inputs, repo_root, &page_namespaces);
     trim_chains_in_place(&mut consolidated, &page_titles);
 
-    // Resolve slug collisions against both already-assigned slugs in this run
-    // and any meshes that already live in the repo. The probe shells out to
-    // `git mesh <slug>` per candidate; missing `git-mesh` is treated as "no
-    // collisions" so scaffold still works without it. The probe runs after
-    // heading-chain trimming so the page-title duplicates we just dropped
-    // aren't reintroduced as qualifiers.
+    // Section-extension pass: when a wiki section already has an associated
+    // mesh (some mesh M anchors the exact `(page_path, section_start,
+    // section_end)` triple), every new code link added in that section becomes
+    // an extension of M instead of a brand-new mesh. Drafts whose new code
+    // anchors are *all* already in M are dropped; drafts with remaining new
+    // anchors switch to `extends_existing = Some(M)`.
+    apply_section_extension(&mut consolidated, &mesh_index);
+
+    // Resolve slug collisions across both already-assigned slugs in this run
+    // and any meshes that already live in the repo. Extension drafts opt out:
+    // they reuse the existing mesh's slug verbatim and skip the probe entirely.
     let probe = |slug: &str| mesh_exists(repo_root, slug);
     resolve_slug_collisions(&mut consolidated, &page_titles, &probe);
 
@@ -322,7 +314,9 @@ pub fn run(
     }
 
     // ── Markdown mode ─────────────────────────────────────────────────────
-    if all_inputs.is_empty() {
+    // Empty when there were no internal fragment links at all OR when every
+    // section already has its links anchored by an existing mesh.
+    if all_inputs.is_empty() || consolidated.is_empty() {
         print!("{}", render::render_empty_markdown(&parse_errors));
         return Ok(0);
     }
@@ -387,6 +381,83 @@ fn build_pages_json(
             }
         })
         .collect()
+}
+
+/// Walk consolidated drafts in place and rewrite each one whose wiki section
+/// anchor is already carried by an existing mesh into an *extension* of that
+/// mesh.
+///
+/// For each draft, the leading entry in `structured_anchors` is the page
+/// section anchor `(page_path, section_start, section_end)`. When some mesh M
+/// anchors that exact triple, the draft is converted: code anchors already in
+/// M are dropped, the section anchor itself is dropped, `slug` is overwritten
+/// with M's name, and `extends_existing = Some(M)` flags the renderer to emit
+/// `git mesh add M ...` with no `git mesh why` line.
+///
+/// Drafts left with no remaining code anchors are filtered out entirely —
+/// nothing new for the user to commit.
+fn apply_section_extension(
+    drafts: &mut Vec<MeshDraft>,
+    mesh_index: &crate::commands::mesh_coverage::MeshIndex,
+) {
+    drafts.retain_mut(|d| {
+        // The page-section anchor is the leading structured anchor by
+        // construction in `draft::build`. If a draft somehow lacks one, leave
+        // it as a normal new-mesh draft.
+        let Some(section_anchor) = d.structured_anchors.first().cloned() else {
+            return true;
+        };
+        let owning = mesh_index
+            .owning_mesh_for_exact(
+                Path::new(&section_anchor.path),
+                section_anchor.start_line,
+                section_anchor.end_line,
+            )
+            .map(|s| s.to_string());
+        let Some(mesh_name) = owning else {
+            return true;
+        };
+
+        // Pair the parallel `anchors` strings with `structured_anchors` and
+        // drop (a) the leading section anchor itself, and (b) any code anchor
+        // already carried by the owning mesh.
+        let paired: Vec<(String, super::draft::StructuredAnchor)> = d
+            .anchors
+            .iter()
+            .cloned()
+            .zip(d.structured_anchors.iter().cloned())
+            .collect();
+        let kept: Vec<(String, super::draft::StructuredAnchor)> = paired
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, (a_str, a_struct))| {
+                if idx == 0 {
+                    return None; // section anchor
+                }
+                if mesh_index.mesh_contains_anchor(
+                    &mesh_name,
+                    Path::new(&a_struct.path),
+                    a_struct.start_line,
+                    a_struct.end_line,
+                ) {
+                    return None;
+                }
+                Some((a_str, a_struct))
+            })
+            .collect();
+
+        if kept.is_empty() {
+            return false; // nothing new; drop the draft
+        }
+
+        let (new_anchors, new_struct): (Vec<String>, Vec<super::draft::StructuredAnchor>) =
+            kept.into_iter().unzip();
+        d.anchors = new_anchors;
+        d.structured_anchors = new_struct;
+        d.slug = mesh_name.clone();
+        d.extends_existing = Some(mesh_name);
+        true
+    });
 }
 
 /// Trim heading chains on all drafts in place. The leading chain entry is
@@ -587,6 +658,12 @@ pub(crate) fn resolve_slug_collisions(
 ) {
     let mut assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
     for d in drafts.iter_mut() {
+        // Extension drafts reuse the existing mesh's slug verbatim — they are
+        // not new meshes, so they participate in neither the assigned set nor
+        // the probe.
+        if d.extends_existing.is_some() {
+            continue;
+        }
         // Inner→outer chain in kebab form, dropping empties and any entry
         // equal to the noun (the deepest entry in `heading_chain` is the
         // section heading itself, which already supplied the noun — using it
@@ -989,6 +1066,7 @@ mod tests {
             consolidated_count: 1,
             noun: noun.to_string(),
             page_ns,
+            extends_existing: None,
         }
     }
 

@@ -60,6 +60,7 @@ mod tests {
             consolidated_count: 1,
             noun: String::new(),
             page_ns: super::super::scaffold::PageNamespace::default(),
+            extends_existing: None,
         }
     }
 

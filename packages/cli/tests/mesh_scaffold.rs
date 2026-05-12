@@ -941,17 +941,21 @@ fn mesh_scaffold_renames_on_existing_mesh_collision() {
     );
 }
 
-/// `wiki scaffold` must skip emitting `git mesh add` blocks for fragment
-/// links whose `(code-path, start, end) ↔ wiki-page` anchor pair is already
-/// covered by an existing mesh — the same predicate `wiki check`'s
-/// `mesh_uncovered` rule applies via
-/// [`collect_mesh_diagnostics`](../src/commands/mesh_coverage.rs).
+/// `wiki scaffold` treats existing meshes as the anchor for a wiki section:
 ///
-/// Reproduction layout: one wiki page with two fragment links — one whose
-/// anchor pair is already covered by a pre-existing mesh, one that is not.
-/// Only the uncovered link should appear in the scaffold output.
+/// - When some mesh M anchors the exact `(page_path, section_start,
+///   section_end)` triple of a section, the section's links are routed into M.
+/// - A link whose code anchor is already in M is dropped from the emission.
+/// - A link whose code anchor is **not** in M becomes
+///   `git mesh add M <code-anchor>` — a stage-only command that extends M.
+///   The `git mesh why` line is suppressed since M already has a why.
+/// - A section with no owning mesh falls through to today's behavior: a new
+///   `git mesh add <fresh-slug>` block with a `git mesh why` companion.
+///
+/// Reproduction layout: one wiki page with three sections, each exercising a
+/// different scenario.
 #[test]
-fn mesh_scaffold_skips_already_covered_fragment_links() {
+fn mesh_scaffold_extends_existing_section_mesh_with_new_code_links() {
     if Command::new("git-mesh").arg("--version").output().is_err() {
         eprintln!("skipping: git-mesh not installed");
         return;
@@ -962,15 +966,32 @@ fn mesh_scaffold_skips_already_covered_fragment_links() {
     std::fs::create_dir_all(root.join("wiki")).unwrap();
     std::fs::write(root.join("wiki/wiki.toml"), "").unwrap();
     std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::write(root.join("src/covered.ts"), "// covered\n").unwrap();
-    std::fs::write(root.join("src/uncovered.ts"), "// uncovered\n").unwrap();
+    std::fs::write(root.join("src/fully.ts"), "// fully\n").unwrap();
+    std::fs::write(root.join("src/extend.ts"), "// extend\n").unwrap();
+    std::fs::write(root.join("src/fresh.ts"), "// fresh\n").unwrap();
+
+    // Section line numbers (1-indexed) after the 4-line frontmatter + blank:
+    //   6:  ## Fully covered
+    //   7:  (blank)
+    //   8:  See [fully](../src/fully.ts#L1-L1).
+    //   9:  (blank)
+    //  10:  ## Extends existing
+    //  11:  (blank)
+    //  12:  See [extend](../src/extend.ts#L1-L1).
+    //  13:  (blank)
+    //  14:  ## Fresh section
+    //  15:  (blank)
+    //  16:  See [fresh](../src/fresh.ts#L1-L1).
+    // Section ranges per scaffold's grouping: [heading .. last content line].
     std::fs::write(
         root.join("wiki/billing.md"),
         "---\ntitle: Billing\nsummary: bill\n---\n\n\
-         ## Covered section\n\n\
-         See [covered](../src/covered.ts#L1-L1).\n\n\
-         ## Uncovered section\n\n\
-         See [uncovered](../src/uncovered.ts#L1-L1).\n",
+         ## Fully covered\n\n\
+         See [fully](../src/fully.ts#L1-L1).\n\n\
+         ## Extends existing\n\n\
+         See [extend](../src/extend.ts#L1-L1).\n\n\
+         ## Fresh section\n\n\
+         See [fresh](../src/fresh.ts#L1-L1).\n",
     )
     .unwrap();
 
@@ -991,13 +1012,43 @@ fn mesh_scaffold_skips_already_covered_fragment_links() {
             String::from_utf8_lossy(&status.stderr)
         );
     };
-    // Pre-existing mesh that anchors both the code range AND the wiki page —
-    // satisfies `MeshIndex::is_covered`'s "same mesh anchors both" predicate.
-    stage(&["add", "billing/covered-flow", "src/covered.ts#L1-L1", "wiki/billing.md"]);
-    stage(&["why", "billing/covered-flow", "-m", "pre-existing"]);
-    stage(&["commit", "billing/covered-flow"]);
 
+    // Discover scaffold's section ranges by running it once with no
+    // pre-existing meshes — the emitted `wiki/billing.md#L<s>-L<e>` anchors
+    // are the section keys we need to stage against.
     let bin = env!("CARGO_BIN_EXE_wiki");
+    let baseline = Command::new(bin)
+        .args(["scaffold", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("run wiki scaffold (baseline)");
+    let baseline_stdout = String::from_utf8_lossy(&baseline.stdout).into_owned();
+    let extract = |label: &str| -> String {
+        // Find the `## <label>` block and the next `wiki/billing.md#L..-L..` anchor inside it.
+        let block_idx = baseline_stdout
+            .find(&format!("## {label}"))
+            .expect("section label present in baseline");
+        let tail = &baseline_stdout[block_idx..];
+        let anchor_start = tail.find("wiki/billing.md#L").expect("section anchor present");
+        let anchor_tail = &tail[anchor_start..];
+        let anchor_end = anchor_tail.find(|c: char| c == ' ' || c == '\\' || c == '\n').unwrap();
+        anchor_tail[..anchor_end].to_string()
+    };
+    let fully_anchor = extract("Fully covered");
+    let extend_anchor = extract("Extends existing");
+
+    // Pre-existing meshes:
+    //   - `billing/fully-covered` owns the section AND the code link → drop draft.
+    //   - `billing/extend-target` owns the section but NOT the code link →
+    //     emission becomes `git mesh add billing/extend-target src/extend.ts#L1-L1`.
+    stage(&["add", "billing/fully-covered", &fully_anchor, "src/fully.ts#L1-L1"]);
+    stage(&["why", "billing/fully-covered", "-m", "pre-existing fully covered"]);
+    stage(&["commit", "billing/fully-covered"]);
+
+    stage(&["add", "billing/extend-target", &extend_anchor]);
+    stage(&["why", "billing/extend-target", "-m", "pre-existing extension target"]);
+    stage(&["commit", "billing/extend-target"]);
+
     let output = Command::new(bin)
         .args(["scaffold", "**/*.md"])
         .current_dir(root.join("wiki"))
@@ -1010,12 +1061,44 @@ fn mesh_scaffold_skips_already_covered_fragment_links() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
 
+    // 1. Fully covered: code anchor must not appear at all; no block created.
     assert!(
-        stdout.contains("src/uncovered.ts#L1-L1"),
-        "uncovered link must still be emitted; got:\n{stdout}"
+        !stdout.contains("src/fully.ts"),
+        "fully-covered section must be filtered out entirely; got:\n{stdout}"
     );
     assert!(
-        !stdout.contains("src/covered.ts#L1-L1"),
-        "covered link must be filtered out of scaffold output; got:\n{stdout}"
+        !stdout.contains("billing/fully-covered"),
+        "no block should reference billing/fully-covered; got:\n{stdout}"
+    );
+
+    // 2. Extends existing: emit `git mesh add billing/extend-target src/extend.ts#L1-L1`
+    //    with no `git mesh why billing/extend-target` line.
+    assert!(
+        stdout.contains("git mesh add billing/extend-target"),
+        "expected extension block targeting existing mesh; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("src/extend.ts#L1-L1"),
+        "expected new code anchor in extension block; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("git mesh why billing/extend-target"),
+        "extension blocks must not invite a why rewrite; got:\n{stdout}"
+    );
+    // The section's wiki anchor itself is dropped from the extension emission
+    // — git-mesh already carries it.
+    assert!(
+        !stdout.contains(&format!("git mesh add billing/extend-target \\\n  {extend_anchor}")),
+        "extension block must not re-add the section's wiki anchor; got:\n{stdout}"
+    );
+
+    // 3. Fresh section: today's behavior — new slug, with a `git mesh why` line.
+    assert!(
+        stdout.contains("git mesh add wiki/fresh-section"),
+        "expected new mesh for the fresh section; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("git mesh why wiki/fresh-section"),
+        "new-mesh blocks still need a why line; got:\n{stdout}"
     );
 }

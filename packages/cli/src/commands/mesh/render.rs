@@ -135,7 +135,11 @@ fn render_mesh_block(out: &mut String, m: &MeshDraft) {
             let _ = writeln!(out, "  {a} \\");
         }
     }
-    let _ = writeln!(out, "git mesh why {} -m \"[why]\"", m.slug);
+    // Suppress `git mesh why` when extending an existing mesh — its why is
+    // already authored and the user should not be invited to overwrite it.
+    if m.extends_existing.is_none() {
+        let _ = writeln!(out, "git mesh why {} -m \"[why]\"", m.slug);
+    }
     let _ = writeln!(out, "```");
     out.push('\n');
 }
@@ -163,6 +167,7 @@ mod tests {
             consolidated_count: 1,
             noun: String::new(),
             page_ns: super::super::scaffold::PageNamespace::default(),
+            extends_existing: None,
         }
     }
 

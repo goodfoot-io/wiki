@@ -34,6 +34,41 @@ impl MeshIndex {
                     .is_some_and(|paths| paths.iter().any(|p| paths_equal(p, wiki_rel)))
             })
     }
+
+    /// Return the name of an existing mesh that anchors the exact
+    /// `(path, start, end)` triple, if one exists. When multiple meshes
+    /// anchor the same triple the lexicographically first name wins so the
+    /// choice is deterministic.
+    pub(crate) fn owning_mesh_for_exact(
+        &self,
+        path: &Path,
+        start: u32,
+        end: u32,
+    ) -> Option<&str> {
+        let key = (path.to_path_buf(), start, end);
+        let names = self.by_anchor.get(&key)?;
+        names.iter().min().map(String::as_str)
+    }
+
+    /// Whether `mesh` anchors the exact `(path, start, end)` triple, or the
+    /// whole-file `(path, 0, 0)` sentinel that covers any range.
+    pub(crate) fn mesh_contains_anchor(
+        &self,
+        mesh: &str,
+        path: &Path,
+        start: u32,
+        end: u32,
+    ) -> bool {
+        let candidates: &[(PathBuf, u32, u32)] = &[
+            (path.to_path_buf(), start, end),
+            (path.to_path_buf(), 0, 0),
+        ];
+        candidates
+            .iter()
+            .filter_map(|k| self.by_anchor.get(k))
+            .flatten()
+            .any(|name| name == mesh)
+    }
 }
 
 // ── Public surface ────────────────────────────────────────────────────────────
