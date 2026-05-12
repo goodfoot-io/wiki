@@ -17,7 +17,7 @@ For the design behind the integration, see [[Wiki Mesh Integration]]. For the co
 wiki check
 ```
 
-Each [`mesh_uncovered`](/packages/cli/src/commands/mesh_coverage.rs#L41-L50) finding names the wiki file, the fragment link, and the line range that lacks a covering mesh. Skim the list before scripting anything: it tells you which subsystems will dominate the work, and it reveals duplicates (the same anchor appearing in two sections of the same page).
+Each [`mesh_uncovered`](/packages/cli/src/commands/mesh_coverage.rs#L76-L85) finding names the wiki file, the fragment link, and the line range that lacks a covering mesh. Skim the list before scripting anything: it tells you which subsystems will dominate the work, and it reveals duplicates (the same anchor appearing in two sections of the same page).
 
 ## 2. Scaffold per page
 
