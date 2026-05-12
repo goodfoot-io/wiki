@@ -257,6 +257,25 @@ mod tests {
         assert!(out.contains("# wiki scaffold"));
     }
 
+    // Regression: the empty-corpus success branch fires whenever `all_inputs`
+    // is empty in `scaffold::run` — i.e. when no internal fragment link with a
+    // parsed line range was discovered. No coverage probe runs before it, so
+    // the message must not claim coverage filtering decided the outcome.
+    #[test]
+    fn render_empty_markdown_does_not_claim_coverage() {
+        let out = render_empty_markdown(&[]);
+        assert!(
+            !out.contains("covered by a mesh"),
+            "empty-corpus message must not claim mesh coverage — no coverage \
+             check runs before this branch:\n{out}"
+        );
+        assert!(
+            !out.contains("No uncovered fragment links"),
+            "empty-corpus message must not frame the result as a coverage \
+             outcome:\n{out}"
+        );
+    }
+
     #[test]
     fn render_empty_markdown_with_errors_block_alone() {
         let errors = vec![make_error("wiki/bad.md", ParseErrorKind::MissingTitle)];
