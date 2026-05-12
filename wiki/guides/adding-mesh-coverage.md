@@ -25,7 +25,7 @@ Each [`mesh_uncovered`](/packages/cli/src/commands/mesh_coverage.rs#L41-L50) fin
 wiki scaffold wiki/architecture/wiki-cli.md
 ```
 
-The output is a [markdown document](/packages/cli/src/commands/mesh/render.rs#L15-L71) — one section per fragment link, each ending in a fenced bash block of [`git mesh add`](/packages/cli/src/commands/mesh/render.rs#L124-L134) and `git mesh why` commands, plus a trailing "Commit Changes After Review" block that lists every `git mesh commit` line. The whole document is **a starting point, not a finished artifact**. The scaffold derives:
+The output is a [markdown document](/packages/cli/src/commands/mesh/render.rs#L15-L71) — one section per fragment link, each ending in a fenced bash block of [`git mesh add`](/packages/cli/src/commands/mesh/render.rs#L128-L138) and `git mesh why` commands, plus a trailing "Commit Changes After Review" block that lists every `git mesh commit` line. The whole document is **a starting point, not a finished artifact**. The scaffold derives:
 
 - **Mesh names** from the page title slug and the link label.
 - **Whys** from the prose sentence that contains the link, with markdown stripped.

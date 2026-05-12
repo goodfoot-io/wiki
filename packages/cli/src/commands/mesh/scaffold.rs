@@ -197,6 +197,20 @@ pub fn run(
     files.sort();
     files.dedup();
 
+    // Coverage index: filter out fragment links already covered by a mesh in
+    // the repo. Fail closed when `git-mesh` is unavailable — emitting unfiltered
+    // `git mesh add` blocks would silently regenerate meshes that already exist.
+    let mesh_index = match crate::commands::mesh_coverage::build_mesh_index(repo_root, &files) {
+        Ok(Some(idx)) => idx,
+        Ok(None) => {
+            eprintln!(
+                "wiki scaffold: mesh_unavailable — `git-mesh` is not on PATH, refusing to scaffold without coverage data. Install git-mesh and retry; see https://github.com/goodfoot-io/git-mesh."
+            );
+            return Ok(1);
+        }
+        Err(e) => return Err(e),
+    };
+
     let mut all_inputs: Vec<LinkInput> = Vec::new();
     for file in &files {
         let content = match read_via_source(file, repo_root, source) {
@@ -210,13 +224,26 @@ pub fn run(
         };
         let raw_links = parse_fragment_links(&content);
         let augmented = augment(&raw_links, &content);
+        let wiki_rel_str = path_relative_to(file, repo_root);
+        let wiki_rel = PathBuf::from(&wiki_rel_str);
         // Filter to internal links with a parsed line range — mirrors the JS
         // which skips URL-scheme links and links lacking `#`.
         for aug in augmented {
             if aug.link.kind != LinkKind::Internal {
                 continue;
             }
-            if aug.link.start_line.is_none() {
+            let Some(start) = aug.link.start_line else {
+                continue;
+            };
+            let end = aug.link.end_line.unwrap_or(start);
+            // Skip when an existing mesh already covers the
+            // `(code-path, start, end) ↔ wiki-page` anchor pair. Uses the same
+            // predicate as `wiki check`'s `mesh_uncovered` rule.
+            let resolved = resolve_link_path(&aug.link.path, file, repo_root);
+            let resolved_rel = path_relative_to(&resolved, repo_root);
+            let resolved_rel = locate_existing_suffix(&resolved_rel, repo_root)
+                .unwrap_or(resolved_rel);
+            if mesh_index.is_covered(Path::new(&resolved_rel), start, end, &wiki_rel) {
                 continue;
             }
             all_inputs.push(LinkInput {

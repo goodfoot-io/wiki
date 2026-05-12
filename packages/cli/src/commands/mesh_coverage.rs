@@ -11,7 +11,7 @@ use super::check::CheckDiagnostic;
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /// All mesh data fetched in a single `git-mesh list --porcelain` call.
-struct MeshIndex {
+pub(crate) struct MeshIndex {
     /// Code anchor `(path, start, end)` → names of every mesh containing it.
     by_anchor: HashMap<(PathBuf, u32, u32), Vec<String>>,
     /// Mesh name → every path anchored by that mesh (any range).
@@ -19,7 +19,7 @@ struct MeshIndex {
 }
 
 impl MeshIndex {
-    fn is_covered(&self, code_path: &Path, start: u32, end: u32, wiki_rel: &Path) -> bool {
+    pub(crate) fn is_covered(&self, code_path: &Path, start: u32, end: u32, wiki_rel: &Path) -> bool {
         // Check exact-range anchor and the whole-file sentinel (0-0).
         let keys: &[(PathBuf, u32, u32)] = &[
             (code_path.to_path_buf(), start, end),
@@ -112,6 +112,35 @@ pub(super) fn collect_mesh_diagnostics(
     }
 
     Ok(out)
+}
+
+/// Build a `MeshIndex` for the given wiki files by invoking `git-mesh list
+/// --porcelain --batch` once.
+///
+/// Returns `Ok(None)` when the `git-mesh` binary is not on PATH so callers can
+/// decide how to react (e.g. `wiki check` surfaces a `mesh_unavailable`
+/// diagnostic; `wiki scaffold` fails closed). Returns `Err` for any other
+/// runtime failure.
+pub(crate) fn build_mesh_index(
+    repo_root: &Path,
+    files: &[PathBuf],
+) -> Result<Option<MeshIndex>, miette::Error> {
+    if files.is_empty() {
+        return Ok(Some(MeshIndex {
+            by_anchor: HashMap::new(),
+            paths_by_mesh: HashMap::new(),
+        }));
+    }
+    let rel_paths: Vec<PathBuf> = files
+        .iter()
+        .map(|p| {
+            p.strip_prefix(repo_root)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|_| p.clone())
+        })
+        .collect();
+    let mut sink: Vec<CheckDiagnostic> = Vec::new();
+    run_git_mesh_ls_all(repo_root, &rel_paths, &mut sink)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
