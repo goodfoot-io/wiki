@@ -940,3 +940,82 @@ fn mesh_scaffold_renames_on_existing_mesh_collision() {
         "expected resolver to prepend the page title; got:\n{stdout}"
     );
 }
+
+/// `wiki scaffold` must skip emitting `git mesh add` blocks for fragment
+/// links whose `(code-path, start, end) ↔ wiki-page` anchor pair is already
+/// covered by an existing mesh — the same predicate `wiki check`'s
+/// `mesh_uncovered` rule applies via
+/// [`collect_mesh_diagnostics`](../src/commands/mesh_coverage.rs).
+///
+/// Reproduction layout: one wiki page with two fragment links — one whose
+/// anchor pair is already covered by a pre-existing mesh, one that is not.
+/// Only the uncovered link should appear in the scaffold output.
+#[test]
+fn mesh_scaffold_skips_already_covered_fragment_links() {
+    if Command::new("git-mesh").arg("--version").output().is_err() {
+        eprintln!("skipping: git-mesh not installed");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::write(root.join("wiki/wiki.toml"), "").unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/covered.ts"), "// covered\n").unwrap();
+    std::fs::write(root.join("src/uncovered.ts"), "// uncovered\n").unwrap();
+    std::fs::write(
+        root.join("wiki/billing.md"),
+        "---\ntitle: Billing\nsummary: bill\n---\n\n\
+         ## Covered section\n\n\
+         See [covered](../src/covered.ts#L1-L1).\n\n\
+         ## Uncovered section\n\n\
+         See [uncovered](../src/uncovered.ts#L1-L1).\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let stage = |args: &[&str]| {
+        let status = Command::new("git")
+            .arg("mesh")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git mesh available");
+        assert!(
+            status.status.success(),
+            "git mesh {args:?} failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    };
+    // Pre-existing mesh that anchors both the code range AND the wiki page —
+    // satisfies `MeshIndex::is_covered`'s "same mesh anchors both" predicate.
+    stage(&["add", "billing/covered-flow", "src/covered.ts#L1-L1", "wiki/billing.md"]);
+    stage(&["why", "billing/covered-flow", "-m", "pre-existing"]);
+    stage(&["commit", "billing/covered-flow"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("run wiki scaffold");
+    assert!(
+        output.status.success(),
+        "scaffold failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("src/uncovered.ts#L1-L1"),
+        "uncovered link must still be emitted; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("src/covered.ts#L1-L1"),
+        "covered link must be filtered out of scaffold output; got:\n{stdout}"
+    );
+}
