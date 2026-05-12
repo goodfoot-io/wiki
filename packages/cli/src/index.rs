@@ -990,7 +990,6 @@ async fn sync_core_index_inner(
             )
         })?;
 
-        let path_rel = pending.path_rel.clone();
         let title = pending.title.clone();
         let title_key = pending.title_key.clone();
         let summary = pending.summary.clone();
@@ -1029,9 +1028,16 @@ async fn sync_core_index_inner(
         .wrap_err("failed to insert wiki document into index")?;
 
         let document_id = tx.last_insert_rowid();
+        // `lookup_keys.key` is UNIQUE. `validate_lookup_collisions` warns
+        // about every cross-document collision before the transaction starts;
+        // here we use `INSERT OR IGNORE` so any conflicting key is silently
+        // skipped — the existing holder keeps routing, the rest of the
+        // document still gets indexed, and the build never aborts. The
+        // title-equals-alias self-collision is benign for the same reason:
+        // the title row wins and the redundant alias is coalesced.
         tx.execute(
-            "INSERT INTO lookup_keys (document_id, key, raw_text, kind) VALUES (?1, ?2, ?3, 'title')",
-            params![document_id, title_key, title],
+            "INSERT OR IGNORE INTO lookup_keys (document_id, key, raw_text, kind) VALUES (?1, ?2, ?3, 'title')",
+            params![document_id, title_key.clone(), title],
         )
         .await
         .into_diagnostic()
@@ -1039,23 +1045,14 @@ async fn sync_core_index_inner(
 
         for alias in pending.aliases {
             let alias_key = alias.to_lowercase();
-            let mut conflict_rows = tx
-                .query(
-                    "SELECT d.path_rel FROM lookup_keys lk JOIN documents d ON d.id = lk.document_id WHERE lk.key = ?1",
-                    params![alias_key.clone()],
-                )
-                .await
-                .into_diagnostic()
-                .wrap_err("failed to check alias conflict")?;
-            if let Some(row) = conflict_rows.next().await.into_diagnostic()? {
-                let conflict_path: String = row.get(0).into_diagnostic()?;
-                return Err(miette!(
-                    "alias `{alias}` in `{path_rel}` conflicts with existing entry in `{conflict_path}`"
-                ));
+            // The title row was just routed to this document under the same
+            // key, so an alias normalizing to the title is a redundant synonym
+            // and must not be reported as a conflict at any layer.
+            if alias_key == title_key {
+                continue;
             }
-            drop(conflict_rows);
             tx.execute(
-                "INSERT INTO lookup_keys (document_id, key, raw_text, kind) VALUES (?1, ?2, ?3, 'alias')",
+                "INSERT OR IGNORE INTO lookup_keys (document_id, key, raw_text, kind) VALUES (?1, ?2, ?3, 'alias')",
                 params![document_id, alias_key.clone(), alias.clone()],
             )
             .await
@@ -1544,10 +1541,16 @@ async fn validate_lookup_collisions(
             if let Some(existing_path) = existing.get(&key)
                 && existing_path != &pending.path_rel
             {
-                return Err(miette!(
-                    "title or alias collision for `{raw_text}` between `{}` and `{existing_path}`",
+                // Per-key collisions are a data quality issue confined to the
+                // offending document. Leave the existing holder in the index,
+                // emit a warning, and let the rest of the sync proceed. The
+                // user-facing surface for these collisions is the `wiki check`
+                // lint, not a build-wide abort.
+                eprintln!(
+                    "warning: title or alias collision for `{raw_text}` between `{}` and `{existing_path}`; dropping conflicting key from index. Run `wiki check` to resolve.",
                     pending.path_rel
-                ));
+                );
+                continue;
             }
 
             match existing.get(&key) {
