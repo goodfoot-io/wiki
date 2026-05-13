@@ -18,9 +18,6 @@ use std::time::Instant;
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use miette::Result;
 
-/// Subcommands that support `-n '*'` (all namespaces) mode.
-const SUPPORTED_MULTI_NS: &str = "search, check, links, list, summary, refs";
-
 #[derive(Debug, Clone, ValueEnum)]
 enum Format {
     Json,
@@ -148,15 +145,6 @@ enum Commands {
         namespace: Option<String>,
     },
 
-    /// Extract wikilinks from stdin and print each page's title and summary.
-    ///
-    /// Reads arbitrary text from stdin, finds all [[wikilink]] references,
-    /// and outputs the canonical title and summary for each resolved page.
-    /// Deduplicates by title (in order of first appearance). Unresolved
-    /// wikilinks are reported to stderr; exit code 1 if any are unresolved.
-    /// With --format json, emits [{ title, summary, file }].
-    Extract,
-
     /// Run `wiki check` on the written/edited file path from a PostToolUse
     /// event and emit a systemMessage when validation errors remain.
     ///
@@ -255,11 +243,6 @@ enum Commands {
         #[arg(value_name = "glob", num_args = 1..)]
         globs: Vec<String>,
     },
-
-    /// List the current wiki's namespace and each declared peer with its
-    /// resolved path and validation status. Exits non-zero if any peer
-    /// fails rule 1 (missing wiki.toml) or rule 2 (alias/namespace mismatch).
-    Namespaces,
 
     /// Create a wiki.toml in the current directory.
     ///
@@ -397,15 +380,12 @@ fn run(
     // Skip wiki-config loading for subcommands that may run in a directory
     // without a wiki: `install` (no wiki touched), `hook` (silently no-ops on
     // non-wiki files; would otherwise fail-closed on every edit outside a wiki
-    // repo), `init` (creates the wiki.toml — can't load what doesn't exist),
-    // and `namespaces` (does its own lenient peer-walk so broken peers are
-    // reported inline rather than aborting the load).
+    // repo), and `init` (creates the wiki.toml — can't load what doesn't exist).
     let needs_config = !matches!(
         command,
         Some(Commands::Install { .. })
             | Some(Commands::Hook)
             | Some(Commands::Init { .. })
-            | Some(Commands::Namespaces)
     );
 
     let config = if needs_config {
@@ -456,97 +436,10 @@ fn run(
         return result;
     }
 
-    // wiki check defaults to all wikis when -n is not specified
-    let effective_namespace = match (&command, &effective_namespace) {
-        (Some(Commands::Check { .. }), None) => Some("*".to_string()),
-        _ => effective_namespace,
-    };
-
     if effective_namespace.as_deref() == Some("*") {
-        let cfg = config.as_ref().ok_or_else(|| {
-            miette::miette!(
-                "this command does not support multi-namespace (`-n '*'`)"
-            )
-        })?;
-        let targets: Vec<(String, &std::path::Path)> = cfg
-            .all()
-            .map(|info| {
-                (
-                    info.namespace.clone().unwrap_or_else(|| "default".into()),
-                    info.root.as_path(),
-                )
-            })
-            .collect();
-        let command_name = command_name(command.as_ref(), effective_query.as_deref());
-        // Use the first discovered wiki's root as the perf root; informational.
-        let perf_root = cfg
-            .all()
-            .next()
-            .map(|w| w.root.as_path())
-            .unwrap_or(repo_root.as_path());
-        perf::init(perf_root, command_name, json);
-        let _command_span = perf::span_for_command(command_name);
-        let started = Instant::now();
-        let result: Result<i32> = match command {
-            Some(Commands::Check { globs, no_exit_code, no_mesh, namespace: _ }) => {
-                commands::check::run_multi(&globs, json, &targets, &repo_root, no_exit_code, no_mesh, source)
-            }
-            Some(Commands::Links { target, namespace: _ }) => {
-                let inputs = resolve_inputs(target, read_stdin_lines)?;
-                run_for_each(
-                    inputs,
-                    |input| commands::links::run_multi(input, json, &targets, &repo_root, source),
-                    false,
-                )
-            }
-            Some(Commands::Summary { title, namespace: _ }) => {
-                let inputs = resolve_inputs(title, read_stdin_lines)?;
-                run_for_each(
-                    inputs,
-                    |input| commands::summary::run_multi(input, json, &targets, &repo_root, source),
-                    false,
-                )
-            }
-            Some(Commands::Refs { title, namespace: _ }) => {
-                let inputs = resolve_inputs(title, read_stdin_lines)?;
-                run_for_each(
-                    inputs,
-                    |input| commands::refs::run_multi(input, json, &targets, &repo_root, Some(cfg), source),
-                    false,
-                )
-            }
-            Some(Commands::List { tag, namespace: _ }) => {
-                commands::list::run_multi(tag.as_deref(), json, &targets, &repo_root, source)
-            }
-            None => match effective_query.as_deref() {
-                Some(q) => commands::search::run_multi(q, limit, offset, json, &targets, &repo_root, source),
-                None => {
-                    return Err(miette::miette!(
-                        "`-n '*'` requires a query or one of: {SUPPORTED_MULTI_NS}"
-                    ));
-                }
-            },
-            _ => {
-                return Err(miette::miette!(
-                    "command does not support multi-namespace (`-n '*'`); supported: {SUPPORTED_MULTI_NS}"
-                ));
-            }
-        };
-        match &result {
-            Ok(code) => perf::finish(
-                command_name,
-                *code,
-                started.elapsed().as_secs_f64() * 1000.0,
-                "ok",
-            ),
-            Err(_) => perf::finish(
-                command_name,
-                2,
-                started.elapsed().as_secs_f64() * 1000.0,
-                "error",
-            ),
-        }
-        return result;
+        return Err(miette::miette!(
+            "multi-namespace (`-n '*'`) is no longer supported"
+        ));
     }
 
     let target = config
@@ -570,42 +463,11 @@ fn run(
         }
         Some(Commands::Links { target, namespace: _ }) => {
             let inputs = resolve_inputs(target, read_stdin_lines)?;
-            if effective_namespace.is_none() {
-                // No explicit -n: default to repo-wide backlinks across all wikis.
-                let cfg = config.as_ref().ok_or_else(|| {
-                    miette::miette!("no wiki.toml found; cannot resolve repo-wide links")
-                })?;
-                let all_targets: Vec<(String, &std::path::Path)> = cfg
-                    .all()
-                    .map(|info| {
-                        (
-                            info.namespace.clone().unwrap_or_else(|| "default".into()),
-                            info.root.as_path(),
-                        )
-                    })
-                    .collect();
-                run_for_each(
-                    inputs,
-                    |input| commands::links::run_multi(input, json, &all_targets, &repo_root, source),
-                    false,
-                )
-            } else {
-                run_for_each(
-                    inputs,
-                    |input| commands::links::run(input, json, wiki_root, &repo_root, source),
-                    false,
-                )
-            }
-        }
-        Some(Commands::Extract) => {
-            let lines = read_stdin_lines();
-            if lines.is_empty() {
-                return Err(miette::miette!(
-                    "no input provided (pipe text containing [[wikilinks]] via stdin)"
-                ));
-            }
-            let input = lines.join("\n");
-            commands::extract::run(&input, json, wiki_root, &repo_root, source)
+            run_for_each(
+                inputs,
+                |input| commands::links::run(input, json, wiki_root, &repo_root, source),
+                false,
+            )
         }
         Some(Commands::Hook) => {
             let lines = read_stdin_lines();
@@ -646,9 +508,6 @@ fn run(
             codex_home.as_deref(),
             &git_ref,
         ),
-        Some(Commands::Namespaces) => {
-            commands::namespaces::run(&cwd, &repo_root, json)
-        }
         Some(Commands::Init { namespace }) => {
             commands::init::run(&cwd, namespace.as_deref())
         }
@@ -753,14 +612,12 @@ fn command_name(command: Option<&Commands>, query: Option<&str>) -> &'static str
     match command {
         Some(Commands::Check { .. }) => "check",
         Some(Commands::Links { .. }) => "links",
-        Some(Commands::Extract) => "extract",
         Some(Commands::Hook) => "hook",
         Some(Commands::List { .. }) => "list",
         Some(Commands::Summary { .. }) => "summary",
         Some(Commands::Refs { .. }) => "refs",
         Some(Commands::Install { .. }) => "install",
         Some(Commands::Scaffold { .. }) => "scaffold",
-        Some(Commands::Namespaces) => "namespaces",
         Some(Commands::Init { .. }) => "init",
         None if query.is_some() => "search",
         None => "help",

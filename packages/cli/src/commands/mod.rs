@@ -1,5 +1,4 @@
 pub mod check;
-pub mod extract;
 pub(crate) mod mesh_coverage;
 pub mod hook_check;
 pub mod init;
@@ -7,7 +6,6 @@ pub mod install;
 pub mod links;
 pub mod list;
 pub mod mesh;
-pub mod namespaces;
 pub mod refs;
 pub mod search;
 pub mod summary;
