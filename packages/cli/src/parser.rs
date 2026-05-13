@@ -11,6 +11,7 @@ fn md_link_re() -> &'static Regex {
     })
 }
 
+#[allow(dead_code)] // Removed in sub-scope 1E (wikilink parser deletion).
 fn wikilink_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -59,6 +60,7 @@ pub struct FragmentLink {
 }
 
 /// A parsed `[[Title#Heading|display]]` wikilink.
+#[allow(dead_code)] // Removed in sub-scope 1E (wikilink parser deletion).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wikilink {
     /// Namespace prefix from `[[ns:Article]]` syntax. `None` for bare
@@ -301,6 +303,7 @@ fn parse_line_range(fragment: Option<&str>) -> (Option<u32>, Option<u32>) {
 // ── Wikilink parser ───────────────────────────────────────────────────────────
 
 /// Parse all wikilinks from markdown `content`.
+#[allow(dead_code)] // Removed in sub-scope 1E (wikilink parser deletion).
 pub fn parse_wikilinks(content: &str) -> Vec<Wikilink> {
     let scrubbed = scrub_non_content(content);
     let mut results = Vec::new();

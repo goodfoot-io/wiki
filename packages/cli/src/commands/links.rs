@@ -115,7 +115,7 @@ mod tests {
         );
         repo.create_file(
             "wiki/source.md",
-            "---\ntitle: Source Page\nsummary: Source summary.\n---\nSee [[Target Page]] for context.\n",
+            "---\ntitle: Source Page\nsummary: Source summary.\n---\nSee [the target](/wiki/target.md) for context.\n",
         );
 
         let code = run(
@@ -135,7 +135,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "Source Page");
         assert_eq!(results[0].snippets[0].line, 5);
-        assert!(results[0].snippets[0].text.contains("[[Target Page]]"));
+        assert!(results[0].snippets[0].text.contains("the target"));
     }
 
     #[test]
@@ -178,7 +178,7 @@ mod tests {
         );
         repo.create_file(
             "wiki/backlink.md",
-            "---\ntitle: Backlink Page\nsummary: Links to the target page.\n---\nSee [[Target Page]].\n",
+            "---\ntitle: Backlink Page\nsummary: Links to the target page.\n---\nSee [target](/wiki/target.md).\n",
         );
         repo.create_file(
             "wiki/reference.md",

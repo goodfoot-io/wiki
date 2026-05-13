@@ -18,10 +18,10 @@ use crate::git::{
     has_unstaged_changes, head_sha, index_revision_signal, index_tracked_paths, read_head_blob,
     read_index_blob, repo_inventory, untracked_paths, working_tree_changed_paths,
 };
-use crate::parser::{LinkKind, parse_fragment_links, parse_wikilinks};
+use crate::parser::{LinkKind, parse_fragment_links};
 use crate::perf;
 
-const SCHEMA_VERSION: &str = "4";
+const SCHEMA_VERSION: &str = "5";
 pub const SEARCH_LIMIT: i64 = 3;
 
 /// Single source of truth for FTS index columns and their weights.
@@ -139,18 +139,6 @@ pub struct ResolvedPage {
     pub document_id: i64,
 }
 
-#[allow(dead_code)] // Removed in sub-scope 1D (index.rs refactor).
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct ResolvedPageFull {
-    pub title: String,
-    pub file: String,
-    pub summary: String,
-    pub aliases: Vec<String>,
-    pub tags: Vec<String>,
-    #[serde(skip_serializing)]
-    pub alias: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PageListEntry {
     pub title: String,
@@ -191,17 +179,8 @@ struct PendingDocument {
 
 #[derive(Debug, Clone)]
 struct PendingIncomingLink {
-    target_kind: PendingIncomingLinkKind,
-    target_key: String,
-    target_text: String,
-    display_text: Option<String>,
+    target_path: String,
     source_line: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum PendingIncomingLinkKind {
-    Page,
-    File,
 }
 
 #[derive(Debug, Clone)]
@@ -239,9 +218,6 @@ pub struct WikiIndex {
     conn: Connection,
     wiki_root: PathBuf,
     repo_root: PathBuf,
-    /// Namespace of the current wiki this index represents.
-    #[allow(dead_code)] // Removed in sub-scope 1D (index.rs refactor).
-    namespace: Option<String>,
     /// Document source selected for this index session.
     #[allow(dead_code)]
     source: DocSource,
@@ -251,36 +227,17 @@ pub struct WikiIndex {
 }
 
 impl WikiIndex {
-    #[allow(dead_code)] // Removed in sub-scope 1D.
+    #[cfg(test)]
     pub fn prepare(wiki_root: &Path, repo_root: &Path) -> Result<Self> {
-        // Auto-detect namespace from wiki.toml so that peer wikis (reached via
-        // `-n <alias>`) filter *.wiki.md files correctly even when callers use
-        // the simpler `prepare` entry point.
-        let namespace = read_namespace_from_toml(wiki_root, repo_root, DocSource::WorkingTree);
-        Self::prepare_with_namespace(wiki_root, repo_root, namespace, DocSource::WorkingTree)
+        Self::prepare_for_source(wiki_root, repo_root, DocSource::WorkingTree)
     }
 
-    /// Prepare the index for the given source, auto-detecting the wiki namespace
-    /// from `wiki.toml`.  This is the production entry point used by commands
-    /// that receive a user-selected `DocSource` from the CLI.
+    /// Prepare the index for the given source.  This is the production entry
+    /// point used by commands that receive a user-selected `DocSource` from
+    /// the CLI.
     pub fn prepare_for_source(
         wiki_root: &Path,
         repo_root: &Path,
-        source: DocSource,
-    ) -> Result<Self> {
-        // Read `wiki.toml` from the same source as the rest of the discovery
-        // pipeline so the namespace filter operates on a self-consistent
-        // snapshot.  When the file is absent in the chosen source (e.g., a
-        // fresh HEAD before `wiki.toml` was committed), fall back to the
-        // default (no namespace).
-        let namespace = read_namespace_from_toml(wiki_root, repo_root, source);
-        Self::prepare_with_namespace(wiki_root, repo_root, namespace, source)
-    }
-
-    pub fn prepare_with_namespace(
-        wiki_root: &Path,
-        repo_root: &Path,
-        namespace: Option<String>,
         source: DocSource,
     ) -> Result<Self> {
         perf::scope_result("index.prepare", json!({}), || {
@@ -291,19 +248,14 @@ impl WikiIndex {
 
             let wiki_root = wiki_root.to_path_buf();
             let repo_root = repo_root.to_path_buf();
-            let (conn, lock) = runtime.block_on(open_and_prepare_connection(
-                &wiki_root,
-                &repo_root,
-                namespace.as_deref(),
-                source,
-            ))?;
+            let (conn, lock) =
+                runtime.block_on(open_and_prepare_connection(&wiki_root, &repo_root, source))?;
 
             Ok(Self {
                 runtime,
                 conn,
                 wiki_root,
                 repo_root,
-                namespace,
                 source,
                 _lock: lock,
             })
@@ -313,12 +265,6 @@ impl WikiIndex {
     pub fn resolve_page(&self, input: &str) -> Result<Option<ResolvedPage>> {
         self.runtime
             .block_on(resolve_page_async(&self.conn, &self.repo_root, input))
-    }
-
-    #[allow(dead_code)] // Removed in sub-scope 1D.
-    pub fn resolve_page_full(&self, input: &str) -> Result<Option<ResolvedPageFull>> {
-        self.runtime
-            .block_on(resolve_page_full_async(&self.conn, &self.repo_root, input))
     }
 
     pub fn search_weighted(
@@ -356,58 +302,9 @@ impl WikiIndex {
             .block_on(links_async(&self.conn, &self.repo_root, input))
     }
 
-    /// Load lookup keys (titles + aliases, lowercased) for a page if it
-    /// resolves in this namespace. Returns `Ok(None)` if not found.
-    #[allow(dead_code)] // Removed in sub-scope 1D.
-    pub fn lookup_keys_for(&self, input: &str) -> Result<Option<Vec<String>>> {
-        self.runtime.block_on(async {
-            if let Some(page) = resolve_page_async(&self.conn, &self.repo_root, input).await? {
-                let keys = load_lookup_keys(&self.conn, page.document_id).await?;
-                Ok(Some(keys))
-            } else {
-                Ok(None)
-            }
-        })
-    }
-
-    /// Run the inbound-links query against this namespace's index using
-    /// caller-supplied page target keys (e.g. resolved in another namespace)
-    /// and an optional file target. Bypasses the local resolve gate.
-    #[allow(dead_code)] // Removed in sub-scope 1D.
-    pub fn links_with_keys(
-        &self,
-        page_target_keys: &[String],
-        file_target: Option<&str>,
-        input: &str,
-    ) -> Result<Vec<SearchResult>> {
-        self.runtime.block_on(links_with_keys_async(
-            &self.conn,
-            page_target_keys,
-            file_target,
-            input,
-        ))
-    }
-
-    #[allow(dead_code)] // Removed in sub-scope 1D.
-    pub fn extract_pages(&self, titles: &[String]) -> Result<(Vec<ResolvedPage>, Vec<String>)> {
-        self.runtime
-            .block_on(extract_pages_async(&self.conn, titles))
-    }
-
     #[allow(dead_code)]
     pub fn wiki_root(&self) -> &Path {
         &self.wiki_root
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)] // Removed in sub-scope 1D.
-    pub fn repo_root(&self) -> &Path {
-        &self.repo_root
-    }
-
-    #[allow(dead_code)] // Removed in sub-scope 1D.
-    pub fn namespace(&self) -> Option<&str> {
-        self.namespace.as_deref()
     }
 }
 
@@ -480,21 +377,20 @@ pub fn is_lock_error(err: &miette::Error) -> bool {
 async fn open_and_prepare_connection(
     wiki_root: &Path,
     repo_root: &Path,
-    namespace: Option<&str>,
     source: DocSource,
 ) -> Result<(Connection, IndexLock)> {
     std::fs::create_dir_all(wiki_root)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to create wiki root at {}", wiki_root.display()))?;
     let lock = IndexLock::acquire(wiki_root)?;
-    match try_open_and_prepare(wiki_root, repo_root, namespace, source).await {
+    match try_open_and_prepare(wiki_root, repo_root, source).await {
         Ok(conn) => Ok((conn, lock)),
         Err(err) if is_lock_error(&err) => Err(err),
         Err(_) => {
             // Delete the stale or incompatible database and retry from scratch.
             let db_path = wiki_root.join(".index.db");
             let _ = std::fs::remove_file(&db_path);
-            let conn = try_open_and_prepare(wiki_root, repo_root, namespace, source).await?;
+            let conn = try_open_and_prepare(wiki_root, repo_root, source).await?;
             Ok((conn, lock))
         }
     }
@@ -572,7 +468,6 @@ impl Drop for IndexLock {
 async fn try_open_and_prepare(
     wiki_root: &Path,
     repo_root: &Path,
-    namespace: Option<&str>,
     source: DocSource,
 ) -> Result<Connection> {
     let mut conn = open_index_connection(wiki_root).await?;
@@ -581,7 +476,7 @@ async fn try_open_and_prepare(
     perf::scope_async_result(
         "index.sync",
         json!({}),
-        sync_core_index(&mut conn, wiki_root, repo_root, namespace, source),
+        sync_core_index(&mut conn, wiki_root, repo_root, source),
     )
     .await?;
     Ok(conn)
@@ -670,13 +565,9 @@ async fn recreate_schema(conn: &Connection) -> Result<()> {
         );
 
         CREATE TABLE IF NOT EXISTS incoming_links (
-            document_id INTEGER NOT NULL,
-            target_kind TEXT NOT NULL,
-            target_key TEXT NOT NULL,
-            target_text TEXT NOT NULL,
-            display_text TEXT,
+            source_file TEXT NOT NULL,
             source_line INTEGER NOT NULL,
-            FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+            target_path TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS keywords (
@@ -690,7 +581,8 @@ async fn recreate_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_lookup_keys_document_id ON lookup_keys(document_id);
         CREATE INDEX IF NOT EXISTS idx_tags_document_id ON tags(document_id);
         CREATE INDEX IF NOT EXISTS idx_tags_tag_key ON tags(tag_key);
-        CREATE INDEX IF NOT EXISTS idx_incoming_links_target ON incoming_links(target_kind, target_key);
+        CREATE INDEX IF NOT EXISTS idx_incoming_links_target ON incoming_links(target_path);
+        CREATE INDEX IF NOT EXISTS idx_incoming_links_source_file ON incoming_links(source_file);
         CREATE INDEX IF NOT EXISTS idx_documents_fts ON documents USING fts ({fts_col_list})
         WITH (weights = '{fts_weights}');
         "
@@ -739,17 +631,15 @@ async fn sync_core_index(
     conn: &mut Connection,
     wiki_root: &Path,
     repo_root: &Path,
-    namespace: Option<&str>,
     source: DocSource,
 ) -> Result<()> {
-    sync_core_index_inner(conn, wiki_root, repo_root, namespace, None, source).await
+    sync_core_index_inner(conn, wiki_root, repo_root, None, source).await
 }
 
 async fn sync_core_index_inner(
     conn: &mut Connection,
     wiki_root: &Path,
     repo_root: &Path,
-    namespace: Option<&str>,
     changed_paths: Option<&[PathBuf]>,
     source: DocSource,
 ) -> Result<()> {
@@ -770,7 +660,6 @@ async fn sync_core_index_inner(
             conn,
             wiki_root,
             repo_root,
-            namespace,
             &existing_by_path,
             changed_paths,
             source,
@@ -780,8 +669,9 @@ async fn sync_core_index_inner(
 
     let mut changed_or_new = HashSet::new();
     let mut pending_documents = Vec::new();
-    // Paths that must be removed from this namespace's index because the file's
-    // `namespace:` frontmatter no longer matches (F5: stale row after mutation).
+    // Paths that must be removed from the index because the source returned no
+    // content for a path that was previously indexed (e.g., a staged deletion
+    // in Index mode).
     let mut extra_stale: HashSet<String> = HashSet::new();
     let now_ns = unix_time_now_ns()?;
 
@@ -862,52 +752,20 @@ async fn sync_core_index_inner(
                     path.display()
                 )
             })?;
-        // Namespace filter for `*.wiki.md`: skip files whose namespace does
-        // not match the current wiki's namespace.
-        if path_rel.ends_with(".wiki.md") {
-            let matches_ns = match (frontmatter.namespace.as_deref(), namespace) {
-                (None, None) => true,
-                (Some(a), Some(b)) => a == b,
-                _ => false,
-            };
-            if !matches_ns {
-                // If the file was previously indexed under this namespace,
-                // queue it for deletion so the stale row is removed (F5:
-                // namespace frontmatter mutation removes prior row).
-                if existing_by_path.contains_key(&path_rel) {
-                    extra_stale.insert(path_rel);
-                }
-                continue;
-            }
-        }
         let body = markdown_body(&content);
-        let mut incoming_links = parse_wikilinks(&content)
+        let incoming_links = parse_fragment_links(&content)
             .into_iter()
-            .map(|link| PendingIncomingLink {
-                target_kind: PendingIncomingLinkKind::Page,
-                target_text: link.title.clone(),
-                target_key: link.title.to_lowercase(),
-                display_text: link.display,
-                source_line: link.source_line,
+            .filter(|link| link.kind != LinkKind::External)
+            .map(|link| {
+                let resolved_path = resolve_link_path(&link.path, path, repo_root)
+                    .to_string_lossy()
+                    .into_owned();
+                PendingIncomingLink {
+                    target_path: resolved_path,
+                    source_line: link.source_line,
+                }
             })
             .collect::<Vec<_>>();
-        incoming_links.extend(
-            parse_fragment_links(&content)
-                .into_iter()
-                .filter(|link| link.kind != LinkKind::External)
-                .map(|link| {
-                    let resolved_path = resolve_link_path(&link.path, path, repo_root)
-                        .to_string_lossy()
-                        .into_owned();
-                    PendingIncomingLink {
-                        target_kind: PendingIncomingLinkKind::File,
-                        target_text: resolved_path.clone(),
-                        target_key: resolved_path,
-                        display_text: None,
-                        source_line: link.source_line,
-                    }
-                }),
-        );
 
         changed_or_new.insert(path_rel.clone());
         pending_documents.push(PendingDocument {
@@ -974,6 +832,13 @@ async fn sync_core_index_inner(
         .await
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to remove stale index entry for {stale_path}"))?;
+        tx.execute(
+            "DELETE FROM incoming_links WHERE source_file = ?1",
+            params![stale_path.clone()],
+        )
+        .await
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to remove stale incoming link rows for {stale_path}"))?;
     }
 
     for pending in pending_documents {
@@ -1031,7 +896,7 @@ async fn sync_core_index_inner(
             ",
             params![
                 pending.path_abs,
-                pending.path_rel,
+                pending.path_rel.clone(),
                 title.clone(),
                 title_key.clone(),
                 summary.clone(),
@@ -1103,22 +968,28 @@ async fn sync_core_index_inner(
             .wrap_err("failed to insert keyword row")?;
         }
 
+        // Reset any prior incoming-link rows for this source file before
+        // re-inserting; rows are keyed on `source_file` rather than the
+        // document FK now, so the per-document DELETE above does not cover them.
+        tx.execute(
+            "DELETE FROM incoming_links WHERE source_file = ?1",
+            params![pending.path_rel.clone()],
+        )
+        .await
+        .into_diagnostic()
+        .wrap_err("failed to clear prior incoming link rows for source file")?;
+
+        let _ = document_id;
         for incoming_link in pending.incoming_links {
             tx.execute(
                 "
-                INSERT INTO incoming_links (document_id, target_kind, target_key, target_text, display_text, source_line)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                INSERT INTO incoming_links (source_file, source_line, target_path)
+                VALUES (?1, ?2, ?3)
                 ",
                 params![
-                    document_id,
-                    match incoming_link.target_kind {
-                        PendingIncomingLinkKind::Page => "page",
-                        PendingIncomingLinkKind::File => "file",
-                    },
-                    incoming_link.target_key,
-                    incoming_link.target_text,
-                    incoming_link.display_text,
+                    pending.path_rel.clone(),
                     i64::try_from(incoming_link.source_line).into_diagnostic()?,
+                    incoming_link.target_path,
                 ],
             )
             .await
@@ -1150,43 +1021,9 @@ async fn sync_core_index_inner(
     Ok(())
 }
 
-/// Read the `namespace` field from `<wiki_root>/wiki.toml` in the chosen
-/// `DocSource`, if the file exists and the field is present.  Returns `None`
-/// for the default namespace (no `wiki.toml` in the chosen source, no
-/// `namespace` key, or any read/parse error).
-///
-/// Routing the probe through `DocSource::read` keeps the namespace filter
-/// self-consistent with the snapshot being indexed.  When the worktree's
-/// `wiki.toml` differs from HEAD/index, `--source=head|index` must filter
-/// `*.wiki.md` discovery against the snapshot's namespace, not the worktree's.
-fn read_namespace_from_toml(
-    wiki_root: &Path,
-    repo_root: &Path,
-    source: DocSource,
-) -> Option<String> {
-    let toml_path = wiki_root.join("wiki.toml");
-    let path_rel = toml_path
-        .strip_prefix(repo_root)
-        .ok()
-        .map(|p| p.to_string_lossy().into_owned());
-    let raw = match (source, path_rel.as_deref()) {
-        (DocSource::WorkingTree, _) | (_, None) => std::fs::read_to_string(&toml_path).ok()?,
-        (DocSource::Index, Some(rel)) => source.read(repo_root, rel).ok().flatten()?,
-        (DocSource::Head, Some(rel)) => source.read(repo_root, rel).ok().flatten()?,
-    };
-    let doc: toml_edit::DocumentMut = raw.parse().ok()?;
-    doc.get("namespace")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
-
-fn discover_index_files(
-    wiki_root: &Path,
-    repo_root: &Path,
-    namespace: Option<&str>,
-) -> Result<Vec<PathBuf>> {
+fn discover_index_files(wiki_root: &Path, repo_root: &Path) -> Result<Vec<PathBuf>> {
     match crate::commands::discover_files(&[], wiki_root, repo_root, DocSource::WorkingTree) {
-        Ok(files) => Ok(filter_by_namespace(files, namespace)),
+        Ok(files) => Ok(files),
         Err(e) => {
             if e.to_string().contains("no wiki pages found") {
                 Ok(Vec::new())
@@ -1197,40 +1034,10 @@ fn discover_index_files(
     }
 }
 
-/// Filter out `*.wiki.md` files whose frontmatter `namespace` does not match
-/// the current wiki's namespace. Files under `wiki_root` (non-`.wiki.md`) are
-/// always included; namespace mismatches are quietly skipped.
-fn filter_by_namespace(files: Vec<PathBuf>, namespace: Option<&str>) -> Vec<PathBuf> {
-    files
-        .into_iter()
-        .filter(|p| {
-            let s = p.to_string_lossy();
-            if !s.ends_with(".wiki.md") {
-                return true;
-            }
-            // Read frontmatter to determine namespace.
-            let content = match std::fs::read_to_string(p) {
-                Ok(c) => c,
-                Err(_) => return false,
-            };
-            let fm = match crate::frontmatter::parse_frontmatter(&content, p) {
-                Ok(Some(fm)) => fm,
-                _ => return namespace.is_none(),
-            };
-            match (fm.namespace.as_deref(), namespace) {
-                (None, None) => true,
-                (Some(a), Some(b)) => a == b,
-                _ => false,
-            }
-        })
-        .collect()
-}
-
 async fn compute_change_set(
     conn: &Connection,
     wiki_root: &Path,
     repo_root: &Path,
-    namespace: Option<&str>,
     existing_by_path: &HashMap<String, ExistingDocument>,
     changed_paths: Option<&[PathBuf]>,
     source: DocSource,
@@ -1241,19 +1048,19 @@ async fn compute_change_set(
 
     let current_state = current_discovery_state(wiki_root, repo_root, source)?;
     let Some(previous_state) = read_discovery_state(conn).await? else {
-        return source_full_rescan(source, wiki_root, repo_root, namespace, existing_by_path);
+        return source_full_rescan(source, wiki_root, repo_root, existing_by_path);
     };
 
     // Any mismatch in persistent state forces a full rescan.
     if previous_state != current_state {
-        return source_full_rescan(source, wiki_root, repo_root, namespace, existing_by_path);
+        return source_full_rescan(source, wiki_root, repo_root, existing_by_path);
     }
 
     // For Index and Head modes: full rescan is the only incremental strategy
     // (no mtime/size shortcut, no HEAD-diff fast path).  The cache key change
     // detection above already handles the no-op case when nothing changed.
     if source != DocSource::WorkingTree {
-        return source_full_rescan(source, wiki_root, repo_root, namespace, existing_by_path);
+        return source_full_rescan(source, wiki_root, repo_root, existing_by_path);
     }
 
     // WorkingTree incremental path below.
@@ -1273,7 +1080,7 @@ async fn compute_change_set(
     let mut candidate_paths = HashSet::new();
 
     if previous_state.head_sha.is_empty() != current_state.head_sha.is_empty() {
-        return source_full_rescan(source, wiki_root, repo_root, namespace, existing_by_path);
+        return source_full_rescan(source, wiki_root, repo_root, existing_by_path);
     }
 
     if !previous_state.head_sha.is_empty() && previous_state.head_sha != current_state.head_sha {
@@ -1386,13 +1193,10 @@ fn source_full_rescan(
     source: DocSource,
     wiki_root: &Path,
     repo_root: &Path,
-    namespace: Option<&str>,
     existing_by_path: &HashMap<String, ExistingDocument>,
 ) -> Result<ChangeSet> {
     match source {
-        DocSource::WorkingTree => {
-            full_rescan_change_set(wiki_root, repo_root, namespace, existing_by_path)
-        }
+        DocSource::WorkingTree => full_rescan_change_set(wiki_root, repo_root, existing_by_path),
         DocSource::Index | DocSource::Head => {
             // List all paths from the source, filter to wiki paths, convert to
             // absolute PathBufs so the rest of sync_core_index_inner can use them.
@@ -1423,11 +1227,10 @@ fn source_full_rescan(
 fn full_rescan_change_set(
     wiki_root: &Path,
     repo_root: &Path,
-    namespace: Option<&str>,
     existing_by_path: &HashMap<String, ExistingDocument>,
 ) -> Result<ChangeSet> {
     let files = perf::scope_result("index.discover_files", json!({}), || {
-        discover_index_files(wiki_root, repo_root, namespace)
+        discover_index_files(wiki_root, repo_root)
     })?;
     let mut seen_paths = HashSet::new();
     for path in &files {
@@ -1512,8 +1315,7 @@ async fn write_discovery_state(conn: &Connection, state: &DiscoveryState) -> Res
 
 /// Returns true if `path_rel` (a repo-relative path) is a candidate wiki page
 /// for the current wiki: either it lives under `wiki_root`, or it ends with
-/// `.wiki.md`. Namespace assignment for `*.wiki.md` files is done downstream
-/// by reading frontmatter — this matcher errs on the side of inclusion.
+/// `.wiki.md`. This matcher errs on the side of inclusion.
 fn matches_default_discovery_path(path_rel: &str, wiki_root: &Path, repo_root: &Path) -> bool {
     if !path_rel.ends_with(".md") {
         return false;
@@ -1644,27 +1446,6 @@ async fn resolve_page_async(
         },
     )
     .await
-}
-
-#[allow(dead_code)] // Removed in sub-scope 1D.
-async fn resolve_page_full_async(
-    conn: &Connection,
-    repo_root: &Path,
-    input: &str,
-) -> Result<Option<ResolvedPageFull>> {
-    let Some(page) = resolve_page_async(conn, repo_root, input).await? else {
-        return Ok(None);
-    };
-    let aliases = load_aliases(conn, page.document_id).await?;
-    let tags = load_tags(conn, page.document_id).await?;
-    Ok(Some(ResolvedPageFull {
-        title: page.title,
-        file: page.file,
-        summary: page.summary,
-        aliases,
-        tags,
-        alias: page.alias,
-    }))
 }
 
 async fn fetch_page_by_lookup(conn: &Connection, input: &str) -> Result<Option<ResolvedPage>> {
@@ -2072,70 +1853,41 @@ async fn links_async(
     repo_root: &Path,
     input: &str,
 ) -> Result<Vec<SearchResult>> {
-    let page_target_keys = if let Some(page) = resolve_page_async(conn, repo_root, input).await? {
-        load_lookup_keys(conn, page.document_id).await?
-    } else {
-        Vec::new()
-    };
-    let file_target = looks_like_path(input)
-        .then(|| normalize_repo_relative_path(input, repo_root))
-        .filter(|path| !path.is_empty());
-    links_with_keys_async(conn, &page_target_keys, file_target.as_deref(), input).await
-}
-
-async fn links_with_keys_async(
-    conn: &Connection,
-    page_target_keys: &[String],
-    file_target: Option<&str>,
-    input: &str,
-) -> Result<Vec<SearchResult>> {
     perf::scope_async_result(
         "index.links",
         json!({
             "input": input,
         }),
         async {
-            if page_target_keys.is_empty() && file_target.is_none() {
-                return Ok(Vec::new());
-            }
-
-            let mut predicates = Vec::new();
-            let mut args = Vec::new();
-
-            if !page_target_keys.is_empty() {
-                let placeholders = page_target_keys
-                    .iter()
-                    .enumerate()
-                    .map(|(index, _)| format!("?{}", index + 1))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                predicates.push(format!(
-                    "(il.target_kind = 'page' AND il.target_key IN ({placeholders}))"
-                ));
-                args.extend(page_target_keys.iter().cloned());
-            }
-
-            if let Some(path) = file_target {
-                predicates.push(format!(
-                    "(il.target_kind = 'file' AND il.target_key = ?{})",
-                    args.len() + 1
-                ));
-                args.push(path.to_string());
-            }
-
-            let sql = format!(
-                "
-                SELECT d.title, d.path_abs, d.summary, d.source_raw, il.source_line
-                FROM incoming_links il
-                JOIN documents d ON d.id = il.document_id
-                WHERE {}
-                ORDER BY d.title ASC, il.source_line ASC
-                ",
-                predicates.join(" OR ")
-            );
+            // Resolve the input to a single target path:
+            //   - path-shaped input → the repo-relative path it points to
+            //   - title/alias input → the resolved page's `path_abs`
+            // Incoming links are keyed on `target_path` (a path string), so a
+            // single equality predicate suffices.
+            let target_path = if looks_like_path(input) {
+                let normalized = normalize_repo_relative_path(input, repo_root);
+                if normalized.is_empty() {
+                    return Ok(Vec::new());
+                }
+                normalized
+            } else {
+                let Some(page) = resolve_page_async(conn, repo_root, input).await? else {
+                    return Ok(Vec::new());
+                };
+                load_path_rel(conn, page.document_id).await?
+            };
 
             let mut rows = conn
-                .query(&sql, params_from_iter(args.iter().map(String::as_str)))
+                .query(
+                    "
+                    SELECT d.title, d.path_abs, d.summary, d.source_raw, il.source_line
+                    FROM incoming_links il
+                    JOIN documents d ON d.path_rel = il.source_file
+                    WHERE il.target_path = ?1
+                    ORDER BY d.title ASC, il.source_line ASC
+                    ",
+                    params![target_path.clone()],
+                )
                 .await
                 .into_diagnostic()
                 .wrap_err("failed to load incoming links from wiki index")?;
@@ -2180,51 +1932,12 @@ async fn links_with_keys_async(
                 "ok",
                 json!({
                     "input": input,
+                    "target_path": target_path,
                     "count": results.len(),
-                    "page_target_count": page_target_keys.len(),
-                    "has_file_target": file_target.is_some(),
                 }),
             );
 
             Ok(results)
-        },
-    )
-    .await
-}
-
-#[allow(dead_code)] // Removed in sub-scope 1D.
-async fn extract_pages_async(
-    conn: &Connection,
-    titles: &[String],
-) -> Result<(Vec<ResolvedPage>, Vec<String>)> {
-    perf::scope_async_result(
-        "index.extract_pages",
-        json!({
-            "title_count": titles.len(),
-        }),
-        async {
-            let mut resolved = Vec::new();
-            let mut unresolved = Vec::new();
-
-            for title in titles {
-                if let Some(page) = fetch_page_by_lookup(conn, title).await? {
-                    resolved.push(page);
-                } else {
-                    unresolved.push(title.clone());
-                }
-            }
-
-            perf::log_event(
-                "index.extract_pages_result",
-                0.0,
-                "ok",
-                json!({
-                    "resolved_count": resolved.len(),
-                    "unresolved_count": unresolved.len(),
-                }),
-            );
-
-            Ok((resolved, unresolved))
         },
     )
     .await
@@ -2246,21 +1959,21 @@ async fn load_aliases(conn: &Connection, document_id: i64) -> Result<Vec<String>
     Ok(aliases)
 }
 
-async fn load_lookup_keys(conn: &Connection, document_id: i64) -> Result<Vec<String>> {
+async fn load_path_rel(conn: &Connection, document_id: i64) -> Result<String> {
     let mut rows = conn
         .query(
-            "SELECT key FROM lookup_keys WHERE document_id = ?1 ORDER BY kind ASC, key ASC",
+            "SELECT path_rel FROM documents WHERE id = ?1 LIMIT 1",
             params![document_id],
         )
         .await
         .into_diagnostic()
-        .wrap_err("failed to load lookup keys from wiki index")?;
-
-    let mut keys = Vec::new();
-    while let Some(row) = next_row(&mut rows).await? {
-        keys.push(row_string(&row, 0)?);
+        .wrap_err("failed to load path_rel for resolved page")?;
+    match next_row(&mut rows).await? {
+        Some(row) => row_string(&row, 0),
+        None => Err(miette!(
+            "resolved page document_id {document_id} disappeared from index"
+        )),
     }
-    Ok(keys)
 }
 
 async fn load_tags(conn: &Connection, document_id: i64) -> Result<Vec<String>> {
@@ -2956,13 +2669,8 @@ mod tests {
             "---\ntitle: WorktreeOnly\nsummary: Worktree baseline.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare_with_namespace(
-            &wiki_root,
-            repo.path(),
-            None,
-            DocSource::WorkingTree,
-        )
-        .expect("prepare");
+        let index = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::WorkingTree)
+            .expect("prepare");
         assert!(
             index
                 .resolve_page("WorktreeOnly")
@@ -2991,16 +2699,14 @@ mod tests {
         repo.git(&["add", "wiki/staged.md"]);
 
         // Index mode sees it.
-        let idx =
-            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Index)
-                .expect("prepare index");
+        let idx = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Index)
+            .expect("prepare index");
         assert!(idx.resolve_page("StagedDoc").expect("resolve").is_some());
         drop(idx);
 
         // Head mode does not see it.
-        let head =
-            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Head)
-                .expect("prepare head");
+        let head = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Head)
+            .expect("prepare head");
         assert!(head.resolve_page("StagedDoc").expect("resolve").is_none());
     }
 
@@ -3020,9 +2726,8 @@ mod tests {
         repo.git(&["rm", "--cached", "wiki/committed.md"]);
 
         // Head mode still sees it.
-        let head =
-            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Head)
-                .expect("prepare head");
+        let head = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Head)
+            .expect("prepare head");
         assert!(
             head.resolve_page("CommittedDoc")
                 .expect("resolve")
@@ -3031,9 +2736,8 @@ mod tests {
         drop(head);
 
         // Index mode does not see it.
-        let idx =
-            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Index)
-                .expect("prepare index");
+        let idx = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Index)
+            .expect("prepare index");
         assert!(idx.resolve_page("CommittedDoc").expect("resolve").is_none());
     }
 
@@ -3062,9 +2766,8 @@ mod tests {
             "---\ntitle: VersionDoc\nsummary: worktree v3.\n---\nBody v3.\n",
         );
 
-        let index =
-            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Index)
-                .expect("prepare");
+        let index = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Index)
+            .expect("prepare");
         let pages = index.list_pages(None).expect("list_pages");
         let doc = pages
             .iter()
@@ -3092,9 +2795,8 @@ mod tests {
         );
         repo.git(&["add", "wiki/doc.md"]);
 
-        let index =
-            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Head)
-                .expect("prepare");
+        let index = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Head)
+            .expect("prepare");
         let pages = index.list_pages(None).expect("list_pages");
         let doc = pages
             .iter()
@@ -3120,9 +2822,8 @@ mod tests {
             "---\ntitle: WorktreeOnly\nsummary: Never staged.\n---\nBody.\n",
         );
 
-        let index =
-            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Index)
-                .expect("prepare");
+        let index = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Index)
+            .expect("prepare");
         assert!(
             index
                 .resolve_page("WorktreeOnly")
@@ -3150,20 +2851,14 @@ mod tests {
         );
 
         // Run 1: WorkingTree — worktree-only file is visible.
-        let wt = WikiIndex::prepare_with_namespace(
-            &wiki_root,
-            repo.path(),
-            None,
-            DocSource::WorkingTree,
-        )
-        .expect("prepare worktree");
+        let wt = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::WorkingTree)
+            .expect("prepare worktree");
         assert!(wt.resolve_page("WorktreeOnly").expect("resolve").is_some());
         drop(wt);
 
         // Run 2: Head — worktree-only file must not appear (stale row must not survive).
-        let head =
-            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Head)
-                .expect("prepare head");
+        let head = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Head)
+            .expect("prepare head");
         assert!(
             head.resolve_page("WorktreeOnly")
                 .expect("resolve")
@@ -3175,7 +2870,7 @@ mod tests {
     #[test]
     fn doc_source_default_unchanged_from_baseline() {
         // prepare() with no source override must produce the same results
-        // as prepare_with_namespace(..., DocSource::WorkingTree).
+        // as prepare_for_source(..., DocSource::WorkingTree).
         let repo = TestRepo::new();
         let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
@@ -3187,13 +2882,9 @@ mod tests {
         let default_pages = default_index.list_pages(None).expect("list default");
         drop(default_index);
 
-        let wt_index = WikiIndex::prepare_with_namespace(
-            &wiki_root,
-            repo.path(),
-            None,
-            DocSource::WorkingTree,
-        )
-        .expect("prepare wt");
+        let wt_index =
+            WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::WorkingTree)
+                .expect("prepare wt");
         let wt_pages = wt_index.list_pages(None).expect("list wt");
 
         let default_titles: std::collections::BTreeSet<_> =
@@ -3202,37 +2893,6 @@ mod tests {
             wt_pages.iter().map(|p| p.title.as_str()).collect();
 
         assert_eq!(default_titles, wt_titles);
-    }
-
-    /// Finding 1 regression: when the worktree's `wiki.toml` differs from
-    /// HEAD's namespace, `--source=head` must filter `*.wiki.md` against
-    /// HEAD's namespace, not the worktree's.
-    #[test]
-    fn namespace_toml_is_read_from_head_under_source_head() {
-        let repo = TestRepo::new();
-        // Commit wiki.toml with namespace "alpha" plus a wiki.md tagged alpha.
-        let wiki_dir = repo.path().join("docs");
-        fs::create_dir_all(&wiki_dir).expect("mkdir docs");
-        fs::write(wiki_dir.join("wiki.toml"), "namespace = \"alpha\"\n").expect("toml v1");
-        repo.create_file(
-            "docs/page.wiki.md",
-            "---\ntitle: Alpha Page\nnamespace: alpha\nsummary: ok.\n---\nBody.\n",
-        );
-        repo.git(&["add", "-A"]);
-        repo.git(&["commit", "-m", "alpha"]);
-
-        // Now mutate wiki.toml in the worktree to namespace "beta" without
-        // committing. HEAD still has "alpha".
-        fs::write(wiki_dir.join("wiki.toml"), "namespace = \"beta\"\n").expect("toml v2");
-
-        // Under --source=head, the alpha page must be visible because HEAD's
-        // namespace is alpha — even though the worktree now says beta.
-        let index = WikiIndex::prepare_for_source(&wiki_dir, repo.path(), DocSource::Head)
-            .expect("prepare");
-        assert!(
-            index.resolve_page("Alpha Page").expect("resolve").is_some(),
-            "expected HEAD-namespaced page to be visible under --source=head"
-        );
     }
 
     /// Finding 4 regression: under --source=head/index, `path_abs` (surfaced
