@@ -1,116 +1,11 @@
 use std::path::Path;
 
 use miette::Result;
-use serde_json::json;
 
-use crate::commands::{looks_like_path, normalize_repo_relative_path};
-use crate::index::{DocSource, SearchResult, WikiIndex};
+use crate::commands::looks_like_path;
+use crate::index::{DocSource, WikiIndex};
 
 use super::summary::{format_search_result, render_not_found};
-
-/// Run `links` across multiple namespaces sequentially. Output is labeled.
-pub fn run_multi(
-    target: &str,
-    json: bool,
-    targets: &[(String, &Path)],
-    repo_root: &Path,
-    source: DocSource,
-) -> Result<i32> {
-    let single = targets.len() == 1;
-
-    // First pass: resolve the target's lookup keys in whichever namespace
-    // owns the page. Each namespace's index holds an exclusive process lock
-    // on its wiki root, so we acquire-and-release one at a time rather than
-    // holding all indices simultaneously (multiple targets may share a root
-    // when peers point at the same directory).
-    let mut page_target_keys: Vec<String> = Vec::new();
-    for (_label, wiki_root) in targets {
-        let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
-        if let Some(keys) = index.lookup_keys_for(target)? {
-            page_target_keys = keys;
-            break;
-        }
-    }
-
-    let file_target = if looks_like_path(target) {
-        let p = normalize_repo_relative_path(target, repo_root);
-        if p.is_empty() { None } else { Some(p) }
-    } else {
-        None
-    };
-
-    let resolved_anywhere = !page_target_keys.is_empty();
-
-    if json {
-        let mut out: Vec<serde_json::Value> = Vec::new();
-        for (label, wiki_root) in targets {
-            let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
-            let matches = index.links_with_keys(&page_target_keys, file_target.as_deref(), target)?;
-            for m in matches {
-                let mut v = serde_json::to_value(&m).unwrap();
-                if !single && let Some(obj) = v.as_object_mut() {
-                    obj.insert("namespace".into(), json!(label));
-                }
-                out.push(v);
-            }
-        }
-        if out.is_empty() && !looks_like_path(target) && !resolved_anywhere {
-            let mut all_suggestions: Vec<SearchResult> = Vec::new();
-            for (_label, wiki_root) in targets {
-                let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
-                let suggestions = index.suggest(target)?;
-                for s in suggestions {
-                    if !all_suggestions.iter().any(|existing| existing.title == s.title) {
-                        all_suggestions.push(s);
-                    }
-                }
-            }
-            eprintln!(
-                "{}",
-                serde_json::json!({
-                    "error": format!("page '{}' not found", target),
-                    "suggestions": all_suggestions,
-                })
-            );
-            return Ok(0);
-        }
-        println!("{}", serde_json::to_string_pretty(&out).unwrap());
-        return Ok(0);
-    }
-
-    let mut any = false;
-    let mut first = true;
-    for (label, wiki_root) in targets {
-        let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
-        let matches = index.links_with_keys(&page_target_keys, file_target.as_deref(), target)?;
-        for result in &matches {
-            if !first {
-                println!();
-            }
-            first = false;
-            any = true;
-            if single {
-                println!("{}", format_search_result(result, repo_root));
-            } else {
-                println!("[{label}] {}", format_search_result(result, repo_root));
-            }
-        }
-    }
-    if !any && !looks_like_path(target) && !resolved_anywhere {
-        let mut all_suggestions: Vec<SearchResult> = Vec::new();
-        for (_label, wiki_root) in targets {
-            let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
-            let suggestions = index.suggest(target)?;
-            for s in suggestions {
-                if !all_suggestions.iter().any(|existing| existing.title == s.title) {
-                    all_suggestions.push(s);
-                }
-            }
-        }
-        eprintln!("{}", render_not_found(target, &all_suggestions, repo_root));
-    }
-    Ok(0)
-}
 
 pub fn run(target: &str, json: bool, wiki_root: &Path, repo_root: &Path, source: DocSource) -> Result<i32> {
     let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
@@ -291,56 +186,6 @@ mod tests {
 
         let code = run("packages/nonexistent/file.ts", false, &wiki_root, repo.path(), crate::index::DocSource::WorkingTree).expect("run");
         assert_eq!(code, 0);
-    }
-
-    #[test]
-    fn run_multi_finds_backlinks_across_two_namespaces() {
-        let repo = TestRepo::new();
-        // Both pages live in the same wiki so the index can resolve the wikilink.
-        // run_multi is called with two namespace entries pointing to the same root —
-        // this exercises the iteration and labeled-output path without requiring
-        // cross-wiki wikilink resolution, which the index does not support.
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
-        repo.create_file(
-            "wiki/target.md",
-            "---\ntitle: Target Page\nsummary: Target summary.\n---\nBody.\n",
-        );
-        repo.create_file(
-            "wiki/source.md",
-            "---\ntitle: Source Page\nsummary: Links to target.\n---\nSee [[Target Page]].\n",
-        );
-        let targets: Vec<(String, &Path)> = vec![
-            ("ns-a".to_string(), wiki_root.as_path()),
-            ("ns-b".to_string(), wiki_root.as_path()),
-        ];
-
-        let code = run_multi("Target Page", false, &targets, repo.path(), crate::index::DocSource::WorkingTree).expect("run_multi");
-        assert_eq!(code, 0);
-    }
-
-    #[test]
-    fn run_multi_single_namespace_no_label_prefix() {
-        let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
-        repo.create_file(
-            "wiki/target.md",
-            "---\ntitle: Target Page\nsummary: Target summary.\n---\nBody.\n",
-        );
-        repo.create_file(
-            "wiki/source.md",
-            "---\ntitle: Source Page\nsummary: Links to target.\n---\nSee [[Target Page]].\n",
-        );
-        let targets: Vec<(String, &Path)> = vec![("default".to_string(), wiki_root.as_path())];
-
-        // Capture stdout by verifying the index directly — the label suppression
-        // is verified by ensuring run_multi returns 0 and finds results without panicking.
-        // The absence of "[default]" in output is structural (single == true branch).
-        let code = run_multi("Target Page", false, &targets, repo.path(), crate::index::DocSource::WorkingTree).expect("run_multi");
-        assert_eq!(code, 0);
-
-        // JSON mode: verify no "namespace" field inserted for single target.
-        let code_json = run_multi("Target Page", true, &targets, repo.path(), crate::index::DocSource::WorkingTree).expect("run_multi json");
-        assert_eq!(code_json, 0);
     }
 
     #[test]

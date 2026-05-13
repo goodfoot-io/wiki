@@ -1,62 +1,10 @@
 use std::path::Path;
 
 use miette::Result;
-use serde_json::json;
 
 use crate::index::{DocSource, WikiIndex};
 
 use super::summary::format_search_result;
-
-/// Run `search` across multiple namespaces sequentially. `targets` is
-/// `(namespace_label, wiki_root)` in dispatch order (current first, peers in
-/// declaration order). Output is labeled by namespace.
-pub fn run_multi(
-    query: &str,
-    limit: i64,
-    offset: usize,
-    json: bool,
-    targets: &[(String, &Path)],
-    repo_root: &Path,
-    source: DocSource,
-) -> Result<i32> {
-    if json {
-        let mut out: Vec<serde_json::Value> = Vec::new();
-        for (label, wiki_root) in targets {
-            let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
-            let (matches, _total) = index.search_weighted(query, limit, offset)?;
-            for m in matches {
-                let mut v = serde_json::to_value(&m).unwrap();
-                if let Some(obj) = v.as_object_mut() {
-                    obj.insert("namespace".into(), json!(label));
-                }
-                out.push(v);
-            }
-        }
-        println!("{}", serde_json::to_string_pretty(&out).unwrap());
-        return Ok(0);
-    }
-
-    let mut first = true;
-    for (label, wiki_root) in targets {
-        let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
-        let (matches, total) = index.search_weighted(query, limit, offset)?;
-        if matches.is_empty() {
-            continue;
-        }
-        for result in &matches {
-            if !first {
-                println!();
-            }
-            first = false;
-            println!("[{label}] {}", format_search_result(result, repo_root));
-        }
-        let remaining = total.saturating_sub(offset + matches.len());
-        if remaining > 0 {
-            println!("\n---\n\n*[{label}] {remaining} other wiki matches.*");
-        }
-    }
-    Ok(0)
-}
 
 pub fn run(query: &str, limit: i64, offset: usize, json: bool, wiki_root: &Path, repo_root: &Path, source: DocSource) -> Result<i32> {
     let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;

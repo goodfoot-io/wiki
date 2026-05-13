@@ -69,64 +69,6 @@ pub fn render_not_found(title: &str, suggestions: &[SearchResult], repo_root: &P
     rendered
 }
 
-/// Run `summary` across multiple namespaces sequentially. Each namespace where
-/// the title resolves contributes one labeled output entry. If no namespace
-/// resolves the title, exit 1.
-pub fn run_multi(
-    title: &str,
-    json: bool,
-    targets: &[(String, &Path)],
-    repo_root: &Path,
-    source: DocSource,
-) -> Result<i32> {
-    if json {
-        let mut out: Vec<serde_json::Value> = Vec::new();
-        for (label, wiki_root) in targets {
-            let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
-            if let Some(page) = index.resolve_page(title)? {
-                let so = summary_output(page);
-                let mut v = serde_json::to_value(&so).unwrap();
-                if let Some(obj) = v.as_object_mut() {
-                    obj.insert("namespace".into(), serde_json::json!(label));
-                }
-                out.push(v);
-            }
-        }
-        if out.is_empty() {
-            eprintln!(
-                "{}",
-                serde_json::json!({
-                    "error": format!("page '{}' not found in any namespace", title),
-                })
-            );
-            println!("[]");
-            return Ok(1);
-        }
-        println!("{}", serde_json::to_string_pretty(&out).unwrap());
-        return Ok(0);
-    }
-
-    let mut any = false;
-    let mut first = true;
-    for (label, wiki_root) in targets {
-        let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
-        if let Some(page) = index.resolve_page(title)? {
-            let output = summary_output(page);
-            if !first {
-                println!("\n---\n");
-            }
-            first = false;
-            any = true;
-            println!("[{label}]\n{}", format_text_summary(&output, repo_root));
-        }
-    }
-    if !any {
-        eprintln!("No page found with title or alias `{title}` in any namespace.");
-        return Ok(1);
-    }
-    Ok(0)
-}
-
 pub fn run(title: &str, json: bool, wiki_root: &Path, repo_root: &Path, source: DocSource) -> Result<i32> {
     let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
     match index.resolve_page(title)? {
