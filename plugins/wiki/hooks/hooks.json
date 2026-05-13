@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node $CLAUDE_PLUGIN_ROOT/hooks/bin/stop.d0aed754.mjs"
+            "command": "node $CLAUDE_PLUGIN_ROOT/hooks/bin/stop.e3442bc6.mjs"
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node $CLAUDE_PLUGIN_ROOT/hooks/bin/post-tool-use.78a7192f.mjs",
+            "command": "node $CLAUDE_PLUGIN_ROOT/hooks/bin/post-tool-use.c5163224.mjs",
             "timeout": 30000
           }
         ],
@@ -25,9 +25,9 @@
   },
   "__generated": {
     "files": [
-      "stop.d0aed754.mjs",
-      "post-tool-use.78a7192f.mjs"
+      "stop.e3442bc6.mjs",
+      "post-tool-use.c5163224.mjs"
     ],
-    "timestamp": "2026-05-07T18:24:33.453Z"
+    "timestamp": "2026-05-13T07:07:20.536Z"
   }
 }

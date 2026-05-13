@@ -1,21 +1,41 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { getFilePath, postToolUseHook, postToolUseOutput } from '@goodfoot/claude-code-hooks';
 
+/**
+ * Returns true if the file is a wiki member, determined exclusively by YAML
+ * frontmatter: both `title` and `summary` must be present and non-empty.
+ * Non-.md files are never wiki members.
+ */
 function isWikiFile(filePath: string, cwd: string): boolean {
-  if (filePath.endsWith('.wiki.md')) return true;
+  if (!filePath.endsWith('.md')) return false;
 
   const absPath = isAbsolute(filePath) ? filePath : resolve(cwd, filePath);
-  let dir = dirname(absPath);
-  while (true) {
-    if (existsSync(join(dir, 'wiki.toml'))) return true;
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
+  if (!existsSync(absPath)) return false;
+
+  // Read only the first 30 lines to locate frontmatter efficiently.
+  const content = readFileSync(absPath, 'utf-8');
+  const lines = content.split('\n');
+  const head = lines.slice(0, 30);
+
+  if (head[0]?.trim() !== '---') return false;
+
+  const closeIdx = head.slice(1).findIndex((l) => l.trim() === '---');
+  if (closeIdx === -1) return false;
+
+  const fmLines = head.slice(1, closeIdx + 1);
+  let title = '';
+  let summary = '';
+  for (const line of fmLines) {
+    const titleMatch = line.match(/^title\s*:\s*(.+)$/);
+    if (titleMatch) title = titleMatch[1].trim().replace(/^['"]|['"]$/g, '');
+    const summaryMatch = line.match(/^summary\s*:\s*(.+)$/);
+    if (summaryMatch) summary = summaryMatch[1].trim().replace(/^['"]|['"]$/g, '');
   }
-  return false;
+
+  return title.length > 0 && summary.length > 0;
 }
 
 function sessionTrackingFile(sessionId: string): string {
