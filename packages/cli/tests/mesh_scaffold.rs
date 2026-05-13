@@ -102,24 +102,25 @@ fn mesh_scaffold_parse_error_block() {
     std::fs::create_dir_all(&wiki_dir).unwrap();
     std::fs::write(wiki_dir.join("wiki.toml"), "").unwrap();
 
-    // Category 1: NoFrontmatter — file does not start with `---`.
+    // A file without frontmatter is a valid plain markdown page and must NOT
+    // appear in the parse-error block.
     std::fs::write(wiki_dir.join("no_frontmatter.md"), "# Just a body.\n").unwrap();
 
-    // Category 2: MissingTitle — frontmatter present but no `title:` key.
+    // Category 1: MissingTitle — frontmatter present but no `title:` key.
     std::fs::write(
         wiki_dir.join("missing_title.md"),
         "---\nsummary: x\n---\n\nbody\n",
     )
     .unwrap();
 
-    // Category 3: EmptyTitle — `title:` present but empty.
+    // Category 2: EmptyTitle — `title:` present but empty.
     std::fs::write(
         wiki_dir.join("empty_title.md"),
         "---\ntitle:\nsummary: x\n---\n\nbody\n",
     )
     .unwrap();
 
-    // Category 4: Unreadable — non-UTF-8 bytes.
+    // Category 3: Unreadable — non-UTF-8 bytes.
     std::fs::write(wiki_dir.join("unreadable.md"), [0xFF_u8, 0xFE, 0x00]).unwrap();
 
     // Clean file with a fragment link so there are meshes in the output.
@@ -173,8 +174,7 @@ fn mesh_scaffold_parse_error_block() {
         "expected advisory parse-error header at start, got:\n{stdout}"
     );
 
-    // All four bad files must be listed with their exact reason strings.
-    // File names are sorted: empty_title < missing_title < no_frontmatter < unreadable
+    // The three bad files must be listed with their exact reason strings.
     assert!(
         stdout.contains("wiki/empty_title.md (frontmatter present but `title:` is empty)"),
         "EmptyTitle reason missing:\n{stdout}"
@@ -184,14 +184,16 @@ fn mesh_scaffold_parse_error_block() {
         "MissingTitle reason missing:\n{stdout}"
     );
     assert!(
-        stdout.contains(
-            "wiki/no_frontmatter.md (no frontmatter block — file does not start with `---`)"
-        ),
-        "NoFrontmatter reason missing:\n{stdout}"
-    );
-    assert!(
         stdout.contains("wiki/unreadable.md (file could not be read:"),
         "Unreadable reason missing:\n{stdout}"
+    );
+
+    // A file without a frontmatter block is a valid plain markdown page and
+    // must not surface as a parse error.
+    let block_end_check = stdout.find("\n---\n").unwrap_or(stdout.len());
+    assert!(
+        !stdout[..block_end_check].contains("no_frontmatter.md"),
+        "no_frontmatter.md must not appear in the parse-error block:\n{stdout}"
     );
 
     // Clean file is not in the parse-error block.
@@ -487,15 +489,15 @@ fn mesh_scaffold_json_parse_errors_in_output() {
     std::fs::create_dir_all(&wiki_dir).unwrap();
     std::fs::write(wiki_dir.join("wiki.toml"), "").unwrap();
 
-    // Category 1: NoFrontmatter.
+    // A plain markdown file without a frontmatter block — not an error.
     std::fs::write(wiki_dir.join("no_fm.md"), "# No frontmatter\n").unwrap();
-    // Category 2: MissingTitle.
+    // Category 1: MissingTitle.
     std::fs::write(
         wiki_dir.join("missing_title.md"),
         "---\nsummary: x\n---\n\nbody\n",
     )
     .unwrap();
-    // Category 3: EmptyTitle.
+    // Category 2: EmptyTitle.
     std::fs::write(
         wiki_dir.join("empty_title.md"),
         "---\ntitle:\n---\n\nbody\n",
@@ -554,8 +556,8 @@ fn mesh_scaffold_json_parse_errors_in_output() {
         .map(|e| e["category"].as_str().unwrap())
         .collect();
     assert!(
-        categories.contains(&"no_frontmatter"),
-        "no_frontmatter category missing: {categories:?}"
+        !categories.contains(&"no_frontmatter"),
+        "files without frontmatter must not produce a parse error: {categories:?}"
     );
     assert!(
         categories.contains(&"missing_title"),

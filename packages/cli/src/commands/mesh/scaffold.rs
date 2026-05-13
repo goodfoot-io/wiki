@@ -43,8 +43,6 @@ fn read_via_source(path: &Path, repo_root: &Path, source: DocSource) -> std::io:
 
 #[derive(Debug, Clone)]
 pub(crate) enum ParseErrorKind {
-    /// File does not start with `---\n`.
-    NoFrontmatter,
     /// Frontmatter present, no `title:` key.
     MissingTitle,
     /// `title:` present, value empty/whitespace.
@@ -85,7 +83,6 @@ struct ParseErrorJson {
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 enum ParseErrorCategory {
-    NoFrontmatter,
     MissingTitle,
     EmptyTitle,
     Unreadable,
@@ -122,7 +119,6 @@ struct AnchorJson {
 impl ParseErrorCategory {
     fn from_kind(kind: &ParseErrorKind) -> Self {
         match kind {
-            ParseErrorKind::NoFrontmatter => ParseErrorCategory::NoFrontmatter,
             ParseErrorKind::MissingTitle => ParseErrorCategory::MissingTitle,
             ParseErrorKind::EmptyTitle => ParseErrorCategory::EmptyTitle,
             ParseErrorKind::Unreadable(_) => ParseErrorCategory::Unreadable,
@@ -134,9 +130,6 @@ impl ParseErrorCategory {
 impl ParseErrorKind {
     pub(crate) fn reason(&self) -> String {
         match self {
-            ParseErrorKind::NoFrontmatter => {
-                "no frontmatter block — file does not start with `---`".to_string()
-            }
             ParseErrorKind::MissingTitle => {
                 "frontmatter present but `title:` is missing".to_string()
             }
@@ -771,9 +764,11 @@ fn classify_frontmatter(
         }
     };
 
-    // Step 2: must start with `---\n` or `---\r\n`.
+    // Step 2: must start with `---\n` or `---\r\n`. A file without a
+    // frontmatter block is a valid plain markdown page — it simply has no
+    // extractable title, so return the default `FileMeta` with no error.
     if !text.starts_with("---\n") && !text.starts_with("---\r\n") {
-        return (FileMeta::default(), Some(ParseErrorKind::NoFrontmatter));
+        return (FileMeta::default(), None);
     }
 
     // Step 3: locate closing `---` fence.
@@ -951,12 +946,11 @@ mod tests {
     }
 
     #[test]
-    fn classify_no_frontmatter() {
+    fn classify_no_frontmatter_is_not_an_error() {
+        // A plain markdown file without a frontmatter block is valid — it has
+        // no extractable title but does not produce a parse error.
         let kind = classify_str("# Just a body.\n");
-        assert!(
-            matches!(kind, Some(ParseErrorKind::NoFrontmatter)),
-            "expected NoFrontmatter, got {kind:?}"
-        );
+        assert!(kind.is_none(), "expected None, got {kind:?}");
     }
 
     #[test]
@@ -979,15 +973,10 @@ mod tests {
 
     #[test]
     fn classify_malformed_bom() {
-        // BOM-prefixed frontmatter — parse_frontmatter_field will return None.
+        // BOM-prefixed frontmatter — the file does not start with `---\n`, so
+        // it is treated as a plain markdown page (no frontmatter, no error).
         let kind = classify_str("\u{FEFF}---\ntitle: x\nsummary: y\n---\n");
-        assert!(
-            matches!(
-                kind,
-                Some(ParseErrorKind::Malformed | ParseErrorKind::NoFrontmatter)
-            ),
-            "expected Malformed or NoFrontmatter, got {kind:?}"
-        );
+        assert!(kind.is_none(), "expected None, got {kind:?}");
     }
 
     #[test]

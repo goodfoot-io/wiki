@@ -323,7 +323,7 @@ mod tests {
             vec![],
             vec!["wiki/page.md#L1-L5", "src/a.rs#L1-L5"],
         );
-        let errors = vec![make_error("wiki/bad.md", ParseErrorKind::NoFrontmatter)];
+        let errors = vec![make_error("wiki/bad.md", ParseErrorKind::MissingTitle)];
         let titles = HashMap::new();
         let out = render_markdown(&[d], &titles, &errors, &HashSet::new());
         // Advisory header when scaffold follows.
@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn render_parse_error_hard_stop_header_when_no_meshes() {
-        let errors = vec![make_error("wiki/bad.md", ParseErrorKind::NoFrontmatter)];
+        let errors = vec![make_error("wiki/bad.md", ParseErrorKind::MissingTitle)];
         let out = render_empty_markdown(&errors);
         // Hard-stop header when no scaffold follows.
         assert!(
@@ -357,10 +357,6 @@ mod tests {
         fn reason(kind: ParseErrorKind) -> String {
             kind.reason()
         }
-        assert_eq!(
-            reason(ParseErrorKind::NoFrontmatter),
-            "no frontmatter block — file does not start with `---`"
-        );
         assert_eq!(
             reason(ParseErrorKind::MissingTitle),
             "frontmatter present but `title:` is missing"
@@ -396,7 +392,7 @@ mod tests {
             vec![],
             vec!["wiki/good.md#L1-L5", "src/b.rs#L1-L5"],
         );
-        let errors = vec![make_error("wiki/bad.md", ParseErrorKind::NoFrontmatter)];
+        let errors = vec![make_error("wiki/bad.md", ParseErrorKind::MissingTitle)];
         let mut parse_error_paths = HashSet::new();
         parse_error_paths.insert("wiki/bad.md".to_string());
         let titles = HashMap::new();

@@ -11,6 +11,7 @@ import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { render } from '../rendering/MarkdownRenderer.js';
+import { hasWikiFrontmatter, readFrontmatter } from '../utils/frontmatter.js';
 import { getSourceArgs } from '../utils/sourceMode.js';
 import { runWikiCommand } from '../utils/wikiBinary.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
@@ -40,14 +41,21 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
   /**
    * Return true if `uri` should be opened in the wiki viewer.
    *
-   * Any `.md` file under an open workspace folder qualifies. The host
-   * resolves wiki-aware behaviour (summary, backlinks) by frontmatter
-   * inspection at render time.
+   * A markdown file qualifies only when it lives under the active workspace
+   * and carries both a non-empty `title` and `summary` in its YAML
+   * frontmatter. Plain markdown files without wiki frontmatter fall through
+   * to VS Code's default markdown editor.
    *
    * @param uri - The file URI to test.
-   * @returns True if the file is a `.md` file inside the active workspace.
+   * @returns True when the file is a wiki-aware markdown file.
    */
-  isWikiFile(uri: vscode.Uri): boolean {
+  async isWikiFile(uri: vscode.Uri): Promise<boolean> {
+    if (!this._isInWorkspaceMarkdown(uri)) return false;
+    const info = await readFrontmatter(uri.fsPath);
+    return hasWikiFrontmatter(info);
+  }
+
+  private _isInWorkspaceMarkdown(uri: vscode.Uri): boolean {
     if (!uri.fsPath.endsWith('.md')) return false;
     const wsRoot = this._workspaceRoot();
     if (wsRoot == null) return false;
@@ -63,7 +71,7 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     webviewPanel: vscode.WebviewPanel,
     _token: vscode.CancellationToken
   ): Promise<void> {
-    if (!this.isWikiFile(document.uri)) {
+    if (!(await this.isWikiFile(document.uri))) {
       webviewPanel.dispose();
       await vscode.window.showTextDocument(document.uri, { preview: false });
       return;
@@ -125,7 +133,7 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
         case 'openFile': {
           try {
             const fileUri = vscode.Uri.parse(message.uri);
-            if (this.isWikiFile(fileUri)) {
+            if (await this.isWikiFile(fileUri)) {
               const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
               await vscode.commands.executeCommand('wiki.openInEditor', fileUri, { viewColumn, preview: false });
             } else {
@@ -214,7 +222,7 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     }
 
     const viewColumn = split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
-    if (absPath.endsWith('.md') && this.isWikiFile(targetUri)) {
+    if (absPath.endsWith('.md') && (await this.isWikiFile(targetUri))) {
       await vscode.commands.executeCommand('vscode.openWith', targetUri, 'wiki.viewer', viewColumn);
     } else {
       await vscode.window.showTextDocument(targetUri, { viewColumn, preview: false });
