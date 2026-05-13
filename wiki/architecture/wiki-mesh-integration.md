@@ -72,6 +72,22 @@ Generated whys require author review — sentences that started with a backtick 
 
 Omitting globs walks all `.md` files and treats those whose frontmatter has both a non-empty `title` and `summary` as wiki pages. `$WIKI_DIR` defaults to `wiki`. This matches the default discovery behavior used by all other wiki commands (see [discover_files](/packages/cli/src/commands/mod.rs#L141-L183)).
 
+### Missing-path filtering
+
+Before emitting any `git mesh add` block, scaffold verifies that every anchor's path exists at the chosen source. If a wiki link's target is missing, the entire mesh is dropped — a partial mesh with the bad anchor stripped is never emitted, because losing an anchor changes what the mesh means.
+
+Path existence is resolved against the active `--source`:
+
+- `--source=worktree` (default) checks `repo_root/<path>` on the filesystem.
+- `--source=index` and `--source=head` check membership in that source's tracked-path list, so a worktree-only deletion does not invalidate a mesh whose target still lives in the index or in HEAD.
+
+Dropped meshes are surfaced in the output:
+
+- **Markdown mode** — an advisory line `Skipped mesh \`<slug>\` — references missing path \`<path>\`.` appears in the advisory block ahead of any retained meshes (or alone, if every candidate was dropped).
+- **JSON mode** — a top-level `droppedMeshes` array of `{ slug, missingPath, page }` entries.
+
+Fix the wiki link (correct the path, or remove the link if the target is intentionally gone) and rerun `wiki scaffold`.
+
 ## Workflow
 
 ```bash

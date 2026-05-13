@@ -371,3 +371,43 @@ fn snippet_regression_source_raw_unchanged() {
         "expected snippetterm in snippets; got: {snippets_str}"
     );
 }
+
+/// A `.md` file with frontmatter that does not carry both `title` and `summary`
+/// is not a wiki member, and discovery must silently exclude it — never surface
+/// a `FrontmatterError` to the user. Reproduces the original `big-idea-author.md`
+/// symptom: a Claude Code agent definition (`---\nname: ...\ndescription: ...\n---`)
+/// sitting under `.claude/agents/` broke `wiki <query>` because the old code
+/// path tried to validate every `.md` it saw.
+#[test]
+fn non_wiki_markdown_with_partial_frontmatter_is_silently_excluded() {
+    let repo = make_wiki_repo();
+    // A real wiki member so search has something to return.
+    repo.create_file(
+        "wiki/alpha.md",
+        "---\ntitle: Alpha Doc\nsummary: A short summary.\n---\nFindme zygomorphic.\n",
+    );
+    // A Claude Code agent definition — has frontmatter but no `title` or `summary`.
+    // Under the old rule this errored out; under the new rule it is not a wiki
+    // member and must be silently excluded.
+    repo.create_file(
+        ".claude/agents/big-idea-author.md",
+        "---\nname: big-idea-author\ndescription: An agent that drafts big ideas.\n---\nBody prose.\n",
+    );
+    repo.commit("add wiki page plus agent definition");
+
+    let out = repo.wiki(&["zygomorphic"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "wiki must exit 0 even with a non-wiki .md present; stderr=\n{stderr}\nstdout=\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("frontmatter") && !stderr.contains("Add a `title`"),
+        "no frontmatter-error noise must leak to stderr; got:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Alpha Doc"),
+        "the real wiki member must still be returned; got:\n{stdout}"
+    );
+}

@@ -95,7 +95,7 @@ After all prose edits:
 wiki scaffold
 ```
 
-Review the output. If any fragment links are uncovered, run the generated `git mesh add` and `git mesh why` commands, then commit:
+Review the output. `wiki scaffold` will also surface a `Skipped mesh \`<slug>\` — references missing path \`<path>\`.` advisory for any link whose target no longer exists on disk; fix the wiki link (or remove it if the target is intentionally gone) and rerun. If any fragment links are uncovered, run the generated `git mesh add` and `git mesh why` commands, then commit:
 
 ```bash
 git mesh commit

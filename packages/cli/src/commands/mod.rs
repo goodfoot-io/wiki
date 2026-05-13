@@ -238,7 +238,7 @@ fn discover_default_files(repo_root: &Path, source: DocSource) -> Result<Vec<Pat
             let files: Vec<PathBuf> = all_paths
                 .into_iter()
                 .filter(|p| {
-                    if !p.ends_with(".md") {
+                    if !p.ends_with(".md") || is_fixture_path(p) {
                         return false;
                     }
                     match source.read(repo_root, p) {
@@ -262,7 +262,7 @@ fn discover_default_files(repo_root: &Path, source: DocSource) -> Result<Vec<Pat
 
     let mut files = Vec::new();
     for path_rel in inventory {
-        if !path_rel.ends_with(".md") {
+        if !path_rel.ends_with(".md") || is_fixture_path(&path_rel) {
             continue;
         }
         let path = repo_root.join(&path_rel);
@@ -275,6 +275,15 @@ fn discover_default_files(repo_root: &Path, source: DocSource) -> Result<Vec<Pat
     }
 
     Ok(files)
+}
+
+/// Test-fixture wiki files (under any `tests/fixtures/` directory) are part of
+/// the CLI's own integration suites — they are not part of the repo's authored
+/// wiki and must be excluded from default discovery so commands like
+/// `wiki check` don't validate them as real pages. Explicit globs that target
+/// these paths still match.
+fn is_fixture_path(path_rel: &str) -> bool {
+    path_rel.contains("/tests/fixtures/") || path_rel.contains("\\tests\\fixtures\\")
 }
 
 /// Filter a `DocSource`'s path list against the same glob semantics as

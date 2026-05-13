@@ -1287,3 +1287,103 @@ fn mesh_scaffold_json_dropped_meshes_array() {
     );
     assert!(entry["page"].is_string(), "page must be string:\n{stdout}");
 }
+
+/// The missing-path check must honor `--source`: under `--source=head` an anchor
+/// whose target was deleted from the worktree but still lives in HEAD must NOT
+/// be dropped, while under the default `--source=worktree` (or omitted) the same
+/// scaffold run must drop it.
+#[test]
+fn mesh_scaffold_missing_path_check_respects_source_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wiki_dir = tmp.path().join("wiki");
+    std::fs::create_dir_all(&wiki_dir).unwrap();
+
+    std::fs::write(
+        wiki_dir.join("page.md"),
+        "---\ntitle: Page\nsummary: A page.\n---\n\nSee [target](../src/target.rs#L1-L5).\n",
+    )
+    .unwrap();
+    let src_dir = tmp.path().join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(src_dir.join("target.rs"), "// target\n").unwrap();
+
+    git(tmp.path(), &["init", "-q", "-b", "main"]);
+    git(
+        tmp.path(),
+        &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
+    );
+    git(
+        tmp.path(),
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
+
+    // Delete target.rs from the worktree only — HEAD still has it.
+    std::fs::remove_file(src_dir.join("target.rs")).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+
+    // Default (worktree) source: target.rs is missing → mesh dropped.
+    let worktree_out = Command::new(bin)
+        .args(["scaffold", "**/*.md", "--format", "json"])
+        .current_dir(&wiki_dir)
+        .output()
+        .expect("run wiki binary (worktree)");
+    let worktree_stdout = String::from_utf8_lossy(&worktree_out.stdout);
+    let worktree_v: serde_json::Value =
+        serde_json::from_str(&worktree_stdout).expect("valid JSON (worktree)");
+    let worktree_dropped = worktree_v["droppedMeshes"]
+        .as_array()
+        .expect("droppedMeshes array (worktree)");
+    assert_eq!(
+        worktree_dropped.len(),
+        1,
+        "worktree mode must drop the mesh:\n{worktree_stdout}"
+    );
+    assert_eq!(
+        worktree_dropped[0]["missingPath"].as_str().unwrap_or(""),
+        "src/target.rs"
+    );
+
+    // --source=head: target.rs still exists in HEAD → mesh kept.
+    let head_out = Command::new(bin)
+        .args([
+            "--source",
+            "head",
+            "scaffold",
+            "**/*.md",
+            "--format",
+            "json",
+        ])
+        .current_dir(&wiki_dir)
+        .output()
+        .expect("run wiki binary (head)");
+    assert!(
+        head_out.status.success(),
+        "head mode must exit 0: stderr=\n{}",
+        String::from_utf8_lossy(&head_out.stderr)
+    );
+    let head_stdout = String::from_utf8_lossy(&head_out.stdout);
+    let head_v: serde_json::Value =
+        serde_json::from_str(&head_stdout).expect("valid JSON (head)");
+    let head_dropped = head_v["droppedMeshes"]
+        .as_array()
+        .expect("droppedMeshes array (head)");
+    assert!(
+        head_dropped.is_empty(),
+        "head mode must NOT drop the mesh (target still in HEAD):\n{head_stdout}"
+    );
+    let head_pages = head_v["pages"].as_array().expect("pages array (head)");
+    assert!(
+        !head_pages.is_empty(),
+        "head mode must emit the surviving mesh under pages:\n{head_stdout}"
+    );
+}

@@ -15,10 +15,6 @@ The [parser](/packages/cli/src/parser.rs#L6-L12) extracts fragment links from ma
 
 The [check command](/packages/cli/src/commands/check.rs#L28-L29) runs a full validation pass: [frontmatter parsing](/packages/cli/src/frontmatter.rs#L56-L56), title/alias collision detection, wikilink resolution, and fragment link verification (file existence and line range bounds at the pinned SHA). With `--fix`, unpinned fragment links are pinned automatically rather than reported as errors — already-pinned links are never touched.
 
-## Extract
-
-The [extract command](/packages/cli/src/commands/extract.rs#L17-L17) (`packages/cli/src/commands/extract.rs`) reads arbitrary text from stdin, parses all wiki references, and outputs the [canonical title and summary](/packages/cli/src/commands/extract.rs#L10-L15) for each resolved page. Extraction runs before any file I/O — if no references are found, the command [exits immediately with no output](/packages/cli/src/commands/extract.rs#L28-L33). Unresolved references are reported to stderr and cause exit code 1.
-
 ## PostToolUse Hook
 
 The [hook command](/packages/cli/src/commands/hook_check.rs#L16-L63) integrates the wiki with external tools like Claude Code. It processes `PostToolUse` JSON events from stdin: when a `.md` file inside the wiki directory is written or edited, it runs `wiki check` on that file and emits a JSON `systemMessage` envelope if validation errors remain, so the AI can address them immediately.
@@ -31,7 +27,6 @@ Several commands support navigating and searching the wiki from the command line
 - **Search**: The [search command](/packages/cli/src/commands/search.rs) is the primary entrypoint for finding wiki content. It performs a weighted search that ranks exact title matches, repo-relative path matches, and full-text matches (BM25) in a single unified flow.
 - **Suggest**: The suggest command (used internally by the hook) finds the best matches for a query with a minimum score threshold, prioritizing titles and aliases.
 - **Summary**: The [summary command](/packages/cli/src/commands/summary.rs#L130-L130) outputs a page's frontmatter-defined summary along with a repo-relative path to its source file.
-- **Print**: The [print command](/packages/cli/src/commands/print.rs#L9-L9) outputs the full raw markdown content of a wiki page to stdout.
 
 ## Rendering
 
