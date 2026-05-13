@@ -303,8 +303,23 @@ fn mesh_scaffold_json_shape_and_fields() {
     std::fs::write(src_dir.join("charge.rs"), "// charge\n").unwrap();
 
     git(tmp.path(), &["init", "-q", "-b", "main"]);
-    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
-    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+    git(
+        tmp.path(),
+        &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
+    );
+    git(
+        tmp.path(),
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
@@ -312,7 +327,11 @@ fn mesh_scaffold_json_shape_and_fields() {
         .current_dir(&wiki_dir)
         .output()
         .expect("run wiki binary");
-    assert!(output.status.success(), "wiki scaffold --json failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "wiki scaffold --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON output");
@@ -321,8 +340,14 @@ fn mesh_scaffold_json_shape_and_fields() {
     assert_eq!(v["schemaVersion"], 1, "schemaVersion must be 1:\n{stdout}");
 
     // parseErrors must be present and empty.
-    assert!(v["parseErrors"].is_array(), "parseErrors must be array:\n{stdout}");
-    assert!(v["parseErrors"].as_array().unwrap().is_empty(), "parseErrors must be empty:\n{stdout}");
+    assert!(
+        v["parseErrors"].is_array(),
+        "parseErrors must be array:\n{stdout}"
+    );
+    assert!(
+        v["parseErrors"].as_array().unwrap().is_empty(),
+        "parseErrors must be empty:\n{stdout}"
+    );
 
     // pages must be present and non-empty.
     assert!(v["pages"].is_array(), "pages must be array:\n{stdout}");
@@ -339,25 +364,59 @@ fn mesh_scaffold_json_shape_and_fields() {
 
     // headingChain must be trimmed (Billing dropped, Charge handler kept).
     let chain = mesh["headingChain"].as_array().unwrap();
-    assert_eq!(chain.len(), 1, "leading 'Billing' should be trimmed, got chain: {chain:?}");
+    assert_eq!(
+        chain.len(),
+        1,
+        "leading 'Billing' should be trimmed, got chain: {chain:?}"
+    );
     assert_eq!(chain[0], "Charge handler");
 
     // sectionOpening field must be absent — heading chain alone identifies the section.
-    assert!(mesh.get("sectionOpening").is_none(), "sectionOpening field must be absent:\n{stdout}");
+    assert!(
+        mesh.get("sectionOpening").is_none(),
+        "sectionOpening field must be absent:\n{stdout}"
+    );
 
     // anchors must be structured objects, with the page section anchor first.
     let anchors = mesh["anchors"].as_array().unwrap();
-    assert!(anchors.len() >= 2, "anchors must contain page section + targets:\n{stdout}");
-    assert_eq!(anchors[0]["path"], "wiki/billing.md", "anchors[0] must be the page section anchor:\n{stdout}");
-    assert!(anchors[0]["startLine"].is_number(), "anchor.startLine must be number:\n{stdout}");
-    assert!(anchors[0]["endLine"].is_number(), "anchor.endLine must be number:\n{stdout}");
-    assert_eq!(anchors[1]["path"], "src/charge.rs", "anchors[1] must be the target:\n{stdout}");
+    assert!(
+        anchors.len() >= 2,
+        "anchors must contain page section + targets:\n{stdout}"
+    );
+    assert_eq!(
+        anchors[0]["path"], "wiki/billing.md",
+        "anchors[0] must be the page section anchor:\n{stdout}"
+    );
+    assert!(
+        anchors[0]["startLine"].is_number(),
+        "anchor.startLine must be number:\n{stdout}"
+    );
+    assert!(
+        anchors[0]["endLine"].is_number(),
+        "anchor.endLine must be number:\n{stdout}"
+    );
+    assert_eq!(
+        anchors[1]["path"], "src/charge.rs",
+        "anchors[1] must be the target:\n{stdout}"
+    );
 
     // Legacy fields must be absent.
-    assert!(mesh["name"].is_null(), "legacy 'name' field must be absent:\n{stdout}");
-    assert!(mesh["why"].is_null(), "legacy 'why' field must be absent:\n{stdout}");
-    assert!(mesh["wikiFile"].is_null(), "legacy 'wikiFile' field must be absent:\n{stdout}");
-    assert!(mesh["anchor"].is_null(), "legacy 'anchor' string field must be absent:\n{stdout}");
+    assert!(
+        mesh["name"].is_null(),
+        "legacy 'name' field must be absent:\n{stdout}"
+    );
+    assert!(
+        mesh["why"].is_null(),
+        "legacy 'why' field must be absent:\n{stdout}"
+    );
+    assert!(
+        mesh["wikiFile"].is_null(),
+        "legacy 'wikiFile' field must be absent:\n{stdout}"
+    );
+    assert!(
+        mesh["anchor"].is_null(),
+        "legacy 'anchor' string field must be absent:\n{stdout}"
+    );
 }
 
 /// JSON mode with empty corpus still emits the structured object, not `[]`.
@@ -376,8 +435,23 @@ fn mesh_scaffold_json_empty_corpus_structured_output() {
     .unwrap();
 
     git(tmp.path(), &["init", "-q", "-b", "main"]);
-    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
-    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+    git(
+        tmp.path(),
+        &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
+    );
+    git(
+        tmp.path(),
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
@@ -385,13 +459,20 @@ fn mesh_scaffold_json_empty_corpus_structured_output() {
         .current_dir(&wiki_dir)
         .output()
         .expect("run wiki binary");
-    assert!(output.status.success(), "wiki scaffold --json failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "wiki scaffold --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
 
     // Must be an object (not `[]`).
-    assert!(v.is_object(), "empty corpus must emit object, not array:\n{stdout}");
+    assert!(
+        v.is_object(),
+        "empty corpus must emit object, not array:\n{stdout}"
+    );
     assert_eq!(v["schemaVersion"], 1);
     assert!(v["parseErrors"].is_array());
     assert!(v["pages"].is_array());
@@ -409,15 +490,42 @@ fn mesh_scaffold_json_parse_errors_in_output() {
     // Category 1: NoFrontmatter.
     std::fs::write(wiki_dir.join("no_fm.md"), "# No frontmatter\n").unwrap();
     // Category 2: MissingTitle.
-    std::fs::write(wiki_dir.join("missing_title.md"), "---\nsummary: x\n---\n\nbody\n").unwrap();
+    std::fs::write(
+        wiki_dir.join("missing_title.md"),
+        "---\nsummary: x\n---\n\nbody\n",
+    )
+    .unwrap();
     // Category 3: EmptyTitle.
-    std::fs::write(wiki_dir.join("empty_title.md"), "---\ntitle:\n---\n\nbody\n").unwrap();
+    std::fs::write(
+        wiki_dir.join("empty_title.md"),
+        "---\ntitle:\n---\n\nbody\n",
+    )
+    .unwrap();
     // Clean file with no links (so all_inputs.is_empty() → but we want the parse_errors path).
-    std::fs::write(wiki_dir.join("clean.md"), "---\ntitle: Clean\n---\n\nNo links.\n").unwrap();
+    std::fs::write(
+        wiki_dir.join("clean.md"),
+        "---\ntitle: Clean\n---\n\nNo links.\n",
+    )
+    .unwrap();
 
     git(tmp.path(), &["init", "-q", "-b", "main"]);
-    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
-    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+    git(
+        tmp.path(),
+        &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
+    );
+    git(
+        tmp.path(),
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
@@ -425,22 +533,38 @@ fn mesh_scaffold_json_parse_errors_in_output() {
         .current_dir(&wiki_dir)
         .output()
         .expect("run wiki binary");
-    assert!(output.status.success(), "wiki scaffold --json failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "wiki scaffold --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
 
     let errors = v["parseErrors"].as_array().unwrap();
-    assert!(!errors.is_empty(), "parseErrors must be non-empty:\n{stdout}");
+    assert!(
+        !errors.is_empty(),
+        "parseErrors must be non-empty:\n{stdout}"
+    );
 
     // Check category tags are snake_case.
     let categories: Vec<&str> = errors
         .iter()
         .map(|e| e["category"].as_str().unwrap())
         .collect();
-    assert!(categories.contains(&"no_frontmatter"), "no_frontmatter category missing: {categories:?}");
-    assert!(categories.contains(&"missing_title"), "missing_title category missing: {categories:?}");
-    assert!(categories.contains(&"empty_title"), "empty_title category missing: {categories:?}");
+    assert!(
+        categories.contains(&"no_frontmatter"),
+        "no_frontmatter category missing: {categories:?}"
+    );
+    assert!(
+        categories.contains(&"missing_title"),
+        "missing_title category missing: {categories:?}"
+    );
+    assert!(
+        categories.contains(&"empty_title"),
+        "empty_title category missing: {categories:?}"
+    );
 
     // Each error must have path and message.
     for e in errors {
@@ -468,8 +592,23 @@ fn mesh_scaffold_json_top_of_file_link_empty_chain() {
     std::fs::write(src_dir.join("x.rs"), "// x\n").unwrap();
 
     git(tmp.path(), &["init", "-q", "-b", "main"]);
-    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
-    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+    git(
+        tmp.path(),
+        &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
+    );
+    git(
+        tmp.path(),
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
@@ -484,7 +623,10 @@ fn mesh_scaffold_json_top_of_file_link_empty_chain() {
 
     let mesh = &v["pages"][0]["meshes"][0];
     let chain = mesh["headingChain"].as_array().unwrap();
-    assert!(chain.is_empty(), "top-of-file link must have empty headingChain, got: {chain:?}");
+    assert!(
+        chain.is_empty(),
+        "top-of-file link must have empty headingChain, got: {chain:?}"
+    );
 }
 
 /// JSON mode — a file in `parseErrors[]` must NOT appear in `pages[]` (disjoint
@@ -516,8 +658,23 @@ fn mesh_scaffold_json_parse_error_page_not_in_pages() {
     std::fs::write(src_dir.join("y.rs"), "// y\n").unwrap();
 
     git(tmp.path(), &["init", "-q", "-b", "main"]);
-    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
-    git(tmp.path(), &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+    git(
+        tmp.path(),
+        &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
+    );
+    git(
+        tmp.path(),
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
@@ -537,20 +694,26 @@ fn mesh_scaffold_json_parse_error_page_not_in_pages() {
     // bad.md must be in parseErrors.
     let errors = v["parseErrors"].as_array().unwrap();
     assert!(
-        errors.iter().any(|e| e["path"].as_str().is_some_and(|p| p.contains("bad.md"))),
+        errors
+            .iter()
+            .any(|e| e["path"].as_str().is_some_and(|p| p.contains("bad.md"))),
         "bad.md must appear in parseErrors:\n{stdout}"
     );
 
     // bad.md must NOT be in pages.
     let pages = v["pages"].as_array().unwrap();
     assert!(
-        !pages.iter().any(|p| p["path"].as_str().is_some_and(|pp| pp.contains("bad.md"))),
+        !pages
+            .iter()
+            .any(|p| p["path"].as_str().is_some_and(|pp| pp.contains("bad.md"))),
         "bad.md must not appear in pages[]:\n{stdout}"
     );
 
     // clean.md must be in pages.
     assert!(
-        pages.iter().any(|p| p["path"].as_str().is_some_and(|pp| pp.contains("clean.md"))),
+        pages
+            .iter()
+            .any(|p| p["path"].as_str().is_some_and(|pp| pp.contains("clean.md"))),
         "clean.md must appear in pages[]:\n{stdout}"
     );
 }
@@ -615,7 +778,9 @@ fn mesh_scaffold_json_unreadable_file_in_parse_errors() {
     // parseErrors must contain the unreadable file with category "unreadable".
     let errors = v["parseErrors"].as_array().unwrap();
     let unreadable_entry = errors.iter().find(|e| {
-        e["path"].as_str().is_some_and(|p| p.contains("unreadable.md"))
+        e["path"]
+            .as_str()
+            .is_some_and(|p| p.contains("unreadable.md"))
     });
     assert!(
         unreadable_entry.is_some(),
@@ -630,7 +795,9 @@ fn mesh_scaffold_json_unreadable_file_in_parse_errors() {
     // The unreadable file must NOT appear in pages[].
     let pages = v["pages"].as_array().unwrap();
     let bad_page = pages.iter().find(|p| {
-        p["path"].as_str().is_some_and(|pp| pp.contains("unreadable.md"))
+        p["path"]
+            .as_str()
+            .is_some_and(|pp| pp.contains("unreadable.md"))
     });
     assert!(
         bad_page.is_none(),
@@ -675,14 +842,7 @@ fn mesh_scaffold_handles_float_outside_root() {
     git(root, &["init", "-q", "-b", "main"]);
     git(
         root,
-        &[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "add",
-            "-A",
-        ],
+        &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
     );
     git(
         root,
@@ -750,8 +910,23 @@ fn mesh_scaffold_namespaced_wiki_slug_prefix() {
     std::fs::write(root.join("src/leaf.rs"), "// leaf\n").unwrap();
 
     git(root, &["init", "-q", "-b", "main"]);
-    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
-    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+    git(
+        root,
+        &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
+    );
+    git(
+        root,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
@@ -789,7 +964,7 @@ fn mesh_scaffold_namespaced_wiki_slug_prefix() {
 /// frontmatter `namespace` field to choose the slug prefix:
 ///   * no `namespace` → `wiki/<noun>` (default namespace),
 ///   * `namespace: foo` → `wiki/foo/<noun>` (named peer),
-/// regardless of where on disk the file sits.
+///     regardless of where on disk the file sits.
 #[test]
 fn mesh_scaffold_float_uses_frontmatter_namespace() {
     let tmp = tempfile::tempdir().unwrap();
@@ -827,8 +1002,23 @@ fn mesh_scaffold_float_uses_frontmatter_namespace() {
     .unwrap();
 
     git(root, &["init", "-q", "-b", "main"]);
-    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
-    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+    git(
+        root,
+        &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
+    );
+    git(
+        root,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
@@ -890,8 +1080,23 @@ fn mesh_scaffold_renames_on_existing_mesh_collision() {
     .unwrap();
 
     git(root, &["init", "-q", "-b", "main"]);
-    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
-    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+    git(
+        root,
+        &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
+    );
+    git(
+        root,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
 
     // Pre-stage a mesh at the exact slug scaffold would otherwise pick.
     let stage = |args: &[&str]| {
@@ -996,8 +1201,23 @@ fn mesh_scaffold_extends_existing_section_mesh_with_new_code_links() {
     .unwrap();
 
     git(root, &["init", "-q", "-b", "main"]);
-    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
-    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+    git(
+        root,
+        &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
+    );
+    git(
+        root,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
 
     let stage = |args: &[&str]| {
         let status = Command::new("git")
@@ -1029,9 +1249,11 @@ fn mesh_scaffold_extends_existing_section_mesh_with_new_code_links() {
             .find(&format!("## {label}"))
             .expect("section label present in baseline");
         let tail = &baseline_stdout[block_idx..];
-        let anchor_start = tail.find("wiki/billing.md#L").expect("section anchor present");
+        let anchor_start = tail
+            .find("wiki/billing.md#L")
+            .expect("section anchor present");
         let anchor_tail = &tail[anchor_start..];
-        let anchor_end = anchor_tail.find(|c: char| c == ' ' || c == '\\' || c == '\n').unwrap();
+        let anchor_end = anchor_tail.find([' ', '\\', '\n']).unwrap();
         anchor_tail[..anchor_end].to_string()
     };
     let fully_anchor = extract("Fully covered");
@@ -1041,12 +1263,27 @@ fn mesh_scaffold_extends_existing_section_mesh_with_new_code_links() {
     //   - `billing/fully-covered` owns the section AND the code link → drop draft.
     //   - `billing/extend-target` owns the section but NOT the code link →
     //     emission becomes `git mesh add billing/extend-target src/extend.ts#L1-L1`.
-    stage(&["add", "billing/fully-covered", &fully_anchor, "src/fully.ts#L1-L1"]);
-    stage(&["why", "billing/fully-covered", "-m", "pre-existing fully covered"]);
+    stage(&[
+        "add",
+        "billing/fully-covered",
+        &fully_anchor,
+        "src/fully.ts#L1-L1",
+    ]);
+    stage(&[
+        "why",
+        "billing/fully-covered",
+        "-m",
+        "pre-existing fully covered",
+    ]);
     stage(&["commit", "billing/fully-covered"]);
 
     stage(&["add", "billing/extend-target", &extend_anchor]);
-    stage(&["why", "billing/extend-target", "-m", "pre-existing extension target"]);
+    stage(&[
+        "why",
+        "billing/extend-target",
+        "-m",
+        "pre-existing extension target",
+    ]);
     stage(&["commit", "billing/extend-target"]);
 
     let output = Command::new(bin)
@@ -1088,7 +1325,9 @@ fn mesh_scaffold_extends_existing_section_mesh_with_new_code_links() {
     // The section's wiki anchor itself is dropped from the extension emission
     // — git-mesh already carries it.
     assert!(
-        !stdout.contains(&format!("git mesh add billing/extend-target \\\n  {extend_anchor}")),
+        !stdout.contains(&format!(
+            "git mesh add billing/extend-target \\\n  {extend_anchor}"
+        )),
         "extension block must not re-add the section's wiki anchor; got:\n{stdout}"
     );
 

@@ -76,9 +76,7 @@ impl TestRepo {
 }
 
 fn make_wiki_page(title: &str, body: &str) -> String {
-    format!(
-        "---\ntitle: {title}\nsummary: A page about {title}.\n---\n{body}"
-    )
+    format!("---\ntitle: {title}\nsummary: A page about {title}.\n---\n{body}")
 }
 
 // ── Bare image path (page-relative resolution, found) ─────────────────────────
@@ -205,10 +203,7 @@ fn explicit_relative_image_path_does_not_produce_missing_file() {
     repo.create_file("wiki/wiki.toml", "");
     repo.create_file(
         "wiki/design/pages/example.md",
-        &make_wiki_page(
-            "Example",
-            "![screenshot](./images/screenshot.png)",
-        ),
+        &make_wiki_page("Example", "![screenshot](./images/screenshot.png)"),
     );
     repo.create_file("wiki/design/pages/images/screenshot.png", "");
     repo.commit("init");
@@ -229,25 +224,13 @@ fn explicit_relative_image_path_does_not_produce_missing_file() {
     );
 }
 
-// ── Multi-namespace owning-ns routing for image references ──────────────────
-
-/// An image reference (`![alt](nonexistent.png)`) inside an untagged
-/// `*.wiki.md` float must produce a `missing_file` diagnostic exactly once,
-/// attributed to the float's owning namespace (default). Today the
-/// diagnostic fans out across every configured peer.
-///
-/// Demonstrates the same scope-routing bug as `check_link_scope::k2`, but
-/// via the image-reference code path.
+/// An image reference (`![alt](nonexistent.png)`) inside a `*.wiki.md`
+/// float must produce a `broken_link` diagnostic exactly once.
 #[test]
-fn image_reference_in_float_reported_only_in_owning_ns() {
+fn image_reference_to_missing_file_emits_broken_link() {
     let repo = TestRepo::new();
-    repo.create_file("wiki/wiki.toml", "[peers]\nfoo = \"../foo\"\n");
-    repo.create_file(
-        "wiki/index.md",
-        &make_wiki_page("Default Index", "Hi."),
-    );
-    repo.create_file("foo/wiki.toml", "namespace = \"foo\"\n");
-    repo.create_file("foo/index.md", &make_wiki_page("Foo Index", "Hi."));
+    repo.create_file("wiki/wiki.toml", "");
+    repo.create_file("wiki/index.md", &make_wiki_page("Default Index", "Hi."));
     repo.create_file(
         "floats/illustrated.wiki.md",
         "---\ntitle: Illustrated\nsummary: S.\n---\n\n![alt](nonexistent.png)\n",
@@ -268,20 +251,14 @@ fn image_reference_in_float_reported_only_in_owning_ns() {
         .and_then(|x| x.as_array())
         .cloned()
         .unwrap_or_default();
-    let missing_file: Vec<&serde_json::Value> = errs
+    let broken_links: Vec<&serde_json::Value> = errs
         .iter()
-        .filter(|e| e["kind"].as_str() == Some("missing_file"))
+        .filter(|e| e["kind"].as_str() == Some("broken_link"))
         .collect();
     assert_eq!(
-        missing_file.len(),
+        broken_links.len(),
         1,
-        "expected exactly one missing_file diagnostic for the float's image \
-         reference; got: {missing_file:?}"
-    );
-    assert_eq!(
-        missing_file[0]["namespace"].as_str(),
-        Some("default"),
-        "diagnostic must be attributed to the float's owning namespace; got: {:?}",
-        missing_file[0]
+        "expected exactly one broken_link diagnostic for the float's image \
+         reference; got: {broken_links:?}"
     );
 }

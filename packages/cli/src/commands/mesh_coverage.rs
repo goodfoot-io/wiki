@@ -19,7 +19,13 @@ pub(crate) struct MeshIndex {
 }
 
 impl MeshIndex {
-    pub(crate) fn is_covered(&self, code_path: &Path, start: u32, end: u32, wiki_rel: &Path) -> bool {
+    pub(crate) fn is_covered(
+        &self,
+        code_path: &Path,
+        start: u32,
+        end: u32,
+        wiki_rel: &Path,
+    ) -> bool {
         // Check exact-range anchor and the whole-file sentinel (0-0).
         let keys: &[(PathBuf, u32, u32)] = &[
             (code_path.to_path_buf(), start, end),
@@ -39,12 +45,7 @@ impl MeshIndex {
     /// `(path, start, end)` triple, if one exists. When multiple meshes
     /// anchor the same triple the lexicographically first name wins so the
     /// choice is deterministic.
-    pub(crate) fn owning_mesh_for_exact(
-        &self,
-        path: &Path,
-        start: u32,
-        end: u32,
-    ) -> Option<&str> {
+    pub(crate) fn owning_mesh_for_exact(&self, path: &Path, start: u32, end: u32) -> Option<&str> {
         let key = (path.to_path_buf(), start, end);
         let names = self.by_anchor.get(&key)?;
         names.iter().min().map(String::as_str)
@@ -59,10 +60,8 @@ impl MeshIndex {
         start: u32,
         end: u32,
     ) -> bool {
-        let candidates: &[(PathBuf, u32, u32)] = &[
-            (path.to_path_buf(), start, end),
-            (path.to_path_buf(), 0, 0),
-        ];
+        let candidates: &[(PathBuf, u32, u32)] =
+            &[(path.to_path_buf(), start, end), (path.to_path_buf(), 0, 0)];
         candidates
             .iter()
             .filter_map(|k| self.by_anchor.get(k))
@@ -313,7 +312,10 @@ fn parse_mesh_ls_output(stdout: &str) -> Result<MeshIndex, miette::Error> {
         }
     }
 
-    Ok(MeshIndex { by_anchor, paths_by_mesh })
+    Ok(MeshIndex {
+        by_anchor,
+        paths_by_mesh,
+    })
 }
 
 /// Parse a `\d+-\d+` range token into `(start, end)`. Returns `None` on failure.

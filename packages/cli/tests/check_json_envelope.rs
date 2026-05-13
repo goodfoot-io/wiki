@@ -24,7 +24,12 @@ fn check_json_output_is_envelope_object_with_errors_key() {
             .env("GIT_COMMITTER_EMAIL", "test@test.com")
             .output()
             .expect("git");
-        assert!(out.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
     };
     git(&["init"]);
     git(&["checkout", "-b", "main"]);

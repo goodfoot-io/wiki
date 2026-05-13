@@ -655,9 +655,9 @@ pub fn has_head_entry(repo: &Path, path_rel: &str) -> Result<bool> {
 pub fn index_revision_signal(repo: &Path) -> Result<String> {
     let gix_repo = open_repo(repo)?;
     let index = open_persisted_index(&gix_repo)?;
-    let checksum = index
-        .checksum()
-        .ok_or_else(|| miette!("git index has no checksum — cannot derive cache-revision signal"))?;
+    let checksum = index.checksum().ok_or_else(|| {
+        miette!("git index has no checksum — cannot derive cache-revision signal")
+    })?;
     Ok(checksum.to_hex().to_string())
 }
 
@@ -1044,8 +1044,7 @@ mod tests {
         let repo = TestRepo::new();
         repo.create_file("real.md", "real content\n");
         // Create a symlink `link.md -> real.md` and stage both.
-        std::os::unix::fs::symlink("real.md", repo.path().join("link.md"))
-            .expect("create symlink");
+        std::os::unix::fs::symlink("real.md", repo.path().join("link.md")).expect("create symlink");
         repo.git(&["add", "real.md", "link.md"]);
 
         let content = read_index_blob(repo.path(), "link.md")
@@ -1059,8 +1058,7 @@ mod tests {
     fn read_head_blob_follows_symlinks() {
         let repo = TestRepo::new();
         repo.create_file("real.md", "real content\n");
-        std::os::unix::fs::symlink("real.md", repo.path().join("link.md"))
-            .expect("create symlink");
+        std::os::unix::fs::symlink("real.md", repo.path().join("link.md")).expect("create symlink");
         repo.commit("with symlink");
 
         let content = read_head_blob(repo.path(), "link.md")
@@ -1074,8 +1072,7 @@ mod tests {
     fn head_tracked_paths_includes_symlink() {
         let repo = TestRepo::new();
         repo.create_file("real.md", "real\n");
-        std::os::unix::fs::symlink("real.md", repo.path().join("link.md"))
-            .expect("create symlink");
+        std::os::unix::fs::symlink("real.md", repo.path().join("link.md")).expect("create symlink");
         repo.commit("with symlink");
 
         let paths = head_tracked_paths(repo.path()).expect("head_tracked_paths");

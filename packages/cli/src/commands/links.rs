@@ -7,7 +7,13 @@ use crate::index::{DocSource, WikiIndex};
 
 use super::summary::{format_search_result, render_not_found};
 
-pub fn run(target: &str, json: bool, wiki_root: &Path, repo_root: &Path, source: DocSource) -> Result<i32> {
+pub fn run(
+    target: &str,
+    json: bool,
+    wiki_root: &Path,
+    repo_root: &Path,
+    source: DocSource,
+) -> Result<i32> {
     let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
     let matches = index.links(target)?;
 
@@ -112,7 +118,14 @@ mod tests {
             "---\ntitle: Source Page\nsummary: Source summary.\n---\nSee [[Target Page]] for context.\n",
         );
 
-        let code = run("Target Page", false, &wiki_root, repo.path(), crate::index::DocSource::WorkingTree).expect("run");
+        let code = run(
+            "Target Page",
+            false,
+            &wiki_root,
+            repo.path(),
+            crate::index::DocSource::WorkingTree,
+        )
+        .expect("run");
         assert_eq!(code, 0);
 
         let results = WikiIndex::prepare(&wiki_root, repo.path())
@@ -135,7 +148,14 @@ mod tests {
             "---\ntitle: Foo Bar\nsummary: Describes the foo bar module.\n---\nSee [bar](/packages/foo/bar.ts) for details.\n",
         );
 
-        let code = run("packages/foo/bar.ts", false, &wiki_root, repo.path(), crate::index::DocSource::WorkingTree).expect("run");
+        let code = run(
+            "packages/foo/bar.ts",
+            false,
+            &wiki_root,
+            repo.path(),
+            crate::index::DocSource::WorkingTree,
+        )
+        .expect("run");
         assert_eq!(code, 0);
 
         let results = WikiIndex::prepare(&wiki_root, repo.path())
@@ -184,7 +204,14 @@ mod tests {
             "---\ntitle: Page\nsummary: A page.\n---\nNo references.\n",
         );
 
-        let code = run("packages/nonexistent/file.ts", false, &wiki_root, repo.path(), crate::index::DocSource::WorkingTree).expect("run");
+        let code = run(
+            "packages/nonexistent/file.ts",
+            false,
+            &wiki_root,
+            repo.path(),
+            crate::index::DocSource::WorkingTree,
+        )
+        .expect("run");
         assert_eq!(code, 0);
     }
 
@@ -198,7 +225,14 @@ mod tests {
             "---\ntitle: Foo Bar\nsummary: Summary.\n---\nSee [bar](packages/foo/bar.ts).\n",
         );
 
-        let code = run("./packages/foo/bar.ts", false, &wiki_root, repo.path(), crate::index::DocSource::WorkingTree).expect("run");
+        let code = run(
+            "./packages/foo/bar.ts",
+            false,
+            &wiki_root,
+            repo.path(),
+            crate::index::DocSource::WorkingTree,
+        )
+        .expect("run");
         assert_eq!(code, 0);
     }
 }

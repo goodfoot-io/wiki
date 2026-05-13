@@ -321,7 +321,12 @@ pub fn run(
         return Ok(0);
     }
 
-    let rendered = render::render_markdown(&consolidated, &page_titles, &parse_errors, &parse_error_paths);
+    let rendered = render::render_markdown(
+        &consolidated,
+        &page_titles,
+        &parse_errors,
+        &parse_error_paths,
+    );
     print!("{rendered}");
     Ok(0)
 }
@@ -592,10 +597,7 @@ fn build_meshes(
         // be in the map (every discovered file is registered above), but fall
         // back to a default-namespace empty-subdir context so a missing entry
         // can never panic — the slug still gets the `wiki/` prefix.
-        let page_ns = page_namespaces
-            .get(&page_rel)
-            .cloned()
-            .unwrap_or_default();
+        let page_ns = page_namespaces.get(&page_rel).cloned().unwrap_or_default();
         let drafts = draft::build(&page_rel, &groups, repo_root, &page_ns);
         let start = all_drafts.len();
         all_drafts.extend(drafts);
@@ -790,7 +792,11 @@ pub(crate) fn resolve_page_namespace(
 
 /// Classify the frontmatter of a file, returning both the `FileMeta` and an
 /// optional `ParseErrorKind` if the file's `title` could not be extracted.
-fn classify_frontmatter(path: &Path, repo_root: &Path, source: DocSource) -> (FileMeta, Option<ParseErrorKind>) {
+fn classify_frontmatter(
+    path: &Path,
+    repo_root: &Path,
+    source: DocSource,
+) -> (FileMeta, Option<ParseErrorKind>) {
     let text = match read_via_source(path, repo_root, source) {
         Ok(s) => s,
         Err(e) => {
@@ -1029,7 +1035,8 @@ mod tests {
     fn classify_unreadable_non_utf8() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), [0xFF_u8, 0xFE, 0x00]).unwrap();
-        let (_, kind) = classify_frontmatter(tmp.path(), &std::env::temp_dir(), DocSource::WorkingTree);
+        let (_, kind) =
+            classify_frontmatter(tmp.path(), &std::env::temp_dir(), DocSource::WorkingTree);
         assert!(
             matches!(kind, Some(ParseErrorKind::Unreadable(_))),
             "expected Unreadable, got {kind:?}"
@@ -1102,9 +1109,8 @@ mod tests {
         )];
         let titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
-        let existing: std::collections::HashSet<String> = ["wiki/charge-handler".to_string()]
-            .into_iter()
-            .collect();
+        let existing: std::collections::HashSet<String> =
+            ["wiki/charge-handler".to_string()].into_iter().collect();
         let exists = |slug: &str| existing.contains(slug);
         resolve_slug_collisions(&mut drafts, &titles, &exists);
         assert_eq!(drafts[0].slug, "wiki/checkout/charge-handler");
@@ -1144,7 +1150,10 @@ mod tests {
         )];
         let mut titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
-        titles.insert("wiki/billing.md".to_string(), Some("Billing Service".to_string()));
+        titles.insert(
+            "wiki/billing.md".to_string(),
+            Some("Billing Service".to_string()),
+        );
         let existing: std::collections::HashSet<String> = [
             "wiki/charge-handler".to_string(),
             "wiki/checkout/charge-handler".to_string(),
@@ -1169,9 +1178,8 @@ mod tests {
         )];
         let titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
-        let existing: std::collections::HashSet<String> = ["wiki/charge-handler".to_string()]
-            .into_iter()
-            .collect();
+        let existing: std::collections::HashSet<String> =
+            ["wiki/charge-handler".to_string()].into_iter().collect();
         let exists = |slug: &str| existing.contains(slug);
         resolve_slug_collisions(&mut drafts, &titles, &exists);
         // No chain, no title — only the base slug is a unique candidate,

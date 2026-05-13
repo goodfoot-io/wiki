@@ -36,7 +36,10 @@ pub fn validate_namespace_value(ns: &str) -> Result<()> {
             "the literal namespace 'default' is reserved for the anonymous default — omit the `namespace` field instead"
         ));
     }
-    if !ns.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if !ns
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         return Err(miette!(
             "namespace `{ns}` is invalid: only ASCII letters, digits, `_`, and `-` are allowed"
         ));
@@ -102,9 +105,7 @@ impl WikiConfig {
                 ));
             }
 
-            let key = namespace
-                .clone()
-                .unwrap_or_else(|| DEFAULT_KEY.to_string());
+            let key = namespace.clone().unwrap_or_else(|| DEFAULT_KEY.to_string());
 
             if let Some(prev) = wikis.get(&key) {
                 let label = if namespace.is_none() {
@@ -166,11 +167,7 @@ impl WikiConfig {
     }
 
     fn known_list(&self) -> String {
-        self.wikis
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ")
+        self.wikis.keys().cloned().collect::<Vec<_>>().join(", ")
     }
 }
 
@@ -290,7 +287,10 @@ mod tests {
         write(&repo.join("beta/wiki.toml"), "namespace = \"shared\"\n");
         let err = WikiConfig::load(repo, repo).unwrap_err();
         let s = err.to_string();
-        assert!(s.contains("namespace `shared`") || s.contains("duplicate"), "got: {s}");
+        assert!(
+            s.contains("namespace `shared`") || s.contains("duplicate"),
+            "got: {s}"
+        );
     }
 
     #[test]
@@ -355,7 +355,10 @@ mod tests {
         write(&repo.join("wiki/wiki.toml"), "namespace = 42\n");
         let err = WikiConfig::load(repo, repo).unwrap_err();
         let s = err.to_string();
-        assert!(s.contains("non-string") || s.contains("must be a string"), "got: {s}");
+        assert!(
+            s.contains("non-string") || s.contains("must be a string"),
+            "got: {s}"
+        );
     }
 
     #[test]
@@ -365,7 +368,10 @@ mod tests {
         write(&repo.join("wiki/wiki.toml"), "namespace = [\"foo\"]\n");
         let err = WikiConfig::load(repo, repo).unwrap_err();
         let s = err.to_string();
-        assert!(s.contains("non-string") || s.contains("must be a string"), "got: {s}");
+        assert!(
+            s.contains("non-string") || s.contains("must be a string"),
+            "got: {s}"
+        );
     }
 
     #[test]
@@ -375,17 +381,17 @@ mod tests {
         write(&repo.join("wiki/wiki.toml"), "namespace = \"default\"\n");
         let err = WikiConfig::load(repo, repo).unwrap_err();
         let s = err.to_string();
-        assert!(s.contains("reserved") || s.contains("'default'"), "got: {s}");
+        assert!(
+            s.contains("reserved") || s.contains("'default'"),
+            "got: {s}"
+        );
     }
 
     #[test]
     fn load_ignores_obsolete_peers_table() {
         let dir = TempDir::new().unwrap();
         let repo = dir.path();
-        write(
-            &repo.join("wiki/wiki.toml"),
-            "[peers]\nfoo = \"../foo\"\n",
-        );
+        write(&repo.join("wiki/wiki.toml"), "[peers]\nfoo = \"../foo\"\n");
         // Note: no foo/wiki.toml created — peers used to require this.
         let cfg = WikiConfig::load(repo, repo).expect("load ignores peers");
         assert_eq!(cfg.wikis.len(), 1);

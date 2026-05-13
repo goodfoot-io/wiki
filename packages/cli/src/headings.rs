@@ -285,11 +285,20 @@ mod tests {
         // must resolve, not just the slug form.
         let content = "### Code layout: six bounded-context packages\n";
         let headings = extract_headings(content);
-        assert!(resolve_heading("Code layout: six bounded-context packages", &headings));
-        assert!(resolve_heading("code-layout-six-bounded-context-packages", &headings));
+        assert!(resolve_heading(
+            "Code layout: six bounded-context packages",
+            &headings
+        ));
+        assert!(resolve_heading(
+            "code-layout-six-bounded-context-packages",
+            &headings
+        ));
         // The colon-retained form also resolves: the colon is stripped during
         // slugification, leaving the same `code-layout-six-...` slug.
-        assert!(resolve_heading("code-layout:-six-bounded-context-packages", &headings));
+        assert!(resolve_heading(
+            "code-layout:-six-bounded-context-packages",
+            &headings
+        ));
     }
 
     #[test]

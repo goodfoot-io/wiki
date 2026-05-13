@@ -313,7 +313,10 @@ mod tests {
     fn slug_strips_repeated_namespace_segment() {
         // A page at mesh/mesh/foo.md in the mesh-ns wiki at mesh/ would
         // produce subdir "mesh" — drop it so the namespace is not repeated.
-        assert_eq!(build_slug(&ns(Some("mesh"), "mesh"), "foo"), "wiki/mesh/foo");
+        assert_eq!(
+            build_slug(&ns(Some("mesh"), "mesh"), "foo"),
+            "wiki/mesh/foo"
+        );
     }
 
     #[test]
@@ -424,7 +427,10 @@ mod tests {
             ]
         );
         assert_eq!(drafts[0].structured_anchors.len(), 2);
-        assert_eq!(drafts[0].structured_anchors[0].path, "wiki/perf/indexing.md");
+        assert_eq!(
+            drafts[0].structured_anchors[0].path,
+            "wiki/perf/indexing.md"
+        );
         assert_eq!(drafts[0].structured_anchors[0].start_line, 10);
         assert_eq!(drafts[0].structured_anchors[0].end_line, 20);
         assert_eq!(drafts[0].structured_anchors[1].path, "src/index.rs");

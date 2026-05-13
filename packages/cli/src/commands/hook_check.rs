@@ -55,11 +55,7 @@ pub fn run(input: &str, _wiki_root: &Path, repo_root: &Path, source: DocSource) 
             match crate::frontmatter::parse_namespace(&content) {
                 // Tagged float: route to the declared namespace, falling back
                 // to the enclosing wiki and then to default.
-                Some(ns) => cfg
-                    .wikis
-                    .get(&ns)
-                    .or(enclosing)
-                    .or_else(|| cfg.default()),
+                Some(ns) => cfg.wikis.get(&ns).or(enclosing).or_else(|| cfg.default()),
                 // Untagged float: prefer the enclosing wiki so a float nested
                 // under a peer root is owned by that peer; otherwise default.
                 None => enclosing.or_else(|| cfg.default()),

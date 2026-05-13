@@ -33,9 +33,8 @@ pub fn run(cwd: &Path, namespace: Option<&str>) -> Result<i32> {
         None => String::new(),
     };
 
-    std::fs::write(&toml_path, &content).map_err(|e| {
-        miette!("failed to write {}: {e}", toml_path.display())
-    })?;
+    std::fs::write(&toml_path, &content)
+        .map_err(|e| miette!("failed to write {}: {e}", toml_path.display()))?;
 
     println!("created {}", toml_path.display());
     Ok(0)

@@ -383,9 +383,7 @@ fn run(
     // repo), and `init` (creates the wiki.toml — can't load what doesn't exist).
     let needs_config = !matches!(
         command,
-        Some(Commands::Install { .. })
-            | Some(Commands::Hook)
-            | Some(Commands::Init { .. })
+        Some(Commands::Install { .. }) | Some(Commands::Hook) | Some(Commands::Init { .. })
     );
 
     let config = if needs_config {
@@ -402,11 +400,9 @@ fn run(
 
     // Scaffold always operates across all wikis, regardless of -n.
     if let Some(Commands::Scaffold { globs }) = &command {
-        let cfg = config.as_ref().ok_or_else(|| {
-            miette::miette!(
-                "wiki scaffold requires a wiki.toml (no wiki found)"
-            )
-        })?;
+        let cfg = config
+            .as_ref()
+            .ok_or_else(|| miette::miette!("wiki scaffold requires a wiki.toml (no wiki found)"))?;
         let wiki_infos: Vec<wiki_config::WikiInfo> = cfg.all().cloned().collect();
         let wiki_roots: Vec<PathBuf> = wiki_infos.iter().map(|w| w.root.clone()).collect();
         let command_name = command_name(command.as_ref(), effective_query.as_deref());
@@ -418,7 +414,14 @@ fn run(
         perf::init(perf_root, command_name, json);
         let _command_span = perf::span_for_command(command_name);
         let started = Instant::now();
-        let result = commands::mesh::scaffold::run(globs, json, &wiki_roots, &wiki_infos, &repo_root, source);
+        let result = commands::mesh::scaffold::run(
+            globs,
+            json,
+            &wiki_roots,
+            &wiki_infos,
+            &repo_root,
+            source,
+        );
         match &result {
             Ok(code) => perf::finish(
                 command_name,
@@ -458,10 +461,25 @@ fn run(
     let started = Instant::now();
 
     let result = match command {
-        Some(Commands::Check { globs, no_exit_code, no_mesh, namespace: _ }) => {
-            commands::check::run(&globs, json, wiki_root, &repo_root, config.as_ref(), no_exit_code, no_mesh, source)
-        }
-        Some(Commands::Links { target, namespace: _ }) => {
+        Some(Commands::Check {
+            globs,
+            no_exit_code,
+            no_mesh,
+            namespace: _,
+        }) => commands::check::run(
+            &globs,
+            json,
+            wiki_root,
+            &repo_root,
+            config.as_ref(),
+            no_exit_code,
+            no_mesh,
+            source,
+        ),
+        Some(Commands::Links {
+            target,
+            namespace: _,
+        }) => {
             let inputs = resolve_inputs(target, read_stdin_lines)?;
             run_for_each(
                 inputs,
@@ -477,7 +495,10 @@ fn run(
         Some(Commands::List { tag, namespace: _ }) => {
             commands::list::run(&[], tag.as_deref(), json, wiki_root, &repo_root, source)
         }
-        Some(Commands::Summary { title, namespace: _ }) => {
+        Some(Commands::Summary {
+            title,
+            namespace: _,
+        }) => {
             let inputs = resolve_inputs(title, read_stdin_lines)?;
             run_for_each(
                 inputs,
@@ -485,11 +506,16 @@ fn run(
                 false,
             )
         }
-        Some(Commands::Refs { title, namespace: _ }) => {
+        Some(Commands::Refs {
+            title,
+            namespace: _,
+        }) => {
             let inputs = resolve_inputs(title, read_stdin_lines)?;
             run_for_each(
                 inputs,
-                |input| commands::refs::run(input, json, wiki_root, &repo_root, config.as_ref(), source),
+                |input| {
+                    commands::refs::run(input, json, wiki_root, &repo_root, config.as_ref(), source)
+                },
                 false,
             )
         }
@@ -508,9 +534,7 @@ fn run(
             codex_home.as_deref(),
             &git_ref,
         ),
-        Some(Commands::Init { namespace }) => {
-            commands::init::run(&cwd, namespace.as_deref())
-        }
+        Some(Commands::Init { namespace }) => commands::init::run(&cwd, namespace.as_deref()),
         // Scaffold is handled before the single-wiki resolution block above,
         // so this arm is unreachable.
         Some(Commands::Scaffold { .. }) => {

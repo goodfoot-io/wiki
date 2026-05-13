@@ -45,9 +45,8 @@ pub enum FrontmatterError {
 /// Command names that cannot be used as page titles or aliases.
 ///
 /// These are reserved to prevent ambiguity with `wiki <title>` default dispatch.
-pub const RESERVED_TITLES: &[&str] = &[
-    "check", "pin", "stale", "links", "list", "summary", "print",
-];
+pub const RESERVED_TITLES: &[&str] =
+    &["check", "pin", "stale", "links", "list", "summary", "print"];
 
 // ── Raw deserialization helper ────────────────────────────────────────────────
 
@@ -519,7 +518,7 @@ mod tests {
                 tags: vec![],
                 keywords: vec![],
                 summary: "Summary.".into(),
-            namespace: None,
+                namespace: None,
             },
         )];
         let (idx, collisions) = build_index(&pages);
@@ -539,7 +538,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
-                namespace: None,
+                    namespace: None,
                 },
             ),
             (
@@ -550,7 +549,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
-                namespace: None,
+                    namespace: None,
                 },
             ),
         ];
@@ -573,7 +572,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
-                namespace: None,
+                    namespace: None,
                 },
             ),
             (
@@ -584,7 +583,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
-                namespace: None,
+                    namespace: None,
                 },
             ),
         ];
@@ -606,7 +605,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
-                namespace: None,
+                    namespace: None,
                 },
             ),
             (
@@ -617,7 +616,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
-                namespace: None,
+                    namespace: None,
                 },
             ),
         ];
@@ -668,7 +667,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
-                namespace: None,
+                    namespace: None,
                 },
             ),
             (
@@ -679,7 +678,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
-                namespace: None,
+                    namespace: None,
                 },
             ),
         ];

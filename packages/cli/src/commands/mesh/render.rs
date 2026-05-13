@@ -101,7 +101,11 @@ pub(crate) fn render_empty_markdown(parse_errors: &[ParseError]) -> String {
 /// `has_scaffold_following` controls the header phrasing:
 /// - `true`  → advisory ("Some wiki pages could not be parsed and were skipped:")
 /// - `false` → hard-stop ("Unable to generate scaffolding due to parsing errors:")
-fn render_parse_errors(out: &mut String, parse_errors: &[ParseError], has_scaffold_following: bool) {
+fn render_parse_errors(
+    out: &mut String,
+    parse_errors: &[ParseError],
+    has_scaffold_following: bool,
+) {
     use std::fmt::Write as _;
     let header = if has_scaffold_following {
         "Some wiki pages could not be parsed and were skipped:"
@@ -148,9 +152,9 @@ fn render_mesh_block(out: &mut String, m: &MeshDraft) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::draft::MeshDraft;
     use super::super::scaffold::ParseErrorKind;
+    use super::*;
 
     fn make_draft(
         page_path: &str,
@@ -199,8 +203,14 @@ mod tests {
         titles.insert("wiki/page2.md".to_string(), Some("Page 2".to_string()));
         let out = render_markdown(&[d1, d2], &titles, &[], &HashSet::new());
 
-        assert!(out.contains("\n---\n"), "interior separator missing:\n{out}");
-        assert!(!out.trim_end().ends_with("---"), "terminal --- must be absent:\n{out}");
+        assert!(
+            out.contains("\n---\n"),
+            "interior separator missing:\n{out}"
+        );
+        assert!(
+            !out.trim_end().ends_with("---"),
+            "terminal --- must be absent:\n{out}"
+        );
     }
 
     #[test]
@@ -213,7 +223,10 @@ mod tests {
         );
         let titles = HashMap::new();
         let out = render_markdown(&[d], &titles, &[], &HashSet::new());
-        assert!(!out.contains("\n---\n"), "no separator for single page:\n{out}");
+        assert!(
+            !out.contains("\n---\n"),
+            "no separator for single page:\n{out}"
+        );
     }
 
     #[test]
@@ -240,18 +253,21 @@ mod tests {
             "wiki/page.md",
             "wiki/foo",
             vec!["Section"],
-            vec![
-                "wiki/page.md#L10-L20",
-                "src/a.rs#L1-L5",
-                "src/b.rs#L1-L5",
-            ],
+            vec!["wiki/page.md#L10-L20", "src/a.rs#L1-L5", "src/b.rs#L1-L5"],
         );
         let titles = HashMap::new();
         let out = render_markdown(&[d], &titles, &[], &HashSet::new());
         let add_idx = out.find("git mesh add wiki/foo").expect("add line present");
-        let page_idx = out[add_idx..].find("wiki/page.md#L10-L20").expect("page anchor present");
-        let target_idx = out[add_idx..].find("src/a.rs#L1-L5").expect("target present");
-        assert!(page_idx < target_idx, "page anchor must precede targets:\n{out}");
+        let page_idx = out[add_idx..]
+            .find("wiki/page.md#L10-L20")
+            .expect("page anchor present");
+        let target_idx = out[add_idx..]
+            .find("src/a.rs#L1-L5")
+            .expect("target present");
+        assert!(
+            page_idx < target_idx,
+            "page anchor must precede targets:\n{out}"
+        );
     }
 
     // ── parse-error block integration ─────────────────────────────────────────
@@ -293,7 +309,10 @@ mod tests {
         assert!(out.starts_with("Unable to generate scaffolding due to parsing errors:\n"));
         assert!(out.contains("wiki/bad.md (frontmatter present but `title:` is missing)"));
         assert!(!out.contains("\n---\n"), "separator must be absent");
-        assert!(!out.contains("# wiki scaffold"), "success header must be absent");
+        assert!(
+            !out.contains("# wiki scaffold"),
+            "success header must be absent"
+        );
     }
 
     #[test]
@@ -382,7 +401,10 @@ mod tests {
         parse_error_paths.insert("wiki/bad.md".to_string());
         let titles = HashMap::new();
         let out = render_markdown(&[bad, good], &titles, &errors, &parse_error_paths);
-        assert!(!out.contains("bad-slug"), "parse-error page must not appear in pages:\n{out}");
+        assert!(
+            !out.contains("bad-slug"),
+            "parse-error page must not appear in pages:\n{out}"
+        );
         assert!(out.contains("good-slug"), "good page must appear:\n{out}");
     }
 }

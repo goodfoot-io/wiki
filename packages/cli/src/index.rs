@@ -78,8 +78,10 @@ impl DocSource {
                 match std::fs::read_to_string(&abs) {
                     Ok(s) => Ok(Some(s)),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                    Err(e) => Err(miette::miette!(e)
-                        .wrap_err(format!("failed to read {}", abs.display()))),
+                    Err(e) => {
+                        Err(miette::miette!(e)
+                            .wrap_err(format!("failed to read {}", abs.display())))
+                    }
                 }
             }
             DocSource::Index => read_index_blob(repo_root, path_rel),
@@ -137,6 +139,7 @@ pub struct ResolvedPage {
     pub document_id: i64,
 }
 
+#[allow(dead_code)] // Removed in sub-scope 1D (index.rs refactor).
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ResolvedPageFull {
     pub title: String,
@@ -237,6 +240,7 @@ pub struct WikiIndex {
     wiki_root: PathBuf,
     repo_root: PathBuf,
     /// Namespace of the current wiki this index represents.
+    #[allow(dead_code)] // Removed in sub-scope 1D (index.rs refactor).
     namespace: Option<String>,
     /// Document source selected for this index session.
     #[allow(dead_code)]
@@ -247,6 +251,7 @@ pub struct WikiIndex {
 }
 
 impl WikiIndex {
+    #[allow(dead_code)] // Removed in sub-scope 1D.
     pub fn prepare(wiki_root: &Path, repo_root: &Path) -> Result<Self> {
         // Auto-detect namespace from wiki.toml so that peer wikis (reached via
         // `-n <alias>`) filter *.wiki.md files correctly even when callers use
@@ -258,7 +263,11 @@ impl WikiIndex {
     /// Prepare the index for the given source, auto-detecting the wiki namespace
     /// from `wiki.toml`.  This is the production entry point used by commands
     /// that receive a user-selected `DocSource` from the CLI.
-    pub fn prepare_for_source(wiki_root: &Path, repo_root: &Path, source: DocSource) -> Result<Self> {
+    pub fn prepare_for_source(
+        wiki_root: &Path,
+        repo_root: &Path,
+        source: DocSource,
+    ) -> Result<Self> {
         // Read `wiki.toml` from the same source as the rest of the discovery
         // pipeline so the namespace filter operates on a self-consistent
         // snapshot.  When the file is absent in the chosen source (e.g., a
@@ -306,6 +315,7 @@ impl WikiIndex {
             .block_on(resolve_page_async(&self.conn, &self.repo_root, input))
     }
 
+    #[allow(dead_code)] // Removed in sub-scope 1D.
     pub fn resolve_page_full(&self, input: &str) -> Result<Option<ResolvedPageFull>> {
         self.runtime
             .block_on(resolve_page_full_async(&self.conn, &self.repo_root, input))
@@ -348,6 +358,7 @@ impl WikiIndex {
 
     /// Load lookup keys (titles + aliases, lowercased) for a page if it
     /// resolves in this namespace. Returns `Ok(None)` if not found.
+    #[allow(dead_code)] // Removed in sub-scope 1D.
     pub fn lookup_keys_for(&self, input: &str) -> Result<Option<Vec<String>>> {
         self.runtime.block_on(async {
             if let Some(page) = resolve_page_async(&self.conn, &self.repo_root, input).await? {
@@ -362,6 +373,7 @@ impl WikiIndex {
     /// Run the inbound-links query against this namespace's index using
     /// caller-supplied page target keys (e.g. resolved in another namespace)
     /// and an optional file target. Bypasses the local resolve gate.
+    #[allow(dead_code)] // Removed in sub-scope 1D.
     pub fn links_with_keys(
         &self,
         page_target_keys: &[String],
@@ -376,6 +388,7 @@ impl WikiIndex {
         ))
     }
 
+    #[allow(dead_code)] // Removed in sub-scope 1D.
     pub fn extract_pages(&self, titles: &[String]) -> Result<(Vec<ResolvedPage>, Vec<String>)> {
         self.runtime
             .block_on(extract_pages_async(&self.conn, titles))
@@ -387,10 +400,12 @@ impl WikiIndex {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)] // Removed in sub-scope 1D.
     pub fn repo_root(&self) -> &Path {
         &self.repo_root
     }
 
+    #[allow(dead_code)] // Removed in sub-scope 1D.
     pub fn namespace(&self) -> Option<&str> {
         self.namespace.as_deref()
     }
@@ -681,9 +696,9 @@ async fn recreate_schema(conn: &Connection) -> Result<()> {
         "
     );
     conn.execute_batch(&schema)
-    .await
-    .into_diagnostic()
-    .wrap_err("failed to create wiki index schema")?;
+        .await
+        .into_diagnostic()
+        .wrap_err("failed to create wiki index schema")?;
 
     set_state(conn, "schema_version", SCHEMA_VERSION).await?;
     Ok(())
@@ -751,7 +766,15 @@ async fn sync_core_index_inner(
     let change_set = perf::scope_async_result(
         "index.compute_change_set",
         json!({}),
-        compute_change_set(conn, wiki_root, repo_root, namespace, &existing_by_path, changed_paths, source),
+        compute_change_set(
+            conn,
+            wiki_root,
+            repo_root,
+            namespace,
+            &existing_by_path,
+            changed_paths,
+            source,
+        ),
     )
     .await?;
 
@@ -1118,7 +1141,11 @@ async fn sync_core_index_inner(
             .into_diagnostic()
             .wrap_err("failed to optimize FTS index")?;
     }
-    write_discovery_state(conn, &current_discovery_state(wiki_root, repo_root, source)?).await?;
+    write_discovery_state(
+        conn,
+        &current_discovery_state(wiki_root, repo_root, source)?,
+    )
+    .await?;
 
     Ok(())
 }
@@ -1363,7 +1390,9 @@ fn source_full_rescan(
     existing_by_path: &HashMap<String, ExistingDocument>,
 ) -> Result<ChangeSet> {
     match source {
-        DocSource::WorkingTree => full_rescan_change_set(wiki_root, repo_root, namespace, existing_by_path),
+        DocSource::WorkingTree => {
+            full_rescan_change_set(wiki_root, repo_root, namespace, existing_by_path)
+        }
         DocSource::Index | DocSource::Head => {
             // List all paths from the source, filter to wiki paths, convert to
             // absolute PathBufs so the rest of sync_core_index_inner can use them.
@@ -1416,7 +1445,11 @@ fn full_rescan_change_set(
     })
 }
 
-fn current_discovery_state(wiki_root: &Path, repo_root: &Path, source: DocSource) -> Result<DiscoveryState> {
+fn current_discovery_state(
+    wiki_root: &Path,
+    repo_root: &Path,
+    source: DocSource,
+) -> Result<DiscoveryState> {
     // The `head_sha` field doubles as a "source revision" signal.  Its meaning
     // depends on the source:
     //   WorkingTree — the HEAD commit SHA (existing behaviour)
@@ -1613,6 +1646,7 @@ async fn resolve_page_async(
     .await
 }
 
+#[allow(dead_code)] // Removed in sub-scope 1D.
 async fn resolve_page_full_async(
     conn: &Connection,
     repo_root: &Path,
@@ -2038,12 +2072,11 @@ async fn links_async(
     repo_root: &Path,
     input: &str,
 ) -> Result<Vec<SearchResult>> {
-    let page_target_keys =
-        if let Some(page) = resolve_page_async(conn, repo_root, input).await? {
-            load_lookup_keys(conn, page.document_id).await?
-        } else {
-            Vec::new()
-        };
+    let page_target_keys = if let Some(page) = resolve_page_async(conn, repo_root, input).await? {
+        load_lookup_keys(conn, page.document_id).await?
+    } else {
+        Vec::new()
+    };
     let file_target = looks_like_path(input)
         .then(|| normalize_repo_relative_path(input, repo_root))
         .filter(|path| !path.is_empty());
@@ -2159,6 +2192,7 @@ async fn links_with_keys_async(
     .await
 }
 
+#[allow(dead_code)] // Removed in sub-scope 1D.
 async fn extract_pages_async(
     conn: &Connection,
     titles: &[String],
@@ -2922,10 +2956,19 @@ mod tests {
             "---\ntitle: WorktreeOnly\nsummary: Worktree baseline.\n---\nBody.\n",
         );
 
-        let index =
-            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::WorkingTree)
-                .expect("prepare");
-        assert!(index.resolve_page("WorktreeOnly").expect("resolve").is_some());
+        let index = WikiIndex::prepare_with_namespace(
+            &wiki_root,
+            repo.path(),
+            None,
+            DocSource::WorkingTree,
+        )
+        .expect("prepare");
+        assert!(
+            index
+                .resolve_page("WorktreeOnly")
+                .expect("resolve")
+                .is_some()
+        );
     }
 
     #[test]
@@ -2933,7 +2976,10 @@ mod tests {
         // File staged but not committed: visible under Index, invisible under Head.
         let repo = TestRepo::new();
         // Need at least one commit so HEAD exists.
-        repo.create_file("wiki/init.md", "---\ntitle: Init\nsummary: Init.\n---\nBody.\n");
+        repo.create_file(
+            "wiki/init.md",
+            "---\ntitle: Init\nsummary: Init.\n---\nBody.\n",
+        );
         let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.git(&["add", "-A"]);
         repo.git(&["commit", "-m", "initial"]);
@@ -2977,7 +3023,11 @@ mod tests {
         let head =
             WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Head)
                 .expect("prepare head");
-        assert!(head.resolve_page("CommittedDoc").expect("resolve").is_some());
+        assert!(
+            head.resolve_page("CommittedDoc")
+                .expect("resolve")
+                .is_some()
+        );
         drop(head);
 
         // Index mode does not see it.
@@ -3016,7 +3066,10 @@ mod tests {
             WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Index)
                 .expect("prepare");
         let pages = index.list_pages(None).expect("list_pages");
-        let doc = pages.iter().find(|p| p.title == "VersionDoc").expect("page");
+        let doc = pages
+            .iter()
+            .find(|p| p.title == "VersionDoc")
+            .expect("page");
         assert!(doc.summary.contains("staged v2"));
     }
 
@@ -3043,7 +3096,10 @@ mod tests {
             WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Head)
                 .expect("prepare");
         let pages = index.list_pages(None).expect("list_pages");
-        let doc = pages.iter().find(|p| p.title == "VersionDoc").expect("page");
+        let doc = pages
+            .iter()
+            .find(|p| p.title == "VersionDoc")
+            .expect("page");
         assert!(doc.summary.contains("committed v1"));
     }
 
@@ -3051,7 +3107,10 @@ mod tests {
     fn doc_source_index_excludes_worktree_only_addition() {
         // File never staged, never committed: invisible under Index.
         let repo = TestRepo::new();
-        repo.create_file("wiki/init.md", "---\ntitle: Init\nsummary: Init.\n---\nBody.\n");
+        repo.create_file(
+            "wiki/init.md",
+            "---\ntitle: Init\nsummary: Init.\n---\nBody.\n",
+        );
         let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.git(&["add", "-A"]);
         repo.git(&["commit", "-m", "initial"]);
@@ -3064,10 +3123,12 @@ mod tests {
         let index =
             WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Index)
                 .expect("prepare");
-        assert!(index
-            .resolve_page("WorktreeOnly")
-            .expect("resolve")
-            .is_none());
+        assert!(
+            index
+                .resolve_page("WorktreeOnly")
+                .expect("resolve")
+                .is_none()
+        );
     }
 
     #[test]
@@ -3089,27 +3150,26 @@ mod tests {
         );
 
         // Run 1: WorkingTree — worktree-only file is visible.
-        let wt =
-            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::WorkingTree)
-                .expect("prepare worktree");
-        assert!(wt
-            .resolve_page("WorktreeOnly")
-            .expect("resolve")
-            .is_some());
+        let wt = WikiIndex::prepare_with_namespace(
+            &wiki_root,
+            repo.path(),
+            None,
+            DocSource::WorkingTree,
+        )
+        .expect("prepare worktree");
+        assert!(wt.resolve_page("WorktreeOnly").expect("resolve").is_some());
         drop(wt);
 
         // Run 2: Head — worktree-only file must not appear (stale row must not survive).
         let head =
             WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::Head)
                 .expect("prepare head");
-        assert!(head
-            .resolve_page("WorktreeOnly")
-            .expect("resolve")
-            .is_none());
-        assert!(head
-            .resolve_page("Committed")
-            .expect("resolve")
-            .is_some());
+        assert!(
+            head.resolve_page("WorktreeOnly")
+                .expect("resolve")
+                .is_none()
+        );
+        assert!(head.resolve_page("Committed").expect("resolve").is_some());
     }
 
     #[test]
@@ -3127,9 +3187,13 @@ mod tests {
         let default_pages = default_index.list_pages(None).expect("list default");
         drop(default_index);
 
-        let wt_index =
-            WikiIndex::prepare_with_namespace(&wiki_root, repo.path(), None, DocSource::WorkingTree)
-                .expect("prepare wt");
+        let wt_index = WikiIndex::prepare_with_namespace(
+            &wiki_root,
+            repo.path(),
+            None,
+            DocSource::WorkingTree,
+        )
+        .expect("prepare wt");
         let wt_pages = wt_index.list_pages(None).expect("list wt");
 
         let default_titles: std::collections::BTreeSet<_> =
@@ -3163,8 +3227,8 @@ mod tests {
 
         // Under --source=head, the alpha page must be visible because HEAD's
         // namespace is alpha — even though the worktree now says beta.
-        let index =
-            WikiIndex::prepare_for_source(&wiki_dir, repo.path(), DocSource::Head).expect("prepare");
+        let index = WikiIndex::prepare_for_source(&wiki_dir, repo.path(), DocSource::Head)
+            .expect("prepare");
         assert!(
             index.resolve_page("Alpha Page").expect("resolve").is_some(),
             "expected HEAD-namespaced page to be visible under --source=head"
@@ -3185,8 +3249,8 @@ mod tests {
         repo.git(&["add", "-A"]);
         repo.git(&["commit", "-m", "init"]);
 
-        let index =
-            WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Head).expect("prepare");
+        let index = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Head)
+            .expect("prepare");
         let page = index
             .resolve_page("Example")
             .expect("resolve")

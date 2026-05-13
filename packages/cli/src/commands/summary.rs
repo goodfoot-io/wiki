@@ -69,7 +69,13 @@ pub fn render_not_found(title: &str, suggestions: &[SearchResult], repo_root: &P
     rendered
 }
 
-pub fn run(title: &str, json: bool, wiki_root: &Path, repo_root: &Path, source: DocSource) -> Result<i32> {
+pub fn run(
+    title: &str,
+    json: bool,
+    wiki_root: &Path,
+    repo_root: &Path,
+    source: DocSource,
+) -> Result<i32> {
     let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
     match index.resolve_page(title)? {
         Some(page) => {

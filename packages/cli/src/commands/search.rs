@@ -6,7 +6,15 @@ use crate::index::{DocSource, WikiIndex};
 
 use super::summary::format_search_result;
 
-pub fn run(query: &str, limit: i64, offset: usize, json: bool, wiki_root: &Path, repo_root: &Path, source: DocSource) -> Result<i32> {
+pub fn run(
+    query: &str,
+    limit: i64,
+    offset: usize,
+    json: bool,
+    wiki_root: &Path,
+    repo_root: &Path,
+    source: DocSource,
+) -> Result<i32> {
     let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
     let (matches, total) = index.search_weighted(query, limit, offset)?;
 
@@ -99,7 +107,16 @@ mod tests {
             "---\ntitle: Beta\nsummary: Beta summary.\n---\nNo match.\n",
         );
 
-        let code = run("keyword", 20, 0, false, &wiki_root, repo.path(), crate::index::DocSource::WorkingTree).expect("run");
+        let code = run(
+            "keyword",
+            20,
+            0,
+            false,
+            &wiki_root,
+            repo.path(),
+            crate::index::DocSource::WorkingTree,
+        )
+        .expect("run");
         assert_eq!(code, 0);
     }
 
@@ -112,7 +129,16 @@ mod tests {
             "---\ntitle: Alpha\nsummary: Alpha summary.\n---\nContains Keyword here.\n",
         );
 
-        let code = run("missing", 20, 0, false, &wiki_root, repo.path(), crate::index::DocSource::WorkingTree).expect("run");
+        let code = run(
+            "missing",
+            20,
+            0,
+            false,
+            &wiki_root,
+            repo.path(),
+            crate::index::DocSource::WorkingTree,
+        )
+        .expect("run");
         assert_eq!(code, 0);
     }
 }

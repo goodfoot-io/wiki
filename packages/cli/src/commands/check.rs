@@ -14,11 +14,7 @@ use crate::wiki_config::WikiConfig;
 use super::mesh_coverage;
 
 /// Read `path` from the chosen `DocSource`.
-fn read_via_source(
-    path: &Path,
-    repo_root: &Path,
-    source: DocSource,
-) -> std::io::Result<String> {
+fn read_via_source(path: &Path, repo_root: &Path, source: DocSource) -> std::io::Result<String> {
     match source {
         DocSource::WorkingTree => std::fs::read_to_string(path),
         DocSource::Index | DocSource::Head => {
@@ -47,10 +43,8 @@ fn filter_files_for_source(
     if matches!(source, DocSource::WorkingTree) {
         return Ok(files);
     }
-    let listed: std::collections::HashSet<String> = source
-        .list_paths(repo_root)?
-        .into_iter()
-        .collect();
+    let listed: std::collections::HashSet<String> =
+        source.list_paths(repo_root)?.into_iter().collect();
     Ok(files
         .into_iter()
         .filter(|p| {
@@ -171,7 +165,10 @@ pub fn run(
         );
     } else {
         for d in &diagnostics {
-            print!("{}", format_diagnostic(&d.kind, &d.file, d.line, &d.message));
+            print!(
+                "{}",
+                format_diagnostic(&d.kind, &d.file, d.line, &d.message)
+            );
         }
     }
 
@@ -184,7 +181,11 @@ pub fn run(
 
 /// Collect diagnostics for the given glob patterns without printing output.
 #[allow(dead_code)]
-pub fn collect(globs: &[String], wiki_root: &Path, repo_root: &Path) -> Result<Vec<CheckDiagnostic>> {
+pub fn collect(
+    globs: &[String],
+    wiki_root: &Path,
+    repo_root: &Path,
+) -> Result<Vec<CheckDiagnostic>> {
     collect_with_config(globs, wiki_root, repo_root, None, DocSource::WorkingTree)
 }
 
@@ -416,10 +417,7 @@ fn collect_for_files(
                         kind: "broken_anchor".into(),
                         file: path.display().to_string(),
                         line: link.source_line,
-                        message: format!(
-                            "Heading `#{anchor}` not found in `{}`.",
-                            link.path
-                        ),
+                        message: format!("Heading `#{anchor}` not found in `{}`.", link.path),
                     });
                 }
             }
@@ -734,7 +732,11 @@ mod tests {
             .iter()
             .filter(|d| d.kind == "mesh_uncovered")
             .collect();
-        assert_eq!(mesh_diags.len(), 1, "expected one mesh_uncovered: {diagnostics:?}");
+        assert_eq!(
+            mesh_diags.len(),
+            1,
+            "expected one mesh_uncovered: {diagnostics:?}"
+        );
         let code = run(
             &[],
             false,

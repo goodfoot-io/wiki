@@ -2,9 +2,9 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
+use crate::parser::FragmentLink;
 #[allow(unused_imports)]
 use crate::parser::scrub_non_content;
-use crate::parser::FragmentLink;
 
 /// A `FragmentLink` augmented with surrounding text and heading context.
 #[derive(Clone)]
@@ -359,7 +359,10 @@ mod tests {
         let links = parse_fragment_links(content);
         let augmented = augment(&links, content);
         assert_eq!(augmented.len(), 2);
-        assert_eq!(augmented[0].section_start_line, augmented[1].section_start_line);
+        assert_eq!(
+            augmented[0].section_start_line,
+            augmented[1].section_start_line
+        );
         assert_eq!(augmented[0].section_end_line, augmented[1].section_end_line);
     }
 }

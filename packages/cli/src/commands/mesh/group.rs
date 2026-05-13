@@ -40,8 +40,8 @@ pub(crate) fn consolidate_within_page(drafts: Vec<MeshDraft>) -> Vec<MeshDraft> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::draft::StructuredAnchor;
+    use super::*;
 
     fn draft(slug: &str, anchors: &[&str]) -> MeshDraft {
         MeshDraft {

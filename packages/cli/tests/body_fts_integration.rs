@@ -320,11 +320,18 @@ fn common_term_ranking_survives_search_limit() {
 
     let out = repo.wiki(&["--format", "json", "luminal"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "wiki failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "wiki failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("json parse failed");
     let arr = v.as_array().expect("expected json array");
-    assert!(!arr.is_empty(), "expected at least one result; got: {stdout}");
+    assert!(
+        !arr.is_empty(),
+        "expected at least one result; got: {stdout}"
+    );
 
     let titles: Vec<&str> = arr
         .iter()
@@ -350,15 +357,16 @@ fn snippet_regression_source_raw_unchanged() {
 
     let out = repo.wiki(&["--format", "json", "snippetterm"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
     let arr = v.as_array().expect("array");
     assert!(!arr.is_empty(), "expected results; got: {stdout}");
     let snippets = &arr[0]["snippets"];
-    assert!(
-        !snippets.is_null(),
-        "expected snippets field; got: {arr:?}"
-    );
+    assert!(!snippets.is_null(), "expected snippets field; got: {arr:?}");
     let snippets_str = snippets.to_string();
     assert!(
         snippets_str.contains("snippetterm"),
