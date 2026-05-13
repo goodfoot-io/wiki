@@ -59,7 +59,7 @@ mod tests {
             heading_chain: Vec::new(),
             consolidated_count: 1,
             noun: String::new(),
-            page_ns: super::super::scaffold::PageNamespace::default(),
+            page_subdir: String::new(),
             extends_existing: None,
         }
     }

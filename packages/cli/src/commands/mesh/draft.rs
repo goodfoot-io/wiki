@@ -8,7 +8,6 @@
 use std::path::{Path, PathBuf};
 
 use super::augment::AugmentedLink;
-use super::scaffold::PageNamespace;
 
 /// Structured anchor triple — path and line range, before stringification.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,10 +43,11 @@ pub(crate) struct MeshDraft {
     /// link label, or file stem fallback). Retained so the collision
     /// resolver can rebuild the slug with extra qualifiers.
     pub(crate) noun: String,
-    /// Snapshot of the page's namespace context at draft-build time. Used by
-    /// the collision resolver to reapply [`build_slug_with_qualifiers`] when
-    /// the base slug clashes with an existing mesh.
-    pub(crate) page_ns: PageNamespace,
+    /// Snapshot of the page's subdir (relative to its owning wiki root) at
+    /// draft-build time. Used by the collision resolver to reapply
+    /// [`build_slug_with_qualifiers`] when the base slug clashes with an
+    /// existing mesh.
+    pub(crate) page_subdir: String,
     /// When `Some(name)`, the draft extends a pre-existing mesh whose anchors
     /// already include this page section. Rendering switches to "extend mode":
     /// the slug is `name`, the page-section anchor and any code anchors that
@@ -72,13 +72,13 @@ pub(crate) fn build(
     page_path: &str,
     groups: &[SectionGroup<'_>],
     _repo_root: &Path,
-    page_ns: &PageNamespace,
+    page_subdir: &str,
 ) -> Vec<MeshDraft> {
     groups
         .iter()
         .map(|g| {
             let noun = derive_noun(g.leader);
-            let slug = build_slug(page_ns, &noun);
+            let slug = build_slug(page_subdir, &noun);
             let page_anchor_str = format!(
                 "{page_path}#L{start}-L{end}",
                 start = g.section_start,
@@ -103,32 +103,28 @@ pub(crate) fn build(
                 heading_chain: g.leader.heading_chain.clone(),
                 consolidated_count: 1,
                 noun,
-                page_ns: page_ns.clone(),
+                page_subdir: page_subdir.to_string(),
                 extends_existing: None,
             }
         })
         .collect()
 }
 
-/// Compose the slug from a `PageNamespace` and a kebab-cased noun, applying
-/// the no-repeat invariant on `wiki` and the namespace name.
+/// Compose the slug from a page subdir and a kebab-cased noun.
 ///
-/// Slug = `<prefix>/<inner-subdir>/<noun>`, where:
-///   - `<prefix>` is `wiki` for default-namespace pages and `wiki/<ns>` for
-///     pages in a named-namespace wiki;
+/// Slug = `wiki/<inner-subdir>/<noun>`, where:
 ///   - `<inner-subdir>` is the page's directory relative to its owning wiki
-///     root (empty for pages at the wiki root, and empty for `.wiki.md`
-///     floats that have no owning root);
+///     root (empty for pages at the wiki root, and empty for pages that have
+///     no owning root);
 ///   - `<noun>` comes from the deepest section heading kebab-cased, falling
 ///     back to the link label, then the target file stem.
 ///
-/// The `wiki/` and `wiki/<ns>/` prefixes are added exactly once and never
-/// repeated inside the slug: any inner-subdir segment equal to `wiki` (or to
-/// the namespace, when set) is stripped before concatenation, so that a page
-/// at `wiki/wiki/foo.md` or `mesh/mesh/foo.md` does not produce duplicate
+/// The `wiki/` prefix is added exactly once and never repeated inside the
+/// slug: any inner-subdir segment equal to `wiki` is stripped before
+/// concatenation, so a page at `wiki/wiki/foo.md` does not produce duplicate
 /// prefix segments.
-pub(crate) fn build_slug(page_ns: &PageNamespace, noun: &str) -> String {
-    build_slug_with_qualifiers(page_ns, &[], noun)
+pub(crate) fn build_slug(page_subdir: &str, noun: &str) -> String {
+    build_slug_with_qualifiers(page_subdir, &[], noun)
 }
 
 /// Like [`build_slug`], but inserts extra **qualifier** segments
@@ -137,23 +133,17 @@ pub(crate) fn build_slug(page_ns: &PageNamespace, noun: &str) -> String {
 /// context when the base slug clashes with an existing mesh.
 ///
 /// Qualifiers are subject to the same no-repeat invariant: any qualifier
-/// segment equal to `wiki`, the namespace, or already present in `parts` is
-/// silently dropped so we never emit `wiki/foo/foo/bar`.
+/// segment equal to `wiki` or already present in `parts` is silently dropped
+/// so we never emit `wiki/foo/foo/bar`.
 pub(crate) fn build_slug_with_qualifiers(
-    page_ns: &PageNamespace,
+    page_subdir: &str,
     qualifiers: &[String],
     noun: &str,
 ) -> String {
     let mut parts: Vec<String> = vec!["wiki".to_string()];
-    if let Some(ns) = page_ns.namespace.as_deref() {
-        parts.push(ns.to_string());
-    }
     let mut reserved: std::collections::HashSet<String> = std::collections::HashSet::new();
     reserved.insert("wiki".to_string());
-    if let Some(ns) = page_ns.namespace.as_deref() {
-        reserved.insert(ns.to_string());
-    }
-    for seg in page_ns.subdir.split('/') {
+    for seg in page_subdir.split('/') {
         if seg.is_empty() || reserved.contains(seg) {
             continue;
         }
@@ -269,72 +259,35 @@ mod tests {
         }
     }
 
-    fn ns(namespace: Option<&str>, subdir: &str) -> PageNamespace {
-        PageNamespace {
-            namespace: namespace.map(|s| s.to_string()),
-            subdir: subdir.to_string(),
-        }
+    #[test]
+    fn slug_top_level() {
+        assert_eq!(build_slug("", "billing"), "wiki/billing");
     }
 
     #[test]
-    fn slug_default_namespace_top_level() {
-        assert_eq!(build_slug(&ns(None, ""), "billing"), "wiki/billing");
-    }
-
-    #[test]
-    fn slug_default_namespace_with_subdir() {
+    fn slug_with_subdir() {
         assert_eq!(
-            build_slug(&ns(None, "perf"), "sync-detection"),
+            build_slug("perf", "sync-detection"),
             "wiki/perf/sync-detection"
         );
     }
 
     #[test]
-    fn slug_named_namespace_top_level() {
-        assert_eq!(build_slug(&ns(Some("mesh"), ""), "foo"), "wiki/mesh/foo");
-    }
-
-    #[test]
-    fn slug_named_namespace_with_subdir() {
-        assert_eq!(
-            build_slug(&ns(Some("mesh"), "sub"), "bar"),
-            "wiki/mesh/sub/bar"
-        );
+    fn slug_with_nested_subdir() {
+        assert_eq!(build_slug("perf/sub", "bar"), "wiki/perf/sub/bar");
     }
 
     #[test]
     fn slug_strips_repeated_wiki_segment() {
-        // A page at wiki/wiki/foo.md in the default-ns wiki at wiki/ would
-        // produce subdir "wiki" — drop it so the prefix is not repeated.
-        assert_eq!(build_slug(&ns(None, "wiki"), "foo"), "wiki/foo");
-    }
-
-    #[test]
-    fn slug_strips_repeated_namespace_segment() {
-        // A page at mesh/mesh/foo.md in the mesh-ns wiki at mesh/ would
-        // produce subdir "mesh" — drop it so the namespace is not repeated.
-        assert_eq!(
-            build_slug(&ns(Some("mesh"), "mesh"), "foo"),
-            "wiki/mesh/foo"
-        );
-    }
-
-    #[test]
-    fn slug_strips_repeats_anywhere_in_subdir() {
-        assert_eq!(
-            build_slug(&ns(Some("mesh"), "wiki/mesh/sub"), "leaf"),
-            "wiki/mesh/sub/leaf"
-        );
+        // A page at wiki/wiki/foo.md in the wiki at wiki/ would produce
+        // subdir "wiki" — drop it so the prefix is not repeated.
+        assert_eq!(build_slug("wiki", "foo"), "wiki/foo");
     }
 
     #[test]
     fn qualifiers_insert_between_subdir_and_noun() {
         assert_eq!(
-            build_slug_with_qualifiers(
-                &ns(None, "perf"),
-                &["bootstrap".to_string()],
-                "sync-detection"
-            ),
+            build_slug_with_qualifiers("perf", &["bootstrap".to_string()], "sync-detection"),
             "wiki/perf/bootstrap/sync-detection"
         );
     }
@@ -343,7 +296,7 @@ mod tests {
     fn qualifiers_preserve_outer_to_inner_order() {
         assert_eq!(
             build_slug_with_qualifiers(
-                &ns(None, ""),
+                "",
                 &["billing".to_string(), "checkout".to_string()],
                 "charge-handler"
             ),
@@ -356,23 +309,11 @@ mod tests {
         // `wiki` is reserved (prefix); `perf` is already in subdir.
         assert_eq!(
             build_slug_with_qualifiers(
-                &ns(None, "perf"),
+                "perf",
                 &["wiki".to_string(), "perf".to_string(), "extra".to_string()],
                 "leaf"
             ),
             "wiki/perf/extra/leaf"
-        );
-    }
-
-    #[test]
-    fn qualifiers_drop_namespace_repeats() {
-        assert_eq!(
-            build_slug_with_qualifiers(
-                &ns(Some("mesh"), ""),
-                &["mesh".to_string(), "inner".to_string()],
-                "leaf"
-            ),
-            "wiki/mesh/inner/leaf"
         );
     }
 
@@ -415,8 +356,7 @@ mod tests {
                 end_line: 20,
             }],
         };
-        let page_ns = ns(None, "perf");
-        let drafts = build("wiki/perf/indexing.md", &[group], Path::new("/"), &page_ns);
+        let drafts = build("wiki/perf/indexing.md", &[group], Path::new("/"), "perf");
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].slug, "wiki/perf/sync-detection");
         assert_eq!(

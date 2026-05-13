@@ -55,6 +55,7 @@ pub struct WikiInfo {
     /// Absolute path to the wiki root (the directory containing `wiki.toml`).
     pub root: PathBuf,
     /// `None` indicates the default namespace.
+    #[allow(dead_code)]
     pub namespace: Option<String>,
 }
 

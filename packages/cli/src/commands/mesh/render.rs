@@ -170,7 +170,7 @@ mod tests {
             heading_chain: heading_chain.iter().map(|s| s.to_string()).collect(),
             consolidated_count: 1,
             noun: String::new(),
-            page_ns: super::super::scaffold::PageNamespace::default(),
+            page_subdir: String::new(),
             extends_existing: None,
         }
     }

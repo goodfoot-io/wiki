@@ -15,7 +15,6 @@ use serde::Serialize;
 use crate::commands::{discover_files, resolve_link_path};
 use crate::index::DocSource;
 use crate::parser::{LinkKind, parse_fragment_links};
-use crate::wiki_config::WikiInfo;
 
 /// Read `path` from the chosen [`DocSource`], routing non-worktree reads
 /// through [`DocSource::read`] so the content snapshot matches the discovery
@@ -160,7 +159,6 @@ pub fn run(
     globs: &[String],
     json: bool,
     wiki_roots: &[PathBuf],
-    wiki_infos: &[WikiInfo],
     repo_root: &Path,
     source: crate::index::DocSource,
 ) -> Result<i32> {
@@ -258,16 +256,17 @@ pub fn run(
     // Build the page-title lookup keyed by repo-root-relative path strings.
     let mut page_titles: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
-    // Parallel map: per-page slug namespace context (owning wiki + subdir).
-    let mut page_namespaces: std::collections::HashMap<String, PageNamespace> =
+    // Parallel map: per-page slug subdir (page directory relative to its
+    // owning wiki root, forward slashes, empty for pages at the wiki root
+    // or for pages outside any root).
+    let mut page_subdirs: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     for f in &files {
         let rel = path_relative_to(f, repo_root);
         let title = wiki_meta_cache.get(f).and_then(|m| m.title.clone());
-        let fm_ns = wiki_meta_cache.get(f).and_then(|m| m.namespace.clone());
         page_titles.insert(rel.clone(), title);
-        let ns = resolve_page_namespace(f, repo_root, wiki_infos, fm_ns.as_deref());
-        page_namespaces.insert(rel, ns);
+        let subdir = resolve_page_subdir(f, wiki_roots);
+        page_subdirs.insert(rel, subdir);
     }
 
     // Collect parse-error paths for exclusion from pages output.
@@ -276,7 +275,7 @@ pub fn run(
 
     // ── Unified build/group pipeline (both modes) ─────────────────────────
     // Trim heading chains once here so both renderers consume pre-trimmed data.
-    let mut consolidated = build_meshes(&all_inputs, repo_root, &page_namespaces);
+    let mut consolidated = build_meshes(&all_inputs, repo_root, &page_subdirs);
     trim_chains_in_place(&mut consolidated, &page_titles);
 
     // Section-extension pass: when a wiki section already has an associated
@@ -509,7 +508,7 @@ pub(crate) fn normalize_heading_text(s: &str) -> String {
 fn build_meshes(
     inputs: &[LinkInput],
     repo_root: &Path,
-    page_namespaces: &std::collections::HashMap<String, PageNamespace>,
+    page_subdirs: &std::collections::HashMap<String, String>,
 ) -> Vec<MeshDraft> {
     // Group inputs by source page (preserving discovery order).
     let mut page_order: Vec<PathBuf> = Vec::new();
@@ -595,10 +594,10 @@ fn build_meshes(
             .collect();
         // Look up the owning wiki for slug derivation. A page should always
         // be in the map (every discovered file is registered above), but fall
-        // back to a default-namespace empty-subdir context so a missing entry
-        // can never panic — the slug still gets the `wiki/` prefix.
-        let page_ns = page_namespaces.get(&page_rel).cloned().unwrap_or_default();
-        let drafts = draft::build(&page_rel, &groups, repo_root, &page_ns);
+        // back to an empty subdir so a missing entry can never panic — the
+        // slug still gets the `wiki/` prefix.
+        let page_subdir = page_subdirs.get(&page_rel).cloned().unwrap_or_default();
+        let drafts = draft::build(&page_rel, &groups, repo_root, &page_subdir);
         let start = all_drafts.len();
         all_drafts.extend(drafts);
         page_spans.push((start, all_drafts.len()));
@@ -700,7 +699,7 @@ pub(crate) fn resolve_slug_collisions(
         let mut last_unique: Option<String> = None;
         let mut resolved: Option<String> = None;
         for quals in &candidates {
-            let slug = draft::build_slug_with_qualifiers(&d.page_ns, quals, &d.noun);
+            let slug = draft::build_slug_with_qualifiers(&d.page_subdir, quals, &d.noun);
             if !tried.insert(slug.clone()) {
                 continue;
             }
@@ -736,58 +735,23 @@ struct LinkInput {
 #[derive(Debug, Clone, Default)]
 struct FileMeta {
     title: Option<String>,
-    /// Frontmatter `namespace` field, when present. Used as the slug
-    /// namespace for `.wiki.md` pages that live outside any wiki root.
-    namespace: Option<String>,
 }
 
-/// Per-page slug context: which wiki namespace owns the page (`None` for the
-/// default-namespace wiki) and the page's directory path relative to its
-/// owning wiki root (forward slashes, no leading or trailing slash; empty
-/// when the page sits directly at the wiki root).
-#[derive(Debug, Clone, Default)]
-pub(crate) struct PageNamespace {
-    pub(crate) namespace: Option<String>,
-    pub(crate) subdir: String,
-}
-
-/// Resolve which wiki owns a page and the page's directory within that wiki.
-///
-/// Pages under a `wiki.toml` tree inherit that wiki's namespace; the longest
+/// Resolve a page's directory relative to its owning wiki root. The longest
 /// containing root wins (a nested wiki shadows an outer one). Pages outside
-/// every root fall back to their frontmatter `namespace` field (a `.wiki.md`
-/// float opting into a peer wiki). When no enclosing root and no frontmatter
-/// declaration apply, the page is treated as default-namespace with an empty
-/// subdir — the slug becomes `wiki/<noun>` so the prefix invariant holds
-/// regardless of where the page sits on disk.
-pub(crate) fn resolve_page_namespace(
-    page_abs: &Path,
-    repo_root: &Path,
-    wiki_infos: &[WikiInfo],
-    fm_namespace: Option<&str>,
-) -> PageNamespace {
-    // Pick the longest wiki root that contains this page (deeper roots win).
-    let owner = wiki_infos
+/// every root receive an empty subdir — the slug becomes `wiki/<noun>` so the
+/// `wiki/` prefix invariant holds regardless of where the page sits on disk.
+pub(crate) fn resolve_page_subdir(page_abs: &Path, wiki_roots: &[PathBuf]) -> String {
+    let owner = wiki_roots
         .iter()
-        .filter(|w| page_abs.starts_with(&w.root))
-        .max_by_key(|w| w.root.components().count());
-    if let Some(w) = owner {
-        let rel = page_abs.strip_prefix(&w.root).unwrap_or(page_abs);
+        .filter(|r| page_abs.starts_with(r))
+        .max_by_key(|r| r.components().count());
+    if let Some(root) = owner {
+        let rel = page_abs.strip_prefix(root).unwrap_or(page_abs);
         let parent = rel.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-        let subdir = parent.to_string_lossy().replace('\\', "/");
-        return PageNamespace {
-            namespace: w.namespace.clone(),
-            subdir,
-        };
+        return parent.to_string_lossy().replace('\\', "/");
     }
-    // Float page: honor frontmatter `namespace`. Drop the file's directory
-    // path — float pages don't carry a wiki-root path component, only the
-    // declared namespace.
-    let _ = repo_root; // kept in signature for symmetry; unused on the float path
-    PageNamespace {
-        namespace: fm_namespace.map(|s| s.to_string()),
-        subdir: String::new(),
-    }
+    String::new()
 }
 
 /// Classify the frontmatter of a file, returning both the `FileMeta` and an
@@ -870,12 +834,7 @@ fn classify_frontmatter(
         return (FileMeta::default(), Some(ParseErrorKind::Malformed));
     }
 
-    // `namespace` is optional and only meaningful for `.wiki.md` float pages;
-    // pages under a `wiki.toml` inherit their namespace from the root and the
-    // field is ignored. Read it eagerly so the resolver can use it later.
-    let namespace = parse_frontmatter_field(&text, "namespace");
-
-    let meta = FileMeta { title, namespace };
+    let meta = FileMeta { title };
     (meta, None)
 }
 
@@ -1056,10 +1015,10 @@ mod tests {
     fn make_draft(
         page_path: &str,
         noun: &str,
-        page_ns: PageNamespace,
+        page_subdir: &str,
         heading_chain: Vec<&str>,
     ) -> MeshDraft {
-        let slug = super::super::draft::build_slug(&page_ns, noun);
+        let slug = super::super::draft::build_slug(page_subdir, noun);
         MeshDraft {
             page_path: page_path.to_string(),
             slug,
@@ -1072,26 +1031,14 @@ mod tests {
             heading_chain: heading_chain.iter().map(|s| s.to_string()).collect(),
             consolidated_count: 1,
             noun: noun.to_string(),
-            page_ns,
+            page_subdir: page_subdir.to_string(),
             extends_existing: None,
-        }
-    }
-
-    fn ns(namespace: Option<&str>, subdir: &str) -> PageNamespace {
-        PageNamespace {
-            namespace: namespace.map(|s| s.to_string()),
-            subdir: subdir.to_string(),
         }
     }
 
     #[test]
     fn collision_resolver_keeps_unique_slugs() {
-        let mut drafts = vec![make_draft(
-            "wiki/billing.md",
-            "charge-handler",
-            ns(None, ""),
-            vec![],
-        )];
+        let mut drafts = vec![make_draft("wiki/billing.md", "charge-handler", "", vec![])];
         let titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
         let exists = |_slug: &str| false;
@@ -1104,7 +1051,7 @@ mod tests {
         let mut drafts = vec![make_draft(
             "wiki/billing.md",
             "charge-handler",
-            ns(None, ""),
+            "",
             vec!["Checkout"],
         )];
         let titles: std::collections::HashMap<String, Option<String>> =
@@ -1124,7 +1071,7 @@ mod tests {
         let mut drafts = vec![make_draft(
             "wiki/billing.md",
             "charge-handler",
-            ns(None, ""),
+            "",
             vec!["Payments", "Checkout"],
         )];
         let titles: std::collections::HashMap<String, Option<String>> =
@@ -1145,7 +1092,7 @@ mod tests {
         let mut drafts = vec![make_draft(
             "wiki/billing.md",
             "charge-handler",
-            ns(None, ""),
+            "",
             vec!["Checkout"],
         )];
         let mut titles: std::collections::HashMap<String, Option<String>> =
@@ -1170,12 +1117,7 @@ mod tests {
 
     #[test]
     fn collision_resolver_falls_back_to_digit_suffix() {
-        let mut drafts = vec![make_draft(
-            "wiki/billing.md",
-            "charge-handler",
-            ns(None, ""),
-            vec![],
-        )];
+        let mut drafts = vec![make_draft("wiki/billing.md", "charge-handler", "", vec![])];
         let titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
         let existing: std::collections::HashSet<String> =
@@ -1192,8 +1134,8 @@ mod tests {
         // Two drafts with the same base slug and no semantic disambiguators
         // available; the second must get a digit suffix.
         let mut drafts = vec![
-            make_draft("wiki/a.md", "foo", ns(None, ""), vec![]),
-            make_draft("wiki/b.md", "foo", ns(None, ""), vec![]),
+            make_draft("wiki/a.md", "foo", "", vec![]),
+            make_draft("wiki/b.md", "foo", "", vec![]),
         ];
         let titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
@@ -1206,8 +1148,8 @@ mod tests {
     #[test]
     fn collision_resolver_intra_run_uses_semantic_qualifier_first() {
         let mut drafts = vec![
-            make_draft("wiki/a.md", "foo", ns(None, ""), vec!["First"]),
-            make_draft("wiki/b.md", "foo", ns(None, ""), vec!["Second"]),
+            make_draft("wiki/a.md", "foo", "", vec!["First"]),
+            make_draft("wiki/b.md", "foo", "", vec!["Second"]),
         ];
         let titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
@@ -1221,15 +1163,10 @@ mod tests {
 
     #[test]
     fn collision_resolver_skips_duplicate_candidates_from_reserved_drop() {
-        // Page lives in namespace "mesh" at root; parent heading is also "mesh",
+        // Page lives at subdir "mesh"; parent heading is also "mesh",
         // so the +parent candidate collapses back to the base slug. The resolver
         // must skip that duplicate and try the next strategy (page title).
-        let mut drafts = vec![make_draft(
-            "mesh/page.md",
-            "leaf",
-            ns(Some("mesh"), ""),
-            vec!["Mesh"],
-        )];
+        let mut drafts = vec![make_draft("mesh/page.md", "leaf", "mesh", vec!["Mesh"])];
         let mut titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
         titles.insert("mesh/page.md".to_string(), Some("Outer".to_string()));
