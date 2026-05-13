@@ -43,8 +43,6 @@ fn read_via_source(path: &Path, repo_root: &Path, source: DocSource) -> std::io:
 
 #[derive(Debug, Clone)]
 pub(crate) enum ParseErrorKind {
-    /// Frontmatter present, no `title:` key.
-    MissingTitle,
     /// `title:` present, value empty/whitespace.
     EmptyTitle,
     /// IO error or invalid UTF-8 — message captured.
@@ -61,12 +59,30 @@ pub(crate) struct ParseError {
 
 // ── JSON output types ─────────────────────────────────────────────────────────
 
+/// A mesh that was dropped because one of its anchor paths does not exist.
+#[derive(Debug, Clone)]
+pub(crate) struct DroppedMesh {
+    pub(crate) slug: String,
+    pub(crate) missing_path: String,
+    pub(crate) page: String,
+}
+
+/// JSON representation of a dropped mesh.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DroppedMeshJson {
+    slug: String,
+    missing_path: String,
+    page: String,
+}
+
 /// Top-level JSON output for `wiki scaffold --format json`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ScaffoldOutput {
     schema_version: u32,
     parse_errors: Vec<ParseErrorJson>,
+    dropped_meshes: Vec<DroppedMeshJson>,
     pages: Vec<PageJson>,
 }
 
@@ -83,7 +99,6 @@ struct ParseErrorJson {
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 enum ParseErrorCategory {
-    MissingTitle,
     EmptyTitle,
     Unreadable,
     MalformedFrontmatter,
@@ -119,7 +134,6 @@ struct AnchorJson {
 impl ParseErrorCategory {
     fn from_kind(kind: &ParseErrorKind) -> Self {
         match kind {
-            ParseErrorKind::MissingTitle => ParseErrorCategory::MissingTitle,
             ParseErrorKind::EmptyTitle => ParseErrorCategory::EmptyTitle,
             ParseErrorKind::Unreadable(_) => ParseErrorCategory::Unreadable,
             ParseErrorKind::Malformed => ParseErrorCategory::MalformedFrontmatter,
@@ -130,9 +144,6 @@ impl ParseErrorCategory {
 impl ParseErrorKind {
     pub(crate) fn reason(&self) -> String {
         match self {
-            ParseErrorKind::MissingTitle => {
-                "frontmatter present but `title:` is missing".to_string()
-            }
             ParseErrorKind::EmptyTitle => "frontmatter present but `title:` is empty".to_string(),
             ParseErrorKind::Unreadable(msg) => format!("file could not be read: {msg}"),
             ParseErrorKind::Malformed => {
@@ -151,42 +162,25 @@ use super::render;
 pub fn run(
     globs: &[String],
     json: bool,
-    wiki_roots: &[PathBuf],
     repo_root: &Path,
     source: crate::index::DocSource,
 ) -> Result<i32> {
-    let mut files: Vec<PathBuf> = Vec::new();
-    for wiki_root in wiki_roots {
-        // Per-iteration discovery operates against this wiki's root: a glob
-        // that resolves outside this root may legitimately yield zero files
-        // here while still matching under another iteration. Treat that as
-        // empty rather than failing the whole scaffold run; the caller
-        // surfaces a real "no wiki pages found" error only if every
-        // iteration produces zero files (see the post-loop check below).
-        let discovered = match discover_files(globs, wiki_root, repo_root, source) {
-            Ok(v) => v,
-            Err(e) => {
-                if e.to_string().contains("no wiki pages found") {
-                    Vec::new()
-                } else {
-                    return Err(e);
-                }
-            }
-        };
-        // Filter test fixtures: `wiki check` legitimately scans them, but a
-        // scaffold run that materializes mesh commands for a test wiki would
-        // pollute the repo's mesh state on the first commit. Scoped to scaffold.
-        for f in discovered {
-            let s = f.to_string_lossy();
-            if !s.contains("/tests/fixtures/") && !s.contains("\\tests\\fixtures\\") {
-                files.push(f);
+    let files = match discover_files(globs, repo_root, source) {
+        Ok(v) => v
+            .into_iter()
+            .filter(|f| {
+                let s = f.to_string_lossy();
+                !s.contains("/tests/fixtures/") && !s.contains("\\tests\\fixtures\\")
+            })
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            if e.to_string().contains("no wiki pages found") {
+                Vec::new()
+            } else {
+                return Err(e);
             }
         }
-    }
-    // Deduplicate across wikis (each discover_files call already deduplicates
-    // internally, but the same file may be matched through multiple wiki roots).
-    files.sort();
-    files.dedup();
+    };
 
     // Coverage index: filter out fragment links already covered by a mesh in
     // the repo. Fail closed when `git-mesh` is unavailable — emitting unfiltered
@@ -249,16 +243,15 @@ pub fn run(
     // Build the page-title lookup keyed by repo-root-relative path strings.
     let mut page_titles: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
-    // Parallel map: per-page slug subdir (page directory relative to its
-    // owning wiki root, forward slashes, empty for pages at the wiki root
-    // or for pages outside any root).
+    // Parallel map: per-page slug subdir (directory of page relative to repo_root,
+    // forward slashes).
     let mut page_subdirs: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     for f in &files {
         let rel = path_relative_to(f, repo_root);
         let title = wiki_meta_cache.get(f).and_then(|m| m.title.clone());
         page_titles.insert(rel.clone(), title);
-        let subdir = resolve_page_subdir(f, wiki_roots);
+        let subdir = resolve_page_subdir(f, repo_root);
         page_subdirs.insert(rel, subdir);
     }
 
@@ -285,6 +278,41 @@ pub fn run(
     let probe = |slug: &str| mesh_exists(repo_root, slug);
     resolve_slug_collisions(&mut consolidated, &page_titles, &probe);
 
+    // Drop meshes whose non-wiki anchors reference paths that don't exist in
+    // the active source.
+    let source_paths: Option<std::collections::HashSet<String>> = match source {
+        crate::index::DocSource::WorkingTree => None, // check filesystem inline
+        crate::index::DocSource::Index | crate::index::DocSource::Head => Some(
+            source
+                .list_paths(repo_root)
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+        ),
+    };
+    let mut dropped_meshes: Vec<DroppedMesh> = Vec::new();
+    consolidated.retain(|draft| {
+        // Check every non-wiki anchor (skip the first anchor which is the page section).
+        for anchor in draft.structured_anchors.iter().skip(1) {
+            let missing = match &source_paths {
+                None => {
+                    let abs = repo_root.join(&anchor.path);
+                    !abs.is_file()
+                }
+                Some(paths) => !paths.contains(&anchor.path),
+            };
+            if missing {
+                dropped_meshes.push(DroppedMesh {
+                    slug: draft.slug.clone(),
+                    missing_path: anchor.path.clone(),
+                    page: draft.page_path.clone(),
+                });
+                return false;
+            }
+        }
+        true
+    });
+
     if json {
         let parse_errors_json: Vec<ParseErrorJson> = parse_errors
             .iter()
@@ -294,10 +322,19 @@ pub fn run(
                 message: e.kind.reason(),
             })
             .collect();
+        let dropped_meshes_json: Vec<DroppedMeshJson> = dropped_meshes
+            .iter()
+            .map(|d| DroppedMeshJson {
+                slug: d.slug.clone(),
+                missing_path: d.missing_path.clone(),
+                page: d.page.clone(),
+            })
+            .collect();
         let pages = build_pages_json(&consolidated, &page_titles, &parse_error_paths);
         let output = ScaffoldOutput {
             schema_version: 1,
             parse_errors: parse_errors_json,
+            dropped_meshes: dropped_meshes_json,
             pages,
         };
         let s = serde_json::to_string_pretty(&output).into_diagnostic()?;
@@ -309,7 +346,10 @@ pub fn run(
     // Empty when there were no internal fragment links at all OR when every
     // section already has its links anchored by an existing mesh.
     if all_inputs.is_empty() || consolidated.is_empty() {
-        print!("{}", render::render_empty_markdown(&parse_errors));
+        print!(
+            "{}",
+            render::render_empty_markdown(&parse_errors, &dropped_meshes)
+        );
         return Ok(0);
     }
 
@@ -318,6 +358,7 @@ pub fn run(
         &page_titles,
         &parse_errors,
         &parse_error_paths,
+        &dropped_meshes,
     );
     print!("{rendered}");
     Ok(0)
@@ -730,21 +771,13 @@ struct FileMeta {
     title: Option<String>,
 }
 
-/// Resolve a page's directory relative to its owning wiki root. The longest
-/// containing root wins (a nested wiki shadows an outer one). Pages outside
-/// every root receive an empty subdir — the slug becomes `wiki/<noun>` so the
-/// `wiki/` prefix invariant holds regardless of where the page sits on disk.
-pub(crate) fn resolve_page_subdir(page_abs: &Path, wiki_roots: &[PathBuf]) -> String {
-    let owner = wiki_roots
-        .iter()
-        .filter(|r| page_abs.starts_with(r))
-        .max_by_key(|r| r.components().count());
-    if let Some(root) = owner {
-        let rel = page_abs.strip_prefix(root).unwrap_or(page_abs);
-        let parent = rel.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-        return parent.to_string_lossy().replace('\\', "/");
-    }
-    String::new()
+/// Resolve a page's directory relative to repo_root (minus the filename).
+/// Returns the parent directory as a forward-slash string, or empty string
+/// if the page is directly in the repo root.
+pub(crate) fn resolve_page_subdir(page_abs: &Path, repo_root: &Path) -> String {
+    let rel = page_abs.strip_prefix(repo_root).unwrap_or(page_abs);
+    let parent = rel.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    parent.to_string_lossy().replace('\\', "/")
 }
 
 /// Classify the frontmatter of a file, returning both the `FileMeta` and an
@@ -797,7 +830,9 @@ fn classify_frontmatter(
         .find(|l| l.starts_with("title:") || l.starts_with("title :"));
 
     if title_line.is_none() {
-        return (FileMeta::default(), Some(ParseErrorKind::MissingTitle));
+        // A frontmatter block without a `title:` key is valid — the page
+        // simply has no extractable title and is treated as a plain page.
+        return (FileMeta::default(), None);
     }
 
     // Check if the value is empty/whitespace.
@@ -954,12 +989,11 @@ mod tests {
     }
 
     #[test]
-    fn classify_missing_title() {
+    fn classify_missing_title_is_not_an_error() {
+        // Frontmatter without a `title:` key is valid — the page has no
+        // extractable title but does not produce a parse error.
         let kind = classify_str("---\nsummary: x\n---\n\nbody\n");
-        assert!(
-            matches!(kind, Some(ParseErrorKind::MissingTitle)),
-            "expected MissingTitle, got {kind:?}"
-        );
+        assert!(kind.is_none(), "expected None, got {kind:?}");
     }
 
     #[test]
@@ -1164,5 +1198,103 @@ mod tests {
         let exists = |slug: &str| existing.contains(slug);
         resolve_slug_collisions(&mut drafts, &titles, &exists);
         assert_eq!(drafts[0].slug, "wiki/mesh/outer/leaf");
+    }
+
+    // ── resolve_page_subdir ──────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_page_subdir_returns_parent_relative_to_repo_root() {
+        let repo_root = std::path::Path::new("/repo");
+        let page = std::path::Path::new("/repo/wiki/billing.md");
+        assert_eq!(resolve_page_subdir(page, repo_root), "wiki");
+    }
+
+    #[test]
+    fn resolve_page_subdir_nested_dir() {
+        let repo_root = std::path::Path::new("/repo");
+        let page = std::path::Path::new("/repo/wiki/payments/charge.md");
+        assert_eq!(resolve_page_subdir(page, repo_root), "wiki/payments");
+    }
+
+    #[test]
+    fn resolve_page_subdir_at_repo_root() {
+        let repo_root = std::path::Path::new("/repo");
+        let page = std::path::Path::new("/repo/readme.md");
+        assert_eq!(resolve_page_subdir(page, repo_root), "");
+    }
+
+    // ── missing-anchor filtering ─────────────────────────────────────────────
+
+    #[test]
+    fn missing_anchor_drops_mesh_and_records_dropped_entry() {
+        // Build two drafts: one whose second anchor exists on disk and one
+        // whose second anchor does not.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_root = tmp.path();
+
+        // Create the file that the first draft references.
+        let present = repo_root.join("src/present.rs");
+        std::fs::create_dir_all(present.parent().unwrap()).unwrap();
+        std::fs::write(&present, "// present\n").unwrap();
+
+        let make = |page: &str, anchor_path: &str| {
+            let slug = super::super::draft::build_slug(
+                "wiki",
+                page.split('/').last().unwrap().trim_end_matches(".md"),
+            );
+            super::super::draft::MeshDraft {
+                page_path: page.to_string(),
+                slug,
+                anchors: vec![format!("{page}#L1-L5"), format!("{anchor_path}#L1-L5")],
+                structured_anchors: vec![
+                    StructuredAnchor {
+                        path: page.to_string(),
+                        start_line: 1,
+                        end_line: 5,
+                    },
+                    StructuredAnchor {
+                        path: anchor_path.to_string(),
+                        start_line: 1,
+                        end_line: 5,
+                    },
+                ],
+                heading_chain: vec![],
+                consolidated_count: 1,
+                noun: "test".to_string(),
+                page_subdir: "wiki".to_string(),
+                extends_existing: None,
+            }
+        };
+
+        let mut drafts = vec![
+            make("wiki/a.md", "src/present.rs"),
+            make("wiki/b.md", "src/missing.rs"),
+        ];
+
+        let mut dropped: Vec<DroppedMesh> = Vec::new();
+        drafts.retain(|draft| {
+            for anchor in draft.structured_anchors.iter().skip(1) {
+                let abs = repo_root.join(&anchor.path);
+                if !abs.is_file() {
+                    dropped.push(DroppedMesh {
+                        slug: draft.slug.clone(),
+                        missing_path: anchor.path.clone(),
+                        page: draft.page_path.clone(),
+                    });
+                    return false;
+                }
+            }
+            true
+        });
+
+        assert_eq!(
+            drafts.len(),
+            1,
+            "only the draft with present anchor should survive"
+        );
+        assert_eq!(drafts[0].page_path, "wiki/a.md");
+        assert_eq!(dropped.len(), 1, "one mesh should be dropped");
+        assert_eq!(dropped[0].page, "wiki/b.md");
+        assert_eq!(dropped[0].missing_path, "src/missing.rs");
     }
 }

@@ -96,17 +96,15 @@ fn format_diagnostic(kind: &str, file: &str, line: usize, message: &str) -> Stri
 /// Run the check command.
 ///
 /// Returns the exit code: 0 = valid, 1 = validation errors, 2 = runtime error.
-#[allow(clippy::too_many_arguments)]
 pub fn run(
     globs: &[String],
     json: bool,
-    wiki_root: &Path,
     repo_root: &Path,
     no_exit_code: bool,
     no_mesh: bool,
     source: DocSource,
 ) -> Result<i32> {
-    let files = match discover_files(globs, wiki_root, repo_root, source) {
+    let files = match discover_files(globs, repo_root, source) {
         Ok(f) => f,
         Err(e) => {
             if json {
@@ -132,22 +130,21 @@ pub fn run(
     let index_files = if globs.is_empty() {
         files.clone()
     } else {
-        let raw = discover_files(&[], wiki_root, repo_root, source)?;
+        let raw = discover_files(&[], repo_root, source)?;
         filter_files_for_source(raw, repo_root, source)?
     };
 
-    let diagnostics =
-        match collect_for_files(&files, &index_files, wiki_root, repo_root, no_mesh, source) {
-            Ok(d) => d,
-            Err(e) => {
-                if json {
-                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
-                } else {
-                    eprintln!("error: {e}");
-                }
-                return Ok(2);
+    let diagnostics = match collect_for_files(&files, &index_files, repo_root, no_mesh, source) {
+        Ok(d) => d,
+        Err(e) => {
+            if json {
+                eprintln!("{}", serde_json::json!({"error": e.to_string()}));
+            } else {
+                eprintln!("error: {e}");
             }
-        };
+            return Ok(2);
+        }
+    };
 
     if json {
         println!(
@@ -172,30 +169,25 @@ pub fn run(
 
 /// Collect diagnostics for the given glob patterns without printing output.
 #[allow(dead_code)]
-pub fn collect(
-    globs: &[String],
-    wiki_root: &Path,
-    repo_root: &Path,
-) -> Result<Vec<CheckDiagnostic>> {
-    collect_with_source(globs, wiki_root, repo_root, DocSource::WorkingTree)
+pub fn collect(globs: &[String], repo_root: &Path) -> Result<Vec<CheckDiagnostic>> {
+    collect_with_source(globs, repo_root, DocSource::WorkingTree)
 }
 
 /// Collect diagnostics with an explicit `DocSource`.
 pub fn collect_with_source(
     globs: &[String],
-    wiki_root: &Path,
     repo_root: &Path,
     source: DocSource,
 ) -> Result<Vec<CheckDiagnostic>> {
-    let files = discover_files(globs, wiki_root, repo_root, source)?;
+    let files = discover_files(globs, repo_root, source)?;
     let files = filter_files_for_source(files, repo_root, source)?;
     let index_files = if globs.is_empty() {
         files.clone()
     } else {
-        let raw = discover_files(&[], wiki_root, repo_root, source)?;
+        let raw = discover_files(&[], repo_root, source)?;
         filter_files_for_source(raw, repo_root, source)?
     };
-    collect_for_files(&files, &index_files, wiki_root, repo_root, false, source)
+    collect_for_files(&files, &index_files, repo_root, false, source)
 }
 
 /// Extract the anchor portion (after `#`) from a markdown link href, if present.
@@ -211,7 +203,6 @@ fn anchor_of(href: &str) -> Option<&str> {
 fn collect_for_files(
     files: &[PathBuf],
     index_files: &[PathBuf],
-    _wiki_root: &Path,
     repo_root: &Path,
     no_mesh: bool,
     source: DocSource,
@@ -506,14 +497,12 @@ mod tests {
     fn valid_pages_exit_0() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("wiki/page.md", &make_wiki_page("Page", "No links here."));
         repo.commit("add page");
 
         let code = run(
             &[],
             false,
-            &wiki_root,
             repo.path(),
             false,
             false,
@@ -527,7 +516,6 @@ mod tests {
     fn title_collision_exit_1() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("wiki/a.md", &make_wiki_page("Shared", ""));
         repo.create_file("wiki/b.md", &make_wiki_page("Shared", ""));
         repo.commit("add pages");
@@ -535,7 +523,6 @@ mod tests {
         let code = run(
             &[],
             false,
-            &wiki_root,
             repo.path(),
             false,
             false,
@@ -546,38 +533,36 @@ mod tests {
     }
 
     #[test]
-    fn missing_frontmatter_exit_1() {
+    fn file_without_frontmatter_is_not_discovered() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("wiki/page.md", "# Just a heading\n\nNo frontmatter.");
         repo.commit("add page");
 
+        // File has no frontmatter → not a wiki member → not discovered → exit 2
         let code = run(
             &[],
             false,
-            &wiki_root,
             repo.path(),
             false,
             false,
             crate::index::DocSource::WorkingTree,
         )
         .expect("run");
-        assert_eq!(code, 1);
+        assert_eq!(code, 2);
     }
 
     #[test]
     fn missing_link_target_emits_broken_link() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/page.md",
             &make_wiki_page("Page", "See [missing](/src/missing.rs)."),
         );
         repo.commit("add page");
 
-        let diags = collect(&[], &wiki_root, repo.path()).expect("collect");
+        let diags = collect(&[], repo.path()).expect("collect");
         assert!(
             diags.iter().any(|d| d.kind == "broken_link"),
             "expected broken_link: {diags:?}"
@@ -588,7 +573,6 @@ mod tests {
     fn line_range_out_of_bounds_emits_broken_anchor() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
@@ -596,7 +580,7 @@ mod tests {
         );
         repo.commit("add files");
 
-        let diags = collect(&[], &wiki_root, repo.path()).expect("collect");
+        let diags = collect(&[], repo.path()).expect("collect");
         assert!(
             diags.iter().any(|d| d.kind == "broken_anchor"),
             "expected broken_anchor: {diags:?}"
@@ -607,7 +591,6 @@ mod tests {
     fn heading_anchor_resolves_when_present() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/target.md",
             &make_wiki_page("Target", "## Introduction\n\nbody\n"),
@@ -618,7 +601,7 @@ mod tests {
         );
         repo.commit("add pages");
 
-        let diags = collect(&[], &wiki_root, repo.path()).expect("collect");
+        let diags = collect(&[], repo.path()).expect("collect");
         assert!(
             diags.iter().all(|d| d.kind != "broken_anchor"),
             "anchor must resolve via slug: {diags:?}"
@@ -629,7 +612,6 @@ mod tests {
     fn missing_heading_anchor_emits_broken_anchor() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/target.md",
             &make_wiki_page("Target", "## Introduction\n"),
@@ -640,7 +622,7 @@ mod tests {
         );
         repo.commit("add pages");
 
-        let diags = collect(&[], &wiki_root, repo.path()).expect("collect");
+        let diags = collect(&[], repo.path()).expect("collect");
         assert!(
             diags.iter().any(|d| d.kind == "broken_anchor"),
             "expected broken_anchor: {diags:?}"
@@ -651,7 +633,6 @@ mod tests {
     fn directory_link_is_valid() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("src/lib.rs", "fn main() {}");
         repo.create_file(
             "wiki/page.md",
@@ -662,7 +643,6 @@ mod tests {
         let code = run(
             &[],
             false,
-            &wiki_root,
             repo.path(),
             false,
             false,
@@ -676,14 +656,13 @@ mod tests {
     fn mailto_link_does_not_produce_broken_link() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/page.md",
             &make_wiki_page("Page", "Contact [us](mailto:someone@example.com)."),
         );
         repo.commit("add files");
 
-        let diagnostics = collect(&[], &wiki_root, repo.path()).expect("collect");
+        let diagnostics = collect(&[], repo.path()).expect("collect");
         assert!(
             diagnostics.iter().all(|d| d.kind != "broken_link"),
             "mailto: links must not produce broken_link: {diagnostics:?}"
@@ -696,7 +675,6 @@ mod tests {
     fn mesh_uncovered_link_exits_1() {
         let _guard = PATH_MUTEX.lock().expect("path mutex");
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
@@ -704,7 +682,7 @@ mod tests {
         );
         repo.commit("add files");
 
-        let diagnostics = collect(&[], &wiki_root, repo.path()).expect("collect");
+        let diagnostics = collect(&[], repo.path()).expect("collect");
         let mesh_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.kind == "mesh_uncovered")
@@ -717,7 +695,6 @@ mod tests {
         let code = run(
             &[],
             false,
-            &wiki_root,
             repo.path(),
             false,
             false,
@@ -731,7 +708,6 @@ mod tests {
     fn mesh_covered_link_exits_0() {
         let _guard = PATH_MUTEX.lock().expect("path mutex");
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
@@ -743,7 +719,7 @@ mod tests {
         repo.git_mesh(&["why", "test-mesh", "-m", "Links wiki page to code."]);
         repo.git_mesh(&["commit"]);
 
-        let diagnostics = collect(&[], &wiki_root, repo.path()).expect("collect");
+        let diagnostics = collect(&[], repo.path()).expect("collect");
         let mesh_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.kind == "mesh_uncovered")
@@ -755,7 +731,6 @@ mod tests {
         let code = run(
             &[],
             false,
-            &wiki_root,
             repo.path(),
             false,
             false,
@@ -769,7 +744,6 @@ mod tests {
     fn mesh_skips_links_without_line_range() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
@@ -777,7 +751,7 @@ mod tests {
         );
         repo.commit("add files");
 
-        let diagnostics = collect(&[], &wiki_root, repo.path()).expect("collect");
+        let diagnostics = collect(&[], repo.path()).expect("collect");
         let mesh_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.kind == "mesh_uncovered")
@@ -794,7 +768,6 @@ mod tests {
     fn source_index_validates_staged_broken_when_worktree_clean() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file("wiki/page.md", &make_wiki_page("Page", "No links."));
         repo.commit("clean baseline");
@@ -806,22 +779,16 @@ mod tests {
         repo.git(&["add", "wiki/page.md"]);
         repo.create_file("wiki/page.md", &make_wiki_page("Page", "No links."));
 
-        let diags_wt = collect_with_source(
-            &[],
-            &wiki_root,
-            repo.path(),
-            crate::index::DocSource::WorkingTree,
-        )
-        .expect("collect wt");
+        let diags_wt = collect_with_source(&[], repo.path(), crate::index::DocSource::WorkingTree)
+            .expect("collect wt");
         assert!(
             diags_wt.is_empty(),
             "worktree should be clean, got: {:?}",
             diags_wt
         );
 
-        let diags_idx =
-            collect_with_source(&[], &wiki_root, repo.path(), crate::index::DocSource::Index)
-                .expect("collect idx");
+        let diags_idx = collect_with_source(&[], repo.path(), crate::index::DocSource::Index)
+            .expect("collect idx");
         assert!(
             diags_idx.iter().any(|d| d.kind == "broken_anchor"),
             "index should see staged broken anchor, got: {:?}",

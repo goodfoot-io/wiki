@@ -7,14 +7,8 @@ use crate::index::{DocSource, WikiIndex};
 
 use super::summary::{format_search_result, render_not_found};
 
-pub fn run(
-    target: &str,
-    json: bool,
-    wiki_root: &Path,
-    repo_root: &Path,
-    source: DocSource,
-) -> Result<i32> {
-    let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
+pub fn run(target: &str, json: bool, repo_root: &Path, source: DocSource) -> Result<i32> {
+    let index = WikiIndex::prepare_for_source(repo_root, source)?;
     let matches = index.links(target)?;
 
     if matches.is_empty() {
@@ -108,7 +102,6 @@ mod tests {
     #[test]
     fn returns_pages_linking_to_a_wiki_page() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/target.md",
             "---\ntitle: Target Page\nsummary: Target summary.\n---\nBody.\n",
@@ -121,14 +114,13 @@ mod tests {
         let code = run(
             "Target Page",
             false,
-            &wiki_root,
             repo.path(),
             crate::index::DocSource::WorkingTree,
         )
         .expect("run");
         assert_eq!(code, 0);
 
-        let results = WikiIndex::prepare(&wiki_root, repo.path())
+        let results = WikiIndex::prepare(repo.path())
             .expect("prepare")
             .links("Target Page")
             .expect("links");
@@ -141,7 +133,6 @@ mod tests {
     #[test]
     fn returns_pages_referencing_a_file() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("packages/foo/bar.ts", "export const x = 1;");
         repo.create_file(
             "wiki/page.md",
@@ -151,14 +142,13 @@ mod tests {
         let code = run(
             "packages/foo/bar.ts",
             false,
-            &wiki_root,
             repo.path(),
             crate::index::DocSource::WorkingTree,
         )
         .expect("run");
         assert_eq!(code, 0);
 
-        let results = WikiIndex::prepare(&wiki_root, repo.path())
+        let results = WikiIndex::prepare(repo.path())
             .expect("prepare")
             .links("packages/foo/bar.ts")
             .expect("links");
@@ -171,7 +161,6 @@ mod tests {
     #[test]
     fn path_input_can_return_page_links_and_file_refs() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/target.md",
             "---\ntitle: Target Page\nsummary: Target summary.\n---\nBody.\n",
@@ -185,7 +174,7 @@ mod tests {
             "---\ntitle: Reference Page\nsummary: References the target file.\n---\nRead [the file](/wiki/target.md) directly.\n",
         );
 
-        let results = WikiIndex::prepare(&wiki_root, repo.path())
+        let results = WikiIndex::prepare(repo.path())
             .expect("prepare")
             .links("wiki/target.md")
             .expect("links");
@@ -198,7 +187,6 @@ mod tests {
     #[test]
     fn returns_exit_0_when_no_references_found() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/page.md",
             "---\ntitle: Page\nsummary: A page.\n---\nNo references.\n",
@@ -207,7 +195,6 @@ mod tests {
         let code = run(
             "packages/nonexistent/file.ts",
             false,
-            &wiki_root,
             repo.path(),
             crate::index::DocSource::WorkingTree,
         )
@@ -218,7 +205,6 @@ mod tests {
     #[test]
     fn strips_leading_dot_slash_from_path_input() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("packages/foo/bar.ts", "export const x = 1;");
         repo.create_file(
             "wiki/page.md",
@@ -228,7 +214,6 @@ mod tests {
         let code = run(
             "./packages/foo/bar.ts",
             false,
-            &wiki_root,
             repo.path(),
             crate::index::DocSource::WorkingTree,
         )

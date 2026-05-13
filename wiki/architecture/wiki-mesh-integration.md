@@ -18,19 +18,19 @@ Two commands implement this:
 ```bash
 wiki check
 wiki check wiki/architecture/*.md
-wiki check "packages/auth/**/*.wiki.md"
+wiki check "packages/auth/**/*.md"
 ```
 
 Extends the existing `wiki check` validation pass with a [mesh coverage check](/packages/cli/src/commands/mesh_coverage.rs#L49-L52). For each internal fragment link with a line range, it [runs `git mesh list`](/packages/cli/src/commands/mesh_coverage.rs#L141-L141) `<path>#L<s>-L<e> --porcelain` and verifies that at least one returned mesh also anchors the wiki file containing the link. Any uncovered link is reported as an error ([non-zero exit](/packages/cli/src/commands/mesh_coverage.rs#L100-L110)).
 
-Mesh coverage is always on; `git mesh` must be installed or `wiki check` fails fast. Glob targeting follows the same rules as bare `wiki check`: omitting globs defaults to `$WIKI_DIR/**/*.md` plus `**/*.wiki.md` (with `$WIKI_DIR` defaulting to `wiki`).
+Mesh coverage is always on; `git mesh` must be installed or `wiki check` fails fast. Glob targeting follows the same rules as bare `wiki check`: a markdown file is treated as a wiki page only when its frontmatter has both a non-empty `title` and `summary`; omitting globs walks all `.md` files under `$WIKI_DIR` (defaulting to `wiki`) applying that filter.
 
 ## wiki scaffold
 
 ```bash
 wiki scaffold
 wiki scaffold wiki/architecture/*.md
-wiki scaffold "packages/auth/**/*.wiki.md"
+wiki scaffold "packages/auth/**/*.md"
 ```
 
 [Scans the same file set as `wiki check`](/packages/cli/src/commands/mesh/scaffold.rs#L159-L166) and emits a markdown document containing the `git mesh add` / `git mesh why` / `git mesh commit` commands needed to create a mesh for every fragment link not yet covered. Output is printed to stdout — nothing is staged or committed.
@@ -70,13 +70,7 @@ Generated whys require author review — sentences that started with a backtick 
 
 ### Default glob behavior
 
-Omitting globs is equivalent to:
-
-```bash
-wiki scaffold "$WIKI_DIR/**/*.md" "**/*.wiki.md"
-```
-
-where `$WIKI_DIR` defaults to `wiki`. This matches the default discovery behavior used by all other wiki commands (see [discover_files](/packages/cli/src/commands/mod.rs#L141-L183)).
+Omitting globs walks all `.md` files and treats those whose frontmatter has both a non-empty `title` and `summary` as wiki pages. `$WIKI_DIR` defaults to `wiki`. This matches the default discovery behavior used by all other wiki commands (see [discover_files](/packages/cli/src/commands/mod.rs#L141-L183)).
 
 ## Workflow
 

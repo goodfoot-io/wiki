@@ -1,13 +1,13 @@
 ---
 title: Wiki Migration Candidates
-summary: Markdown files across the repository that are good candidates for migration into wiki/ or conversion to *.wiki.md files, with reasoning for each.
+summary: Markdown files across the repository that are good candidates for promotion to wiki pages by adding YAML frontmatter with a non-empty title and summary, with reasoning for each.
 tags:
   - meta
   - wiki
   - maintenance
 ---
 
-Living list of candidate files for wiki migration. Files are grouped by source area. Each entry notes the recommended destination (wiki/ page vs embedded *.wiki.md) and brief reasoning.
+Living list of candidate files for wiki migration. Files are grouped by source area. Each entry notes the recommended destination and brief reasoning. A file becomes a wiki page once its frontmatter has both a non-empty `title` and `summary`.
 
 See [Wiki Organization](./wiki-organization.md) for the embed vs. centralize decision criteria.
 
@@ -74,8 +74,8 @@ See [Wiki Organization](./wiki-organization.md) for the embed vs. centralize dec
 - **documentation/telemetry/north-star.md** — `wiki/guides/telemetry-north-star.md`
   Reason: Explains the foundational principles and evidence framework for telemetry instrumentation in the Cards extension (activation, retention, health metrics, privacy constraints). This synthesizes requirements across the extension system and answers "why" the instrumentation strategy exists. Highly durable, relevant across multiple commits, and can be anchored to telemetry.json and sanitizer implementation.
 
-- **documentation/telemetry/plan.md** — `packages/extension/TELEMETRY.wiki.md`
-  Reason: Comprehensive taxonomy redesign for the Cards extension's telemetry system. Since it is primarily about extension-specific instrumentation (setup wizard, actions, API server) and references specific files like SetupWizardViewProvider.ts, it is better suited as an embedded document alongside the extension package where maintainers will encounter it directly, ensuring it stays current as the extension evolves.
+- **documentation/telemetry/plan.md** — `packages/extension/TELEMETRY.md` (add frontmatter with title and summary)
+  Reason: Comprehensive taxonomy redesign for the Cards extension's telemetry system. Since it is primarily about extension-specific instrumentation (setup wizard, actions, API server) and references specific files like SetupWizardViewProvider.ts, it is better suited as a file alongside the extension package where maintainers will encounter it directly, ensuring it stays current as the extension evolves.
 
 ### Excluded
 
@@ -93,10 +93,10 @@ See [Wiki Organization](./wiki-organization.md) for the embed vs. centralize dec
 
 ## packages/ and other areas
 
-- **packages/cards/web/SPACING.md** — `packages/cards/web/SPACING.wiki.md`
+- **packages/cards/web/SPACING.md** — add frontmatter (title + summary) in place
   Reason: UI design system specification with concrete spacing rules for the Cards component; local to the web package.
 
-- **packages/extension/CLAUDE_TEST_CACHING.md** — `packages/extension/CLAUDE_TEST_CACHING.wiki.md`
+- **packages/extension/CLAUDE_TEST_CACHING.md** — add frontmatter (title + summary) in place
   Reason: Technical guide explaining test caching behavior and management; component-specific developer reference.
 
 - **packages/extension/docs/git-command-spec.md** — `wiki/architecture/extension-git-commands.md`
@@ -114,7 +114,7 @@ See [Wiki Organization](./wiki-organization.md) for the embed vs. centralize dec
 - **packages/website/CLAUDE.md** — `wiki/guides/website-development.md`
   Reason: Detailed dev server setup, database configuration, and authentication testing guide for website package; foundational developer guide.
 
-- **public/packages/test-utils/CLAUDE.md** — `public/packages/test-utils/CLAUDE.wiki.md`
+- **public/packages/test-utils/CLAUDE.md** — add frontmatter (title + summary) in place
   Reason: Usage documentation for shared test utilities library; guidance embedded alongside the component.
 
 - **public/plugins/runtime/docs/CONTEXT_MAP.md** — `wiki/architecture/runtime-plugin-agents.md`

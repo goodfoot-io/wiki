@@ -107,7 +107,7 @@ Expect: no output, exit 0.
 Stage all modified wiki pages and commit:
 
 ```bash
-git add wiki/ documentation/**/*.wiki.md
+git add wiki/ documentation/
 git commit -m "wiki: maintenance pass — [brief summary of what changed]"
 ```
 

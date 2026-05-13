@@ -7,49 +7,6 @@ as documented.
 
 ## Bugs / non-spec behavior
 
-### `wiki namespaces` parse-error case hard-fails (Step 3c)
-
-The procedure says: "a third tab column shows the parse error on the broken
-row; exit `1` (other namespaces still listed)." Actual behavior:
-
-```
-× failed to parse /tmp/.../broken/wiki.toml
-╰─▶ TOML parse error at line 1, column 9 ...
-exit:2
-```
-
-No rows are printed; the command bails on the first parse failure. This is the
-behavior introduced by recent commits (29bd1dd / 0e4229a — "hard-fails on
-unparseable wiki.toml"), so the *code* is the intended behavior; the
-**procedure is stale** and should be rewritten to match.
-
-### `wiki namespaces --format json` output shape mismatch (Step 3a)
-
-The procedure expects each object to carry `"status": "ok"`. The actual JSON
-shape is:
-
-```json
-{ "alias": "", "namespace": null, "path": "...", "abs_path": "..." }
-```
-
-There is no `status` field, but there is an `alias` field that is always an
-empty string in this scenario. Either the procedure is out-of-date or the
-empty-string `alias` should not be emitted by default.
-
-### `wiki links` does not surface cross-namespace inbound links (Step 9)
-
-<!-- intentional: historical example, namespaces and wikilink syntax removed -->
-`notes/operator-notes.md` (namespace `scratch`) contains a cross-namespace
-reference to `default:Authentication`. The procedure expects
-`wiki links "Authentication"` to include `scratch:Operator Notes` in the
-output. It does not — only same-namespace backlinks (`Sessions`,
-`OAuth Notes`) appear.
-
-Passing `-n '*'` does **not** fix it: the output is identical to the default
-invocation. So there is no documented way to discover that `Operator Notes`
-links to `Authentication` from the `Authentication` page's perspective. This
-is the same bug previously reported; still present.
-
 ### `wiki install` surface mismatches the procedure (Step 14)
 
 Procedure: "subcommands listing supported integration targets (e.g. `claude`,

@@ -305,17 +305,14 @@ fn run(
     query: Option<String>,
     limit: i64,
     offset: usize,
-    root: Option<PathBuf>,
+    _root: Option<PathBuf>,
     json: bool,
     source: index::DocSource,
 ) -> Result<i32> {
     let repo_root = git::repo_root()?;
-    let cwd = std::env::current_dir().unwrap_or_else(|_| repo_root.clone());
-    let wiki_root_pb = root.unwrap_or(cwd);
-    let wiki_root = wiki_root_pb.as_path();
 
     let command_name = command_name(command.as_ref(), query.as_deref());
-    perf::init(wiki_root, command_name, json);
+    perf::init(&repo_root, command_name, json);
     let _command_span = perf::span_for_command(command_name);
     let started = Instant::now();
 
@@ -324,36 +321,28 @@ fn run(
             globs,
             no_exit_code,
             no_mesh,
-        }) => commands::check::run(
-            &globs,
-            json,
-            wiki_root,
-            &repo_root,
-            no_exit_code,
-            no_mesh,
-            source,
-        ),
+        }) => commands::check::run(&globs, json, &repo_root, no_exit_code, no_mesh, source),
         Some(Commands::Links { target }) => {
             let inputs = resolve_inputs(target, read_stdin_lines)?;
             run_for_each(
                 inputs,
-                |input| commands::links::run(input, json, wiki_root, &repo_root, source),
+                |input| commands::links::run(input, json, &repo_root, source),
                 false,
             )
         }
         Some(Commands::Hook) => {
             let lines = read_stdin_lines();
             let input = lines.join("\n");
-            commands::hook_check::run(&input, wiki_root, &repo_root, source)
+            commands::hook_check::run(&input, &repo_root, source)
         }
         Some(Commands::List { tag }) => {
-            commands::list::run(&[], tag.as_deref(), json, wiki_root, &repo_root, source)
+            commands::list::run(&[], tag.as_deref(), json, &repo_root, source)
         }
         Some(Commands::Summary { title }) => {
             let inputs = resolve_inputs(title, read_stdin_lines)?;
             run_for_each(
                 inputs,
-                |input| commands::summary::run(input, json, wiki_root, &repo_root, source),
+                |input| commands::summary::run(input, json, &repo_root, source),
                 false,
             )
         }
@@ -361,7 +350,7 @@ fn run(
             let inputs = resolve_inputs(title, read_stdin_lines)?;
             run_for_each(
                 inputs,
-                |input| commands::refs::run(input, json, wiki_root, &repo_root, source),
+                |input| commands::refs::run(input, json, &repo_root, source),
                 false,
             )
         }
@@ -381,28 +370,15 @@ fn run(
             &git_ref,
         ),
         Some(Commands::Scaffold { globs }) => {
-            let wiki_roots = vec![wiki_root_pb.clone()];
-            commands::mesh::scaffold::run(&globs, json, &wiki_roots, &repo_root, source)
+            commands::mesh::scaffold::run(&globs, json, &repo_root, source)
         }
         None => match query.as_deref() {
-            Some(query) => {
-                commands::search::run(query, limit, offset, json, wiki_root, &repo_root, source)
-            }
+            Some(query) => commands::search::run(query, limit, offset, json, &repo_root, source),
             None => {
                 // No subcommand and no query: print help and the wiki README.
                 let mut cmd = <Cli as clap::CommandFactory>::command();
                 cmd.print_help().ok();
-
-                let readme_path = wiki_root.join("README.md");
-
-                if readme_path.exists() {
-                    if let Ok(content) = std::fs::read_to_string(&readme_path) {
-                        println!("\n---\n");
-                        println!("{}", content.trim_end());
-                    }
-                } else {
-                    println!();
-                }
+                println!();
                 Ok(0)
             }
         },

@@ -69,14 +69,8 @@ pub fn render_not_found(title: &str, suggestions: &[SearchResult], repo_root: &P
     rendered
 }
 
-pub fn run(
-    title: &str,
-    json: bool,
-    wiki_root: &Path,
-    repo_root: &Path,
-    source: DocSource,
-) -> Result<i32> {
-    let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
+pub fn run(title: &str, json: bool, repo_root: &Path, source: DocSource) -> Result<i32> {
+    let index = WikiIndex::prepare_for_source(repo_root, source)?;
     match index.resolve_page(title)? {
         Some(page) => {
             let output = summary_output(page);
@@ -159,13 +153,12 @@ mod tests {
     #[test]
     fn resolves_summary_by_alias_from_index() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/page.md",
             "---\ntitle: My Page\naliases:\n  - alt\nsummary: This is the summary.\n---\nBody text.\n",
         );
 
-        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(repo.path()).expect("prepare");
         let output = summary_output(index.resolve_page("alt").expect("resolve").expect("page"));
         assert_eq!(output.title, "My Page");
         assert_eq!(output.alias.as_deref(), Some("alt"));

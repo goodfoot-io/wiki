@@ -23,7 +23,7 @@ Skills are located in `.agents/skills/`. Load a skill before performing speciali
 
 ## Wiki
 
-This repository stores documentation in `./wiki/**/*.md` and `**/*.wiki.md` files. Reference articles using relative markdown links (e.g. `[Title](./other-page.md)`). Use the `wiki` CLI to search and read documentation:
+A markdown file is part of the wiki when its YAML frontmatter has both a non-empty `title` and a non-empty `summary`. Files without frontmatter, or missing either field, are not wiki pages — they are plain markdown. Reference wiki articles using relative markdown links (e.g. `[Title](./other-page.md)`). Use the `wiki` CLI to search and read documentation:
 
 ```bash
 wiki "search query"

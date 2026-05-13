@@ -186,11 +186,24 @@ if ! (cd "$WORKTREE_DIR" && wiki check); then
   exit 1
 fi
 
-# Check if any wiki files were created or modified
+# Check if any wiki files were created or modified.
+# A file counts as a wiki page iff its first frontmatter block (---...---) has
+# both a non-empty title: and a non-empty summary: field.
 WORKTREE_WIKI_FILES=$(cd "$WORKTREE_DIR" && {
   git diff --name-only HEAD
-  git ls-files --others --exclude-standard -- "$WIKI_DIR/" '*.wiki.md'
-} | grep -E "^${WIKI_DIR}/|.*\.wiki\.md$" | grep -v 'claude-commit-message\.txt' | sort -u || true)
+  git ls-files --others --exclude-standard
+} | grep '\.md$' | grep -v 'claude-commit-message\.txt' | sort -u | while IFS= read -r f; do
+  [ -f "$f" ] || continue
+  if awk '
+    BEGIN { in_fm=0; got_title=0; got_summary=0 }
+    NR==1 { if ($0=="---") { in_fm=1 } else { exit 1 } next }
+    in_fm && /^---$/ { exit (got_title && got_summary) ? 0 : 1 }
+    in_fm && /^title:[[:space:]]*[^[:space:]]/ { got_title=1 }
+    in_fm && /^summary:[[:space:]]*[^[:space:]]/ { got_summary=1 }
+  ' "$f" 2>/dev/null; then
+    printf '%s\n' "$f"
+  fi
+done || true)
 
 if [ -z "$WORKTREE_WIKI_FILES" ]; then
   echo "No wiki files created or modified. Exiting."

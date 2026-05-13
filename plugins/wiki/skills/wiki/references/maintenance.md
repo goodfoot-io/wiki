@@ -121,7 +121,7 @@ Expect: no errors.
 Stage all modified wiki pages and commit:
 
 ```bash
-git add wiki/ documentation/**/*.wiki.md
+git add wiki/ documentation/
 git commit -m "wiki: maintenance pass — [brief summary of what changed]"
 ```
 
@@ -142,6 +142,6 @@ wiki: maintenance pass — update cards and rebuild pages
 Report:
 
 - **Pages updated** — pages where prose changed; one line per page describing what changed and why
-- **Re-anchored only** — pages where only mesh anchors were advanced (no prose changes needed)
+- **Re-pinned only** — pages where only line ranges were adjusted (no prose changes needed)
 - **Flagged (uncertain)** — entries where the diff was ambiguous; describe the judgment call made
 - **New meshes created** — meshes added by `wiki scaffold` for previously uncovered fragment links

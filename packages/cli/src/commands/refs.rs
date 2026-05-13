@@ -25,14 +25,8 @@ fn format_text_entries(entries: &[RefEntry]) -> String {
     out.trim_end().to_string()
 }
 
-pub fn run(
-    title: &str,
-    json: bool,
-    wiki_root: &Path,
-    repo_root: &Path,
-    source: DocSource,
-) -> Result<i32> {
-    let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
+pub fn run(title: &str, json: bool, repo_root: &Path, source: DocSource) -> Result<i32> {
+    let index = WikiIndex::prepare_for_source(repo_root, source)?;
     let Some(_page) = index.resolve_page(title)? else {
         if json {
             eprintln!(
@@ -123,7 +117,6 @@ mod tests {
     #[test]
     fn source_page_not_found_returns_exit_1() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/other.md",
             "---\ntitle: Other\nsummary: Other page.\n---\nBody.\n",
@@ -132,7 +125,6 @@ mod tests {
         let code = run(
             "Nonexistent",
             true,
-            &wiki_root,
             repo.path(),
             crate::index::DocSource::WorkingTree,
         )

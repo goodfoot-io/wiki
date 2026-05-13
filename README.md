@@ -93,7 +93,7 @@ filesystem; you stay in control.
 
 ## Wiki Viewer (VS Code extension)
 
-Install **Wiki Viewer** from the [VS Code Marketplace](https://marketplace.visualstudio.com/) or [Open VSIX](https://open-vsx.org/). It registers as the default editor for `**/wiki/**/*.md` and `**/*.wiki.md`.
+Install **Wiki Viewer** from the [VS Code Marketplace](https://marketplace.visualstudio.com/) or [Open VSIX](https://open-vsx.org/). It registers as the default editor for `.md` files whose YAML frontmatter has both a non-empty `title` and a non-empty `summary`; other markdown files fall through to VS Code's default editor.
 
 ### Features
 

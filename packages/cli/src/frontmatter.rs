@@ -74,6 +74,13 @@ pub struct Frontmatter {
 
 // ── Parsing ───────────────────────────────────────────────────────────────────
 
+/// Returns `true` iff `content` has a YAML frontmatter block with both a
+/// non-empty `title:` and a non-empty `summary:` field. Errors are treated as
+/// non-membership.
+pub fn is_wiki_member(content: &str, path: &Path) -> bool {
+    matches!(parse_frontmatter(content, path), Ok(Some(_)))
+}
+
 /// Extract only the title from frontmatter, without full validation.
 ///
 /// Returns `None` if there is no frontmatter block, the YAML is unparseable,

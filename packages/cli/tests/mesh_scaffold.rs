@@ -50,8 +50,6 @@ fn mesh_scaffold_byte_equal_with_expected_md() {
     let tmp = tempfile::tempdir().unwrap();
     copy_dir_recursive(&fixture_dir.join("wiki"), &tmp.path().join("wiki"));
     copy_dir_recursive(&fixture_dir.join("src"), &tmp.path().join("src"));
-    // Mark the wiki/ dir as a wiki root so `WikiConfig::load` finds it.
-    std::fs::write(tmp.path().join("wiki/wiki.toml"), "").unwrap();
 
     git(tmp.path(), &["init", "-q", "-b", "main"]);
     git(
@@ -73,8 +71,6 @@ fn mesh_scaffold_byte_equal_with_expected_md() {
     );
 
     let bin = env!("CARGO_BIN_EXE_wiki");
-    // Run from inside the wiki dir so `WikiConfig::load` walks up and finds
-    // `wiki/wiki.toml`.
     let output = Command::new(bin)
         .args(["scaffold", "**/*.md"])
         .current_dir(tmp.path().join("wiki"))
@@ -100,27 +96,26 @@ fn mesh_scaffold_parse_error_block() {
     let tmp = tempfile::tempdir().unwrap();
     let wiki_dir = tmp.path().join("wiki");
     std::fs::create_dir_all(&wiki_dir).unwrap();
-    std::fs::write(wiki_dir.join("wiki.toml"), "").unwrap();
 
     // A file without frontmatter is a valid plain markdown page and must NOT
     // appear in the parse-error block.
     std::fs::write(wiki_dir.join("no_frontmatter.md"), "# Just a body.\n").unwrap();
 
-    // Category 1: MissingTitle — frontmatter present but no `title:` key.
+    // Frontmatter without `title:` is valid — not an error.
     std::fs::write(
         wiki_dir.join("missing_title.md"),
         "---\nsummary: x\n---\n\nbody\n",
     )
     .unwrap();
 
-    // Category 2: EmptyTitle — `title:` present but empty.
+    // Category 1: EmptyTitle — `title:` present but empty.
     std::fs::write(
         wiki_dir.join("empty_title.md"),
         "---\ntitle:\nsummary: x\n---\n\nbody\n",
     )
     .unwrap();
 
-    // Category 3: Unreadable — non-UTF-8 bytes.
+    // Category 2: Unreadable — non-UTF-8 bytes.
     std::fs::write(wiki_dir.join("unreadable.md"), [0xFF_u8, 0xFE, 0x00]).unwrap();
 
     // Clean file with a fragment link so there are meshes in the output.
@@ -174,26 +169,26 @@ fn mesh_scaffold_parse_error_block() {
         "expected advisory parse-error header at start, got:\n{stdout}"
     );
 
-    // The three bad files must be listed with their exact reason strings.
+    // The two bad files must be listed with their exact reason strings.
     assert!(
         stdout.contains("wiki/empty_title.md (frontmatter present but `title:` is empty)"),
         "EmptyTitle reason missing:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("wiki/missing_title.md (frontmatter present but `title:` is missing)"),
-        "MissingTitle reason missing:\n{stdout}"
     );
     assert!(
         stdout.contains("wiki/unreadable.md (file could not be read:"),
         "Unreadable reason missing:\n{stdout}"
     );
 
-    // A file without a frontmatter block is a valid plain markdown page and
-    // must not surface as a parse error.
+    // Files without a frontmatter block, or with frontmatter but no `title:`
+    // key, are valid plain markdown pages and must not surface as parse errors.
     let block_end_check = stdout.find("\n---\n").unwrap_or(stdout.len());
     assert!(
         !stdout[..block_end_check].contains("no_frontmatter.md"),
         "no_frontmatter.md must not appear in the parse-error block:\n{stdout}"
+    );
+    assert!(
+        !stdout[..block_end_check].contains("missing_title.md"),
+        "missing_title.md must not appear in the parse-error block:\n{stdout}"
     );
 
     // Clean file is not in the parse-error block.
@@ -225,13 +220,11 @@ fn mesh_scaffold_only_parse_errors_emits_block_alone() {
     let tmp = tempfile::tempdir().unwrap();
     let wiki_dir = tmp.path().join("wiki");
     std::fs::create_dir_all(&wiki_dir).unwrap();
-    std::fs::write(wiki_dir.join("wiki.toml"), "").unwrap();
 
     // Only files that fail to parse — no clean file with links.
-    std::fs::write(wiki_dir.join("no_fm.md"), "# No frontmatter.\n").unwrap();
     std::fs::write(
-        wiki_dir.join("missing_title.md"),
-        "---\nsummary: x\n---\n\nbody\n",
+        wiki_dir.join("empty_title.md"),
+        "---\ntitle:\n---\n\nbody\n",
     )
     .unwrap();
 
@@ -292,7 +285,6 @@ fn mesh_scaffold_json_shape_and_fields() {
     let tmp = tempfile::tempdir().unwrap();
     let wiki_dir = tmp.path().join("wiki");
     std::fs::create_dir_all(&wiki_dir).unwrap();
-    std::fs::write(wiki_dir.join("wiki.toml"), "").unwrap();
 
     // Page with a heading chain where top equals title (trim positive).
     std::fs::write(
@@ -427,7 +419,6 @@ fn mesh_scaffold_json_empty_corpus_structured_output() {
     let tmp = tempfile::tempdir().unwrap();
     let wiki_dir = tmp.path().join("wiki");
     std::fs::create_dir_all(&wiki_dir).unwrap();
-    std::fs::write(wiki_dir.join("wiki.toml"), "").unwrap();
 
     // A valid file with no fragment links → empty corpus.
     std::fs::write(
@@ -487,17 +478,16 @@ fn mesh_scaffold_json_parse_errors_in_output() {
     let tmp = tempfile::tempdir().unwrap();
     let wiki_dir = tmp.path().join("wiki");
     std::fs::create_dir_all(&wiki_dir).unwrap();
-    std::fs::write(wiki_dir.join("wiki.toml"), "").unwrap();
 
     // A plain markdown file without a frontmatter block — not an error.
     std::fs::write(wiki_dir.join("no_fm.md"), "# No frontmatter\n").unwrap();
-    // Category 1: MissingTitle.
+    // Frontmatter without `title:` — not an error.
     std::fs::write(
         wiki_dir.join("missing_title.md"),
         "---\nsummary: x\n---\n\nbody\n",
     )
     .unwrap();
-    // Category 2: EmptyTitle.
+    // Category 1: EmptyTitle.
     std::fs::write(
         wiki_dir.join("empty_title.md"),
         "---\ntitle:\n---\n\nbody\n",
@@ -560,8 +550,8 @@ fn mesh_scaffold_json_parse_errors_in_output() {
         "files without frontmatter must not produce a parse error: {categories:?}"
     );
     assert!(
-        categories.contains(&"missing_title"),
-        "missing_title category missing: {categories:?}"
+        !categories.contains(&"missing_title"),
+        "frontmatter without `title:` must not produce a parse error: {categories:?}"
     );
     assert!(
         categories.contains(&"empty_title"),
@@ -582,7 +572,6 @@ fn mesh_scaffold_json_top_of_file_link_empty_chain() {
     let tmp = tempfile::tempdir().unwrap();
     let wiki_dir = tmp.path().join("wiki");
     std::fs::create_dir_all(&wiki_dir).unwrap();
-    std::fs::write(wiki_dir.join("wiki.toml"), "").unwrap();
 
     std::fs::write(
         wiki_dir.join("page.md"),
@@ -639,12 +628,11 @@ fn mesh_scaffold_json_parse_error_page_not_in_pages() {
     let tmp = tempfile::tempdir().unwrap();
     let wiki_dir = tmp.path().join("wiki");
     std::fs::create_dir_all(&wiki_dir).unwrap();
-    std::fs::write(wiki_dir.join("wiki.toml"), "").unwrap();
 
-    // File with missing title but contains a fragment link — should be in parseErrors only.
+    // File with empty title (EmptyTitle parse error) — should be in parseErrors only.
     std::fs::write(
         wiki_dir.join("bad.md"),
-        "---\nsummary: x\n---\n\nSee [x](src/x.rs#L1-L2) for details.\n",
+        "---\ntitle:\nsummary: x\n---\n\nSee [x](src/x.rs#L1-L2) for details.\n",
     )
     .unwrap();
     // A clean file so pages[] is non-empty.
@@ -727,7 +715,6 @@ fn mesh_scaffold_json_unreadable_file_in_parse_errors() {
     let tmp = tempfile::tempdir().unwrap();
     let wiki_dir = tmp.path().join("wiki");
     std::fs::create_dir_all(&wiki_dir).unwrap();
-    std::fs::write(wiki_dir.join("wiki.toml"), "").unwrap();
 
     // A valid file with a fragment link so pages[] is non-empty.
     std::fs::write(
@@ -807,36 +794,25 @@ fn mesh_scaffold_json_unreadable_file_in_parse_errors() {
     );
 }
 
-/// `wiki scaffold <float>` against a `*.wiki.md` file outside any wiki root
-/// must succeed. Today the multi-namespace dispatch evaluates the path
-/// against every peer's discovery glob; peers whose roots don't enclose the
-/// float report "no wiki pages found" and the run fails. Owning-ns routing
-/// should send the float to its single owning namespace and skip the others.
+/// `wiki scaffold` against a wiki file outside the `wiki/` directory must
+/// succeed. Content-based discovery finds any `.md` with title+summary
+/// frontmatter regardless of path.
 #[test]
-fn mesh_scaffold_handles_float_outside_root() {
+fn mesh_scaffold_handles_file_outside_wiki_dir() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
-    std::fs::create_dir_all(root.join("foo")).unwrap();
     std::fs::create_dir_all(root.join("floats")).unwrap();
-    std::fs::write(root.join("wiki/wiki.toml"), "[peers]\nfoo = \"../foo\"\n").unwrap();
     std::fs::write(
         root.join("wiki/index.md"),
         "---\ntitle: Default Index\nsummary: D.\n---\nHi.\n",
     )
     .unwrap();
-    std::fs::write(root.join("foo/wiki.toml"), "namespace = \"foo\"\n").unwrap();
-    std::fs::write(
-        root.join("foo/index.md"),
-        "---\ntitle: Foo Index\nsummary: F.\n---\nHi.\n",
-    )
-    .unwrap();
-    // Untagged float — owned by default. Body has a fragment link so the
-    // scaffold has something to emit.
+    // Float outside wiki/ — has valid frontmatter so it is a wiki member.
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/code.rs"), "fn x() {}\n").unwrap();
     std::fs::write(
-        root.join("floats/notes.wiki.md"),
+        root.join("floats/notes.md"),
         "---\ntitle: Notes\nsummary: N.\n---\nSee [code](../src/code.rs#L1-L1).\n",
     )
     .unwrap();
@@ -862,7 +838,7 @@ fn mesh_scaffold_handles_float_outside_root() {
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
-        .args(["scaffold", "../floats/notes.wiki.md"])
+        .args(["scaffold", "../floats/notes.md"])
         .current_dir(root.join("wiki"))
         .output()
         .expect("run wiki scaffold");
@@ -871,16 +847,16 @@ fn mesh_scaffold_handles_float_outside_root() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "scaffold against an out-of-root float must succeed; \
+        "scaffold against a file outside wiki/ must succeed; \
          status={:?}\nstdout: {stdout}\nstderr: {stderr}",
         output.status
     );
-    // Scaffold must emit a `git mesh add` line that anchors the float to its
+    // Scaffold must emit a `git mesh add` line that anchors the file to its
     // fragment-link target — if the run silently became a no-op the success
     // assertion alone would not catch it.
     assert!(
         stdout.contains("git mesh add") && stdout.contains("src/code.rs#L1-L1"),
-        "scaffold must emit a mesh entry covering the float's fragment link; \
+        "scaffold must emit a mesh entry covering the file's fragment link; \
          stdout: {stdout}\nstderr: {stderr}"
     );
 }
@@ -901,7 +877,6 @@ fn mesh_scaffold_renames_on_existing_mesh_collision() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
-    std::fs::write(root.join("wiki/wiki.toml"), "").unwrap();
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/charge.ts"), "// charge\n").unwrap();
     // Page's frontmatter title is "Billing"; the deepest heading is
@@ -1003,7 +978,6 @@ fn mesh_scaffold_extends_existing_section_mesh_with_new_code_links() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
-    std::fs::write(root.join("wiki/wiki.toml"), "").unwrap();
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/fully.ts"), "// fully\n").unwrap();
     std::fs::write(root.join("src/extend.ts"), "// extend\n").unwrap();
@@ -1174,4 +1148,142 @@ fn mesh_scaffold_extends_existing_section_mesh_with_new_code_links() {
         stdout.contains("git mesh why wiki/fresh-section"),
         "new-mesh blocks still need a why line; got:\n{stdout}"
     );
+}
+
+/// When a fragment link references a source path that does not exist on disk,
+/// the mesh is dropped from scaffold output and an advisory line is emitted.
+#[test]
+fn mesh_scaffold_drops_mesh_with_missing_anchor_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wiki_dir = tmp.path().join("wiki");
+    std::fs::create_dir_all(&wiki_dir).unwrap();
+
+    // Page links to src/present.rs (exists) and src/missing.rs (does not exist).
+    std::fs::write(
+        wiki_dir.join("page.md"),
+        "---\ntitle: Page\nsummary: A page.\n---\n\n\
+         ## Section A\n\nSee [present](../src/present.rs#L1-L5).\n\n\
+         ## Section B\n\nSee [missing](../src/missing.rs#L1-L5).\n",
+    )
+    .unwrap();
+    let src_dir = tmp.path().join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(src_dir.join("present.rs"), "// present\n").unwrap();
+    // src/missing.rs intentionally NOT created.
+
+    git(tmp.path(), &["init", "-q", "-b", "main"]);
+    git(
+        tmp.path(),
+        &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
+    );
+    git(
+        tmp.path(),
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "**/*.md"])
+        .current_dir(&wiki_dir)
+        .output()
+        .expect("run wiki binary");
+    assert!(
+        output.status.success(),
+        "wiki scaffold failed: stderr=\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Section A's mesh (present.rs exists) must appear.
+    assert!(
+        stdout.contains("src/present.rs#L1-L5"),
+        "mesh for present anchor must appear:\n{stdout}"
+    );
+
+    // Section B's mesh (missing.rs absent) must be dropped — the advisory names it
+    // but no `git mesh add` block for section-b must appear.
+    assert!(
+        !stdout.contains("git mesh add wiki/section-b"),
+        "git mesh add block for missing-anchor mesh must be absent:\n{stdout}"
+    );
+
+    // An advisory line must name the skipped mesh and path.
+    assert!(
+        stdout.contains("Skipped mesh") && stdout.contains("src/missing.rs"),
+        "advisory line for dropped mesh must appear:\n{stdout}"
+    );
+}
+
+/// JSON mode: dropped meshes appear in the top-level `droppedMeshes` array.
+#[test]
+fn mesh_scaffold_json_dropped_meshes_array() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wiki_dir = tmp.path().join("wiki");
+    std::fs::create_dir_all(&wiki_dir).unwrap();
+
+    std::fs::write(
+        wiki_dir.join("page.md"),
+        "---\ntitle: Page\nsummary: A page.\n---\n\nSee [missing](../src/missing.rs#L1-L5).\n",
+    )
+    .unwrap();
+    // src/missing.rs intentionally absent.
+
+    git(tmp.path(), &["init", "-q", "-b", "main"]);
+    git(
+        tmp.path(),
+        &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
+    );
+    git(
+        tmp.path(),
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "**/*.md", "--format", "json"])
+        .current_dir(&wiki_dir)
+        .output()
+        .expect("run wiki binary");
+    assert!(
+        output.status.success(),
+        "wiki scaffold --format json failed: stderr=\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+
+    let dropped = v["droppedMeshes"].as_array().expect("droppedMeshes array");
+    assert!(
+        !dropped.is_empty(),
+        "droppedMeshes must be non-empty:\n{stdout}"
+    );
+
+    let entry = &dropped[0];
+    assert!(entry["slug"].is_string(), "slug must be string:\n{stdout}");
+    assert_eq!(
+        entry["missingPath"].as_str().unwrap_or(""),
+        "src/missing.rs",
+        "missingPath must be the missing file:\n{stdout}"
+    );
+    assert!(entry["page"].is_string(), "page must be string:\n{stdout}");
 }

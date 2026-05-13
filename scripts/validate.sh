@@ -23,7 +23,7 @@ fi
 {
   yarn typecheck &&
   yarn lint &&
-  wiki check --root wiki &&
+  wiki check &&
   yarn test &&
   eval "$BUILD_CMD"
 } 2>&1 | tee yarn-validate-output.log

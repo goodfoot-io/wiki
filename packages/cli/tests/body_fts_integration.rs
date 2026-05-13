@@ -72,9 +72,7 @@ impl TestRepo {
 }
 
 fn make_wiki_repo() -> TestRepo {
-    let repo = TestRepo::new();
-    repo.create_file("wiki/wiki.toml", "");
-    repo
+    TestRepo::new()
 }
 
 /// A page whose term appears only in the body (not title/aliases/tags/keywords/summary)

@@ -18,7 +18,7 @@ fn parse_file_path(input: &str) -> Option<String> {
 ///
 /// Only processes `.md` files. Outputs a JSON `systemMessage` envelope when
 /// validation errors remain after auto-fix so Claude can address them.
-pub fn run(input: &str, wiki_root: &Path, repo_root: &Path, source: DocSource) -> Result<i32> {
+pub fn run(input: &str, repo_root: &Path, source: DocSource) -> Result<i32> {
     let Some(file_path) = parse_file_path(input) else {
         return Ok(0);
     };
@@ -27,13 +27,25 @@ pub fn run(input: &str, wiki_root: &Path, repo_root: &Path, source: DocSource) -
         return Ok(0);
     }
 
-    let rel_path = super::normalize_repo_relative_path(&file_path, repo_root);
-    if !super::matches_default_discovery_path(&rel_path, wiki_root, repo_root) {
+    // Only process files that are wiki members (have title + summary frontmatter).
+    let abs_path = {
+        let p = std::path::Path::new(&file_path);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            repo_root.join(p)
+        }
+    };
+    let content = match std::fs::read_to_string(&abs_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(0),
+    };
+    if !crate::frontmatter::is_wiki_member(&content, &abs_path) {
         return Ok(0);
     }
 
     let globs = vec![file_path.clone()];
-    let diagnostics = match check::collect_with_source(&globs, wiki_root, repo_root, source) {
+    let diagnostics = match check::collect_with_source(&globs, repo_root, source) {
         Ok(d) => d,
         Err(_) => return Ok(0), // not a wiki page or discovery failed — skip silently
     };

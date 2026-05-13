@@ -36,7 +36,6 @@ fn check_json_output_is_envelope_object_with_errors_key() {
 
     // Seed a clean wiki with one valid article.
     fs::create_dir_all(root.join("wiki")).unwrap();
-    fs::write(root.join("wiki/wiki.toml"), "").unwrap();
     fs::write(
         root.join("wiki/page.md"),
         "---\ntitle: Page\nsummary: A page.\n---\nHello.\n",

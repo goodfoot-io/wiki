@@ -1,8 +1,8 @@
 //! Regression tests for `wiki hook` (PostToolUse:Edit hook).
 //!
 //! The hook must silently return exit 0 when given a `.md` file that is
-//! outside the wiki scope (i.e., not under `$WIKI_DIR` and not a
-//! `*.wiki.md` file). Only wiki pages should be validated.
+//! not a wiki member (i.e., does not have both `title:` and `summary:` in its
+//! YAML frontmatter). Only wiki member files should be validated.
 
 use std::fs;
 use std::io::Write;
@@ -47,19 +47,19 @@ impl TestRepo {
     }
 }
 
-/// A non-wiki `.md` file (not under `$WIKI_DIR`, not `*.wiki.md`) must be
-/// silently skipped: `wiki hook` should produce no output and exit 0.
+/// A `.md` file without complete frontmatter (missing `title:` and/or
+/// `summary:`) must be silently skipped: `wiki hook` should produce no
+/// output and exit 0.
 ///
 /// This test FAILS before the bug is fixed because `hook_check::run()` passes
 /// the file path as an explicit glob to `check::collect`, bypassing the
-/// wiki-scope filter in `discover_files`. As a result the non-wiki file is
-/// validated and a `systemMessage` is printed to stdout.
+/// wiki-member filter. As a result the non-member file is validated and a
+/// `systemMessage` is printed to stdout.
 #[test]
 fn hook_check_skips_non_wiki_md_file() {
     let repo = TestRepo::new();
 
-    // Create a plain README that is NOT a wiki page (no frontmatter, not
-    // under wiki/ and not named *.wiki.md).
+    // Create a plain README that is NOT a wiki member — no frontmatter.
     let readme_path = repo.path().join("src/README.md");
     fs::create_dir_all(readme_path.parent().unwrap()).expect("mkdir src/");
     fs::write(
@@ -68,7 +68,7 @@ fn hook_check_skips_non_wiki_md_file() {
     )
     .expect("write README");
 
-    // The wiki root is `wiki/`; the README at src/README.md sits outside it
+    // The wiki root is `wiki/`; the README at src/README.md has no frontmatter
     // and must be skipped by the hook.
     fs::create_dir_all(repo.path().join("wiki")).expect("mkdir wiki/");
 
@@ -107,9 +107,9 @@ fn hook_check_skips_non_wiki_md_file() {
 
     let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
 
-    // The hook must produce no output when given a non-wiki .md file.
+    // The hook must produce no output when given a non-wiki-member .md file.
     assert!(
         stdout.trim().is_empty(),
-        "hook must produce no output for a non-wiki .md file, got: {stdout}"
+        "hook must produce no output for a non-wiki-member .md file, got: {stdout}"
     );
 }

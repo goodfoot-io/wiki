@@ -161,16 +161,17 @@ pub fn find_page_by_path(
 
 /// Discover wiki pages.
 ///
-/// When `globs` is empty, the default set is `wiki_root/**/*.md` ∪
-/// `repo_root/**/*.wiki.md`. Explicit globs are matched relative to
-/// `repo_root`. Fail closed: returns an error if zero `.md` files are matched.
+/// When `globs` is empty, walks the repo from `repo_root` for all `.md` files
+/// and filters by content-based wiki membership (both `title:` and `summary:`
+/// frontmatter fields must be present and non-empty). Explicit globs are
+/// matched relative to `repo_root`. Fail closed: returns an error if zero
+/// `.md` files are matched.
 ///
 /// `source` controls which tree is used to seed the candidate list when globs
 /// are empty. For `Index` and `Head`, candidate paths are taken from
 /// `source.list_paths()` so files absent from the worktree are still included.
 pub fn discover_files(
     globs: &[String],
-    wiki_root: &Path,
     repo_root: &Path,
     source: DocSource,
 ) -> Result<Vec<PathBuf>> {
@@ -183,23 +184,23 @@ pub fn discover_files(
             let mut files = match source {
                 DocSource::Index | DocSource::Head => {
                     if globs.is_empty() {
-                        discover_default_files(wiki_root, repo_root, source)?
+                        discover_default_files(repo_root, source)?
                     } else {
                         // For non-worktree sources we must never read the
                         // worktree filesystem to satisfy a glob.  Filter the
                         // source's own path list instead so the candidate set
                         // is internally consistent with `--source`.
-                        discover_files_by_glob_in_source(globs, wiki_root, repo_root, source)?
+                        discover_files_by_glob_in_source(globs, repo_root, source)?
                     }
                 }
                 DocSource::WorkingTree => {
                     let initial = if globs.is_empty() {
-                        discover_default_files(wiki_root, repo_root, source)?
+                        discover_default_files(repo_root, source)?
                     } else {
                         Vec::new()
                     };
                     if initial.is_empty() || !globs.is_empty() {
-                        discover_files_by_walk(globs, wiki_root, repo_root)?
+                        discover_files_by_walk(globs, repo_root)?
                     } else {
                         initial
                     }
@@ -227,11 +228,7 @@ pub fn discover_files(
     )
 }
 
-fn discover_default_files(
-    wiki_root: &Path,
-    repo_root: &Path,
-    source: DocSource,
-) -> Result<Vec<PathBuf>> {
+fn discover_default_files(repo_root: &Path, source: DocSource) -> Result<Vec<PathBuf>> {
     // For non-worktree sources, seed from the source's own path list so that
     // files absent from the worktree (deleted locally but present in HEAD or
     // the index) are still included in the candidate set.
@@ -240,7 +237,17 @@ fn discover_default_files(
             let all_paths = source.list_paths(repo_root)?;
             let files: Vec<PathBuf> = all_paths
                 .into_iter()
-                .filter(|p| matches_default_discovery_path(p, wiki_root, repo_root))
+                .filter(|p| {
+                    if !p.ends_with(".md") {
+                        return false;
+                    }
+                    match source.read(repo_root, p) {
+                        Ok(Some(content)) => {
+                            crate::frontmatter::is_wiki_member(&content, Path::new(p))
+                        }
+                        _ => false,
+                    }
+                })
                 .map(|p| repo_root.join(p))
                 .collect();
             return Ok(files);
@@ -250,39 +257,24 @@ fn discover_default_files(
 
     let inventory = match repo_inventory(repo_root) {
         Ok(inventory) => inventory,
-        Err(_) => return discover_files_by_walk(&[], wiki_root, repo_root),
+        Err(_) => return discover_files_by_walk(&[], repo_root),
     };
 
     let mut files = Vec::new();
     for path_rel in inventory {
-        if !matches_default_discovery_path(&path_rel, wiki_root, repo_root) {
+        if !path_rel.ends_with(".md") {
             continue;
         }
-
         let path = repo_root.join(&path_rel);
-        if path.is_file() {
+        if path.is_file()
+            && let Ok(content) = std::fs::read_to_string(&path)
+            && crate::frontmatter::is_wiki_member(&content, &path)
+        {
             files.push(path);
         }
     }
 
     Ok(files)
-}
-
-pub(crate) fn matches_default_discovery_path(
-    path_rel: &str,
-    wiki_root: &Path,
-    repo_root: &Path,
-) -> bool {
-    if !path_rel.ends_with(".md") {
-        return false;
-    }
-
-    if path_rel.ends_with(".wiki.md") {
-        return true;
-    }
-
-    let abs = repo_root.join(path_rel);
-    abs.starts_with(wiki_root)
 }
 
 /// Filter a `DocSource`'s path list against the same glob semantics as
@@ -291,7 +283,6 @@ pub(crate) fn matches_default_discovery_path(
 /// `--source=index|head` so glob discovery never reads the worktree.
 fn discover_files_by_glob_in_source(
     globs: &[String],
-    _wiki_root: &Path,
     repo_root: &Path,
     source: DocSource,
 ) -> Result<Vec<PathBuf>> {
@@ -322,29 +313,31 @@ fn discover_files_by_glob_in_source(
     Ok(files)
 }
 
-fn discover_files_by_walk(
-    globs: &[String],
-    wiki_root: &Path,
-    repo_root: &Path,
-) -> Result<Vec<PathBuf>> {
+fn discover_files_by_walk(globs: &[String], repo_root: &Path) -> Result<Vec<PathBuf>> {
     let mut files: Vec<PathBuf> = Vec::new();
-    let mut search_tasks: Vec<(PathBuf, Vec<String>)> = Vec::new();
 
-    if globs.is_empty() {
-        if wiki_root.exists() {
-            search_tasks.push((wiki_root.to_path_buf(), vec!["**/*.md".to_string()]));
-        }
-        search_tasks.push((repo_root.to_path_buf(), vec!["**/*.wiki.md".to_string()]));
+    let candidates = if globs.is_empty() {
+        discover_files_by_parallel_walk(repo_root, &["**/*.md".to_string()])?
     } else {
         let normalized_globs = globs
             .iter()
             .map(|glob| normalize_repo_relative_path(glob, repo_root))
-            .collect();
-        search_tasks.push((repo_root.to_path_buf(), normalized_globs));
+            .collect::<Vec<_>>();
+        discover_files_by_parallel_walk(repo_root, &normalized_globs)?
     };
 
-    for (base_dir, patterns) in search_tasks {
-        files.extend(discover_files_by_parallel_walk(&base_dir, &patterns)?);
+    for path in candidates {
+        // For explicit globs, include all .md matches (membership is checked
+        // by callers like check/collect). For default walks, filter by content.
+        if globs.is_empty() {
+            if let Ok(content) = std::fs::read_to_string(&path)
+                && crate::frontmatter::is_wiki_member(&content, &path)
+            {
+                files.push(path);
+            }
+        } else {
+            files.push(path);
+        }
     }
 
     files.sort();
@@ -621,98 +614,70 @@ mod tests {
     }
 
     #[test]
-    fn test_discover_missing_wiki_dir_exits_2_with_no_pages() {
+    fn test_discover_no_md_files_exits_with_no_pages() {
         let repo = TestRepo::new();
-        // No wiki dir created
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
-        let err = discover_files(&[], &wiki_root, repo.path(), DocSource::WorkingTree).unwrap_err();
+        // No .md files at all
+        let err = discover_files(&[], repo.path(), DocSource::WorkingTree).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("no wiki pages found"), "got: {msg}");
     }
 
     #[test]
-    fn test_discover_empty_wiki_dir_exits_2() {
+    fn test_discover_md_without_frontmatter_not_found() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("wiki/.gitkeep", "");
-        let err = discover_files(&[], &wiki_root, repo.path(), DocSource::WorkingTree).unwrap_err();
+        repo.create_file("wiki/plain.md", "# no frontmatter\n");
+        let err = discover_files(&[], repo.path(), DocSource::WorkingTree).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("no wiki pages found"), "got: {msg}");
     }
 
     #[test]
-    fn test_discover_finds_md_files() {
+    fn test_discover_finds_md_files_with_frontmatter() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
-        let files =
-            discover_files(&[], &wiki_root, repo.path(), DocSource::WorkingTree).expect("discover");
+        let files = discover_files(&[], repo.path(), DocSource::WorkingTree).expect("discover");
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("page.md"));
     }
 
     #[test]
-    fn test_discover_finds_wiki_md_files_outside_wiki_dir() {
+    fn test_discover_finds_member_md_anywhere_in_repo() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
         repo.create_file(
-            "src/component/docs.wiki.md",
+            "src/component/docs.md",
             "---\ntitle: Docs\nsummary: Component docs.\n---\n",
         );
         repo.create_file("src/component/ordinary.md", "# ordinary\n");
-        let files =
-            discover_files(&[], &wiki_root, repo.path(), DocSource::WorkingTree).expect("discover");
+        let files = discover_files(&[], repo.path(), DocSource::WorkingTree).expect("discover");
         assert_eq!(files.len(), 2);
         let paths: Vec<_> = files
             .into_iter()
             .map(|p| p.to_string_lossy().to_string())
             .collect();
-        assert!(
-            paths
-                .iter()
-                .any(|p| p.ends_with("src/component/docs.wiki.md"))
-        );
+        assert!(paths.iter().any(|p| p.ends_with("src/component/docs.md")));
         assert!(paths.iter().any(|p| p.ends_with("wiki/page.md")));
         assert!(!paths.iter().any(|p| p.ends_with("ordinary.md")));
     }
 
     #[test]
-    fn test_discover_finds_wiki_md_files_without_wiki_dir() {
-        let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
-        repo.create_file(
-            "src/component/docs.wiki.md",
-            "---\ntitle: Docs\nsummary: Component docs.\n---\n",
-        );
-        let files =
-            discover_files(&[], &wiki_root, repo.path(), DocSource::WorkingTree).expect("discover");
-        assert_eq!(files.len(), 1);
-        assert!(files[0].ends_with("docs.wiki.md"));
-    }
-
-    #[test]
     fn test_discover_explicit_glob_zero_matches_exits_2() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
         let globs = vec!["wiki/nonexistent/**/*.md".to_string()];
-        let err =
-            discover_files(&globs, &wiki_root, repo.path(), DocSource::WorkingTree).unwrap_err();
+        let err = discover_files(&globs, repo.path(), DocSource::WorkingTree).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("no wiki pages found"), "got: {msg}");
     }
 
     #[test]
-    fn test_discover_explicit_glob_works_without_wiki_dir() {
+    fn test_discover_explicit_glob_finds_files() {
         let repo = TestRepo::new();
-        // Set WIKI_DIR to a nonexistent directory — explicit globs must bypass this check
-        let wiki_root = repo.path().join("does_not_exist");
-        // Create docs/ instead of wiki/
         repo.create_file("docs/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
         let globs = vec!["docs/**/*.md".to_string()];
-        let files = discover_files(&globs, &wiki_root, repo.path(), DocSource::WorkingTree)
-            .expect("explicit glob should succeed without WIKI_DIR");
+        let files = discover_files(&globs, repo.path(), DocSource::WorkingTree)
+            .expect("explicit glob should succeed");
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("page.md"));
     }
@@ -720,11 +685,9 @@ mod tests {
     #[test]
     fn test_discover_explicit_glob_with_dot_slash_prefix() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
         let globs = vec!["./wiki/page.md".to_string()];
-        let files = discover_files(&globs, &wiki_root, repo.path(), DocSource::WorkingTree)
-            .expect("discover");
+        let files = discover_files(&globs, repo.path(), DocSource::WorkingTree).expect("discover");
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("wiki/page.md"));
     }
@@ -732,17 +695,15 @@ mod tests {
     #[test]
     fn test_discover_skips_gitignored_directories() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
         // Create a wiki page inside a gitignored directory.
         repo.create_file(
-            "ignored-dir/stale.wiki.md",
+            "ignored-dir/stale.md",
             "---\ntitle: Stale\nsummary: Should be excluded.\n---\n",
         );
         // Gitignore the directory — discover_files must not return files from it.
         repo.create_file(".gitignore", "ignored-dir/\n");
-        let files =
-            discover_files(&[], &wiki_root, repo.path(), DocSource::WorkingTree).expect("discover");
+        let files = discover_files(&[], repo.path(), DocSource::WorkingTree).expect("discover");
         let paths: Vec<_> = files
             .iter()
             .map(|p| p.to_string_lossy().to_string())
@@ -756,7 +717,6 @@ mod tests {
     #[test]
     fn test_discover_skips_git_worktrees() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
         // Simulate a real git worktree: it contains a .git FILE (not directory)
         // pointing back to the main repo's .git/worktrees/... directory.
@@ -765,13 +725,12 @@ mod tests {
             "gitdir: /workspace/.git/worktrees/main-265-1\n",
         );
         repo.create_file(
-            ".worktrees/cards/main-265/1/documentation/monetezation.wiki.md",
+            ".worktrees/cards/main-265/1/documentation/monetezation.md",
             "---\ntitle: compare branch monetization\nsummary: Stale.\n---\n",
         );
         // Gitignore the worktrees directory (as this repo does in production).
         repo.create_file(".gitignore", ".worktrees\n");
-        let files =
-            discover_files(&[], &wiki_root, repo.path(), DocSource::WorkingTree).expect("discover");
+        let files = discover_files(&[], repo.path(), DocSource::WorkingTree).expect("discover");
         let paths: Vec<_> = files
             .iter()
             .map(|p| p.to_string_lossy().to_string())
@@ -791,28 +750,25 @@ mod tests {
     #[test]
     fn test_parallel_walk_matches_git_inventory_for_default_semantics() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
         repo.create_file(
             "wiki/nested/child.md",
             "---\ntitle: Child\nsummary: Child page.\n---\n",
         );
         repo.create_file(
-            "docs/reference.wiki.md",
+            "docs/reference.md",
             "---\ntitle: Reference\nsummary: Reference.\n---\n",
         );
         repo.create_file(
-            "ignored-dir/stale.wiki.md",
+            "ignored-dir/stale.md",
             "---\ntitle: Stale\nsummary: Should be excluded.\n---\n",
         );
         repo.create_file(".gitignore", "ignored-dir/\n");
         repo.git(&["add", "-A"]);
 
-        let inventory_files =
-            discover_default_files(&wiki_root, repo.path(), DocSource::WorkingTree)
-                .expect("inventory discover");
-        let walk_files =
-            discover_files_by_walk(&[], &wiki_root, repo.path()).expect("walk discover");
+        let inventory_files = discover_default_files(repo.path(), DocSource::WorkingTree)
+            .expect("inventory discover");
+        let walk_files = discover_files_by_walk(&[], repo.path()).expect("walk discover");
 
         assert_eq!(inventory_files, walk_files);
     }

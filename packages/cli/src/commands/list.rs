@@ -18,11 +18,10 @@ pub fn run(
     _globs: &[String],
     tag: Option<&str>,
     json: bool,
-    wiki_root: &Path,
     repo_root: &Path,
     source: DocSource,
 ) -> Result<i32> {
-    let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
+    let index = WikiIndex::prepare_for_source(repo_root, source)?;
     let entries = index
         .list_pages(tag)?
         .into_iter()

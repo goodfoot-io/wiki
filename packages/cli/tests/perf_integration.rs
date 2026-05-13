@@ -31,7 +31,7 @@ impl TestRepo {
     }
 
     fn log_path(&self) -> PathBuf {
-        self.dir.path().join("wiki/wiki.log")
+        self.dir.path().join("wiki.log")
     }
 
     fn git(&self, args: &[&str]) {
@@ -66,8 +66,7 @@ fn run_wiki_env(repo: &TestRepo, args: &[&str], extra_env: &[(&str, &str)]) -> O
     let _ = fs::remove_file(repo.log_path());
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_wiki"));
-    // Run from inside the wiki/ directory so `WikiConfig::load` walks up and
-    // finds `wiki/wiki.toml`.
+    // Run from inside the wiki/ directory so the binary resolves paths correctly.
     cmd.current_dir(repo.path().join("wiki"))
         .args(args)
         .env("WIKI_BACKGROUND_FTS", "0")
@@ -104,7 +103,6 @@ fn has_event(events: &[Value], name: &str) -> bool {
 
 fn seed_repo() -> TestRepo {
     let repo = TestRepo::new();
-    repo.create_file("wiki/wiki.toml", "");
     repo.create_file(
         "wiki/example.md",
         "---\ntitle: Example\nsummary: Example summary.\n---\nBody.\n",
@@ -152,7 +150,6 @@ fn perf_off_emits_no_stderr_timings() {
 #[test]
 fn warm_list_avoids_full_rescan_discovery_event() {
     let repo = TestRepo::new();
-    repo.create_file("wiki/wiki.toml", "");
     repo.create_file(
         "wiki/example.md",
         "---\ntitle: Example\nsummary: Example summary.\n---\nBody.\n",
@@ -175,7 +172,6 @@ fn warm_list_avoids_full_rescan_discovery_event() {
 #[test]
 fn summary_uses_fts_suggestions_for_missing_pages() {
     let repo = TestRepo::new();
-    repo.create_file("wiki/wiki.toml", "");
     repo.create_file(
         "wiki/example.md",
         "---\ntitle: Example\nsummary: Example summary.\n---\nRust indexing appears here.\n",

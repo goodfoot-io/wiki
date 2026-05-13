@@ -89,7 +89,6 @@ fn bare_image_path_found_at_page_relative_location() {
     let repo = TestRepo::new();
     // Page at wiki/design/pages/example.md references an image via bare path:
     //   `![screenshot](images/screenshot.png)`
-    repo.create_file("wiki/wiki.toml", "");
     repo.create_file(
         "wiki/design/pages/example.md",
         &make_wiki_page("Example", "![screenshot](images/screenshot.png)"),
@@ -126,7 +125,6 @@ fn bare_image_path_suggests_slash_prefix_when_repo_relative_exists() {
     let repo = TestRepo::new();
     // Page at wiki/design/pages/example.md references an image via bare path:
     //   `![screenshot](images/screenshot.png)`
-    repo.create_file("wiki/wiki.toml", "");
     repo.create_file(
         "wiki/design/pages/example.md",
         &make_wiki_page("Example", "![screenshot](images/screenshot.png)"),
@@ -166,7 +164,6 @@ fn slash_prefixed_image_path_found_at_repo_relative_location() {
     let repo = TestRepo::new();
     // Page at wiki/design/pages/example.md references an image via `/`-prefixed
     // path: `![screenshot](/images/screenshot.png)`
-    repo.create_file("wiki/wiki.toml", "");
     repo.create_file(
         "wiki/design/pages/example.md",
         &make_wiki_page("Example", "![screenshot](/images/screenshot.png)"),
@@ -200,7 +197,6 @@ fn slash_prefixed_image_path_found_at_repo_relative_location() {
 #[test]
 fn explicit_relative_image_path_does_not_produce_missing_file() {
     let repo = TestRepo::new();
-    repo.create_file("wiki/wiki.toml", "");
     repo.create_file(
         "wiki/design/pages/example.md",
         &make_wiki_page("Example", "![screenshot](./images/screenshot.png)"),
@@ -224,15 +220,15 @@ fn explicit_relative_image_path_does_not_produce_missing_file() {
     );
 }
 
-/// An image reference (`![alt](nonexistent.png)`) inside a `*.wiki.md`
-/// float must produce a `broken_link` diagnostic exactly once.
+/// An image reference (`![alt](nonexistent.png)`) inside a wiki member file
+/// (identified by `title:` + `summary:` frontmatter) must produce a
+/// `broken_link` diagnostic exactly once.
 #[test]
 fn image_reference_to_missing_file_emits_broken_link() {
     let repo = TestRepo::new();
-    repo.create_file("wiki/wiki.toml", "");
     repo.create_file("wiki/index.md", &make_wiki_page("Default Index", "Hi."));
     repo.create_file(
-        "floats/illustrated.wiki.md",
+        "floats/illustrated.md",
         "---\ntitle: Illustrated\nsummary: S.\n---\n\n![alt](nonexistent.png)\n",
     );
     repo.commit("init");

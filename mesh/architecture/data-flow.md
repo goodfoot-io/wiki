@@ -10,4 +10,4 @@ tags:
 
 Describes data flow between mesh components. References Communication Protocol and Mesh Design.
 
-A cross-namespace reference: Wiki CLI.
+References the Wiki CLI for documentation-driven data flow.

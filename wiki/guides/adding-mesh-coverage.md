@@ -59,7 +59,7 @@ Worked examples from this baseline pass:
 | Scaffold draft | Rewritten why |
 |---|---|
 | "Validation — the validation pipeline wiki section describes validation in check." | "End-to-end validation pass that drives frontmatter parsing, title/alias collision detection, wikilink resolution, and fragment-link verification for every wiki page." |
-| "Dir — the default glob behavior wiki section describes default in mod." | "Default file-discovery contract shared by every wiki command: when no globs are passed, the CLI walks `$WIKI_DIR/**/*.md` plus `**/*.wiki.md`, and the mesh-integration design page promises that same default." |
+| "Dir — the default glob behavior wiki section describes default in mod." | "Default file-discovery contract shared by every wiki command: when no globs are passed, the CLI treats any `.md` file whose frontmatter has a non-empty `title` and `summary` as a wiki page, and the mesh-integration design page promises that same default." |
 | "Confirm contract that synchronizes the pages shape expected by the update order wiki section with what card files table provides." | "Wiki skill workflow contract that defines page-discovery, location, validation, and cross-linking steps for agents; the touchpoints register holds it in sync with the CLI it drives." |
 
 ## 4. Consolidate anchors that share a relationship

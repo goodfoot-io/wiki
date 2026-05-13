@@ -38,9 +38,8 @@ const FTS_COLUMNS: &[(&str, f32)] = &[
 ];
 const SUGGESTION_LIMIT: i64 = 3;
 const SUGGESTION_MIN_SCORE: f64 = 0.5;
-const DISCOVERY_STRATEGY_VERSION: &str = "2";
+const DISCOVERY_STRATEGY_VERSION: &str = "3";
 const HEAD_SHA_KEY: &str = "head_sha";
-const WIKI_DIR_KEY: &str = "wiki_dir";
 const DISCOVERY_STRATEGY_VERSION_KEY: &str = "discovery_strategy_version";
 pub const DOC_SOURCE_KEY: &str = "doc_source";
 
@@ -194,7 +193,6 @@ struct SearchRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DiscoveryState {
     head_sha: String,
-    wiki_root_abs: String,
     strategy_version: String,
     source: String,
 }
@@ -216,45 +214,37 @@ struct ChangeSet {
 pub struct WikiIndex {
     runtime: Runtime,
     conn: Connection,
-    wiki_root: PathBuf,
     repo_root: PathBuf,
     /// Document source selected for this index session.
     #[allow(dead_code)]
     source: DocSource,
     // Held for the lifetime of this index so concurrent `wiki` processes
-    // serialize on the same wiki directory. Dropped after `conn`.
+    // serialize on the same repository directory. Dropped after `conn`.
     _lock: IndexLock,
 }
 
 impl WikiIndex {
     #[cfg(test)]
-    pub fn prepare(wiki_root: &Path, repo_root: &Path) -> Result<Self> {
-        Self::prepare_for_source(wiki_root, repo_root, DocSource::WorkingTree)
+    pub fn prepare(repo_root: &Path) -> Result<Self> {
+        Self::prepare_for_source(repo_root, DocSource::WorkingTree)
     }
 
     /// Prepare the index for the given source.  This is the production entry
     /// point used by commands that receive a user-selected `DocSource` from
     /// the CLI.
-    pub fn prepare_for_source(
-        wiki_root: &Path,
-        repo_root: &Path,
-        source: DocSource,
-    ) -> Result<Self> {
+    pub fn prepare_for_source(repo_root: &Path, source: DocSource) -> Result<Self> {
         perf::scope_result("index.prepare", json!({}), || {
             let runtime = RuntimeBuilder::new_current_thread()
                 .build()
                 .into_diagnostic()
                 .wrap_err("failed to create runtime for wiki index")?;
 
-            let wiki_root = wiki_root.to_path_buf();
             let repo_root = repo_root.to_path_buf();
-            let (conn, lock) =
-                runtime.block_on(open_and_prepare_connection(&wiki_root, &repo_root, source))?;
+            let (conn, lock) = runtime.block_on(open_and_prepare_connection(&repo_root, source))?;
 
             Ok(Self {
                 runtime,
                 conn,
-                wiki_root,
                 repo_root,
                 source,
                 _lock: lock,
@@ -300,11 +290,6 @@ impl WikiIndex {
     pub fn links(&self, input: &str) -> Result<Vec<SearchResult>> {
         self.runtime
             .block_on(links_async(&self.conn, &self.repo_root, input))
-    }
-
-    #[allow(dead_code)]
-    pub fn wiki_root(&self) -> &Path {
-        &self.wiki_root
     }
 }
 
@@ -375,22 +360,21 @@ pub fn is_lock_error(err: &miette::Error) -> bool {
 /// open/bootstrap/verify/sync/connection lifecycle means each process waits
 /// in the kernel for its predecessor to finish, rather than polling turso.
 async fn open_and_prepare_connection(
-    wiki_root: &Path,
     repo_root: &Path,
     source: DocSource,
 ) -> Result<(Connection, IndexLock)> {
-    std::fs::create_dir_all(wiki_root)
+    std::fs::create_dir_all(repo_root)
         .into_diagnostic()
-        .wrap_err_with(|| format!("failed to create wiki root at {}", wiki_root.display()))?;
-    let lock = IndexLock::acquire(wiki_root)?;
-    match try_open_and_prepare(wiki_root, repo_root, source).await {
+        .wrap_err_with(|| format!("failed to create repo root at {}", repo_root.display()))?;
+    let lock = IndexLock::acquire(repo_root)?;
+    match try_open_and_prepare(repo_root, source).await {
         Ok(conn) => Ok((conn, lock)),
         Err(err) if is_lock_error(&err) => Err(err),
         Err(_) => {
             // Delete the stale or incompatible database and retry from scratch.
-            let db_path = wiki_root.join(".index.db");
+            let db_path = repo_root.join(".index.db");
             let _ = std::fs::remove_file(&db_path);
-            let conn = try_open_and_prepare(wiki_root, repo_root, source).await?;
+            let conn = try_open_and_prepare(repo_root, source).await?;
             Ok((conn, lock))
         }
     }
@@ -416,12 +400,12 @@ impl IndexLock {
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
     const TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
-    fn acquire(wiki_root: &Path) -> Result<Self> {
+    fn acquire(repo_root: &Path) -> Result<Self> {
         use fs4::fs_std::FileExt;
-        std::fs::create_dir_all(wiki_root)
+        std::fs::create_dir_all(repo_root)
             .into_diagnostic()
-            .wrap_err_with(|| format!("failed to create wiki root at {}", wiki_root.display()))?;
-        let lock_path = wiki_root.join(".index.lock");
+            .wrap_err_with(|| format!("failed to create repo root at {}", repo_root.display()))?;
+        let lock_path = repo_root.join(".index.lock");
         let file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -465,25 +449,21 @@ impl Drop for IndexLock {
     }
 }
 
-async fn try_open_and_prepare(
-    wiki_root: &Path,
-    repo_root: &Path,
-    source: DocSource,
-) -> Result<Connection> {
-    let mut conn = open_index_connection(wiki_root).await?;
+async fn try_open_and_prepare(repo_root: &Path, source: DocSource) -> Result<Connection> {
+    let mut conn = open_index_connection(repo_root).await?;
     perf::scope_async_result("index.bootstrap_schema", json!({}), bootstrap_schema(&conn)).await?;
     perf::scope_async_result("index.verify_integrity", json!({}), verify_integrity(&conn)).await?;
     perf::scope_async_result(
         "index.sync",
         json!({}),
-        sync_core_index(&mut conn, wiki_root, repo_root, source),
+        sync_core_index(&mut conn, repo_root, source),
     )
     .await?;
     Ok(conn)
 }
 
-async fn open_index_connection(wiki_root: &Path) -> Result<Connection> {
-    let db_path = wiki_root.join(".index.db");
+async fn open_index_connection(repo_root: &Path) -> Result<Connection> {
+    let db_path = repo_root.join(".index.db");
     let db = perf::scope_async_result(
         "index.open_database",
         json!({
@@ -627,18 +607,12 @@ async fn verify_integrity(conn: &Connection) -> Result<()> {
     ))
 }
 
-async fn sync_core_index(
-    conn: &mut Connection,
-    wiki_root: &Path,
-    repo_root: &Path,
-    source: DocSource,
-) -> Result<()> {
-    sync_core_index_inner(conn, wiki_root, repo_root, None, source).await
+async fn sync_core_index(conn: &mut Connection, repo_root: &Path, source: DocSource) -> Result<()> {
+    sync_core_index_inner(conn, repo_root, None, source).await
 }
 
 async fn sync_core_index_inner(
     conn: &mut Connection,
-    wiki_root: &Path,
     repo_root: &Path,
     changed_paths: Option<&[PathBuf]>,
     source: DocSource,
@@ -656,14 +630,7 @@ async fn sync_core_index_inner(
     let change_set = perf::scope_async_result(
         "index.compute_change_set",
         json!({}),
-        compute_change_set(
-            conn,
-            wiki_root,
-            repo_root,
-            &existing_by_path,
-            changed_paths,
-            source,
-        ),
+        compute_change_set(conn, repo_root, &existing_by_path, changed_paths, source),
     )
     .await?;
 
@@ -744,14 +711,14 @@ async fn sync_core_index_inner(
             continue;
         }
 
-        let frontmatter = parse_frontmatter(&content, path)
-            .map_err(|error| miette!("frontmatter error in `{}`: {error}", path.display()))?
-            .ok_or_else(|| {
-                miette!(
-                    "No frontmatter in `{}` — add a `---` block with `title` and `summary`.",
-                    path.display()
-                )
-            })?;
+        let Some(frontmatter) = parse_frontmatter(&content, path).unwrap_or(None) else {
+            // Not a wiki member (no valid frontmatter) — remove from index if
+            // it was previously indexed, otherwise skip silently.
+            if existing_by_path.contains_key(&path_rel) {
+                extra_stale.insert(path_rel);
+            }
+            continue;
+        };
         let body = markdown_body(&content);
         let incoming_links = parse_fragment_links(&content)
             .into_iter()
@@ -1012,17 +979,13 @@ async fn sync_core_index_inner(
             .into_diagnostic()
             .wrap_err("failed to optimize FTS index")?;
     }
-    write_discovery_state(
-        conn,
-        &current_discovery_state(wiki_root, repo_root, source)?,
-    )
-    .await?;
+    write_discovery_state(conn, &current_discovery_state(repo_root, source)?).await?;
 
     Ok(())
 }
 
-fn discover_index_files(wiki_root: &Path, repo_root: &Path) -> Result<Vec<PathBuf>> {
-    match crate::commands::discover_files(&[], wiki_root, repo_root, DocSource::WorkingTree) {
+fn discover_index_files(repo_root: &Path) -> Result<Vec<PathBuf>> {
+    match crate::commands::discover_files(&[], repo_root, DocSource::WorkingTree) {
         Ok(files) => Ok(files),
         Err(e) => {
             if e.to_string().contains("no wiki pages found") {
@@ -1036,7 +999,6 @@ fn discover_index_files(wiki_root: &Path, repo_root: &Path) -> Result<Vec<PathBu
 
 async fn compute_change_set(
     conn: &Connection,
-    wiki_root: &Path,
     repo_root: &Path,
     existing_by_path: &HashMap<String, ExistingDocument>,
     changed_paths: Option<&[PathBuf]>,
@@ -1046,21 +1008,21 @@ async fn compute_change_set(
         return hinted_change_set(repo_root, existing_by_path, changed_paths);
     }
 
-    let current_state = current_discovery_state(wiki_root, repo_root, source)?;
+    let current_state = current_discovery_state(repo_root, source)?;
     let Some(previous_state) = read_discovery_state(conn).await? else {
-        return source_full_rescan(source, wiki_root, repo_root, existing_by_path);
+        return source_full_rescan(source, repo_root, existing_by_path);
     };
 
     // Any mismatch in persistent state forces a full rescan.
     if previous_state != current_state {
-        return source_full_rescan(source, wiki_root, repo_root, existing_by_path);
+        return source_full_rescan(source, repo_root, existing_by_path);
     }
 
     // For Index and Head modes: full rescan is the only incremental strategy
     // (no mtime/size shortcut, no HEAD-diff fast path).  The cache key change
     // detection above already handles the no-op case when nothing changed.
     if source != DocSource::WorkingTree {
-        return source_full_rescan(source, wiki_root, repo_root, existing_by_path);
+        return source_full_rescan(source, repo_root, existing_by_path);
     }
 
     // WorkingTree incremental path below.
@@ -1080,14 +1042,14 @@ async fn compute_change_set(
     let mut candidate_paths = HashSet::new();
 
     if previous_state.head_sha.is_empty() != current_state.head_sha.is_empty() {
-        return source_full_rescan(source, wiki_root, repo_root, existing_by_path);
+        return source_full_rescan(source, repo_root, existing_by_path);
     }
 
     if !previous_state.head_sha.is_empty() && previous_state.head_sha != current_state.head_sha {
         for path in
             changed_paths_between(repo_root, &previous_state.head_sha, &current_state.head_sha)?
         {
-            if matches_default_discovery_path(&path, wiki_root, repo_root) {
+            if path.ends_with(".md") {
                 candidate_paths.insert(path);
             }
         }
@@ -1096,7 +1058,7 @@ async fn compute_change_set(
     if current_state.head_sha.is_empty() || !tracked_files_present {
         let current_inventory = repo_inventory(repo_root)?
             .into_iter()
-            .filter(|path| matches_default_discovery_path(path, wiki_root, repo_root))
+            .filter(|path| path.ends_with(".md"))
             .collect::<HashSet<_>>();
 
         for path in &current_inventory {
@@ -1104,9 +1066,7 @@ async fn compute_change_set(
         }
 
         for path in existing_by_path.keys() {
-            if matches_default_discovery_path(path, wiki_root, repo_root)
-                && !current_inventory.contains(path)
-            {
+            if path.ends_with(".md") && !current_inventory.contains(path) {
                 candidate_paths.insert(path.clone());
             }
         }
@@ -1120,13 +1080,13 @@ async fn compute_change_set(
 
     if has_dirty_tracked_tree {
         for path in working_tree_changed_paths(repo_root)? {
-            if matches_default_discovery_path(&path, wiki_root, repo_root) {
+            if path.ends_with(".md") {
                 candidate_paths.insert(path);
             }
         }
     } else {
         for path in untracked_paths(repo_root)? {
-            if matches_default_discovery_path(&path, wiki_root, repo_root) {
+            if path.ends_with(".md") {
                 candidate_paths.insert(path);
             }
         }
@@ -1191,19 +1151,18 @@ fn hinted_change_set(
 
 fn source_full_rescan(
     source: DocSource,
-    wiki_root: &Path,
     repo_root: &Path,
     existing_by_path: &HashMap<String, ExistingDocument>,
 ) -> Result<ChangeSet> {
     match source {
-        DocSource::WorkingTree => full_rescan_change_set(wiki_root, repo_root, existing_by_path),
+        DocSource::WorkingTree => full_rescan_change_set(repo_root, existing_by_path),
         DocSource::Index | DocSource::Head => {
-            // List all paths from the source, filter to wiki paths, convert to
-            // absolute PathBufs so the rest of sync_core_index_inner can use them.
+            // List all .md paths from the source, convert to absolute PathBufs.
+            // Membership is checked later when content is parsed.
             let all_paths = source.list_paths(repo_root)?;
             let files: Vec<PathBuf> = all_paths
                 .into_iter()
-                .filter(|p| matches_default_discovery_path(p, wiki_root, repo_root))
+                .filter(|p| p.ends_with(".md"))
                 .map(|p| repo_root.join(&p))
                 .collect();
             let seen_paths: HashSet<String> = files
@@ -1225,12 +1184,11 @@ fn source_full_rescan(
 }
 
 fn full_rescan_change_set(
-    wiki_root: &Path,
     repo_root: &Path,
     existing_by_path: &HashMap<String, ExistingDocument>,
 ) -> Result<ChangeSet> {
     let files = perf::scope_result("index.discover_files", json!({}), || {
-        discover_index_files(wiki_root, repo_root)
+        discover_index_files(repo_root)
     })?;
     let mut seen_paths = HashSet::new();
     for path in &files {
@@ -1248,11 +1206,7 @@ fn full_rescan_change_set(
     })
 }
 
-fn current_discovery_state(
-    wiki_root: &Path,
-    repo_root: &Path,
-    source: DocSource,
-) -> Result<DiscoveryState> {
+fn current_discovery_state(repo_root: &Path, source: DocSource) -> Result<DiscoveryState> {
     // The `head_sha` field doubles as a "source revision" signal.  Its meaning
     // depends on the source:
     //   WorkingTree — the HEAD commit SHA (existing behaviour)
@@ -1272,7 +1226,6 @@ fn current_discovery_state(
     };
     Ok(DiscoveryState {
         head_sha: source_revision,
-        wiki_root_abs: wiki_root.to_string_lossy().into_owned(),
         strategy_version: DISCOVERY_STRATEGY_VERSION.to_string(),
         source: source.as_key().to_string(),
     })
@@ -1280,9 +1233,6 @@ fn current_discovery_state(
 
 async fn read_discovery_state(conn: &Connection) -> Result<Option<DiscoveryState>> {
     let Some(head_sha) = get_state(conn, HEAD_SHA_KEY).await? else {
-        return Ok(None);
-    };
-    let Some(wiki_root_abs) = get_state(conn, WIKI_DIR_KEY).await? else {
         return Ok(None);
     };
     let Some(strategy_version) = get_state(conn, DISCOVERY_STRATEGY_VERSION_KEY).await? else {
@@ -1294,7 +1244,6 @@ async fn read_discovery_state(conn: &Connection) -> Result<Option<DiscoveryState
 
     Ok(Some(DiscoveryState {
         head_sha,
-        wiki_root_abs,
         strategy_version,
         source,
     }))
@@ -1302,7 +1251,6 @@ async fn read_discovery_state(conn: &Connection) -> Result<Option<DiscoveryState
 
 async fn write_discovery_state(conn: &Connection, state: &DiscoveryState) -> Result<()> {
     set_state(conn, HEAD_SHA_KEY, &state.head_sha).await?;
-    set_state(conn, WIKI_DIR_KEY, &state.wiki_root_abs).await?;
     set_state(
         conn,
         DISCOVERY_STRATEGY_VERSION_KEY,
@@ -1311,22 +1259,6 @@ async fn write_discovery_state(conn: &Connection, state: &DiscoveryState) -> Res
     .await?;
     set_state(conn, DOC_SOURCE_KEY, &state.source).await?;
     Ok(())
-}
-
-/// Returns true if `path_rel` (a repo-relative path) is a candidate wiki page
-/// for the current wiki: either it lives under `wiki_root`, or it ends with
-/// `.wiki.md`. This matcher errs on the side of inclusion.
-fn matches_default_discovery_path(path_rel: &str, wiki_root: &Path, repo_root: &Path) -> bool {
-    if !path_rel.ends_with(".md") {
-        return false;
-    }
-
-    if path_rel.ends_with(".wiki.md") {
-        return true;
-    }
-
-    let abs = repo_root.join(path_rel);
-    abs.starts_with(wiki_root)
 }
 
 async fn validate_lookup_collisions(
@@ -2445,14 +2377,14 @@ mod tests {
     #[test]
     fn creates_index_and_resolves_pages() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/example.md",
             "---\ntitle: Example\naliases:\n  - Sample\ntags:\n  - docs\nsummary: Example summary.\n---\nBody with [[Other]].\n",
         );
 
-        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
-        assert!(repo.path().join("wiki/.index.db").exists());
+        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        assert!(repo.path().join(".index.db").exists());
 
         let page = index
             .resolve_page("sample")
@@ -2465,13 +2397,13 @@ mod tests {
     #[test]
     fn sync_removes_deleted_files_and_handles_renames() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/old.md",
             "---\ntitle: Old\nsummary: Old summary.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(repo.path()).expect("prepare");
         assert!(index.resolve_page("Old").expect("resolve").is_some());
         drop(index);
 
@@ -2481,20 +2413,20 @@ mod tests {
             "---\ntitle: New\nsummary: New summary.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(repo.path()).expect("prepare");
         assert!(index.resolve_page("Old").expect("resolve").is_none());
         assert!(index.resolve_page("New").expect("resolve").is_some());
         drop(index);
 
         repo.remove("wiki/new.md");
-        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(repo.path()).expect("prepare");
         assert!(index.resolve_page("New").expect("resolve").is_none());
     }
 
     #[test]
     fn search_weighted_prioritizes_exact_title_matches() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/title-match.md",
             "---\ntitle: Rust Indexing\nsummary: Title match.\n---\nBody.\n",
@@ -2504,7 +2436,7 @@ mod tests {
             "---\ntitle: Secondary\nsummary: Rust indexing summary match.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(repo.path()).expect("prepare");
         let (results, _) = index
             .search_weighted("rust indexing", SEARCH_LIMIT, 0)
             .expect("search");
@@ -2522,7 +2454,7 @@ mod tests {
     #[test]
     fn search_weighted_prioritizes_path_matches() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/rust-indexing-guide.md",
             "---\ntitle: Unrelated\nsummary: Path match.\n---\nNothing here.\n",
@@ -2532,7 +2464,7 @@ mod tests {
             "---\ntitle: Summary Match\nsummary: Rust indexing guide appears in the summary.\n---\nNothing here.\n",
         );
 
-        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(repo.path()).expect("prepare");
         let (results, _) = index
             .search_weighted("rust indexing guide", SEARCH_LIMIT, 0)
             .expect("search");
@@ -2550,7 +2482,7 @@ mod tests {
     #[test]
     fn search_weighted_truncates_to_limit() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/a.md",
             "---\ntitle: Alpha\nsummary: needle one.\n---\nBody.\n",
@@ -2564,7 +2496,7 @@ mod tests {
             "---\ntitle: Gamma\nsummary: needle three.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(repo.path()).expect("prepare");
         let (results, total) = index.search_weighted("needle", 2, 0).expect("search");
 
         assert_eq!(results.len(), 2);
@@ -2574,13 +2506,13 @@ mod tests {
     #[test]
     fn search_reflects_content_changes_after_resync() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/example.md",
             "---\ntitle: Example\nsummary: Rust indexing appears here.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(repo.path()).expect("prepare");
         let (initial, _) = index
             .search_weighted("rust", SEARCH_LIMIT, 0)
             .expect("search");
@@ -2592,7 +2524,7 @@ mod tests {
             "---\ntitle: Example\nsummary: Graph traversal appears here.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(repo.path()).expect("prepare");
         assert!(
             index
                 .search_weighted("rust", SEARCH_LIMIT, 0)
@@ -2610,13 +2542,13 @@ mod tests {
     #[test]
     fn prepare_updates_untracked_files_without_head() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/example.md",
             "---\ntitle: Example\nsummary: Example summary.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(repo.path()).expect("prepare");
         assert!(index.resolve_page("Example").expect("resolve").is_some());
         drop(index);
 
@@ -2625,36 +2557,9 @@ mod tests {
             "---\ntitle: Renamed\nsummary: Example summary.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
+        let index = WikiIndex::prepare(repo.path()).expect("prepare");
         assert!(index.resolve_page("Example").expect("resolve").is_none());
         assert!(index.resolve_page("Renamed").expect("resolve").is_some());
-    }
-
-    #[test]
-    fn prepare_invalidates_discovery_state_when_wiki_dir_changes() {
-        // Each wiki root has its own `.index.db`; swapping wiki roots gives
-        // each root its own isolated index.
-        let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
-        repo.create_file(
-            "wiki/example.md",
-            "---\ntitle: Example\nsummary: Example summary.\n---\nBody.\n",
-        );
-
-        let index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare");
-        assert!(index.resolve_page("Example").expect("resolve").is_some());
-        drop(index);
-
-        repo.create_file(
-            "docs/other.md",
-            "---\ntitle: Other\nsummary: Other summary.\n---\nBody.\n",
-        );
-        repo.remove("wiki/example.md");
-        let docs_root = crate::test_support::write_wiki_toml(repo.path(), "docs");
-
-        let index = WikiIndex::prepare(&docs_root, repo.path()).expect("prepare");
-        assert!(index.resolve_page("Example").expect("resolve").is_none());
-        assert!(index.resolve_page("Other").expect("resolve").is_some());
     }
 
     // ── DocSource integration tests (Phase 2 acceptance tests — unskipped in Phase 3) ──
@@ -2663,14 +2568,14 @@ mod tests {
     fn doc_source_worktree_indexes_uncommitted_changes() {
         // Baseline: untracked wiki file is visible under WorkingTree (default).
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/worktree_only.md",
             "---\ntitle: WorktreeOnly\nsummary: Worktree baseline.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::WorkingTree)
-            .expect("prepare");
+        let index =
+            WikiIndex::prepare_for_source(repo.path(), DocSource::WorkingTree).expect("prepare");
         assert!(
             index
                 .resolve_page("WorktreeOnly")
@@ -2688,7 +2593,7 @@ mod tests {
             "wiki/init.md",
             "---\ntitle: Init\nsummary: Init.\n---\nBody.\n",
         );
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.git(&["add", "-A"]);
         repo.git(&["commit", "-m", "initial"]);
 
@@ -2699,14 +2604,14 @@ mod tests {
         repo.git(&["add", "wiki/staged.md"]);
 
         // Index mode sees it.
-        let idx = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Index)
-            .expect("prepare index");
+        let idx =
+            WikiIndex::prepare_for_source(repo.path(), DocSource::Index).expect("prepare index");
         assert!(idx.resolve_page("StagedDoc").expect("resolve").is_some());
         drop(idx);
 
         // Head mode does not see it.
-        let head = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Head)
-            .expect("prepare head");
+        let head =
+            WikiIndex::prepare_for_source(repo.path(), DocSource::Head).expect("prepare head");
         assert!(head.resolve_page("StagedDoc").expect("resolve").is_none());
     }
 
@@ -2718,7 +2623,7 @@ mod tests {
             "wiki/committed.md",
             "---\ntitle: CommittedDoc\nsummary: Committed.\n---\nBody.\n",
         );
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.git(&["add", "-A"]);
         repo.git(&["commit", "-m", "initial"]);
 
@@ -2726,8 +2631,8 @@ mod tests {
         repo.git(&["rm", "--cached", "wiki/committed.md"]);
 
         // Head mode still sees it.
-        let head = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Head)
-            .expect("prepare head");
+        let head =
+            WikiIndex::prepare_for_source(repo.path(), DocSource::Head).expect("prepare head");
         assert!(
             head.resolve_page("CommittedDoc")
                 .expect("resolve")
@@ -2736,8 +2641,8 @@ mod tests {
         drop(head);
 
         // Index mode does not see it.
-        let idx = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Index)
-            .expect("prepare index");
+        let idx =
+            WikiIndex::prepare_for_source(repo.path(), DocSource::Index).expect("prepare index");
         assert!(idx.resolve_page("CommittedDoc").expect("resolve").is_none());
     }
 
@@ -2750,7 +2655,7 @@ mod tests {
             "wiki/doc.md",
             "---\ntitle: VersionDoc\nsummary: committed v1.\n---\nBody v1.\n",
         );
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.git(&["add", "-A"]);
         repo.git(&["commit", "-m", "initial"]);
 
@@ -2766,8 +2671,7 @@ mod tests {
             "---\ntitle: VersionDoc\nsummary: worktree v3.\n---\nBody v3.\n",
         );
 
-        let index = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Index)
-            .expect("prepare");
+        let index = WikiIndex::prepare_for_source(repo.path(), DocSource::Index).expect("prepare");
         let pages = index.list_pages(None).expect("list_pages");
         let doc = pages
             .iter()
@@ -2785,7 +2689,7 @@ mod tests {
             "wiki/doc.md",
             "---\ntitle: VersionDoc\nsummary: committed v1.\n---\nBody v1.\n",
         );
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.git(&["add", "-A"]);
         repo.git(&["commit", "-m", "initial"]);
 
@@ -2795,8 +2699,7 @@ mod tests {
         );
         repo.git(&["add", "wiki/doc.md"]);
 
-        let index = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Head)
-            .expect("prepare");
+        let index = WikiIndex::prepare_for_source(repo.path(), DocSource::Head).expect("prepare");
         let pages = index.list_pages(None).expect("list_pages");
         let doc = pages
             .iter()
@@ -2813,7 +2716,7 @@ mod tests {
             "wiki/init.md",
             "---\ntitle: Init\nsummary: Init.\n---\nBody.\n",
         );
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.git(&["add", "-A"]);
         repo.git(&["commit", "-m", "initial"]);
 
@@ -2822,8 +2725,7 @@ mod tests {
             "---\ntitle: WorktreeOnly\nsummary: Never staged.\n---\nBody.\n",
         );
 
-        let index = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Index)
-            .expect("prepare");
+        let index = WikiIndex::prepare_for_source(repo.path(), DocSource::Index).expect("prepare");
         assert!(
             index
                 .resolve_page("WorktreeOnly")
@@ -2841,7 +2743,7 @@ mod tests {
             "wiki/committed.md",
             "---\ntitle: Committed\nsummary: Committed doc.\n---\nBody.\n",
         );
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.git(&["add", "-A"]);
         repo.git(&["commit", "-m", "initial"]);
 
@@ -2851,14 +2753,14 @@ mod tests {
         );
 
         // Run 1: WorkingTree — worktree-only file is visible.
-        let wt = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::WorkingTree)
+        let wt = WikiIndex::prepare_for_source(repo.path(), DocSource::WorkingTree)
             .expect("prepare worktree");
         assert!(wt.resolve_page("WorktreeOnly").expect("resolve").is_some());
         drop(wt);
 
         // Run 2: Head — worktree-only file must not appear (stale row must not survive).
-        let head = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Head)
-            .expect("prepare head");
+        let head =
+            WikiIndex::prepare_for_source(repo.path(), DocSource::Head).expect("prepare head");
         assert!(
             head.resolve_page("WorktreeOnly")
                 .expect("resolve")
@@ -2872,19 +2774,18 @@ mod tests {
         // prepare() with no source override must produce the same results
         // as prepare_for_source(..., DocSource::WorkingTree).
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/example.md",
             "---\ntitle: Example\nsummary: Sanity check.\n---\nBody.\n",
         );
 
-        let default_index = WikiIndex::prepare(&wiki_root, repo.path()).expect("prepare default");
+        let default_index = WikiIndex::prepare(repo.path()).expect("prepare default");
         let default_pages = default_index.list_pages(None).expect("list default");
         drop(default_index);
 
         let wt_index =
-            WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::WorkingTree)
-                .expect("prepare wt");
+            WikiIndex::prepare_for_source(repo.path(), DocSource::WorkingTree).expect("prepare wt");
         let wt_pages = wt_index.list_pages(None).expect("list wt");
 
         let default_titles: std::collections::BTreeSet<_> =
@@ -2901,7 +2802,7 @@ mod tests {
     #[test]
     fn file_field_is_repo_relative_under_source_head() {
         let repo = TestRepo::new();
-        let wiki_root = crate::test_support::write_wiki_toml(repo.path(), "wiki");
+        crate::test_support::write_wiki_toml(repo.path(), "wiki");
         repo.create_file(
             "wiki/example.md",
             "---\ntitle: Example\nsummary: ok.\n---\nBody.\n",
@@ -2909,8 +2810,7 @@ mod tests {
         repo.git(&["add", "-A"]);
         repo.git(&["commit", "-m", "init"]);
 
-        let index = WikiIndex::prepare_for_source(&wiki_root, repo.path(), DocSource::Head)
-            .expect("prepare");
+        let index = WikiIndex::prepare_for_source(repo.path(), DocSource::Head).expect("prepare");
         let page = index
             .resolve_page("Example")
             .expect("resolve")

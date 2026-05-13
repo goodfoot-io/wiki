@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::draft::MeshDraft;
-use super::scaffold::ParseError;
+use super::scaffold::{DroppedMesh, ParseError};
 
 /// Render `meshes` (already grouped per-page in declaration order) and the
 /// per-page titles (frontmatter `title` keyed by `page_path`, `None` when
@@ -17,6 +17,7 @@ pub(crate) fn render_markdown(
     page_titles: &HashMap<String, Option<String>>,
     parse_errors: &[ParseError],
     parse_error_paths: &HashSet<String>,
+    dropped_meshes: &[DroppedMesh],
 ) -> String {
     let mut out = String::new();
 
@@ -26,9 +27,11 @@ pub(crate) fn render_markdown(
         .filter(|m| !parse_error_paths.contains(&m.page_path))
         .collect();
 
-    // Prepend parse-error block when non-empty.
-    if !parse_errors.is_empty() {
-        render_parse_errors(&mut out, parse_errors, !filtered.is_empty());
+    let has_advisories = !parse_errors.is_empty() || !dropped_meshes.is_empty();
+
+    // Prepend advisory block when non-empty.
+    if has_advisories {
+        render_advisories(&mut out, parse_errors, dropped_meshes, !filtered.is_empty());
         // Separator only when other content follows.
         if !filtered.is_empty() {
             use std::fmt::Write as _;
@@ -71,14 +74,16 @@ pub(crate) fn render_markdown(
 }
 
 /// Render the empty-corpus success markdown.
-pub(crate) fn render_empty_markdown(parse_errors: &[ParseError]) -> String {
+pub(crate) fn render_empty_markdown(
+    parse_errors: &[ParseError],
+    dropped_meshes: &[DroppedMesh],
+) -> String {
     let mut out = String::new();
 
-    if !parse_errors.is_empty() {
+    if !parse_errors.is_empty() || !dropped_meshes.is_empty() {
         // When every file fails to parse there is no corpus to report.
-        // Emit only the parse-error block — no separator, no success line.
-        // `has_scaffold_following` is false: no pages follow.
-        render_parse_errors(&mut out, parse_errors, false);
+        // Emit only the advisory block — no separator, no success line.
+        render_advisories(&mut out, parse_errors, dropped_meshes, false);
         return out;
     }
 
@@ -96,27 +101,40 @@ pub(crate) fn render_empty_markdown(parse_errors: &[ParseError]) -> String {
     out
 }
 
-/// Render the parse-error block.
+/// Render the advisory block (parse errors and dropped meshes).
 ///
-/// `has_scaffold_following` controls the header phrasing:
+/// `has_scaffold_following` controls the parse-error header phrasing:
 /// - `true`  → advisory ("Some wiki pages could not be parsed and were skipped:")
 /// - `false` → hard-stop ("Unable to generate scaffolding due to parsing errors:")
-fn render_parse_errors(
+fn render_advisories(
     out: &mut String,
     parse_errors: &[ParseError],
+    dropped_meshes: &[DroppedMesh],
     has_scaffold_following: bool,
 ) {
     use std::fmt::Write as _;
-    let header = if has_scaffold_following {
-        "Some wiki pages could not be parsed and were skipped:"
-    } else {
-        "Unable to generate scaffolding due to parsing errors:"
-    };
-    let _ = writeln!(out, "{header}");
-    for e in parse_errors {
-        let _ = writeln!(out, "- {} ({})", e.path, e.kind.reason());
+    if !parse_errors.is_empty() {
+        let header = if has_scaffold_following {
+            "Some wiki pages could not be parsed and were skipped:"
+        } else {
+            "Unable to generate scaffolding due to parsing errors:"
+        };
+        let _ = writeln!(out, "{header}");
+        for e in parse_errors {
+            let _ = writeln!(out, "- {} ({})", e.path, e.kind.reason());
+        }
+        out.push('\n');
     }
-    out.push('\n');
+    for d in dropped_meshes {
+        let _ = writeln!(
+            out,
+            "Skipped mesh `{}` — references missing path `{}`.",
+            d.slug, d.missing_path
+        );
+    }
+    if !dropped_meshes.is_empty() {
+        out.push('\n');
+    }
 }
 
 fn render_mesh_block(out: &mut String, m: &MeshDraft) {
@@ -201,7 +219,7 @@ mod tests {
         let mut titles = HashMap::new();
         titles.insert("wiki/page1.md".to_string(), Some("Page 1".to_string()));
         titles.insert("wiki/page2.md".to_string(), Some("Page 2".to_string()));
-        let out = render_markdown(&[d1, d2], &titles, &[], &HashSet::new());
+        let out = render_markdown(&[d1, d2], &titles, &[], &HashSet::new(), &[]);
 
         assert!(
             out.contains("\n---\n"),
@@ -222,7 +240,7 @@ mod tests {
             vec!["wiki/page1.md#L1-L5", "src/a.rs#L1-L5"],
         );
         let titles = HashMap::new();
-        let out = render_markdown(&[d], &titles, &[], &HashSet::new());
+        let out = render_markdown(&[d], &titles, &[], &HashSet::new(), &[]);
         assert!(
             !out.contains("\n---\n"),
             "no separator for single page:\n{out}"
@@ -238,7 +256,7 @@ mod tests {
             vec!["wiki/page.md#L1-L5", "src/a.rs#L1-L5"],
         );
         let titles = HashMap::new();
-        let out = render_markdown(&[d], &titles, &[], &HashSet::new());
+        let out = render_markdown(&[d], &titles, &[], &HashSet::new(), &[]);
         assert!(
             !out.contains("## "),
             "## line must be absent for empty chain:\n{out}"
@@ -256,7 +274,7 @@ mod tests {
             vec!["wiki/page.md#L10-L20", "src/a.rs#L1-L5", "src/b.rs#L1-L5"],
         );
         let titles = HashMap::new();
-        let out = render_markdown(&[d], &titles, &[], &HashSet::new());
+        let out = render_markdown(&[d], &titles, &[], &HashSet::new(), &[]);
         let add_idx = out.find("git mesh add wiki/foo").expect("add line present");
         let page_idx = out[add_idx..]
             .find("wiki/page.md#L10-L20")
@@ -274,7 +292,7 @@ mod tests {
 
     #[test]
     fn render_empty_markdown_zero_errors_no_block() {
-        let out = render_empty_markdown(&[]);
+        let out = render_empty_markdown(&[], &[]);
         assert!(
             !out.contains("Unable to generate"),
             "no parse-error block expected with zero errors"
@@ -288,7 +306,7 @@ mod tests {
     // the message must not claim coverage filtering decided the outcome.
     #[test]
     fn render_empty_markdown_does_not_claim_coverage() {
-        let out = render_empty_markdown(&[]);
+        let out = render_empty_markdown(&[], &[]);
         assert!(
             !out.contains("covered by a mesh"),
             "empty-corpus message must not claim mesh coverage — no coverage \
@@ -303,11 +321,11 @@ mod tests {
 
     #[test]
     fn render_empty_markdown_with_errors_block_alone() {
-        let errors = vec![make_error("wiki/bad.md", ParseErrorKind::MissingTitle)];
-        let out = render_empty_markdown(&errors);
+        let errors = vec![make_error("wiki/bad.md", ParseErrorKind::EmptyTitle)];
+        let out = render_empty_markdown(&errors, &[]);
         // No scaffold follows → hard-stop header.
         assert!(out.starts_with("Unable to generate scaffolding due to parsing errors:\n"));
-        assert!(out.contains("wiki/bad.md (frontmatter present but `title:` is missing)"));
+        assert!(out.contains("wiki/bad.md (frontmatter present but `title:` is empty)"));
         assert!(!out.contains("\n---\n"), "separator must be absent");
         assert!(
             !out.contains("# wiki scaffold"),
@@ -323,9 +341,9 @@ mod tests {
             vec![],
             vec!["wiki/page.md#L1-L5", "src/a.rs#L1-L5"],
         );
-        let errors = vec![make_error("wiki/bad.md", ParseErrorKind::MissingTitle)];
+        let errors = vec![make_error("wiki/bad.md", ParseErrorKind::EmptyTitle)];
         let titles = HashMap::new();
-        let out = render_markdown(&[d], &titles, &errors, &HashSet::new());
+        let out = render_markdown(&[d], &titles, &errors, &HashSet::new(), &[]);
         // Advisory header when scaffold follows.
         assert!(
             out.starts_with("Some wiki pages could not be parsed and were skipped:\n"),
@@ -339,8 +357,8 @@ mod tests {
 
     #[test]
     fn render_parse_error_hard_stop_header_when_no_meshes() {
-        let errors = vec![make_error("wiki/bad.md", ParseErrorKind::MissingTitle)];
-        let out = render_empty_markdown(&errors);
+        let errors = vec![make_error("wiki/bad.md", ParseErrorKind::EmptyTitle)];
+        let out = render_empty_markdown(&errors, &[]);
         // Hard-stop header when no scaffold follows.
         assert!(
             out.starts_with("Unable to generate scaffolding due to parsing errors:\n"),
@@ -357,10 +375,6 @@ mod tests {
         fn reason(kind: ParseErrorKind) -> String {
             kind.reason()
         }
-        assert_eq!(
-            reason(ParseErrorKind::MissingTitle),
-            "frontmatter present but `title:` is missing"
-        );
         assert_eq!(
             reason(ParseErrorKind::EmptyTitle),
             "frontmatter present but `title:` is empty"
@@ -392,11 +406,11 @@ mod tests {
             vec![],
             vec!["wiki/good.md#L1-L5", "src/b.rs#L1-L5"],
         );
-        let errors = vec![make_error("wiki/bad.md", ParseErrorKind::MissingTitle)];
+        let errors = vec![make_error("wiki/bad.md", ParseErrorKind::EmptyTitle)];
         let mut parse_error_paths = HashSet::new();
         parse_error_paths.insert("wiki/bad.md".to_string());
         let titles = HashMap::new();
-        let out = render_markdown(&[bad, good], &titles, &errors, &parse_error_paths);
+        let out = render_markdown(&[bad, good], &titles, &errors, &parse_error_paths, &[]);
         assert!(
             !out.contains("bad-slug"),
             "parse-error page must not appear in pages:\n{out}"
