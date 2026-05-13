@@ -1,6 +1,6 @@
 # Wiki CLI Reference
 
-**When to use this:** reaching past the day-to-day commands in `SKILL.md` — inspecting back-references, paginating search, validating a non-worktree source, targeting a peer namespace, machine-reading diagnostics, or wiring `wiki` into another tool.
+**When to use this:** reaching past the day-to-day commands in `SKILL.md` — inspecting back-references, paginating search, validating specific files, machine-reading diagnostics, or wiring `wiki` into another tool.
 
 The day-to-day commands (`wiki [query]`, `wiki check`, `wiki scaffold`) are documented in `SKILL.md`; this file covers everything else.
 
@@ -25,6 +25,7 @@ wiki -l 10 -o 10 "auth"           # next page
 ## Validation flags
 
 ```bash
+wiki check --root wiki            # scope validation to the wiki/ directory
 wiki check --no-mesh              # skip mesh coverage (when git mesh runs separately)
 wiki check --no-exit-code         # report-only; exits 0 even with errors
 wiki check --format json          # structured diagnostics
@@ -43,24 +44,10 @@ wiki --source head     check      # latest commit (use in CI)
 
 `--source` reads from a different snapshot of the repo without touching the working tree. The `index` source is what the pre-commit hook in `git-hook-setup.md` uses.
 
-## Namespaces and peer wikis
-
-```bash
-wiki namespaces                   # show current wiki, peers, validation status
-wiki -n platform "auth"           # search a peer namespace
-wiki -n '*' "auth"                # search every wiki in the repo
-wiki check -n '*'                 # validate every wiki
-```
-
-`-n` goes **before** the query for the default search; **after** the subcommand name for `check`, `links`, `list`, `summary`, `refs`.
-
-A peer fails validation (`wiki namespaces` exits non-zero) if it has no `wiki.toml` (rule 1) or its alias/namespace doesn't match (rule 2).
-
 ## Setup and integration
 
 ```bash
-wiki init                         # create a wiki.toml in the current directory
-wiki install <tool>                # install the wiki integration into an external tool's config home
+wiki install <tool>               # install the wiki integration into an external tool's config home
 wiki hook                         # PostToolUse hook entrypoint (reads event JSON from stdin)
 ```
 
@@ -74,7 +61,7 @@ wiki hook                         # PostToolUse hook entrypoint (reads event JSO
 | `--perf` | Emit per-event timings to stderr (also: `WIKI_PERF=1`). |
 | `--format json` | Structured output (subcommand-dependent). |
 | `--source <s>` | `worktree` (default) / `index` / `head`. |
-| `-n <ns>` | Target a namespace, or `*` for all wikis. |
+| `--root <dir>` | Root directory to scan for wiki pages. |
 | `-l <N>` / `-o <N>` | Search result limit / offset. |
 
 ## Reserved titles

@@ -15,7 +15,7 @@ Wiki validation is split across two hooks because the two error classes have dif
 
 **Why mesh coverage is deferred.** Mesh scaffolding generates `git mesh add` commands that require human review: anchors must be consolidated into meaningful meshes, and each mesh needs a real `why` sentence. The scaffold output is a starting point, not a finished product. Running it post-commit prints the commands so the committer can act on them without blocking the commit.
 
-**Why link validation is blocking.** Broken wikilinks, missing titles, and stale fragment-link SHAs make the wiki incorrect. These are machine-detectable correctness errors with no judgment call involved — they should never enter the tree.
+**Why link validation is blocking.** Broken links, missing titles, and stale fragment-link line ranges make the wiki incorrect. These are machine-detectable correctness errors with no judgment call involved — they should never enter the tree.
 
 ---
 

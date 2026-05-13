@@ -57,9 +57,9 @@ When updating prose, apply this discipline to every component you mention:
 - **Use broad ranges.** Span from the opening line of the definition through its closing brace.
 - **Use a References section for orphaned links.** If a component resists natural prose placement, collect its fragment link in a `## References` section at the bottom of the page.
 
-### 3.4 Update Wikilinks
+### 3.4 Update Cross-References
 
-After updating prose, check whether any wikilinks on the page point to pages that have themselves become inaccurate as a result of the same changes. Update wikilinks and linked pages as needed before moving on.
+After updating prose, check whether any relative markdown links on the page point to pages that have themselves become inaccurate as a result of the same changes. Update those linked pages as needed before moving on.
 
 ### 3.5 Re-anchor
 

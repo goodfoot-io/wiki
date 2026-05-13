@@ -9,7 +9,7 @@ tags:
 
 ## Listing Pages
 
-[`wiki list`](/packages/cli/src/commands/list.rs#L65-L100) enumerates all pages with their title, summary, aliases, tags, and file path.
+[`wiki list`](/packages/cli/src/commands/list.rs#L17-L78) enumerates all pages with their title, summary, aliases, tags, and file path.
 
 ```bash
 # List every page

@@ -46,11 +46,9 @@ by walking the card directory and upserting rows into the [card_files table](pac
 
 Heuristics:
 - Target whole function or struct definitions (signature through closing brace)
-- Paths MUST be repository-relative (e.g. `packages/foo.ts`, NOT `../../foo.ts`)
-- `wiki check --fix` automatically converts absolute or file-relative paths to repo-relative
+- Paths are resolved relative to the linking file's directory (use `../` to climb out of `wiki/`)
 - Backticks in the link label (e.g. `` [`fn`](path) ``) are supported
 - Include broad context — a link that goes stale when surrounding code changes is working as intended
-- Do not add `@sha` manually — `wiki check --fix` pins unpinned links automatically
 
 When a file is relied upon but cannot be worked naturally into prose, add a **References** section at the bottom:
 
@@ -89,17 +87,11 @@ Based on search results:
 - **Multiple pages touch the topic**: Determine the natural home; update it, add relative markdown links from the others
 - **Existing non-wiki document to convert**:
   - **External project copy or resolved bug/incident report**: exclude — not durable knowledge about this codebase
-  - **Notes, working plans, confirmed decisions**: rename to `*.wiki.md`, prepend frontmatter following `<page-format>` — existing prose can stay as-is
+  - **Notes, working plans, confirmed decisions**: add `title` + `summary` frontmatter following `<page-format>` — existing prose can stay as-is
 
 ### Location and Filename (new pages)
 
-Choose based on scope and ownership:
-- **Primarily about one component** — embed as `*.wiki.md` alongside it:
-  - Covers design decisions, internal API, constraints, or rebuild logic for that component
-  - Most fragment links point to code in the same package or directory
-- **Cross-cutting or navigational** — place in `wiki/`:
-  - Topic spans multiple packages, or is a workflow, how-to, or conceptual overview
-  - Needs to be discoverable by someone unfamiliar with the codebase layout
+Place all wiki pages under the `wiki/` directory tree. Use the kebab-cased slug of the title as the filename.
 
 ```
 wiki/
@@ -108,8 +100,6 @@ wiki/
   guides/         # workflows, how-tos
   ...             # new subdirectories as needed
 ```
-
-For `wiki/` pages, use the kebab-cased slug of the title as the filename. For embedded pages, use a descriptive name that fits the component directory (e.g. `DESIGN.wiki.md`, `schema.wiki.md`).
 
 ## 3. Organize
 
@@ -132,8 +122,6 @@ Act on these signals:
 - **Merge**: combine two pages into one; update relative markdown links from the removed page to the merged one
 - **Split**: divide one page into two; add bidirectional relative markdown links between them
 - **Add hub**: create an overview page in the subdirectory that links to its pages via relative markdown links
-- **Move embedded → `wiki/`**: when a `*.wiki.md` page's fragment links have grown to span multiple packages
-- **Move `wiki/` → embedded**: when a page's fragment links are all within one package
 
 ## 4. Update Related Pages
 
@@ -151,10 +139,10 @@ Validate only the files you changed:
 
 ```bash
 wiki check --fix "wiki/architecture/my-page.md"
-wiki check --fix "documentation/**/*.wiki.md"
+wiki check --fix "wiki/**/*.md"
 ```
 
-Use bare `wiki check --fix` only when changes span many pages. `check --fix` pins unpinned links and validates in a single pass — do not run `wiki check` separately afterward.
+Use `wiki check --root wiki --fix` only when changes span many pages. `check --fix` pins unpinned links and validates in a single pass — do not run `wiki check` separately afterward.
 
 For the full maintenance workflow (stale link triage, prose updates, backlink propagation, commit), see the maintenance reference bundled with this skill.
 
