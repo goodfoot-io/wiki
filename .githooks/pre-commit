@@ -156,7 +156,7 @@ fi
 	# --- Wiki validation on all wiki pages ---
 	WIKI_BIN=$(command -v wiki || true)
 	if [ -n "$WIKI_BIN" ]; then
-	    "$WIKI_BIN" check --no-mesh || {
+	    "$WIKI_BIN" check --no-mesh --root wiki || {
 	        exit 1
 	    }
 	fi
