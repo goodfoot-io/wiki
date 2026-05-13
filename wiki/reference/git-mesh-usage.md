@@ -61,9 +61,9 @@ The line range token (`start-end`) is parsed for format validation only; range f
 
 ### `git-mesh commit` *(test fixture only)*
 
-**Where:** [`check.rs`](/packages/cli/src/commands/check.rs#L681) (also lines 712, 741, 771)
+**Where:** [`check.rs`](/packages/cli/src/commands/check.rs)
 
-**Invoked by:** Integration tests (via [`repo.git_mesh(&["commit"])`](/packages/cli/src/commands/check.rs#L1109-L1130)) to commit staged meshes into the test repo before running [`wiki check`](/packages/cli/src/commands/check.rs#L203-L270).
+**Invoked by:** Integration tests to commit staged meshes into the test repo before running `wiki check`.
 
 **Purpose:** Not used in production code; exists only to set up fixture state for mesh coverage tests.
 

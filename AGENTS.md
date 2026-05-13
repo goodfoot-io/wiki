@@ -23,7 +23,7 @@ Skills are located in `.agents/skills/`. Load a skill before performing speciali
 
 ## Wiki
 
-This repository stores documentation in `./wiki/**/*.md` and `**/*.wiki.md` files. Reference articles using `[[wikilink]]` syntax. Use the `wiki` CLI to search and read documentation:
+This repository stores documentation in `./wiki/**/*.md` and `**/*.wiki.md` files. Reference articles using relative markdown links (e.g. `[Title](./other-page.md)`). Use the `wiki` CLI to search and read documentation:
 
 ```bash
 wiki "search query"

@@ -97,7 +97,7 @@ A first-time commit fails if no `why` is staged — that's the normal flow. Erro
 wiki check
 ```
 
-Expect zero `mesh_uncovered` findings on real wiki pages. Test fixtures that intentionally exercise the uncovered code path (e.g. [`packages/cli/tests/fixtures/mesh-scaffold/`](/packages/cli/src/commands/mesh/scaffold.rs#L185-L189)) will keep showing up — leave them.
+Expect zero `mesh_uncovered` findings on real wiki pages. Test fixtures that intentionally exercise the uncovered code path will keep showing up — leave them.
 
 ## Things worth knowing before you start
 

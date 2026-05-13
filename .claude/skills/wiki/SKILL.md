@@ -62,9 +62,9 @@ When a file is relied upon but cannot be worked naturally into prose, add a **Re
 - [CardFile type](packages/cards/src/types.ts#L3-L12)
 ```
 
-## Wikilinks
+## Page-to-page links
 
-Link to related wiki pages using `[[Title]]` or `[[Title#Heading]]` syntax. Resolution is case-insensitive. When creating companion pages (e.g., an architecture reference and a maintenance guide), add bidirectional wikilinks between them.
+Link to related wiki pages using standard markdown relative-path syntax (`[Title](./other-page.md)` or `[Title](./other-page.md#heading)`), resolved against the linking file's directory. When creating companion pages (e.g., an architecture reference and a maintenance guide), add bidirectional links between them.
 
 </page-format>
 
@@ -86,7 +86,7 @@ Search broadly — relevant content may appear in pages you wouldn't expect.
 Based on search results:
 - **No relevant page exists**: Choose a location (see below), write following `<page-format>`
 - **Page exists but lacks coverage**: Inspect it with `wiki summary "Page Title"` and the file on disk, then apply edits following `<page-format>`
-- **Multiple pages touch the topic**: Determine the natural home; update it, add wikilinks from the others
+- **Multiple pages touch the topic**: Determine the natural home; update it, add relative markdown links from the others
 - **Existing non-wiki document to convert**:
   - **External project copy or resolved bug/incident report**: exclude — not durable knowledge about this codebase
   - **Notes, working plans, confirmed decisions**: rename to `*.wiki.md`, prepend frontmatter following `<page-format>` — existing prose can stay as-is
@@ -115,7 +115,7 @@ For `wiki/` pages, use the kebab-cased slug of the title as the filename. For em
 
 ### Page Types
 
-- **Hub pages** — link to sub-pages via wikilinks (`[[Card Files Table]]`); always in `wiki/`
+- **Hub pages** — link to sub-pages via relative markdown links (`[Card Files Table](./card-files-table.md)`); always in `wiki/`
 - **Leaf pages** — cover one concept with fragment links to all relevant code
 - **Long-form pages** — complex workflows as a single page with sections
 
@@ -129,9 +129,9 @@ Act on these signals:
 
 ### How to Reorganize
 
-- **Merge**: combine two pages into one; update wikilinks from the removed page to the merged one
-- **Split**: divide one page into two; add bidirectional wikilinks between them
-- **Add hub**: create an overview page in the subdirectory that links to its pages via wikilinks
+- **Merge**: combine two pages into one; update relative markdown links from the removed page to the merged one
+- **Split**: divide one page into two; add bidirectional relative markdown links between them
+- **Add hub**: create an overview page in the subdirectory that links to its pages via relative markdown links
 - **Move embedded → `wiki/`**: when a `*.wiki.md` page's fragment links have grown to span multiple packages
 - **Move `wiki/` → embedded**: when a page's fragment links are all within one package
 
@@ -143,7 +143,7 @@ After creating, editing, or reorganizing, search for pages that should cross-ref
 wiki "card files rebuild"
 ```
 
-Read each match and add a `[[wikilink]]` where relevant. If a related page discusses components now better covered by the changed page, add cross-references rather than duplicating content. This applies even to brand-new pages — existing pages may mention related concepts without linking to them.
+Read each match and add a relative markdown link where relevant. If a related page discusses components now better covered by the changed page, add cross-references rather than duplicating content. This applies even to brand-new pages — existing pages may mention related concepts without linking to them.
 
 ## 5. Pin and Validate
 
@@ -160,7 +160,7 @@ For the full maintenance workflow (stale link triage, prose updates, backlink pr
 
 ## 6. Update Wiki Feedback
 
-Update [[Wiki CLI Feedback]] with any friction, bugs, or feature requests observed:
+Update [Wiki CLI Feedback](../../../wiki/meta/wiki-feedback.md) with any friction, bugs, or feature requests observed:
 
 ```bash
 wiki summary "Wiki CLI Feedback" # confirm the canonical page before editing it

@@ -8,6 +8,6 @@ tags:
 
 # Data Flow
 
-Describes data flow between mesh components. References [[Communication Protocol]] and [[Mesh Design]].
+Describes data flow between mesh components. References Communication Protocol and Mesh Design.
 
-A cross-namespace reference: [[default:Wiki CLI]].
+A cross-namespace reference: Wiki CLI.

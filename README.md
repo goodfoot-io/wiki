@@ -3,10 +3,10 @@
 A fast, Rust-powered wiki toolkit for local-first Markdown knowledge bases. This monorepo ships:
 
 - **`@goodfoot/wiki`** — a standalone CLI for indexing, searching, linking, and rendering Markdown wikis
-- **Wiki Viewer** — a VS Code extension that renders wiki pages with live wikilink navigation
+- **Wiki Viewer** — a VS Code extension that renders wiki pages with live markdown-link navigation
 - **Agent plugins** — ready-to-install Claude Code and Codex plugins that teach coding agents to read and write the wiki
 
-Documentation is stored as plain Markdown with `[[wikilink]]` references and optional frontmatter — nothing proprietary, no database you can't read.
+Documentation is stored as plain Markdown with relative-path links and optional frontmatter — nothing proprietary, no database you can't read.
 
 ## @goodfoot/wiki (Rust CLI)
 
@@ -83,7 +83,7 @@ filesystem; you stay in control.
 
 ### Features
 
-- **Wikilink resolution** — `[[Title]]`, `[[Title#heading]]`, `[[Title|alias]]` resolved against titles, aliases, and file paths
+- **Markdown link resolution** — relative-path links between wiki pages resolved against the linking file's directory
 - **FTS5 full-text search** — powered by an embedded SQLite (turso) index with BM25 ranking and snippet extraction
 - **Fragment links** — heading slugs are stable and addressable; `#heading` fragments survive rename
 - **Git-aware hooks** — `wiki hook` phases keep the index in lockstep with commits, merges, and rebases (WAL mode for concurrent access)
@@ -130,7 +130,7 @@ The Rust CLI lives in `packages/cli/`; `packages/cli/package.json` is the single
 The `plugins/wiki/` directory is a shared plugin distributed through both the **Claude Code** and **Codex** plugin marketplaces. It provides:
 
 - **Hooks** — `post-commit` / `post-merge` handlers that keep the wiki index synchronized after agent-driven commits
-- **Skills** — a `wiki` skill that teaches agents how to query and author wiki articles using the CLI, including `[[wikilink]]` conventions and frontmatter rules
+- **Skills** — a `wiki` skill that teaches agents how to query and author wiki articles using the CLI, including markdown-link conventions and frontmatter rules
 
 Install via the marketplace integration in Claude Code or Codex, or copy `examples/githooks/*.sh` into `.git/hooks/` for a minimal manual setup. See [examples/githooks/README.md](./examples/githooks/README.md) for the manual install instructions.
 

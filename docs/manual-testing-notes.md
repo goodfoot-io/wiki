@@ -38,8 +38,9 @@ empty-string `alias` should not be emitted by default.
 
 ### `wiki links` does not surface cross-namespace inbound links (Step 9)
 
-`notes/operator-notes.md` (namespace `scratch`) contains
-`[[default:Authentication]]`. The procedure expects
+<!-- intentional: historical example, namespaces and wikilink syntax removed -->
+`notes/operator-notes.md` (namespace `scratch`) contains a cross-namespace
+reference to `default:Authentication`. The procedure expects
 `wiki links "Authentication"` to include `scratch:Operator Notes` in the
 output. It does not — only same-namespace backlinks (`Sessions`,
 `OAuth Notes`) appear.

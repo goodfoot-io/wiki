@@ -44,8 +44,7 @@
     },
     "configurationDefaults": {
       "workbench.editorAssociations": {
-        "{git}:/**/*.md": "default",
-        "{git}:/**/*.wiki.md": "default"
+        "{git}:/**/*.md": "default"
       }
     },
     "customEditors": [

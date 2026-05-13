@@ -10,13 +10,10 @@ The day-to-day commands (`wiki [query]`, `wiki check`, `wiki scaffold`) are docu
 
 ```bash
 wiki summary "Authorization"      # print a page's summary line
-wiki refs   "Authorization"       # every wikilink referenced by the page (forward refs)
+wiki refs   "Authorization"       # every link referenced by the page (forward refs)
 wiki links  "Authorization"       # every page that links to the target  (back refs)
 wiki list                         # all pages with title, aliases, tags, path
-wiki extract                      # read stdin, print title+summary for every wikilink found
 ```
-
-`wiki extract` is the integration point for other tools that produce text containing `[[wikilinks]]` — pipe the text in, get resolved metadata out.
 
 ## Search pagination
 

@@ -58,7 +58,7 @@ Use the `jsdoczoom:jsdoczoom` subagent instead of the `Explore` subagent to answ
 
 <wiki>
 
-This repository stores documentation in a central `./wiki/**/*.md` wiki and in individual `**/*.wiki.md` files. You can reference these articles using [[wikilink]] syntax, where "wikilink" is a wiki document's title or alias.
+This repository stores documentation in a central `./wiki/**/*.md` wiki and in individual `**/*.wiki.md` files. Reference these articles using relative markdown links (e.g. `[Title](./other-page.md)`), resolved against the linking file's directory.
 
 Load the `wiki` skill before writing new standalone documentation. Use the `wiki` CLI to search and read documentation.
 

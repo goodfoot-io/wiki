@@ -5,7 +5,7 @@ description: This skill should be used when the user asks to "search the wiki", 
 
 # Wiki
 
-A corpus of Markdown pages with `[[wikilinks]]` between pages and **fragment links** (with line ranges) into source code. The `wiki` CLI searches and validates them. `git mesh` keeps fragment links honest.
+A corpus of Markdown pages with relative-path links between pages and **fragment links** (with line ranges) into source code. The `wiki` CLI searches and validates them. `git mesh` keeps fragment links honest.
 
 ## Search
 
@@ -45,26 +45,19 @@ namespace: platform   # *.wiki.md only — assigns the page to a peer wiki
 
 A repo has at most **one default (anonymous) namespace** — the wiki whose `wiki.toml` omits the `namespace` field. All other wikis are **named peers** (`namespace = "marketing"`, etc.).
 
-- An empty `wiki.toml` (or one without a `namespace` key) → that wiki **is** the default namespace. Don't add `namespace = "wiki"` "to name it" — that demotes it to a named peer and breaks bare `[[Title]]` links from any page that was relying on the default.
+- An empty `wiki.toml` (or one without a `namespace` key) → that wiki **is** the default namespace. Don't add `namespace = "wiki"` "to name it" — that demotes it to a named peer and breaks bare links from any page that was relying on the default.
 - The literal value `namespace = "default"` is **reserved and rejected**. Omit the field to declare the default.
-- Bare `[[Title]]` links resolve within the current page's namespace; the default namespace has no special "fallback" status for cross-namespace lookups.
+- Bare relative-path links resolve within the current page's namespace; the default namespace has no special "fallback" status for cross-namespace lookups.
 - `*.wiki.md` files outside any `wiki.toml` tree may set `namespace` to join a named peer; omitting it places them in the default namespace.
 
-## Wikilinks
+## Page-to-page links
 
 ```markdown
-See [[Authorization]] or [[AuthZ]] for the policy model.
-Jump to [[Authorization#Role checks]] for the heading.
-See [[platform:Authorization]] to link into a peer namespace.
+See [Authorization](./authorization.md) for the policy model.
+Jump to [Authorization#Role checks](./authorization.md#role-checks) for the heading.
 ```
 
-Resolution is by `title` or any `alias`, case-insensitive, **within a single namespace**. `wiki check` verifies the target exists, is unique, and that any `#Heading` resolves.
-
-### Namespaces and cross-namespace links
-
-Each `wiki.toml` (and each `*.wiki.md` file's `namespace`) defines a separate corpus. A bare `[[Title]]` only resolves inside the current page's namespace. To link into a peer wiki, qualify with `[[ns:Title]]` — e.g. `[[marketing:Pricing]]` from the `wiki` namespace.
-
-**Common misconception:** changing a page from `*.md` to `*.wiki.md` does **not** make it "globally accessible" or fix cross-namespace broken links. The extension only governs whether a file *outside* a `wiki.toml` tree counts as a wiki page; it has no effect on namespace membership or wikilink resolution. A page already under a `wiki.toml` keeps its inherited namespace regardless of extension. Fix cross-namespace broken wikilinks with `[[ns:Title]]` syntax (or by consolidating namespaces), not by renaming files.
+Links between wiki pages use standard markdown relative-path syntax, resolved against the linking file's directory. `wiki check` verifies the target file exists and that any `#heading` slug resolves.
 
 ## Fragment links — prefer line ranges
 
@@ -87,7 +80,7 @@ wiki check                  # links + frontmatter + mesh coverage
 
 Diagnostics fall into three buckets:
 
-- **Frontmatter / wikilink errors** — fix in the page.
+- **Frontmatter / link errors** — fix in the page.
 - **`mesh_uncovered`** — fragment link has no covering mesh. Fix below.
 - **`mesh_unavailable`** — `git-mesh` not on `PATH`; mesh check is skipped. Install `git-mesh` to restore it.
 
@@ -114,7 +107,7 @@ git commit
 
 1. Place the page (under a `wiki.toml`, or as `*.wiki.md`).
 2. Write `title` + `summary`; add `aliases` for other names readers will use.
-3. Cross-link with `[[wikilinks]]`. Run `wiki "..."` first to pick the canonical title.
+3. Cross-link with relative markdown links. Run `wiki "..."` first to pick the canonical title.
 4. Cite source code with **line-ranged** fragment links.
 5. `wiki check`. For `mesh_uncovered`: `wiki scaffold` → run → commit.
 
