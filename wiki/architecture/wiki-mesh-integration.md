@@ -49,7 +49,7 @@ git mesh why wiki/<page-title-slug>/<target-slug> -m "[why]"
 ```
 ````
 
-The trailing `[why]` placeholder is intentional — every why is meant to be rewritten by the author before commit (see [[Adding Mesh Coverage]]).
+The trailing `[why]` placeholder is intentional — every why is meant to be rewritten by the author before commit (see [Adding Mesh Coverage](../guides/adding-mesh-coverage.md)).
 
 ### Mesh naming
 

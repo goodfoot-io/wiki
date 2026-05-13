@@ -9,7 +9,7 @@ tags:
 
 Living list of candidate files for wiki migration. Files are grouped by source area. Each entry notes the recommended destination (wiki/ page vs embedded *.wiki.md) and brief reasoning.
 
-See [[Wiki Organization]] for the embed vs. centralize decision criteria.
+See [Wiki Organization](./wiki-organization.md) for the embed vs. centralize decision criteria.
 
 ---
 

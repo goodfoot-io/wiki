@@ -9,7 +9,7 @@ tags:
 
 This guide captures the technique for taking a wiki repository from "many uncovered fragment links" to "every fragment link is covered by a mesh whose `why` reads like a definition." It is meant for an agent or operator establishing baseline coverage, not for incremental coverage during normal authoring.
 
-For the design behind the integration, see [[Wiki Mesh Integration]]. For the command catalog, see [[git-mesh Usage in the Wiki CLI]]. For the canonical rules on naming and writing whys, the `git-mesh:handbook` skill is the source of truth — load it first.
+For the design behind the integration, see [Wiki Mesh Integration](../architecture/wiki-mesh-integration.md). For the command catalog, see [git-mesh Usage in the Wiki CLI](../reference/git-mesh-usage.md). For the canonical rules on naming and writing whys, the `git-mesh:handbook` skill is the source of truth — load it first.
 
 ## 1. Inventory the gap
 
@@ -112,6 +112,6 @@ Expect zero `mesh_uncovered` findings on real wiki pages. Test fixtures that int
 
 ## References
 
-- [[Wiki Mesh Integration]]
-- [[git-mesh Usage in the Wiki CLI]]
-- [[Wiki CLI]]
+- [Wiki Mesh Integration](../architecture/wiki-mesh-integration.md)
+- [git-mesh Usage in the Wiki CLI](../reference/git-mesh-usage.md)
+- [Wiki CLI](../architecture/wiki-cli.md)

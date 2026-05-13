@@ -9,7 +9,7 @@ tags:
 
 This page is the maintenance map for future wiki documentation updates. When command behavior or recommended usage changes, update the implementation-facing source of truth first, then walk the operator-facing documents and automation references listed here so guidance does not drift.
 
-For the CLI architecture itself, see [[Wiki CLI]]. For the broader rules governing wiki pages, see [[Wiki Organization]] and [[Wiki CLI Advanced Usage]].
+For the CLI architecture itself, see [Wiki CLI](../architecture/wiki-cli.md). For the broader rules governing wiki pages, see [Wiki Organization](./wiki-organization.md) and [Wiki CLI Advanced Usage](../reference/wiki-cli-advanced-usage.md).
 
 ## Command Behavior Source Of Truth
 
@@ -21,8 +21,8 @@ These files are the public guidance surfaces most likely to drift when the CLI c
 
 - The [repository `CLAUDE.md` wiki instructions](/CLAUDE.md#L83-L94) shape how agents in this workspace are told to search and read wiki content.
 - The [wiki skill instructions](/.claude/skills/wiki/SKILL.md#L73-L172) are the highest-leverage agent workflow contract for discovering pages, choosing where to write, validating fragment links, and updating related pages.
-- The [[Wiki CLI Advanced Usage|advanced usage page]] holds the less common CLI behaviors such as stdin handling, file paths, explicit glob targeting, and JSON output.
-- The [[Wiki CLI Feedback|feedback log]] is where observed friction from doc or CLI mismatches should be recorded after the change is understood.
+- The [advanced usage page](../reference/wiki-cli-advanced-usage.md) holds the less common CLI behaviors such as stdin handling, file paths, explicit glob targeting, and JSON output.
+- The [feedback log](./wiki-feedback.md) is where observed friction from doc or CLI mismatches should be recorded after the change is understood.
 
 If a documentation update changes the recommended operator workflow, all of these surfaces should be checked explicitly, not only the page that first exposed the inconsistency.
 
@@ -39,10 +39,10 @@ When wiki documentation behavior changes, use this order:
 1. Confirm the implementation in [CLI parsing and dispatch](/packages/cli/src/main.rs#L26-L60) and [top-level command routing](/packages/cli/src/main.rs#L292-L374).
 2. Update the primary user docs in [CLAUDE.md](/CLAUDE.md#L83-L94).
 3. Update the agent workflow contract in [.claude/skills/wiki/SKILL.md](/.claude/skills/wiki/SKILL.md#L73-L172).
-4. Update secondary references such as [[Wiki CLI Advanced Usage]], [[Wiki CLI Feedback]], and [the Gemini maintenance example](/examples/githooks/scripts/gemini-wiki-gap-detection.sh).
+4. Update secondary references such as [Wiki CLI Advanced Usage](../reference/wiki-cli-advanced-usage.md), [Wiki CLI Feedback](./wiki-feedback.md), and [the Gemini maintenance example](/examples/githooks/scripts/gemini-wiki-gap-detection.sh).
 5. Run `wiki check --fix` on the touched pages so the fragment links pin.
 
 ## References
 
-- [[Wiki CLI|Wiki CLI architecture page]]
-- [[Wiki Organization]]
+- [Wiki CLI architecture page](../architecture/wiki-cli.md)
+- [Wiki Organization](./wiki-organization.md)

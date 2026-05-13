@@ -31,4 +31,4 @@ Full-text search (FTS) indexing is [decoupled from the core document index](/pac
 
 To keep search performance high while improving relevance, [weighted search ranking](/packages/cli/src/index.rs#L1362-L1410) combines exact title matches, path matches, and FTS results. Each pass is optimized separately (using B-tree lookups for titles and paths before falling back to BM25), ensuring that common navigational searches are nearly instantaneous.
 
-See also: [[Wiki CLI]]
+See also: [Wiki CLI](../architecture/wiki-cli.md)

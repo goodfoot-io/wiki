@@ -9,7 +9,7 @@ tags:
 
 # git-mesh Usage in the Wiki CLI
 
-See [[Wiki Mesh Integration]] for the design rationale behind these integrations.
+See [Wiki Mesh Integration](../architecture/wiki-mesh-integration.md) for the design rationale behind these integrations.
 
 ## Commands Currently Used
 

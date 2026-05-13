@@ -5,11 +5,11 @@ tags:
   - tooling
 ---
 
-The wiki CLI validates and maintains fragment links between wiki pages and source code. For the maintenance map of every operator-facing doc and automation prompt that should be checked when CLI behavior changes, see [[Wiki Documentation Touchpoints]]. For the git mesh integration that replaces SHA-pinned staleness detection, see [[Wiki Mesh Integration]].
+The wiki CLI validates and maintains fragment links between wiki pages and source code. For the maintenance map of every operator-facing doc and automation prompt that should be checked when CLI behavior changes, see [Wiki Documentation Touchpoints](../meta/wiki-documentation-touchpoints.md). For the git mesh integration that replaces SHA-pinned staleness detection, see [Wiki Mesh Integration](./wiki-mesh-integration.md).
 
 ## Fragment Link Parsing
 
-The [parser](/packages/cli/src/parser.rs#L6-L12) extracts two link types from markdown content: [fragment links](/packages/cli/src/parser.rs#L213-L213) (`[label](path#sha-L10-L20)`) and [wikilinks](/packages/cli/src/parser.rs#L304-L304) (`[[Title]]`). Both parsers operate on [scrubbed content](/packages/cli/src/parser.rs#L79-L79) — code blocks, inline code, and HTML comments are blanked out before extraction to avoid false matches.
+The [parser](/packages/cli/src/parser.rs#L6-L12) extracts fragment links from markdown content: [fragment links](/packages/cli/src/parser.rs#L213-L213) (`[label](path#sha-L10-L20)`). The parser operates on [scrubbed content](/packages/cli/src/parser.rs#L79-L79) — code blocks, inline code, and HTML comments are blanked out before extraction to avoid false matches.
 
 ## Validation Pipeline
 
@@ -17,7 +17,7 @@ The [check command](/packages/cli/src/commands/check.rs#L28-L29) runs a full val
 
 ## Extract
 
-The [extract command](/packages/cli/src/commands/extract.rs#L17-L17) (`packages/cli/src/commands/extract.rs`) reads arbitrary text from stdin, parses all `[[wikilink]]` references, and outputs the [canonical title and summary](/packages/cli/src/commands/extract.rs#L10-L15) for each resolved page. Wikilink extraction runs before any file I/O — if no wikilinks are found, the command [exits immediately with no output](/packages/cli/src/commands/extract.rs#L28-L33). Unresolved wikilinks are reported to stderr and cause exit code 1.
+The [extract command](/packages/cli/src/commands/extract.rs#L17-L17) (`packages/cli/src/commands/extract.rs`) reads arbitrary text from stdin, parses all wiki references, and outputs the [canonical title and summary](/packages/cli/src/commands/extract.rs#L10-L15) for each resolved page. Extraction runs before any file I/O — if no references are found, the command [exits immediately with no output](/packages/cli/src/commands/extract.rs#L28-L33). Unresolved references are reported to stderr and cause exit code 1.
 
 ## PostToolUse Hook
 

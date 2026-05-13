@@ -132,7 +132,7 @@ summary: How the system authenticates users.
 
 # Authentication
 
-We use OAuth2. See [[Sessions]] and [[scratch:Operator Notes]].
+We use OAuth2. See [Sessions](./sessions.md) and [Operator Notes](../notes/operator-notes.md).
 EOF
 
 cat > docs/sessions.md <<'EOF'
@@ -144,7 +144,7 @@ summary: Session lifecycle.
 
 # Sessions
 
-Sessions are cookies, refreshed via [[Authentication]].
+Sessions are cookies, refreshed via [Authentication](./authentication.md).
 EOF
 ```
 
@@ -163,7 +163,7 @@ title: OAuth Notes
 summary: Implementation notes for the OAuth client.
 ---
 
-Implements the flow described in [[Authentication]].
+Implements the flow described in [Authentication](../docs/authentication.md).
 Anchors: src/auth/oauth.rs#L1-L2
 EOF
 ```
@@ -177,7 +177,7 @@ title: Operator Notes
 summary: Day-2 operations runbook.
 ---
 
-Cross-references [[default:Authentication]].
+Cross-references [Authentication](../docs/authentication.md).
 EOF
 ```
 
@@ -295,7 +295,7 @@ Expect: pages that link **to** `Authentication`, including `Sessions` (`docs/ses
 ## 10. `wiki extract`
 
 ```bash
-echo "See [[Authentication]] and [[Sessions]] for context." | wiki extract
+echo "See [Authentication](./docs/authentication.md) and [Sessions](./docs/sessions.md) for context." | wiki extract
 ```
 
 Expect: each wikilink's title + summary, one block per link.
@@ -311,7 +311,7 @@ Expect: validates frontmatter and wikilinks across all `*.md` and `*.wiki.md`. W
 ### 11a. inject a broken link, observe failure
 
 ```bash
-echo "Broken: [[NoSuchPage]]" >> docs/sessions.md
+echo "Broken: [NoSuchPage](./no-such-page.md)" >> docs/sessions.md
 wiki check ; echo "exit:$?"
 ```
 
@@ -349,7 +349,7 @@ Expect: a JSON object envelope, e.g. `{ "errors": [] }` on a clean wiki. Validat
 printf '{"tool_input":{"file_path":"%s/docs/authentication.md"}}' "$WORK" | wiki hook ; echo "exit:$?"
 ```
 
-Expect: exit `0` and no `systemMessage` because the file is clean. With a broken edit (e.g. introducing `[[BadLink]]`), the hook prints a JSON `{"systemMessage":"…"}` describing the failure.
+Expect: exit `0` and no `systemMessage` because the file is clean. With a broken edit (e.g. introducing a link to a non-existent file), the hook prints a JSON `{"systemMessage":"…"}` describing the failure.
 
 ## 13. `wiki scaffold` (git mesh integration)
 

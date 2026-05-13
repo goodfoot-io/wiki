@@ -10,7 +10,7 @@ tags:
 
 Living record of feedback on the `wiki` CLI utility. Updated after each wiki session with any friction, surprises, or requests encountered in practice.
 
-For the canonical map of documentation and automation files that should be checked after wiki CLI guidance changes, see [[Wiki Documentation Touchpoints]].
+For the canonical map of documentation and automation files that should be checked after wiki CLI guidance changes, see [Wiki Documentation Touchpoints](./wiki-documentation-touchpoints.md).
 
 ## Feature Requests
 
