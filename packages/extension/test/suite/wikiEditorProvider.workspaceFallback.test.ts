@@ -91,9 +91,14 @@ describe('WikiEditorProvider — bare filename workspace fallback', () => {
       `Workspace-root file exists at candidatePath "${candidatePath}"`
     );
 
-    // 2) The file opens via vscode.open (what the navigate handler calls).
+    // 2) The file opens via vscode.open. With every workspace `.md` file
+    //    now routed through the wiki custom editor, the resulting tab uses
+    //    `TabInputCustom` rather than `TabInputText`.
     await vscode.commands.executeCommand('vscode.open', candidateUri);
-    const rootTab = await waitForTab((tab) => tab?.input instanceof vscode.TabInputText, 'Expected root file tab');
+    const rootTab = await waitForTab(
+      (tab) => tab?.input instanceof vscode.TabInputCustom || tab?.input instanceof vscode.TabInputText,
+      'Expected root file tab'
+    );
     assert.ok(rootTab, 'Root file opens via vscode.open');
     await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
 

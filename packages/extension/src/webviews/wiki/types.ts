@@ -6,28 +6,28 @@
  * @summary Discriminated union message types for the wiki webview host↔webview channel.
  */
 
-// Tooltip metadata for a resolved wikilink, as returned by `wiki refs --format json`.
+/**
+ * One incoming backlink as returned by `wiki refs --format json`.
+ *
+ * Each entry represents a single line on a page that links back to the
+ * currently-viewed file.
+ */
 export type ResolvedRefEntry = {
-  wikilink: string;
-  title: string;
-  file: string;
-  summary: string;
-  namespace: string;
-  aliases: string[];
-  tags: string[];
+  source_file: string;
+  source_title: string;
+  line: number;
+  text: string;
 };
-
-export type RefEntry = ResolvedRefEntry | { wikilink: string; error: string };
 
 // Host -> Webview messages
 export type HostMessage =
-  | { type: 'updateContent'; html: string; scrollY?: number; refs?: RefEntry[] }
+  | { type: 'updateContent'; html: string; scrollY?: number; refs?: ResolvedRefEntry[] }
   | { type: 'showLoading' }
   | { type: 'showError'; message: string };
 
 // Webview -> Host messages
 export type WebviewMessage =
-  | { type: 'navigate'; pageName: string; namespace?: string; split: boolean }
+  | { type: 'navigate'; href: string; split: boolean }
   | { type: 'scrollPosition'; y: number }
   | { type: 'openInEditor'; split: boolean }
   | { type: 'openFile'; uri: string; split: boolean }

@@ -1,16 +1,15 @@
 /// <reference lib="dom" />
 /**
- * Floating tooltip for wikilink and file-link hover previews.
+ * Floating tooltip for file-link hover previews.
  *
  * Creates a single fixed-position `#wiki-tooltip` element and repositions it
  * on each show call. Styled via `media/tooltip.css` using VSCode hover-widget
  * CSS variables for automatic light/dark support.
  *
- * @summary Floating tooltip DOM management for wikilink and file-link hover previews.
+ * @summary Floating tooltip DOM management for file-link hover previews.
  */
 
 import '@vscode-elements/elements/dist/vscode-badge/index.js';
-import type { ResolvedRefEntry } from './types.js';
 
 let tooltipEl: HTMLDivElement | null = null;
 let bodyEl: HTMLDivElement | null = null;
@@ -37,28 +36,6 @@ export function initTooltip(): void {
   document.body.appendChild(tooltipEl);
 }
 
-/**
- * Populate and position the tooltip relative to `anchor`, then show it.
- *
- * @param anchor - The hovered anchor element.
- * @param entry - Resolved wikilink metadata to display.
- */
-export function showTooltip(anchor: HTMLElement, entry: ResolvedRefEntry): void {
-  if (bodyEl == null) return;
-
-  // Show qualified namespace:Title in the tooltip header for cross-namespace links.
-  const namespace = anchor.getAttribute('data-namespace');
-  const titleHtml = namespace ? `${escapeHtml(namespace)}: ${escapeHtml(entry.title)}` : escapeHtml(entry.title);
-
-  const tagsHtml =
-    entry.tags.length > 0
-      ? `<div class="wiki-tooltip-tags">${entry.tags.map((t) => `<vscode-badge>${escapeHtml(t)}</vscode-badge>`).join('')}</div>`
-      : '';
-
-  bodyEl.innerHTML = `<div class="wiki-tooltip-title">${titleHtml}</div><div class="wiki-tooltip-summary">${escapeHtml(entry.summary)}</div>${tagsHtml}`;
-  positionAndShow(anchor);
-}
-
 const FILE_LANG: Record<string, string> = {
   ts: 'TypeScript',
   tsx: 'TypeScript',
@@ -79,7 +56,10 @@ const FILE_LANG: Record<string, string> = {
 };
 
 /**
- * Show a tooltip for a repo-relative file link (e.g. `packages/foo/bar.ts@sha#L10-L45`).
+ * Show a tooltip for a markdown link href that points at a file.
+ *
+ * The href may include a line-range fragment (e.g. `path/to/file.ts#L10-L45`)
+ * or a `@sha` git pin produced by `wiki check --fix`.
  *
  * @param anchor - The hovered anchor element.
  * @param href - The raw href attribute of the anchor.
@@ -91,7 +71,6 @@ export function showFileTooltip(anchor: HTMLElement, href: string): void {
   const rawPath = hashIdx >= 0 ? href.slice(0, hashIdx) : href;
   const fragment = hashIdx >= 0 ? href.slice(hashIdx + 1) : '';
 
-  // Strip @sha pin added by `wiki check --fix`.
   const atIdx = rawPath.indexOf('@');
   const filePath = atIdx >= 0 ? rawPath.slice(0, atIdx) : rawPath;
 
@@ -114,7 +93,6 @@ export function showFileTooltip(anchor: HTMLElement, href: string): void {
 function positionAndShow(anchor: HTMLElement): void {
   if (tooltipEl == null || arrowEl == null) return;
 
-  // Make visible but off-screen to measure dimensions before final positioning.
   tooltipEl.style.visibility = 'hidden';
   tooltipEl.classList.add('wiki-tooltip--visible');
 
@@ -132,7 +110,6 @@ function positionAndShow(anchor: HTMLElement): void {
     Math.min(anchorCenterX - tipWidth / 2, window.innerWidth - tipWidth - EDGE_MARGIN)
   );
 
-  // Align arrow with the anchor's horizontal centre, clamped inside tooltip.
   arrowEl.style.left = `${Math.max(ARROW_HALF + 2, Math.min(anchorCenterX - left, tipWidth - ARROW_HALF - 2)) - ARROW_HALF}px`;
 
   tooltipEl.style.top = `${top}px`;

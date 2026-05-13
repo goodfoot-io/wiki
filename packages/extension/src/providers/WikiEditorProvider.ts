@@ -1,13 +1,12 @@
 /**
  * CustomTextEditorProvider that renders wiki markdown in a webview panel.
  *
- * Supports wikilink navigation via vscode.open, live reload on file changes,
- * and scroll position persistence via workspaceState memento.
+ * Resolves webview link clicks to filesystem paths (relative to the source
+ * document), reloads on file change, and persists scroll position.
  *
  * @summary CustomTextEditorProvider that renders wiki markdown in a webview panel.
  */
 
-import * as fs from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
@@ -15,123 +14,44 @@ import { render } from '../rendering/MarkdownRenderer.js';
 import { getSourceArgs } from '../utils/sourceMode.js';
 import { runWikiCommand } from '../utils/wikiBinary.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
-import type { HostMessage, RefEntry, ResolvedRefEntry, WebviewMessage } from '../webviews/wiki/types.js';
-import type { NamespaceCache } from '../wiki/namespaceCache.js';
-import { parseQualifiedWikilink } from '../wiki/wikilinkParser.js';
+import type { HostMessage, ResolvedRefEntry, WebviewMessage } from '../webviews/wiki/types.js';
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/** Summary JSON returned by `wiki summary <path> --format json`. */
 interface WikiSummaryJson {
   title: string;
   file: string;
   summary?: string;
-  aliases?: string[];
-  tags?: string[];
 }
 
-// ---------------------------------------------------------------------------
-// Provider
-// ---------------------------------------------------------------------------
-
 /**
- * Registers as a custom text editor for *.md and *.wiki.md files.
- * Each open document gets its own webview panel with isolated state.
+ * Registers as a custom text editor for `.md` files. Each open document gets
+ * its own webview panel with isolated state.
  */
 export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
   constructor(
     private readonly _extensionUri: vscode.Uri,
     private readonly _binaryManager: WikiBinaryManager,
-    private readonly _context: vscode.ExtensionContext,
-    private readonly _namespaceCache?: NamespaceCache
+    private readonly _context: vscode.ExtensionContext
   ) {}
 
-  /**
-   * Return the filesystem path of the first VS Code workspace folder, or undefined
-   * if no folder is open. The wiki CLI requires a cwd inside the git repo.
-   *
-   * @returns The workspace root path, or undefined if no folder is open.
-   */
   private _workspaceRoot(): string | undefined {
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   }
 
   /**
-   * Resolve the wiki directory for the current workspace.
-   *
-   * Resolution order:
-   *  1. `$WIKI_DIR` is an absolute path → use it directly.
-   *  2. `$WIKI_DIR` is a relative path → resolve relative to `workspaceRoot`.
-   *  3. `$WIKI_DIR` is unset → default to `<workspaceRoot>/wiki/`.
-   *
-   * Returns null when `$WIKI_DIR` is relative (or unset) and no workspace
-   * folder is open.
-   *
-   * @returns The resolved wiki directory path with a trailing separator, or null.
-   */
-  private _wikiDir(): string | null {
-    const envWikiDir = process.env['WIKI_DIR'];
-    if (envWikiDir != null && envWikiDir.length > 0) {
-      if (path.isAbsolute(envWikiDir)) {
-        return envWikiDir.endsWith(path.sep) ? envWikiDir : envWikiDir + path.sep;
-      }
-      const workspaceRoot = this._workspaceRoot();
-      if (workspaceRoot == null) return null;
-      const resolved = path.join(workspaceRoot, envWikiDir);
-      return resolved.endsWith(path.sep) ? resolved : resolved + path.sep;
-    }
-    const workspaceRoot = this._workspaceRoot();
-    if (workspaceRoot == null) return null;
-    return path.join(workspaceRoot, 'wiki') + path.sep;
-  }
-
-  /**
    * Return true if `uri` should be opened in the wiki viewer.
    *
-   * Two cases qualify:
-   *  1. The file has a `.wiki.md` extension — matches anywhere in the workspace.
-   *  2. The file has a plain `.md` extension and lives inside `$WIKI_DIR`.
+   * Any `.md` file under an open workspace folder qualifies. The host
+   * resolves wiki-aware behaviour (summary, backlinks) by frontmatter
+   * inspection at render time.
    *
    * @param uri - The file URI to test.
-   * @returns True if the file belongs to the wiki, false otherwise.
+   * @returns True if the file is a `.md` file inside the active workspace.
    */
   isWikiFile(uri: vscode.Uri): boolean {
-    if (uri.fsPath.endsWith('.wiki.md')) return true;
     if (!uri.fsPath.endsWith('.md')) return false;
-
-    // Check against all known wiki roots (multi-wiki support).
-    if (this._namespaceCache != null) {
-      const all = this._namespaceCache.getAll();
-      for (const ns of all) {
-        if (uri.fsPath.startsWith(ns.absPath)) {
-          return true;
-        }
-      }
-    }
-
-    // When the namespace cache is still populating, fall back to a synchronous
-    // parent-directory walk looking for wiki.toml. This catches peer-namespace
-    // files (e.g. mesh/) that would otherwise be missed by the hardcoded wiki/ prefix.
-    {
-      let dir = path.dirname(uri.fsPath);
-      const workspaceRoot = this._workspaceRoot();
-      while (workspaceRoot != null && dir.startsWith(workspaceRoot)) {
-        if (fs.existsSync(path.join(dir, 'wiki.toml'))) {
-          return true;
-        }
-        if (dir === workspaceRoot) break;
-        const parentDir = path.dirname(dir);
-        if (parentDir === dir) break; // Reached filesystem root
-        dir = parentDir;
-      }
-    }
-
-    // Fall back to legacy single-wiki default path.
-    const wikiDir = this._wikiDir();
-    if (wikiDir == null) return false;
-    return uri.fsPath.startsWith(wikiDir);
+    const wsRoot = this._workspaceRoot();
+    if (wsRoot == null) return false;
+    return uri.fsPath.startsWith(wsRoot + path.sep) || uri.fsPath === wsRoot;
   }
 
   // --------------------------------------------------------------------------
@@ -143,17 +63,14 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     webviewPanel: vscode.WebviewPanel,
     _token: vscode.CancellationToken
   ): Promise<void> {
-    // Guard against user-level workbench.editorAssociations routing non-wiki .md files here.
     if (!this.isWikiFile(document.uri)) {
       webviewPanel.dispose();
       await vscode.window.showTextDocument(document.uri, { preview: false });
       return;
     }
 
-    // Set the tab icon to the library codicon.
     webviewPanel.iconPath = new vscode.ThemeIcon('library');
 
-    // Configure webview security and resource roots.
     webviewPanel.webview.options = {
       enableScripts: true,
       localResourceRoots: [
@@ -162,7 +79,6 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
       ]
     };
 
-    // Set the initial HTML shell (loads dist/wiki.js).
     webviewPanel.webview.html = this._buildShellHtml(webviewPanel.webview);
 
     const scrollKey = `scroll:${document.uri.toString()}`;
@@ -176,11 +92,9 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
       void onDocumentChange(event.document);
     });
 
-    // Handle messages from the webview.
     const messageDisposable = webviewPanel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
       switch (message.type) {
         case 'ready': {
-          // Render the initial page only once the webview signals readiness.
           try {
             await this._binaryManager.ready();
             const savedScrollY = this._context.workspaceState.get<number>(scrollKey);
@@ -195,55 +109,10 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
         }
 
         case 'navigate': {
-          // If the webview provided a namespace and pageName is not already qualified,
-          // prepend the namespace. The webview click handler may already decode
-          // a namespace prefix into pageName (e.g. "default:Wiki CLI").
-          const resolvedPageName =
-            message.namespace && !message.pageName.includes(':')
-              ? `${message.namespace}:${message.pageName}`
-              : message.pageName;
-          // Resolve the target page URI via wiki summary.
-          const targetUri = await this._resolvePageUri(resolvedPageName, document.uri);
-          if (targetUri == null) {
-            // Fallback: treat as a workspace-relative file or directory path.
-            const workspaceRoot = this._workspaceRoot();
-            if (workspaceRoot != null) {
-              const candidateUri = vscode.Uri.file(path.join(workspaceRoot, message.pageName));
-              try {
-                const stat = await vscode.workspace.fs.stat(candidateUri);
-                if (stat.type === vscode.FileType.Directory) {
-                  await vscode.commands.executeCommand('revealInExplorer', candidateUri);
-                  return;
-                }
-                const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
-                const ext = path.extname(message.pageName).toLowerCase();
-                if (ext === '.md') {
-                  await vscode.commands.executeCommand('vscode.open', candidateUri, viewColumn);
-                } else {
-                  await vscode.window.showTextDocument(candidateUri, { viewColumn, preview: false });
-                }
-                return;
-              } catch (err) {
-                const isNotFound = err instanceof vscode.FileSystemError && err.code === 'FileNotFound';
-                if (!isNotFound) {
-                  console.warn('[wiki-extension] Unexpected error checking workspace path:', candidateUri.fsPath, err);
-                }
-              }
-            }
-            this._postMessage(webviewPanel.webview, {
-              type: 'showError',
-              message: `Could not find wiki page: "${message.pageName}"`
-            });
-            return;
-          }
-
-          if (message.split) {
-            await vscode.commands.executeCommand('vscode.openWith', targetUri, 'wiki.viewer', {
-              viewColumn: vscode.ViewColumn.Beside
-            });
-          } else {
-            await vscode.commands.executeCommand('vscode.openWith', targetUri, 'wiki.viewer', vscode.ViewColumn.Active);
-          }
+          // The href is a plain markdown link target (e.g. "../foo.md",
+          // "wiki/index.md", "wiki/index.md#section"). Resolve it relative
+          // to the linking document's directory — standard markdown semantics.
+          await this._navigate(webviewPanel.webview, document.uri, message.href, message.split);
           break;
         }
 
@@ -291,7 +160,6 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
       }
     });
 
-    // Clean up on panel close.
     webviewPanel.onDidDispose(() => {
       changeDisposable.dispose();
       messageDisposable.dispose();
@@ -303,14 +171,56 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
   // --------------------------------------------------------------------------
 
   /**
-   * Render the given wiki file URI into the webview.
-   * Updates the panel title from the wiki summary.
+   * Resolve `href` relative to the linking document, then open it as a wiki
+   * page (if a markdown file) or in a plain editor (anything else).
    *
-   * @param webview - Target webview to post messages to.
-   * @param uri - File URI of the wiki page to render.
-   * @param panel - Parent webview panel (used to update the title).
-   * @param scrollY - Optional scroll position to restore after render.
+   * @param webview     - Target webview, used to post error messages.
+   * @param documentUri - URI of the document the navigation originated from.
+   * @param href        - Raw markdown link target.
+   * @param split       - When true, open beside the current editor.
    */
+  private async _navigate(
+    webview: vscode.Webview,
+    documentUri: vscode.Uri,
+    href: string,
+    split: boolean
+  ): Promise<void> {
+    // Strip URL fragment for path resolution; markdown anchors are not
+    // resolved server-side.
+    const hashIdx = href.indexOf('#');
+    const rawPath = hashIdx >= 0 ? href.slice(0, hashIdx) : href;
+
+    if (rawPath === '') {
+      // pure fragment — ignore
+      return;
+    }
+
+    const sourceDir = path.dirname(documentUri.fsPath);
+    const absPath = path.isAbsolute(rawPath) ? rawPath : path.resolve(sourceDir, rawPath);
+    const targetUri = vscode.Uri.file(absPath);
+
+    try {
+      const stat = await vscode.workspace.fs.stat(targetUri);
+      if (stat.type === vscode.FileType.Directory) {
+        await vscode.commands.executeCommand('revealInExplorer', targetUri);
+        return;
+      }
+    } catch {
+      this._postMessage(webview, {
+        type: 'showError',
+        message: `Could not find file: "${href}"`
+      });
+      return;
+    }
+
+    const viewColumn = split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
+    if (absPath.endsWith('.md') && this.isWikiFile(targetUri)) {
+      await vscode.commands.executeCommand('vscode.openWith', targetUri, 'wiki.viewer', viewColumn);
+    } else {
+      await vscode.window.showTextDocument(targetUri, { viewColumn, preview: false });
+    }
+  }
+
   private async _renderPage(
     webview: vscode.Webview,
     uri: vscode.Uri,
@@ -320,42 +230,37 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     this._postMessage(webview, { type: 'showLoading' });
 
     let text: string;
-    let summaryResult: Awaited<ReturnType<typeof runWikiCommand>>;
+    let summaryResult: Awaited<ReturnType<typeof runWikiCommand>> | null;
     let refsResult: Awaited<ReturnType<typeof runWikiCommand>> | null;
 
     try {
       const handle = await this._binaryManager.ready();
-      const ns = this._namespaceCache?.resolveNamespaceForFile(uri.fsPath) ?? 'default';
       const sourceArgs = getSourceArgs();
-      // Read file content, run summary, and pre-fetch tooltip refs concurrently.
-      // refs is best-effort: its failure is caught inline so it never rejects the Promise.all.
       [text, summaryResult, refsResult] = await Promise.all([
         this._readDocumentText(uri),
         runWikiCommand(
           handle.path,
-          [...sourceArgs, '-n', ns, 'summary', uri.fsPath, '--format', 'json'],
+          [...sourceArgs, 'summary', uri.fsPath, '--format', 'json'],
           undefined,
           this._workspaceRoot()
-        ),
+        ).catch(() => null),
         runWikiCommand(
           handle.path,
-          [...sourceArgs, '-n', ns, 'refs', uri.fsPath, '--format', 'json'],
+          [...sourceArgs, 'refs', uri.fsPath, '--format', 'json'],
           undefined,
           this._workspaceRoot()
         ).catch(() => null)
       ]);
     } catch (err) {
-      // File read error or spawn error (e.g. ENOENT — binary not found after initial check).
       const message = err instanceof Error ? err.message : String(err);
-      console.error('[wiki-extension] Failed to read wiki file or run summary command:', err);
+      console.error('[wiki-extension] Failed to read wiki file:', err);
       this._postMessage(webview, { type: 'showError', message: `Failed to load wiki page: ${message}` });
       return;
     }
 
     const html = render(text);
 
-    // Update panel title from summary (best-effort; don't fail render if summary fails).
-    if (summaryResult.exitCode === 0 && summaryResult.stdout.trim() !== '') {
+    if (summaryResult != null && summaryResult.exitCode === 0 && summaryResult.stdout.trim() !== '') {
       try {
         const summary = JSON.parse(summaryResult.stdout) as WikiSummaryJson;
         panel.title = summary.title;
@@ -364,18 +269,10 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
       }
     }
 
-    let refs: RefEntry[] | undefined;
+    let refs: ResolvedRefEntry[] | undefined;
     if (refsResult != null && refsResult.exitCode === 0 && refsResult.stdout.trim() !== '') {
       try {
-        refs = JSON.parse(refsResult.stdout) as RefEntry[];
-        // Tag each resolved entry with the current document's namespace so the
-        // webview can use namespace-qualified keys in refsMap for deduplication.
-        const currentNs = this._namespaceCache?.resolveNamespaceForFile(uri.fsPath) ?? 'default';
-        for (const entry of refs) {
-          if ('title' in entry) {
-            (entry as ResolvedRefEntry).namespace = currentNs;
-          }
-        }
+        refs = JSON.parse(refsResult.stdout) as ResolvedRefEntry[];
       } catch (parseErr) {
         console.warn('[wiki-extension] Failed to parse wiki refs JSON:', parseErr);
       }
@@ -385,61 +282,6 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     this._postMessage(webview, updateMessage);
   }
 
-  /**
-   * Resolve a wiki page name to a VS Code URI by running `wiki summary`.
-   * Returns null if the page cannot be found.
-   *
-   * Qualified wikilinks (`ns:Title`) are parsed via `parseQualifiedWikilink`;
-   * the namespace portion becomes the `-n` argument. Unqualified page names
-   * inherit the namespace of the source document.
-   *
-   * @param pageName - Decoded wiki page title to resolve.
-   * @param documentUri - URI of the document the navigation originated from.
-   * @returns The VS Code URI for the page's file, or null if not found.
-   */
-  private async _resolvePageUri(pageName: string, documentUri: vscode.Uri): Promise<vscode.Uri | null> {
-    const handle = await this._binaryManager.ready();
-
-    let ns: string;
-    let resolvedPageName: string;
-    const parsed = parseQualifiedWikilink(pageName);
-    if (parsed.namespace != null) {
-      // Qualified wikilink: "ns:Title" → namespace "ns", title "Title".
-      ns = parsed.namespace;
-      resolvedPageName = parsed.title;
-    } else {
-      // Unqualified: inherit namespace from the source document.
-      ns = this._namespaceCache?.resolveNamespaceForFile(documentUri.fsPath) ?? 'default';
-      resolvedPageName = pageName;
-    }
-
-    const sourceArgs = getSourceArgs();
-    const result = await runWikiCommand(
-      handle.path,
-      [...sourceArgs, '-n', ns, 'summary', resolvedPageName, '--format', 'json'],
-      undefined,
-      this._workspaceRoot()
-    );
-    if (result.exitCode !== 0 || result.stdout.trim() === '') {
-      console.warn(`[wiki-extension] Could not resolve page "${pageName}":`, result.stderr.trim());
-      return null;
-    }
-    try {
-      const summary = JSON.parse(result.stdout) as WikiSummaryJson;
-      return vscode.Uri.file(summary.file);
-    } catch (parseErr) {
-      console.error('[wiki-extension] Failed to parse wiki summary for page:', pageName, parseErr);
-      return null;
-    }
-  }
-
-  /**
-   * Read the current text for a URI, preferring an already-open TextDocument so
-   * the webview stays in sync with unsaved in-memory edits.
-   *
-   * @param uri - File URI of the wiki page.
-   * @returns The current text content.
-   */
   private async _readDocumentText(uri: vscode.Uri): Promise<string> {
     const openDocument = vscode.workspace.textDocuments.find((document) => document.uri.toString() === uri.toString());
     if (openDocument != null) {
@@ -448,12 +290,6 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     return readFile(uri.fsPath, 'utf8');
   }
 
-  /**
-   * Post a typed host message to the webview.
-   *
-   * @param webview - Target webview.
-   * @param message - Typed host message to send.
-   */
   private _postMessage(webview: vscode.Webview, message: HostMessage): void {
     webview.postMessage(message).then(
       () => {},
@@ -463,12 +299,6 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     );
   }
 
-  /**
-   * Build the HTML shell that loads the bundled webview script.
-   *
-   * @param webview - The webview instance used to generate secure resource URIs.
-   * @returns The complete HTML string for the webview shell.
-   */
   private _buildShellHtml(webview: vscode.Webview): string {
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'dist', 'wiki.js'));
     const codiconUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'dist', 'codicons', 'codicon.css'));
@@ -476,7 +306,6 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     const highlightCssUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'highlight.css'));
     const tooltipCssUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'tooltip.css'));
 
-    // Content security policy: allow scripts and fonts from the extension's dist and media origins.
     const cspSource = webview.cspSource;
 
     return `<!DOCTYPE html>

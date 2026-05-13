@@ -72,28 +72,10 @@ Paragraph text.`;
       assert.ok(!html2.includes('id="foo-1"'), 'Second call: slug state must not carry over from first call');
     });
 
-    it('converts [[Page Name]] wikilinks to anchor elements', () => {
-      const html = render('See [[Some Page]] for details.\n');
-      assert.ok(html.includes('href="/Some%20Page"'), 'Expected href="/Some%20Page"');
-      assert.ok(html.includes('>Some Page<'), 'Expected link text "Some Page"');
-      assert.ok(!html.includes('[['), 'Expected wikilink brackets to be absent');
-    });
-
-    it('converts [[Target|Display Text]] wikilinks with custom display text', () => {
-      const html = render('See [[Target Page|this page]] for details.\n');
-      assert.ok(html.includes('href="/Target%20Page"'), 'Expected href="/Target%20Page"');
-      assert.ok(html.includes('>this page<'), 'Expected custom display text');
-    });
-
-    it('leaves wikilinks inside fenced code blocks unmodified', () => {
-      const html = render('```md\n[[Example]]\n```\n');
-      assert.ok(html.includes('[[Example]]'), 'Expected raw wikilink syntax inside code block');
-      assert.ok(!html.includes('href="/Example"'), 'Expected no anchor in code block');
-    });
-
-    it('leaves wikilinks inside inline code spans unmodified', () => {
-      const html = render('Use the `[[Example]]` syntax.\n');
-      assert.ok(html.includes('[[Example]]'), 'Expected raw wikilink syntax inside code span');
+    it('renders standard markdown links as anchors with bare hrefs', () => {
+      const html = render('See [some page](path/to/page.md) for details.\n');
+      assert.ok(html.includes('href="path/to/page.md"'), 'Expected href="path/to/page.md"');
+      assert.ok(html.includes('>some page<'), 'Expected link text "some page"');
     });
   });
 });

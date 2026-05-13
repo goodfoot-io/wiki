@@ -121,121 +121,6 @@ const pluginSlugHeaders: MarkdownIt.PluginSimple = (md) => {
 };
 
 // ---------------------------------------------------------------------------
-// Plugin: wikilink syntax
-// ---------------------------------------------------------------------------
-
-/**
- * Converts `[[Page Name]]` and `[[Target|Display Text]]` syntax into standard
- * anchor elements so the webview's click interceptor can post navigation messages
- * to the host.
- *
- * Format produced: `<a href="/Page%20Name">Page Name</a>`
- *
- * The href uses `encodeURIComponent` on the target so the webview's
- * `decodeURIComponent(href.replace(/^\//, ''))` round-trip recovers the
- * original page name for the `wiki summary` lookup.
- *
- * Wikilinks inside fenced code blocks and inline code spans are unaffected
- * because this rule only processes `text` tokens within `inline` block tokens.
- *
- * @param md - The markdown-it instance to extend.
- */
-const pluginWikilinks: MarkdownIt.PluginSimple = (md) => {
-  const wikilinkRe = /\[\[([^[\]]+?)\]\]/g;
-
-  md.core.ruler.push('wikilinks', (state: MarkdownIt.StateCore) => {
-    for (const blockToken of state.tokens) {
-      if (blockToken.type !== 'inline' || blockToken.children == null) continue;
-
-      const newChildren: MarkdownIt.Token[] = [];
-
-      for (const token of blockToken.children) {
-        if (token.type !== 'text') {
-          newChildren.push(token);
-          continue;
-        }
-
-        const parts = token.content.split(wikilinkRe);
-        // split with a capture group produces [before, match1, after, match2, ...].
-        // Odd-index items are the captured wikilink inner text.
-        for (let i = 0; i < parts.length; i++) {
-          const part = parts[i];
-          if (part === undefined || part === '') continue;
-
-          if (i % 2 === 0) {
-            // Plain text segment
-            const t = new state.Token('text', '', 0);
-            t.content = part;
-            newChildren.push(t);
-          } else {
-            // Wikilink inner content, e.g. "Page Name", "Target|Display", or
-            // "ns:Title" / "ns:Title|Display" for cross-namespace links.
-            // Extract optional namespace prefix matching [A-Za-z0-9_-]+:
-            let namespace: string | undefined;
-            let content = part;
-            const nsMatch = content.match(/^([A-Za-z0-9_-]+):/);
-            if (nsMatch) {
-              namespace = nsMatch[1]!;
-              content = content.slice(nsMatch[0].length);
-            }
-
-            const pipeIdx = content.indexOf('|');
-            let target: string;
-            let display: string;
-            if (pipeIdx >= 0) {
-              target = content.slice(0, pipeIdx).trim();
-              display = content.slice(pipeIdx + 1).trim();
-            } else {
-              target = content.trim();
-              display = target;
-            }
-
-            // Strip heading anchor from href target; keep page name as display
-            // if no explicit display was provided.
-            const hashIdx = target.indexOf('#');
-            let href: string;
-            let page: string;
-            if (hashIdx >= 0) {
-              page = target.slice(0, hashIdx);
-              const heading = target.slice(hashIdx + 1);
-              const qualified = namespace ? `${namespace}:${page}` : page;
-              href = `/${encodeURIComponent(qualified)}#${encodeURIComponent(heading)}`;
-              if (pipeIdx < 0) display = page;
-            } else {
-              page = target;
-              const qualified = namespace ? `${namespace}:${page}` : page;
-              href = `/${encodeURIComponent(qualified)}`;
-            }
-
-            // Skip wikilinks with an empty page title (e.g. [[#heading]]) —
-            // matches the wiki CLI's behaviour of leaving them as literal text.
-            if (page.trim() === '') {
-              const t = new state.Token('text', '', 0);
-              t.content = part;
-              newChildren.push(t);
-              continue;
-            }
-
-            const linkOpen = new state.Token('link_open', 'a', 1);
-            linkOpen.attrSet('href', href);
-            if (namespace != null) {
-              linkOpen.attrSet('data-namespace', namespace);
-              linkOpen.attrJoin('class', 'wikilink-cross-namespace');
-            }
-            const text = new state.Token('text', '', 0);
-            text.content = display;
-            const linkClose = new state.Token('link_close', 'a', -1);
-            newChildren.push(linkOpen, text, linkClose);
-          }
-        }
-      }
-
-      blockToken.children = newChildren;
-    }
-  });
-};
-
-// ---------------------------------------------------------------------------
 // markdown-it instance
 // ---------------------------------------------------------------------------
 
@@ -265,7 +150,6 @@ md.use(markdownItFrontMatter, () => {
 });
 md.use(pluginSourceMap);
 md.use(pluginSlugHeaders);
-md.use(pluginWikilinks);
 
 // ---------------------------------------------------------------------------
 // Public API
