@@ -4,7 +4,6 @@ use miette::Result;
 use serde::Serialize;
 
 use crate::index::{DocSource, WikiIndex};
-use crate::wiki_config::WikiConfig;
 
 /// Incoming fragment-link backlink to a wiki page.
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -31,7 +30,6 @@ pub fn run(
     json: bool,
     wiki_root: &Path,
     repo_root: &Path,
-    _wiki_config: Option<&WikiConfig>,
     source: DocSource,
 ) -> Result<i32> {
     let index = WikiIndex::prepare_for_source(wiki_root, repo_root, source)?;
@@ -136,7 +134,6 @@ mod tests {
             true,
             &wiki_root,
             repo.path(),
-            None,
             crate::index::DocSource::WorkingTree,
         )
         .expect("run");

@@ -8,7 +8,6 @@ mod perf;
 #[cfg(test)]
 mod test_support;
 mod version;
-mod wiki_config;
 
 use std::io::{self, BufRead, IsTerminal};
 use std::path::PathBuf;
@@ -37,7 +36,7 @@ enum SourceArg {
     version = crate::version::VERSION,
     before_help = concat!("wiki ", env!("WIKI_VERSION"), "\n"),
     about = "wiki - Read and maintain wiki pages",
-    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, links, list, summary, extract, refs, hook, install) are reserved and cannot be used as page titles.\n\nUse `-n '*'` to run a command across all wikis in the repo. Each result is labeled with its namespace. Supported subcommands: search (default query), check, links, list, summary, refs.",
+    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, links, list, summary, refs, hook, install) are reserved and cannot be used as page titles.\n\nUse `--root <path>` to point at a wiki root other than the current working directory.",
     disable_help_subcommand = true,
     disable_version_flag = true,
 )]
@@ -54,11 +53,9 @@ struct Cli {
     #[arg(long = "perf", action = ArgAction::SetTrue, global = true)]
     perf: bool,
 
-    /// Target a peer namespace (or `*` for all) for the default search.
-    /// Defaults to the current wiki. For other commands, pass `-n` after
-    /// the subcommand (supported on: check, links, list, summary, refs).
-    #[arg(short = 'n', long = "namespace", value_name = "NS")]
-    namespace: Option<String>,
+    /// Wiki root directory. Defaults to the current working directory.
+    #[arg(long = "root", value_name = "PATH", global = true)]
+    root: Option<PathBuf>,
 
     /// Document source: working tree (default), git index, or HEAD commit.
     #[arg(
@@ -100,19 +97,15 @@ enum Commands {
     /// Validate all links and frontmatter in wiki pages.
     ///
     /// Fragment links: referenced file exists, line ranges within bounds.
-    /// Wikilinks: target title/alias exists (case-insensitive), unique,
-    /// heading fragments resolve. Frontmatter: title required, aliases
-    /// and tags valid, no title/alias collisions (case-insensitive).
-    /// Defaults to all wikis in the repository.
+    /// Frontmatter: title required, aliases and tags valid, no title/alias
+    /// collisions (case-insensitive).
     ///
     /// Always verifies that every fragment link with a line range is
     /// covered by a `git mesh` that anchors both the wiki file and the
     /// link target. `git mesh` must be installed; missing the binary
     /// fails the check.
-    ///
-    /// Use `-n <name>` to scope the check to a single namespace.
     Check {
-        /// Glob patterns to match wiki pages (default: $WIKI_DIR/**/*.md)
+        /// Glob patterns to match wiki pages (default: $WIKI_ROOT/**/*.md)
         #[arg(value_name = "glob")]
         globs: Vec<String>,
         /// Exit 0 even when validation errors are found (report-only mode)
@@ -121,9 +114,6 @@ enum Commands {
         /// Skip the git mesh coverage check (useful when `git mesh check` runs separately)
         #[arg(long = "no-mesh")]
         no_mesh: bool,
-        /// Target a peer namespace (or `*` for all). Defaults to all wikis.
-        #[arg(short = 'n', long = "namespace", value_name = "NS")]
-        namespace: Option<String>,
     },
 
     /// Find wiki pages that link to the given target.
@@ -132,17 +122,10 @@ enum Commands {
     /// file targets by repo-relative path. Path-like inputs may match both and
     /// return a unified search-style result set with snippets. Reads from stdin
     /// when the argument is omitted.
-    ///
-    /// By default, searches all wikis in the repo (repo-wide backlinks). Use
-    /// `-n <ns>` to scope to a single namespace, or `-n '*'` as an explicit
-    /// synonym for the repo-wide default.
     Links {
         /// Page title, alias, or file path; reads from stdin if omitted
         #[arg(value_name = "target")]
         target: Option<String>,
-        /// Target a peer namespace (or `*` for all). Defaults to repo-wide.
-        #[arg(short = 'n', long = "namespace", value_name = "NS")]
-        namespace: Option<String>,
     },
 
     /// Run `wiki check` on the written/edited file path from a PostToolUse
@@ -153,15 +136,11 @@ enum Commands {
 
     /// List all wiki pages with metadata (title, aliases, tags, file path).
     ///
-    /// Optionally filter by tag. Use `-n '*'` to list pages across all wikis
-    /// in the repo; each row is labeled with its namespace.
+    /// Optionally filter by tag.
     List {
         /// Filter pages by tag
         #[arg(long = "tag", value_name = "tag")]
         tag: Option<String>,
-        /// Target a peer namespace (or `*` for all). Defaults to the current wiki.
-        #[arg(short = 'n', long = "namespace", value_name = "NS")]
-        namespace: Option<String>,
     },
 
     /// Print the summary of a wiki page.
@@ -169,46 +148,23 @@ enum Commands {
     /// Resolves the argument via title, alias, or file path (case-insensitive
     /// for title/alias), then writes the canonical title, absolute path, and
     /// summary to stdout. Reads from stdin when the argument is omitted. With
-    /// --format json, emits
-    /// { title, file, summary }.
-    ///
-    /// Use `-n '*'` to search across all wikis in the repo.
+    /// --format json, emits { title, file, summary }.
     Summary {
         /// Page title, alias, or file path; reads from stdin if omitted
         #[arg(value_name = "title|path")]
         title: Option<String>,
-        /// Target a peer namespace (or `*` for all). Defaults to the current wiki.
-        #[arg(short = 'n', long = "namespace", value_name = "NS")]
-        namespace: Option<String>,
     },
 
-    /// Print metadata for all wikilinks referenced by a wiki page.
+    /// Print metadata for all fragment-linked pages referenced by a wiki page.
     ///
-    /// Resolves all [[wikilinks]] found in the given page and returns
-    /// their title, summary, aliases, and tags. Useful for pre-fetching
-    /// tooltip data for all links on a page in one call.
-    /// Reads from stdin when the argument is omitted. With --format json,
-    /// emits [{ wikilink, title, file, summary, aliases, tags }] for
-    /// resolved links and [{ wikilink, error }] for unresolved ones.
-    ///
-    /// Use `-n '*'` to resolve wikilinks across all wikis in the repo.
+    /// Reads from stdin when the argument is omitted.
     Refs {
         /// Page title, alias, or file path; reads from stdin if omitted
         #[arg(value_name = "title|path")]
         title: Option<String>,
-        /// Target a peer namespace (or `*` for all). Defaults to the current wiki.
-        #[arg(short = 'n', long = "namespace", value_name = "NS")]
-        namespace: Option<String>,
     },
 
     /// Install the wiki integration into an external tool's config home.
-    ///
-    /// Use --codex to install the Codex integration (downloads the latest
-    /// plugin assets, installs the wiki skill, and configures a PostToolUse
-    /// hook that runs `wiki hook`; repeat runs update the install).
-    /// Use --claude to print friendly setup instructions for the Claude Code
-    /// plugin marketplace — this mode is informational only and never
-    /// touches the filesystem or the network.
     Install {
         /// Install the Codex integration.
         #[arg(long = "codex")]
@@ -237,22 +193,10 @@ enum Commands {
 
     /// Generate a shell script of `git mesh add` / `git mesh why` commands
     /// for every fragment link found in the given files or globs.
-    /// Operates across all wikis in the repository regardless of the -n flag.
     Scaffold {
         /// Wiki page files or glob patterns (required)
         #[arg(value_name = "glob", num_args = 1..)]
         globs: Vec<String>,
-    },
-
-    /// Create a wiki.toml in the current directory.
-    ///
-    /// With a namespace argument: writes `namespace = "<arg>"`.
-    /// Without: writes an empty file (default namespace).
-    /// Fails closed if wiki.toml already exists.
-    Init {
-        /// Namespace name for the new wiki (omit for the default namespace).
-        #[arg(value_name = "namespace")]
-        namespace: Option<String>,
     },
 }
 
@@ -295,10 +239,6 @@ fn resolve_inputs(
 }
 
 /// Run `f` for each input, returning the worst exit code seen.
-///
-/// When `separate` is true, a `---` divider is printed between items in
-/// text output — useful for the print command where each page is a block
-/// of markdown that would otherwise run together.
 fn run_for_each(
     inputs: Vec<String>,
     mut f: impl FnMut(&str) -> Result<i32>,
@@ -331,11 +271,6 @@ fn main() {
         .ok();
     }
 
-    let namespace = cli
-        .namespace
-        .clone()
-        .or_else(|| subcommand_namespace(&cli.command));
-
     let source: index::DocSource = match cli.source {
         SourceArg::Worktree => index::DocSource::WorkingTree,
         SourceArg::Index => index::DocSource::Index,
@@ -347,7 +282,7 @@ fn main() {
         cli.query,
         cli.limit,
         cli.offset,
-        namespace,
+        cli.root,
         json,
         source,
     );
@@ -370,84 +305,16 @@ fn run(
     query: Option<String>,
     limit: i64,
     offset: usize,
-    namespace: Option<String>,
+    root: Option<PathBuf>,
     json: bool,
     source: index::DocSource,
 ) -> Result<i32> {
     let repo_root = git::repo_root()?;
     let cwd = std::env::current_dir().unwrap_or_else(|_| repo_root.clone());
-
-    // Skip wiki-config loading for subcommands that may run in a directory
-    // without a wiki: `install` (no wiki touched), `hook` (silently no-ops on
-    // non-wiki files; would otherwise fail-closed on every edit outside a wiki
-    // repo), and `init` (creates the wiki.toml — can't load what doesn't exist).
-    let needs_config = !matches!(
-        command,
-        Some(Commands::Install { .. }) | Some(Commands::Hook) | Some(Commands::Init { .. })
-    );
-
-    let config = if needs_config {
-        Some(wiki_config::WikiConfig::load(&cwd, &repo_root)?)
-    } else {
-        None
-    };
-
-    // `@foo query` sugar in the default-query branch.
-    let (effective_namespace, effective_query) = match (&command, query.as_deref(), &config) {
-        (None, Some(q), Some(cfg)) => apply_at_sugar(q, cfg, namespace.as_deref()),
-        _ => (namespace.clone(), query.clone()),
-    };
-
-    // Scaffold always operates across all wikis, regardless of -n.
-    if let Some(Commands::Scaffold { globs }) = &command {
-        let cfg = config
-            .as_ref()
-            .ok_or_else(|| miette::miette!("wiki scaffold requires a wiki.toml (no wiki found)"))?;
-        let wiki_roots: Vec<PathBuf> = cfg.all().map(|w| w.root.clone()).collect();
-        let command_name = command_name(command.as_ref(), effective_query.as_deref());
-        let perf_root = cfg
-            .all()
-            .next()
-            .map(|w| w.root.as_path())
-            .unwrap_or(repo_root.as_path());
-        perf::init(perf_root, command_name, json);
-        let _command_span = perf::span_for_command(command_name);
-        let started = Instant::now();
-        let result = commands::mesh::scaffold::run(globs, json, &wiki_roots, &repo_root, source);
-        match &result {
-            Ok(code) => perf::finish(
-                command_name,
-                *code,
-                started.elapsed().as_secs_f64() * 1000.0,
-                "ok",
-            ),
-            Err(_) => perf::finish(
-                command_name,
-                2,
-                started.elapsed().as_secs_f64() * 1000.0,
-                "error",
-            ),
-        }
-        return result;
-    }
-
-    if effective_namespace.as_deref() == Some("*") {
-        return Err(miette::miette!(
-            "multi-namespace (`-n '*'`) is no longer supported"
-        ));
-    }
-
-    let target = config
-        .as_ref()
-        .map(|cfg| resolve_target(cfg, effective_namespace.as_deref()))
-        .transpose()?;
-    let wiki_root_pb = target
-        .as_ref()
-        .map(|info| info.root.clone())
-        .unwrap_or_else(|| repo_root.clone());
+    let wiki_root_pb = root.unwrap_or(cwd);
     let wiki_root = wiki_root_pb.as_path();
 
-    let command_name = command_name(command.as_ref(), effective_query.as_deref());
+    let command_name = command_name(command.as_ref(), query.as_deref());
     perf::init(wiki_root, command_name, json);
     let _command_span = perf::span_for_command(command_name);
     let started = Instant::now();
@@ -457,21 +324,16 @@ fn run(
             globs,
             no_exit_code,
             no_mesh,
-            namespace: _,
         }) => commands::check::run(
             &globs,
             json,
             wiki_root,
             &repo_root,
-            config.as_ref(),
             no_exit_code,
             no_mesh,
             source,
         ),
-        Some(Commands::Links {
-            target,
-            namespace: _,
-        }) => {
+        Some(Commands::Links { target }) => {
             let inputs = resolve_inputs(target, read_stdin_lines)?;
             run_for_each(
                 inputs,
@@ -484,13 +346,10 @@ fn run(
             let input = lines.join("\n");
             commands::hook_check::run(&input, wiki_root, &repo_root, source)
         }
-        Some(Commands::List { tag, namespace: _ }) => {
+        Some(Commands::List { tag }) => {
             commands::list::run(&[], tag.as_deref(), json, wiki_root, &repo_root, source)
         }
-        Some(Commands::Summary {
-            title,
-            namespace: _,
-        }) => {
+        Some(Commands::Summary { title }) => {
             let inputs = resolve_inputs(title, read_stdin_lines)?;
             run_for_each(
                 inputs,
@@ -498,16 +357,11 @@ fn run(
                 false,
             )
         }
-        Some(Commands::Refs {
-            title,
-            namespace: _,
-        }) => {
+        Some(Commands::Refs { title }) => {
             let inputs = resolve_inputs(title, read_stdin_lines)?;
             run_for_each(
                 inputs,
-                |input| {
-                    commands::refs::run(input, json, wiki_root, &repo_root, config.as_ref(), source)
-                },
+                |input| commands::refs::run(input, json, wiki_root, &repo_root, source),
                 false,
             )
         }
@@ -526,13 +380,11 @@ fn run(
             codex_home.as_deref(),
             &git_ref,
         ),
-        Some(Commands::Init { namespace }) => commands::init::run(&cwd, namespace.as_deref()),
-        // Scaffold is handled before the single-wiki resolution block above,
-        // so this arm is unreachable.
-        Some(Commands::Scaffold { .. }) => {
-            unreachable!("scaffold is dispatched before namespace resolution")
+        Some(Commands::Scaffold { globs }) => {
+            let wiki_roots = vec![wiki_root_pb.clone()];
+            commands::mesh::scaffold::run(&globs, json, &wiki_roots, &repo_root, source)
         }
-        None => match effective_query.as_deref() {
+        None => match query.as_deref() {
             Some(query) => {
                 commands::search::run(query, limit, offset, json, wiki_root, &repo_root, source)
             }
@@ -574,56 +426,6 @@ fn run(
     result
 }
 
-/// Resolve `-n NS` to a `WikiInfo` from the loaded config. `None` returns the
-/// default-namespace wiki; `Some(name)` looks up the wiki with that namespace.
-fn resolve_target(
-    cfg: &wiki_config::WikiConfig,
-    namespace: Option<&str>,
-) -> Result<wiki_config::WikiInfo> {
-    cfg.resolve(namespace).cloned()
-}
-
-/// Apply `@foo query` sugar: if the query starts with `@<word> ` and `<word>`
-/// is a declared peer alias or matches the current namespace, strip it and
-/// promote it to the effective namespace.
-fn apply_at_sugar(
-    q: &str,
-    cfg: &wiki_config::WikiConfig,
-    explicit_ns: Option<&str>,
-) -> (Option<String>, Option<String>) {
-    if explicit_ns.is_some() {
-        return (explicit_ns.map(str::to_string), Some(q.to_string()));
-    }
-    let stripped = match q.strip_prefix('@') {
-        Some(s) => s,
-        None => return (None, Some(q.to_string())),
-    };
-    let space = match stripped.find(char::is_whitespace) {
-        Some(i) => i,
-        None => return (None, Some(q.to_string())),
-    };
-    let word = &stripped[..space];
-    let rest = stripped[space + 1..].trim_start().to_string();
-    let known = cfg.wikis.contains_key(word);
-    if known {
-        (Some(word.to_string()), Some(rest))
-    } else {
-        (None, Some(q.to_string()))
-    }
-}
-
-/// Extract the per-subcommand `-n` namespace, if the active subcommand carries one.
-fn subcommand_namespace(command: &Option<Commands>) -> Option<String> {
-    match command {
-        Some(Commands::Check { namespace, .. })
-        | Some(Commands::Links { namespace, .. })
-        | Some(Commands::List { namespace, .. })
-        | Some(Commands::Summary { namespace, .. })
-        | Some(Commands::Refs { namespace, .. }) => namespace.clone(),
-        _ => None,
-    }
-}
-
 fn command_name(command: Option<&Commands>, query: Option<&str>) -> &'static str {
     match command {
         Some(Commands::Check { .. }) => "check",
@@ -634,7 +436,6 @@ fn command_name(command: Option<&Commands>, query: Option<&str>) -> &'static str
         Some(Commands::Refs { .. }) => "refs",
         Some(Commands::Install { .. }) => "install",
         Some(Commands::Scaffold { .. }) => "scaffold",
-        Some(Commands::Init { .. }) => "init",
         None if query.is_some() => "search",
         None => "help",
     }
@@ -673,5 +474,11 @@ mod tests {
         let cli = Cli::try_parse_from(["wiki", "summary"]).expect("parse");
         assert!(matches!(cli.command, Some(Commands::Summary { .. })));
         assert!(cli.query.is_none());
+    }
+
+    #[test]
+    fn parses_root_flag() {
+        let cli = Cli::try_parse_from(["wiki", "--root", "/tmp/wiki", "query"]).expect("parse");
+        assert_eq!(cli.root.as_deref(), Some(std::path::Path::new("/tmp/wiki")));
     }
 }

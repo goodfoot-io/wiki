@@ -1,6 +1,5 @@
 pub mod check;
 pub mod hook_check;
-pub mod init;
 pub mod install;
 pub mod links;
 pub mod list;
@@ -441,7 +440,6 @@ mod tests {
             tags: vec![],
             keywords: vec![],
             summary: "A summary.".into(),
-            namespace: None,
         }
     }
 

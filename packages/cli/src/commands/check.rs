@@ -9,7 +9,6 @@ use crate::git::resolve_ref;
 use crate::headings::{extract_headings, resolve_heading};
 use crate::index::DocSource;
 use crate::parser::{LinkKind, parse_fragment_links};
-use crate::wiki_config::WikiConfig;
 
 use super::mesh_coverage;
 
@@ -103,7 +102,6 @@ pub fn run(
     json: bool,
     wiki_root: &Path,
     repo_root: &Path,
-    wiki_config: Option<&WikiConfig>,
     no_exit_code: bool,
     no_mesh: bool,
     source: DocSource,
@@ -138,25 +136,18 @@ pub fn run(
         filter_files_for_source(raw, repo_root, source)?
     };
 
-    let diagnostics = match collect_for_files(
-        &files,
-        &index_files,
-        wiki_root,
-        repo_root,
-        wiki_config,
-        no_mesh,
-        source,
-    ) {
-        Ok(d) => d,
-        Err(e) => {
-            if json {
-                eprintln!("{}", serde_json::json!({"error": e.to_string()}));
-            } else {
-                eprintln!("error: {e}");
+    let diagnostics =
+        match collect_for_files(&files, &index_files, wiki_root, repo_root, no_mesh, source) {
+            Ok(d) => d,
+            Err(e) => {
+                if json {
+                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
+                } else {
+                    eprintln!("error: {e}");
+                }
+                return Ok(2);
             }
-            return Ok(2);
-        }
-    };
+        };
 
     if json {
         println!(
@@ -186,15 +177,14 @@ pub fn collect(
     wiki_root: &Path,
     repo_root: &Path,
 ) -> Result<Vec<CheckDiagnostic>> {
-    collect_with_config(globs, wiki_root, repo_root, None, DocSource::WorkingTree)
+    collect_with_source(globs, wiki_root, repo_root, DocSource::WorkingTree)
 }
 
-/// Collect diagnostics with an optional `WikiConfig` and explicit `DocSource`.
-pub fn collect_with_config(
+/// Collect diagnostics with an explicit `DocSource`.
+pub fn collect_with_source(
     globs: &[String],
     wiki_root: &Path,
     repo_root: &Path,
-    wiki_config: Option<&WikiConfig>,
     source: DocSource,
 ) -> Result<Vec<CheckDiagnostic>> {
     let files = discover_files(globs, wiki_root, repo_root, source)?;
@@ -205,15 +195,7 @@ pub fn collect_with_config(
         let raw = discover_files(&[], wiki_root, repo_root, source)?;
         filter_files_for_source(raw, repo_root, source)?
     };
-    collect_for_files(
-        &files,
-        &index_files,
-        wiki_root,
-        repo_root,
-        wiki_config,
-        false,
-        source,
-    )
+    collect_for_files(&files, &index_files, wiki_root, repo_root, false, source)
 }
 
 /// Extract the anchor portion (after `#`) from a markdown link href, if present.
@@ -231,7 +213,6 @@ fn collect_for_files(
     index_files: &[PathBuf],
     _wiki_root: &Path,
     repo_root: &Path,
-    _wiki_config: Option<&WikiConfig>,
     no_mesh: bool,
     source: DocSource,
 ) -> Result<Vec<CheckDiagnostic>> {
@@ -534,7 +515,6 @@ mod tests {
             false,
             &wiki_root,
             repo.path(),
-            None,
             false,
             false,
             crate::index::DocSource::WorkingTree,
@@ -557,7 +537,6 @@ mod tests {
             false,
             &wiki_root,
             repo.path(),
-            None,
             false,
             false,
             crate::index::DocSource::WorkingTree,
@@ -579,7 +558,6 @@ mod tests {
             false,
             &wiki_root,
             repo.path(),
-            None,
             false,
             false,
             crate::index::DocSource::WorkingTree,
@@ -686,7 +664,6 @@ mod tests {
             false,
             &wiki_root,
             repo.path(),
-            None,
             false,
             false,
             crate::index::DocSource::WorkingTree,
@@ -742,7 +719,6 @@ mod tests {
             false,
             &wiki_root,
             repo.path(),
-            None,
             false,
             false,
             crate::index::DocSource::WorkingTree,
@@ -781,7 +757,6 @@ mod tests {
             false,
             &wiki_root,
             repo.path(),
-            None,
             false,
             false,
             crate::index::DocSource::WorkingTree,
@@ -831,11 +806,10 @@ mod tests {
         repo.git(&["add", "wiki/page.md"]);
         repo.create_file("wiki/page.md", &make_wiki_page("Page", "No links."));
 
-        let diags_wt = collect_with_config(
+        let diags_wt = collect_with_source(
             &[],
             &wiki_root,
             repo.path(),
-            None,
             crate::index::DocSource::WorkingTree,
         )
         .expect("collect wt");
@@ -845,14 +819,9 @@ mod tests {
             diags_wt
         );
 
-        let diags_idx = collect_with_config(
-            &[],
-            &wiki_root,
-            repo.path(),
-            None,
-            crate::index::DocSource::Index,
-        )
-        .expect("collect idx");
+        let diags_idx =
+            collect_with_source(&[], &wiki_root, repo.path(), crate::index::DocSource::Index)
+                .expect("collect idx");
         assert!(
             diags_idx.iter().any(|d| d.kind == "broken_anchor"),
             "index should see staged broken anchor, got: {:?}",

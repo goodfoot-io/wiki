@@ -11,15 +11,6 @@ fn md_link_re() -> &'static Regex {
     })
 }
 
-#[allow(dead_code)] // Removed in sub-scope 1E (wikilink parser deletion).
-fn wikilink_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        // Matches [[...]] where the inner content does not contain '[' or ']'
-        Regex::new(r"\[\[([^\[\]]+)\]\]").unwrap()
-    })
-}
-
 fn url_scheme_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     // RFC 3986: scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
@@ -55,21 +46,6 @@ pub struct FragmentLink {
     pub original_text: String,
     /// The original, unscrubbed href text.
     pub original_href: String,
-    /// 1-based line number in the source wiki page.
-    pub source_line: usize,
-}
-
-/// A parsed `[[Title#Heading|display]]` wikilink.
-#[allow(dead_code)] // Removed in sub-scope 1E (wikilink parser deletion).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Wikilink {
-    /// Namespace prefix from `[[ns:Article]]` syntax. `None` for bare
-    /// `[[Article]]` links. Populated by `parse_wikilinks` in Phase 2; until
-    /// then every construction site defaults to `None`.
-    pub namespace: Option<String>,
-    pub title: String,
-    pub heading: Option<String>,
-    pub display: Option<String>,
     /// 1-based line number in the source wiki page.
     pub source_line: usize,
 }
@@ -300,73 +276,6 @@ fn parse_line_range(fragment: Option<&str>) -> (Option<u32>, Option<u32>) {
     }
 }
 
-// ── Wikilink parser ───────────────────────────────────────────────────────────
-
-/// Parse all wikilinks from markdown `content`.
-#[allow(dead_code)] // Removed in sub-scope 1E (wikilink parser deletion).
-pub fn parse_wikilinks(content: &str) -> Vec<Wikilink> {
-    let scrubbed = scrub_non_content(content);
-    let mut results = Vec::new();
-
-    for cap in wikilink_re().captures_iter(&scrubbed) {
-        let m = cap.get(0).unwrap();
-        let inner = &cap[1];
-        let source_line = scrubbed[..m.start()]
-            .bytes()
-            .filter(|&b| b == b'\n')
-            .count()
-            + 1;
-
-        // Split on '|' for display text
-        let (title_part, display) = match inner.find('|') {
-            Some(idx) => (&inner[..idx], Some(inner[idx + 1..].to_string())),
-            None => (inner, None),
-        };
-
-        // Detect optional `[[ns:Article]]` namespace prefix. The namespace
-        // word must match `^[A-Za-z0-9_-]+$` and be followed by `:`.
-        let (namespace, after_ns) = match title_part.find(':') {
-            Some(idx) => {
-                let candidate = &title_part[..idx];
-                if !candidate.is_empty()
-                    && candidate
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-                {
-                    (Some(candidate.to_string()), &title_part[idx + 1..])
-                } else {
-                    (None, title_part)
-                }
-            }
-            None => (None, title_part),
-        };
-
-        // Split title on '#' for heading fragment
-        let (title, heading) = match after_ns.find('#') {
-            Some(idx) => (
-                after_ns[..idx].to_string(),
-                Some(after_ns[idx + 1..].to_string()),
-            ),
-            None => (after_ns.to_string(), None),
-        };
-
-        // Skip entirely empty titles
-        if title.is_empty() {
-            continue;
-        }
-
-        results.push(Wikilink {
-            namespace,
-            title,
-            heading,
-            display,
-            source_line,
-        });
-    }
-
-    results
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -460,73 +369,11 @@ mod tests {
         assert_eq!(links[0].end_line, None);
     }
 
-    // ── Wikilink tests ────────────────────────────────────────────────────────
-
     #[test]
-    fn test_wikilink_simple() {
-        let links = parse_wikilinks("See [[SomePage]].");
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].title, "SomePage");
-        assert!(links[0].heading.is_none());
-        assert!(links[0].display.is_none());
-    }
-
-    #[test]
-    fn test_wikilink_with_display() {
-        let links = parse_wikilinks("See [[SomePage|display text]].");
-        assert_eq!(links[0].title, "SomePage");
-        assert_eq!(links[0].display.as_deref(), Some("display text"));
-    }
-
-    #[test]
-    fn test_wikilink_with_heading() {
-        let links = parse_wikilinks("See [[SomePage#Introduction]].");
-        assert_eq!(links[0].title, "SomePage");
-        assert_eq!(links[0].heading.as_deref(), Some("Introduction"));
-        assert!(links[0].display.is_none());
-    }
-
-    #[test]
-    fn test_wikilink_with_heading_and_display() {
-        let links = parse_wikilinks("[[SomePage#Section|click here]]");
-        let l = &links[0];
-        assert_eq!(l.title, "SomePage");
-        assert_eq!(l.heading.as_deref(), Some("Section"));
-        assert_eq!(l.display.as_deref(), Some("click here"));
-    }
-
-    #[test]
-    fn test_wikilink_case_preserved() {
-        let links = parse_wikilinks("[[My Page Title]]");
-        assert_eq!(links[0].title, "My Page Title");
-    }
-
-    #[test]
-    fn test_wikilink_empty_title_skipped() {
-        let links = parse_wikilinks("[[]]");
-        assert_eq!(links.len(), 0);
-    }
-
-    #[test]
-    fn test_wikilink_malformed_no_close() {
-        let links = parse_wikilinks("[[unclosed");
-        assert_eq!(links.len(), 0);
-    }
-
-    #[test]
-    fn test_wikilink_source_line() {
-        let content = "intro\n\n[[Target Page]]\n";
-        let links = parse_wikilinks(content);
-        assert_eq!(links[0].source_line, 3);
-    }
-
-    #[test]
-    fn test_multiple_links_same_content() {
-        let content = "[F1](a.rs#L1) and [[Wiki]] and [F2](b.rs#L2)";
+    fn test_multiple_fragment_links_same_content() {
+        let content = "[F1](a.rs#L1) and [F2](b.rs#L2)";
         let frags = parse_fragment_links(content);
-        let wikis = parse_wikilinks(content);
         assert_eq!(frags.len(), 2);
-        assert_eq!(wikis.len(), 1);
     }
 
     // ── Code block exclusion tests ────────────────────────────────────────────
@@ -613,30 +460,6 @@ mod tests {
     }
 
     #[test]
-    fn test_wikilinks_in_code_block_excluded() {
-        let content = "text\n```\n[[InCode]]\n```\n[[OutsideCode]]\n";
-        let links = parse_wikilinks(content);
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].title, "OutsideCode");
-    }
-
-    #[test]
-    fn test_wikilinks_in_inline_code_excluded() {
-        let content = "See `[[InCode]]` and [[OutsideCode]].";
-        let links = parse_wikilinks(content);
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].title, "OutsideCode");
-    }
-
-    #[test]
-    fn test_wikilinks_in_html_comment_excluded() {
-        let content = "<!-- [[InComment]] -->\n[[Outside]]";
-        let links = parse_wikilinks(content);
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].title, "Outside");
-    }
-
-    #[test]
     fn test_unclosed_html_comment_scrubbed_to_eof() {
         // Link inside an unclosed HTML comment must NOT be extracted
         let content = "<!-- [Hidden](src/file.rs#L1)\n[AlsoHidden](other.rs#L1)";
@@ -645,17 +468,6 @@ mod tests {
             links.len(),
             0,
             "links inside unclosed HTML comment must not be extracted"
-        );
-    }
-
-    #[test]
-    fn test_unclosed_html_comment_wikilink_not_extracted() {
-        let content = "Real text\n<!-- [[HiddenWiki]]\n[[AlsoHidden]]";
-        let links = parse_wikilinks(content);
-        assert_eq!(
-            links.len(),
-            0,
-            "wikilinks inside unclosed HTML comment must not be extracted"
         );
     }
 
@@ -678,23 +490,5 @@ mod tests {
         let links = parse_fragment_links(content);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].path, "real.rs");
-    }
-
-    // ── Namespaced wikilink tests (Phase 2 contract) ─────────────────────────
-
-    #[test]
-    fn test_wikilink_with_namespace_prefix() {
-        let links = parse_wikilinks("[[foo:Article]]");
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].namespace.as_deref(), Some("foo"));
-        assert_eq!(links[0].title, "Article");
-    }
-
-    #[test]
-    fn test_wikilink_without_namespace() {
-        let links = parse_wikilinks("[[Article]]");
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].namespace, None);
-        assert_eq!(links[0].title, "Article");
     }
 }

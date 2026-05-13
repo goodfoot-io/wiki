@@ -58,7 +58,6 @@ struct RawFrontmatter {
     tags: Option<serde_yaml::Value>,
     keywords: Option<serde_yaml::Value>,
     summary: Option<serde_yaml::Value>,
-    namespace: Option<serde_yaml::Value>,
 }
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -71,8 +70,6 @@ pub struct Frontmatter {
     pub tags: Vec<String>,
     pub keywords: Vec<String>,
     pub summary: String,
-    /// Optional namespace assignment, only meaningful for `*.wiki.md` files.
-    pub namespace: Option<String>,
 }
 
 // ── Parsing ───────────────────────────────────────────────────────────────────
@@ -85,20 +82,6 @@ pub fn parse_title(content: &str) -> Option<String> {
     let yaml = extract_yaml_block(content)?;
     let raw: RawFrontmatter = serde_yaml::from_str(yaml).ok()?;
     match raw.title? {
-        serde_yaml::Value::String(s) if !s.is_empty() => Some(s),
-        _ => None,
-    }
-}
-
-/// Extract only the `namespace` field from frontmatter, without full validation.
-///
-/// Returns `None` if there is no frontmatter block, the YAML is unparseable,
-/// or the `namespace` field is absent. Treats an empty-string namespace as
-/// untagged (returns `None`) so `namespace: ""` behaves like an omitted field.
-pub fn parse_namespace(content: &str) -> Option<String> {
-    let yaml = extract_yaml_block(content)?;
-    let raw: RawFrontmatter = serde_yaml::from_str(yaml).ok()?;
-    match raw.namespace? {
         serde_yaml::Value::String(s) if !s.is_empty() => Some(s),
         _ => None,
     }
@@ -245,20 +228,12 @@ pub fn parse_frontmatter(
         }
     };
 
-    let namespace = match raw.namespace {
-        None => None,
-        Some(serde_yaml::Value::String(s)) if !s.is_empty() => Some(s),
-        Some(serde_yaml::Value::String(_)) => None,
-        Some(_) => None,
-    };
-
     Ok(Some(Frontmatter {
         title,
         aliases,
         tags,
         keywords,
         summary,
-        namespace,
     }))
 }
 
@@ -518,7 +493,6 @@ mod tests {
                 tags: vec![],
                 keywords: vec![],
                 summary: "Summary.".into(),
-                namespace: None,
             },
         )];
         let (idx, collisions) = build_index(&pages);
@@ -538,7 +512,6 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
-                    namespace: None,
                 },
             ),
             (
@@ -549,7 +522,6 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
-                    namespace: None,
                 },
             ),
         ];
@@ -572,7 +544,6 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
-                    namespace: None,
                 },
             ),
             (
@@ -583,7 +554,6 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
-                    namespace: None,
                 },
             ),
         ];
@@ -605,7 +575,6 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
-                    namespace: None,
                 },
             ),
             (
@@ -616,7 +585,6 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
-                    namespace: None,
                 },
             ),
         ];
@@ -667,7 +635,6 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
-                    namespace: None,
                 },
             ),
             (
@@ -678,7 +645,6 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
-                    namespace: None,
                 },
             ),
         ];
