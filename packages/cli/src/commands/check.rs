@@ -1275,7 +1275,6 @@ mod tests {
 
     /// Running --fix twice must produce no further rewrites on the second pass.
     #[test]
-    #[ignore]
     fn wiki_check_fix_is_idempotent() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
@@ -1328,7 +1327,6 @@ mod tests {
 
     /// --fix must be rejected when --source is not worktree.
     #[test]
-    #[ignore]
     fn wiki_check_fix_rejects_non_worktree_source() {
         // This test validates the CLI guard in main.rs; since tests call
         // commands::check::run directly (bypassing main.rs), we verify the
