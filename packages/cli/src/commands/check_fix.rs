@@ -6,6 +6,8 @@ use std::process::Command;
 use miette::Result;
 use serde::Serialize;
 
+use crate::frontmatter::parse_frontmatter;
+use crate::headings::{extract_headings, github_slug, resolve_heading};
 use crate::index::DocSource;
 use crate::parser::{parse_fragment_links, LinkKind};
 
@@ -554,6 +556,146 @@ pub fn run_fix_pass(
             // Apply patches in reverse byte order to preserve offsets.
             file_patches.sort_by_key(|p| Reverse(p.0));
             let mut patched = content.clone();
+            for (start, end, replacement) in file_patches {
+                patched.replace_range(start..end, &replacement);
+            }
+            patches.insert(file.clone(), patched);
+        }
+    }
+
+    // ── Fix #3: alias-driven anchor rewrite ───────────────────────────────────
+    //
+    // For each in-scope file, parse fragment links. For each non-line-range
+    // fragment link whose anchor does NOT resolve against the target's headings,
+    // check whether the anchor matches an alias in the target's frontmatter.
+    // If so, rewrite the anchor to the canonical title slug.
+
+    for file in files {
+        // Use the in-memory patched content if Fix #1 rewrote this file.
+        let content = if let Some(patched) = patches.get(file) {
+            patched.clone()
+        } else {
+            match std::fs::read_to_string(file) {
+                Ok(c) => c,
+                Err(_) => continue,
+            }
+        };
+
+        let frag_links = parse_fragment_links(&content);
+        let mut file_patches: Vec<(usize, usize, String)> = Vec::new();
+
+        let file_rel = file
+            .strip_prefix(repo_root)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| file.to_string_lossy().into_owned());
+
+        for link in &frag_links {
+            if link.kind == LinkKind::External {
+                continue;
+            }
+            if link.original_href.starts_with("mailto:") {
+                continue;
+            }
+
+            // Only handle links that have a fragment but no line range.
+            let has_fragment = link.original_href.contains('#');
+            if !has_fragment || link.start_line.is_some() {
+                continue;
+            }
+
+            let anchor = match link.original_href.find('#') {
+                Some(idx) => &link.original_href[idx + 1..],
+                None => continue,
+            };
+            if anchor.is_empty() {
+                continue;
+            }
+
+            // Resolve target file — use Fix #1 patched path if the path part changed.
+            let resolved = crate::commands::resolve_link_path(&link.path, file, repo_root);
+            let target_abs = repo_root.join(&resolved);
+
+            // Read target content: in-memory patch takes priority.
+            let target_content = if let Some(patched) = patches.get(&target_abs) {
+                patched.clone()
+            } else {
+                match std::fs::read_to_string(&target_abs) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                }
+            };
+
+            let headings = extract_headings(&target_content);
+
+            // If anchor resolves correctly, nothing to do.
+            if resolve_heading(anchor, &headings) {
+                continue;
+            }
+
+            // Broken anchor — check for alias match.
+            let fm = match parse_frontmatter(&target_content, &target_abs) {
+                Ok(Some(fm)) => fm,
+                // No frontmatter or parse error → fall through (Fix #5 territory).
+                _ => continue,
+            };
+
+            let anchor_slug = github_slug(anchor);
+
+            // Check if anchor_slug matches any alias.
+            let alias_hit = fm.aliases.iter().any(|a| github_slug(a) == anchor_slug);
+            if !alias_hit {
+                continue;
+            }
+
+            let canonical = github_slug(&fm.title);
+
+            // Verify the canonical slug has a matching heading.
+            if !resolve_heading(&canonical, &headings) {
+                skipped.push(SkippedFix {
+                    file: file_rel.clone(),
+                    line: link.source_line,
+                    kind: FixKind::AliasToCanonical,
+                    reason: format!(
+                        "alias `{}` listed but no heading matches title slug `{}`",
+                        anchor, canonical
+                    ),
+                });
+                continue;
+            }
+
+            // Build the new href: replace just the fragment part after `#`.
+            let path_part = match link.original_href.find('#') {
+                Some(idx) => &link.original_href[..idx],
+                None => continue,
+            };
+            let new_href = format!("{}#{}", path_part, canonical);
+
+            fixes.push(Fix {
+                file: file_rel.clone(),
+                line: link.source_line,
+                kind: FixKind::AliasToCanonical,
+                byte_start: link.href_byte_start,
+                byte_end: link.href_byte_end,
+                old_href: link.original_href.clone(),
+                new_href: new_href.clone(),
+                reason: format!(
+                    "anchor `{}` is an alias for title `{}`; rewriting to canonical slug `{}`",
+                    anchor, fm.title, canonical
+                ),
+                confidence: Confidence::High,
+            });
+            file_patches.push((link.href_byte_start, link.href_byte_end, new_href));
+        }
+
+        if !file_patches.is_empty() {
+            // Apply patches in reverse byte order to preserve offsets.
+            file_patches.sort_by_key(|p| Reverse(p.0));
+            let base = if let Some(existing) = patches.get(file) {
+                existing.clone()
+            } else {
+                content.clone()
+            };
+            let mut patched = base;
             for (start, end, replacement) in file_patches {
                 patched.replace_range(start..end, &replacement);
             }

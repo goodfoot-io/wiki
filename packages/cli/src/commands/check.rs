@@ -1073,22 +1073,21 @@ mod tests {
         );
     }
 
-    /// Fix 3: when a link uses a heading alias slug, --fix rewrites it to the canonical slug.
+    /// Fix 3: when an inbound link uses an aliased slug, --fix rewrites it to the
+    /// canonical title slug so the alias entry can later be retired.
     #[test]
-    #[ignore]
     fn fix3_alias_rewrites_to_canonical_slug() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
         repo.create_file(
             "wiki/target.md",
-            &make_wiki_page("Target", "## My Section\n\nbody\n"),
+            "---\ntitle: Overview\nsummary: s.\naliases:\n  - introduction\n---\n## Overview\n\nbody\n",
         );
         repo.create_file(
             "wiki/source.md",
-            // Use a non-canonical alias slug (e.g. with different capitalisation).
-            &make_wiki_page("Source", "See [target](target.md#My-Section)."),
+            &make_wiki_page("Source", "See [intro](target.md#introduction)."),
         );
-        repo.commit("add pages");
+        repo.commit("baseline");
 
         let code = run(
             &[],
@@ -1105,38 +1104,51 @@ mod tests {
         let content = std::fs::read_to_string(repo.path().join("wiki/source.md"))
             .expect("read source");
         assert!(
-            content.contains("#my-section"),
-            "expected anchor rewritten to canonical slug, got:\n{content}"
+            content.contains("target.md#overview"),
+            "expected anchor rewritten to canonical slug `overview`, got:\n{content}"
         );
+        assert!(!content.contains("#introduction"));
         assert_eq!(code, 0);
     }
 
-    /// Fix 3 skip: when an alias matches multiple headings, skip the rewrite.
+    /// Fix 3 skip: when the target page lists an alias but has no heading matching
+    /// the title slug, Fix #3 declines rather than rewriting to a non-existent anchor.
     #[test]
-    #[ignore]
-    fn fix3_skips_when_alias_resolves_to_multiple_headings() {
+    fn fix3_skips_when_title_has_no_matching_heading() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
+        // Title is "Overview" but no `## Overview` heading exists; only an aliased section.
         repo.create_file(
             "wiki/target.md",
-            &make_wiki_page(
-                "Target",
-                "## Section One\n\nbody\n\n## Section One\n\nbody\n",
-            ),
+            "---\ntitle: Overview\nsummary: s.\naliases:\n  - introduction\n---\n## Body\n",
         );
         repo.create_file(
             "wiki/source.md",
-            &make_wiki_page("Source", "See [target](target.md#section-one)."),
+            &make_wiki_page("Source", "See [intro](target.md#introduction)."),
         );
-        repo.commit("add pages");
+        repo.commit("baseline");
 
-        // With duplicate headings the fix cannot unambiguously choose; it must skip.
-        let diags = collect_with_source(&[], repo.path(), crate::index::DocSource::WorkingTree)
-            .expect("collect");
+        let code = run(
+            &[],
+            false,
+            repo.path(),
+            false,
+            true,
+            crate::index::DocSource::WorkingTree,
+            true,
+            false,
+        )
+        .expect("run");
+
+        let content = std::fs::read_to_string(repo.path().join("wiki/source.md"))
+            .expect("read source");
         assert!(
-            !diags.is_empty(),
-            "expected diagnostics with ambiguous heading: {diags:?}"
+            content.contains("target.md#introduction"),
+            "expected anchor unchanged (skip), got:\n{content}"
         );
+        // Post-fix the diagnostic should still be present (link still broken).
+        // Exit 1 because broken_anchor persists.
+        assert_eq!(code, 1);
     }
 
     /// Fix 5: when a heading was renamed in place (same section position), --fix
