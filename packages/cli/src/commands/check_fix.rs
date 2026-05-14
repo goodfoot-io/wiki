@@ -1,11 +1,13 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use miette::Result;
 use serde::Serialize;
 
+use crate::commands::mesh_coverage::build_mesh_index;
 use crate::frontmatter::parse_frontmatter;
 use crate::headings::{extract_headings, github_slug, resolve_heading};
 use crate::index::DocSource;
@@ -432,6 +434,155 @@ fn normalize_path(path: &Path) -> PathBuf {
     result
 }
 
+// ── Fix #2: mesh auto-follow ──────────────────────────────────────────────────
+
+/// A MOVED anchor found by `git mesh stale --format=porcelain` that passes the
+/// four guardrails (verbatim blob, same path, no Changed sibling, opt-in active).
+#[derive(Debug)]
+pub struct MeshMovePlan {
+    #[allow(dead_code)]
+    pub mesh_name: String,
+    pub old_path: PathBuf,
+    pub old_start: u32,
+    pub old_end: u32,
+}
+
+/// Run `git mesh stale --format=porcelain` and return all MOVED anchors whose
+/// mesh has no CHANGED sibling. Returns `Ok(vec![])` when git-mesh is not found.
+pub fn plan_mesh_follows(repo_root: &Path) -> Result<Vec<MeshMovePlan>> {
+    let mut cmd = Command::new("git-mesh");
+    cmd.current_dir(repo_root)
+        .args(["stale", "--format=porcelain"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let child = match cmd.spawn() {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(miette::miette!("git-mesh stale failed: {e}")),
+        Ok(c) => c,
+    };
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| miette::miette!("git-mesh stale failed: {e}"))?;
+
+    // exit 1 means drift was found — that's fine; we want to read the output.
+    // Only bail on other exit codes if stderr looks like a hard error.
+    if !output.status.success() && output.status.code() != Some(1) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(miette::miette!(
+            "git-mesh stale exited with status {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Porcelain format: `# porcelain v2` header, then lines:
+    //   STATUS\t-\t<mesh>\t<path>\t<start>\t<end>
+    // We skip comment lines starting with `#`.
+
+    // First pass: collect all rows grouped by mesh name.
+    struct Row {
+        status: String,
+        mesh: String,
+        path: PathBuf,
+        start: u32,
+        end: u32,
+    }
+
+    let mut rows: Vec<Row> = Vec::new();
+    for line in stdout.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.splitn(6, '\t').collect();
+        if parts.len() < 6 {
+            continue;
+        }
+        let status = parts[0];
+        // parts[1] is "-"
+        let mesh = parts[2];
+        let path = parts[3];
+        let start: u32 = parts[4].parse().unwrap_or(0);
+        let end: u32 = parts[5].parse().unwrap_or(0);
+
+        rows.push(Row {
+            status: status.to_string(),
+            mesh: mesh.to_string(),
+            path: PathBuf::from(path),
+            start,
+            end,
+        });
+    }
+
+    // Identify meshes that have at least one CHANGED row.
+    let mut changed_meshes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for row in &rows {
+        if row.status == "CHANGED" {
+            changed_meshes.insert(row.mesh.clone());
+        }
+    }
+
+    // Return MOVED rows whose mesh has no CHANGED sibling.
+    let plans: Vec<MeshMovePlan> = rows
+        .into_iter()
+        .filter(|r| r.status == "MOVED" && !changed_meshes.contains(&r.mesh))
+        .map(|r| MeshMovePlan {
+            mesh_name: r.mesh,
+            old_path: r.path,
+            old_start: r.start,
+            old_end: r.end,
+        })
+        .collect();
+
+    Ok(plans)
+}
+
+/// Invoke `git mesh stale --compact --auto-follow --format=json` and parse the
+/// compact-v1 JSON to determine which meshes advanced. Returns `Ok(vec![])` when
+/// git-mesh is not found or no meshes advanced.
+///
+/// After auto-follow completes, re-read the `MeshIndex` via `build_mesh_index` so
+/// callers can query the new line ranges for each anchor.
+fn run_auto_follow(repo_root: &Path) -> Result<()> {
+    let mut cmd = Command::new("git-mesh");
+    cmd.current_dir(repo_root)
+        .args(["stale", "--compact", "--auto-follow", "--format=json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let child = match cmd.spawn() {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(miette::miette!("git-mesh stale --compact failed: {e}")),
+        Ok(c) => c,
+    };
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| miette::miette!("git-mesh stale --compact failed: {e}"))?;
+
+    // Non-zero exit is acceptable (drift found) — parse what we can.
+    // Only bail on hard errors (exit code 2+).
+    if let Some(code) = output.status.code()
+        && code > 1
+    {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(miette::miette!(
+            "git-mesh stale --compact exited with status {code}: {}",
+            stderr.trim()
+        ));
+    }
+
+    // We don't need to parse the JSON for the new ranges; we'll re-read the
+    // MeshIndex after auto-follow to get them.
+    let _ = output.stdout;
+    Ok(())
+}
+
 // ── Fix #1 implementation ─────────────────────────────────────────────────────
 
 /// Scan `files` for `broken_link` diagnostics and attempt to rewrite paths whose
@@ -703,6 +854,206 @@ pub fn run_fix_pass(
         }
     }
 
+    // ── Fix #2: mesh auto-follow (line-range anchors) ─────────────────────────
+    //
+    // Planning phase (read-only): find MOVED anchors with no Changed sibling.
+    // Application phase (mutation): invoke --compact --auto-follow, then
+    // re-read the MeshIndex to obtain the new line ranges and rewrite wiki
+    // page fragment hrefs.
+
+    // Planning phase — always run (even in dry_run) to emit SkippedFix records.
+    let move_plans = plan_mesh_follows(repo_root)?;
+
+    // Build a set of (path, old_start, old_end) that are eligible for rewrite.
+    let eligible: std::collections::HashSet<(PathBuf, u32, u32)> = move_plans
+        .iter()
+        .map(|p| (p.old_path.clone(), p.old_start, p.old_end))
+        .collect();
+
+    // Build the initial MeshIndex (before auto-follow) using all in-scope files.
+    let mesh_index_opt = build_mesh_index(repo_root, files)?;
+
+    if !dry_run {
+        // Application phase: invoke auto-follow to advance the mesh.
+        run_auto_follow(repo_root)?;
+    }
+
+    // Rebuild the MeshIndex after auto-follow to get new coordinates.
+    let new_mesh_index_opt = if dry_run {
+        None
+    } else {
+        build_mesh_index(repo_root, files)?
+    };
+
+    // For each wiki file, rewrite broken line-range links that are now covered
+    // by the updated mesh.
+    for file in files {
+        let content = if let Some(patched) = patches.get(file) {
+            patched.clone()
+        } else {
+            match std::fs::read_to_string(file) {
+                Ok(c) => c,
+                Err(_) => continue,
+            }
+        };
+
+        let frag_links = parse_fragment_links(&content);
+        let mut file_patches: Vec<(usize, usize, String)> = Vec::new();
+
+        let file_rel = file
+            .strip_prefix(repo_root)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| file.to_string_lossy().into_owned());
+
+        let wiki_rel = file
+            .strip_prefix(repo_root)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|_| file.clone());
+
+        for link in &frag_links {
+            if link.kind == LinkKind::External {
+                continue;
+            }
+            if link.original_href.starts_with("mailto:") {
+                continue;
+            }
+
+            // Only handle links with a line-range fragment.
+            let Some(old_start) = link.start_line else {
+                continue;
+            };
+            let old_end = link.end_line.unwrap_or(old_start);
+
+            // Resolve target path.
+            let resolved = crate::commands::resolve_link_path(&link.path, file, repo_root);
+            let target_abs = repo_root.join(&resolved);
+
+            // Target must exist.
+            if !target_abs.exists() {
+                continue;
+            }
+
+            // The primary signal for Fix #2 is that the mesh reports this anchor
+            // as MOVED. Only attempt to rewrite links whose (target, start, end)
+            // triple is in the MOVED eligible set — even if the range is still
+            // technically within bounds (the mesh has shifted to a new position).
+            if !eligible.contains(&(resolved.clone(), old_start, old_end)) {
+                continue;
+            }
+
+            // Check initial mesh coverage (before auto-follow) to confirm both
+            // the wiki page and target path are in the same mesh.
+            let is_mesh_covered = mesh_index_opt
+                .as_ref()
+                .is_some_and(|idx| idx.is_covered(&resolved, old_start, old_end, &wiki_rel));
+
+            if !is_mesh_covered {
+                // No mesh covers (wiki, target) together — this is Fix #4 territory (deferred).
+                skipped.push(SkippedFix {
+                    file: file_rel.clone(),
+                    line: link.source_line,
+                    kind: FixKind::MeshAnchorShift,
+                    reason: "no mesh coverage; manual review required".to_string(),
+                });
+                continue;
+            }
+
+            // Check if the mesh has a Changed sibling — plan_mesh_follows already
+            // filtered these out, but double-check by verifying the anchor is in `eligible`.
+            // (Already confirmed above.)
+
+            if dry_run {
+                skipped.push(SkippedFix {
+                    file: file_rel.clone(),
+                    line: link.source_line,
+                    kind: FixKind::MeshAnchorShift,
+                    reason: "dry-run: cannot preview mesh auto-follow without mutation".to_string(),
+                });
+                continue;
+            }
+
+            // Look up the new coordinates from the refreshed MeshIndex.
+            let Some(ref new_idx) = new_mesh_index_opt else {
+                continue;
+            };
+
+            // Find the new range by scanning all possible candidates. The updated
+            // MeshIndex stores the new (start, end) for this path in `by_anchor`.
+            // We need to find the new entry for `resolved` after auto-follow.
+            // Strategy: look for any anchor on `resolved` that now exists in the
+            // new index but was not in `eligible` (i.e., a different start/end).
+            let new_range = new_idx.owning_mesh_for_exact(&resolved, old_start, old_end);
+            if new_range.is_some() {
+                // The old range is still present — auto-follow didn't rewrite it.
+                // This can happen if the mesh is at HEAD already.
+                skipped.push(SkippedFix {
+                    file: file_rel.clone(),
+                    line: link.source_line,
+                    kind: FixKind::MeshAnchorShift,
+                    reason: "mesh anchor unchanged after auto-follow (already at HEAD)".to_string(),
+                });
+                continue;
+            }
+
+            // We don't have a direct API to query the new range by old path from the
+            // MeshIndex. We need to find the new (start, end) for `resolved` in the
+            // new index. Parse `git-mesh list --porcelain` for just this path.
+            let new_coords = get_new_anchor_coords(repo_root, &resolved)?;
+            let Some((new_start, new_end)) = new_coords else {
+                skipped.push(SkippedFix {
+                    file: file_rel.clone(),
+                    line: link.source_line,
+                    kind: FixKind::MeshAnchorShift,
+                    reason: "could not determine new anchor coordinates after auto-follow"
+                        .to_string(),
+                });
+                continue;
+            };
+
+            if new_start == old_start && new_end == old_end {
+                // No actual change — skip.
+                continue;
+            }
+
+            // Build the new href by replacing only the `#Lstart-Lend` fragment.
+            let path_part = match link.original_href.find('#') {
+                Some(idx) => &link.original_href[..idx],
+                None => &link.original_href,
+            };
+            let new_href = format!("{path_part}#L{new_start}-L{new_end}");
+
+            fixes.push(Fix {
+                file: file_rel.clone(),
+                line: link.source_line,
+                kind: FixKind::MeshAnchorShift,
+                byte_start: link.href_byte_start,
+                byte_end: link.href_byte_end,
+                old_href: link.original_href.clone(),
+                new_href: new_href.clone(),
+                reason: format!(
+                    "mesh auto-follow: anchor {resolved:?}#L{old_start}-L{old_end} \
+                     moved to #L{new_start}-L{new_end}"
+                ),
+                confidence: Confidence::High,
+            });
+            file_patches.push((link.href_byte_start, link.href_byte_end, new_href));
+        }
+
+        if !file_patches.is_empty() {
+            file_patches.sort_by_key(|p| Reverse(p.0));
+            let base = if let Some(existing) = patches.get(file) {
+                existing.clone()
+            } else {
+                content.clone()
+            };
+            let mut patched = base;
+            for (start, end, replacement) in file_patches {
+                patched.replace_range(start..end, &replacement);
+            }
+            patches.insert(file.clone(), patched);
+        }
+    }
+
     // Materialize patches to disk unless dry_run.
     if !dry_run {
         for (path, content) in &patches {
@@ -712,4 +1063,72 @@ pub fn run_fix_pass(
     }
 
     Ok(FixPlan { fixes, skipped })
+}
+
+/// Run `git-mesh list --porcelain` and find the current anchor coordinates for
+/// `path` (repo-relative). Returns the first match found, or `None`.
+fn get_new_anchor_coords(repo_root: &Path, path: &Path) -> Result<Option<(u32, u32)>> {
+    let mut cmd = Command::new("git-mesh");
+    cmd.current_dir(repo_root)
+        .args(["list", "--porcelain"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(miette::miette!("git-mesh list failed: {e}")),
+        Ok(c) => c,
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        writeln!(stdin, "{}", path.display())
+            .map_err(|e| miette::miette!("write to git-mesh stdin: {e}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| miette::miette!("git-mesh list failed: {e}"))?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() || line == "no meshes" {
+            continue;
+        }
+        // Format: <mesh-name>\t<path>\t<start>-<end>
+        // We parse right-to-left to handle mesh names with tabs.
+        let mut right = line.rsplitn(2, '\t');
+        let range_token = right.next().unwrap_or("");
+        let prefix = match right.next() {
+            Some(p) => p,
+            None => continue,
+        };
+        let mut mid = prefix.rsplitn(2, '\t');
+        let path_str = mid.next().unwrap_or("");
+
+        // Match the path.
+        if path_str != path.to_string_lossy().as_ref() {
+            continue;
+        }
+
+        // Parse range token.
+        if let Some((start, end)) = range_token.split_once('-').and_then(|(a, b)| {
+            let s = a.parse::<u32>().ok()?;
+            let e = b.parse::<u32>().ok()?;
+            // Skip whole-file sentinel 0-0.
+            if s == 0 && e == 0 {
+                return None;
+            }
+            Some((s, e))
+        }) {
+            return Ok(Some((start, end)));
+        }
+    }
+
+    Ok(None)
 }

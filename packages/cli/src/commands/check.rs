@@ -1004,7 +1004,6 @@ mod tests {
     /// Fix 2: when a line-range anchor drifted because lines were inserted above it,
     /// --fix updates the range to track the new position reported by the mesh.
     #[test]
-    #[ignore]
     fn fix2_mesh_anchor_follows_line_shift() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
@@ -1019,8 +1018,10 @@ mod tests {
         repo.git_mesh(&["why", "fix2-mesh", "-m", "Test mesh."]);
         repo.git_mesh(&["commit"]);
 
-        // Insert a line before the anchored function.
+        // Insert a line before the anchored function and commit so that
+        // git-mesh stale --compact --auto-follow can advance the mesh anchor.
         repo.create_file("src/code.rs", "// preamble\nfn a() {}\n");
+        repo.commit("shift code");
 
         let code = run(
             &[],
@@ -1043,34 +1044,53 @@ mod tests {
         assert_eq!(code, 0);
     }
 
-    /// Fix 2 skip: when the anchored range changed content (not just shifted),
-    /// do not apply the fix.
+    /// Fix 2 skip: when the anchored range has Changed content (not just a pure
+    /// line shift), Fix #2 declines to rewrite because the mesh guardrails
+    /// disqualify Changed anchors.
     #[test]
-    #[ignore]
     fn fix2_skips_when_changed_sibling_present() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        repo.create_file("src/code.rs", "fn a() {}\nfn b() {}\n");
+        // Three functions on L1-L3. The wiki page links L2-L3 (fn b and fn c).
+        repo.create_file("src/code.rs", "fn a() {}\nfn b() {}\nfn c() {}\n");
         repo.create_file(
             "wiki/page.md",
-            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L2)."),
+            &make_wiki_page("Page", "See [code](/src/code.rs#L2-L3)."),
         );
         repo.commit("baseline with mesh");
 
-        repo.git_mesh(&["add", "fix2-changed-mesh", "wiki/page.md", "src/code.rs#L1-L2"]);
+        // Mesh covers the wiki page and L2-L3 of code.rs.
+        repo.git_mesh(&["add", "fix2-changed-mesh", "wiki/page.md", "src/code.rs#L2-L3"]);
         repo.git_mesh(&["why", "fix2-changed-mesh", "-m", "Test mesh."]);
         repo.git_mesh(&["commit"]);
 
-        // Modify the anchored range (content change, not just a shift).
-        repo.create_file("src/code.rs", "fn a_renamed() {}\nfn b() {}\n");
+        // Replace the file with only one line. The anchor L2-L3 is now both
+        // out of bounds AND content-changed → git-mesh reports CHANGED (not MOVED).
+        repo.create_file("src/code.rs", "fn a_only() {}\n");
+        repo.commit("change and shrink code");
 
-        let diags = collect_with_source(&[], repo.path(), crate::index::DocSource::WorkingTree)
-            .expect("collect");
-        // The fix pass should skip this; a mesh_uncovered or broken_anchor diagnostic remains.
+        // Run --fix. The anchor #L2-L3 is out of bounds (file now has 1 line).
+        let code = run(
+            &[],
+            false,
+            repo.path(),
+            false,
+            false,
+            crate::index::DocSource::WorkingTree,
+            true,
+            false,
+        )
+        .expect("run");
+
+        // Fix #2 should NOT have rewritten the link because the content changed.
+        let content = std::fs::read_to_string(repo.path().join("wiki/page.md"))
+            .expect("read page");
         assert!(
-            !diags.is_empty(),
-            "expected diagnostics when content changed: {diags:?}"
+            content.contains("#L2-L3"),
+            "expected anchor NOT rewritten (content changed), got:\n{content}"
         );
+        // Post-fix the diagnostic should still be present (link still broken) → exit 1.
+        assert_eq!(code, 1, "expected exit 1 (broken anchor remains)");
     }
 
     /// Fix 3: when an inbound link uses an aliased slug, --fix rewrites it to the
