@@ -48,6 +48,12 @@ pub struct FragmentLink {
     pub original_href: String,
     /// 1-based line number in the source wiki page.
     pub source_line: usize,
+    /// Absolute byte offset in the original content where the href begins
+    /// (the character after the opening `(`).
+    pub href_byte_start: usize,
+    /// Absolute byte offset in the original content where the href ends
+    /// (the character before the closing `)`).
+    pub href_byte_end: usize,
 }
 
 // ── Code-region scrubber ──────────────────────────────────────────────────────
@@ -195,12 +201,18 @@ pub fn parse_fragment_links(content: &str) -> Vec<FragmentLink> {
     for cap in md_link_re().captures_iter(&scrubbed) {
         let m = cap.get(0).unwrap();
         let text = cap[1].to_string();
+        let href_match = cap.get(2).unwrap();
         let href = &cap[2];
 
         // Get the original, unscrubbed text from the original content
         // capture[1] corresponds to the text part
         let text_match = cap.get(1).unwrap();
         let original_text = content[text_match.start()..text_match.end()].to_string();
+
+        // The scrubber preserves byte length, so capture group 2's byte range
+        // indexes the original content identically.
+        let href_byte_start = href_match.start();
+        let href_byte_end = href_match.end();
 
         // Compute 1-based source line from byte offset in scrubbed (same newlines)
         let source_line = scrubbed[..m.start()]
@@ -219,6 +231,8 @@ pub fn parse_fragment_links(content: &str) -> Vec<FragmentLink> {
                 original_text,
                 original_href: href.to_string(),
                 source_line,
+                href_byte_start,
+                href_byte_end,
             });
             continue;
         }
@@ -240,6 +254,8 @@ pub fn parse_fragment_links(content: &str) -> Vec<FragmentLink> {
             original_text,
             original_href: href.to_string(),
             source_line,
+            href_byte_start,
+            href_byte_end,
         });
     }
 
@@ -367,6 +383,15 @@ mod tests {
         let links = parse_fragment_links("[F](src/f.rs)");
         assert_eq!(links[0].start_line, None);
         assert_eq!(links[0].end_line, None);
+    }
+
+    #[test]
+    fn test_href_byte_offsets_match_original_href() {
+        let content = "[label](src/foo.rs#L10-L20)";
+        let links = parse_fragment_links(content);
+        assert_eq!(links.len(), 1);
+        let l = &links[0];
+        assert_eq!(&content[l.href_byte_start..l.href_byte_end], l.original_href);
     }
 
     #[test]

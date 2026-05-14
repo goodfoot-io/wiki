@@ -251,6 +251,8 @@ mod tests {
                 original_text: label.to_string(),
                 original_href: path.to_string(),
                 source_line: 1,
+                href_byte_start: 0,
+                href_byte_end: 0,
             },
             heading_chain: Vec::new(),
             section_heading: heading.to_string(),

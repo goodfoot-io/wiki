@@ -114,6 +114,12 @@ enum Commands {
         /// Skip the git mesh coverage check (useful when `git mesh check` runs separately)
         #[arg(long = "no-mesh")]
         no_mesh: bool,
+        /// Rewrite drifted links and anchors in place (requires --source=worktree).
+        #[arg(long = "fix")]
+        fix: bool,
+        /// Print what would be rewritten without modifying any files (requires --fix).
+        #[arg(long = "fix-dry-run", requires = "fix")]
+        fix_dry_run: bool,
     },
 
     /// Find wiki pages that link to the given target.
@@ -321,7 +327,24 @@ fn run(
             globs,
             no_exit_code,
             no_mesh,
-        }) => commands::check::run(&globs, json, &repo_root, no_exit_code, no_mesh, source),
+            fix,
+            fix_dry_run,
+        }) => {
+            if fix && !matches!(source, index::DocSource::WorkingTree) {
+                eprintln!("error: --fix requires --source=worktree");
+                return Ok(2);
+            }
+            commands::check::run(
+                &globs,
+                json,
+                &repo_root,
+                no_exit_code,
+                no_mesh,
+                source,
+                fix,
+                fix_dry_run,
+            )
+        }
         Some(Commands::Links { target }) => {
             let inputs = resolve_inputs(target, read_stdin_lines)?;
             run_for_each(

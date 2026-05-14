@@ -10,6 +10,7 @@ use crate::headings::{extract_headings, resolve_heading};
 use crate::index::DocSource;
 use crate::parser::{LinkKind, parse_fragment_links};
 
+use super::check_fix;
 use super::mesh_coverage;
 
 /// Read `path` from the chosen `DocSource`.
@@ -96,6 +97,7 @@ fn format_diagnostic(kind: &str, file: &str, line: usize, message: &str) -> Stri
 /// Run the check command.
 ///
 /// Returns the exit code: 0 = valid, 1 = validation errors, 2 = runtime error.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     globs: &[String],
     json: bool,
@@ -103,6 +105,8 @@ pub fn run(
     no_exit_code: bool,
     no_mesh: bool,
     source: DocSource,
+    fix: bool,
+    fix_dry_run: bool,
 ) -> Result<i32> {
     let files = match discover_files(globs, repo_root, source) {
         Ok(f) => f,
@@ -145,6 +149,84 @@ pub fn run(
             return Ok(2);
         }
     };
+
+    // ── Fix pass ──────────────────────────────────────────────────────────────
+    if fix {
+        let plan = match check_fix::run_fix_pass(&files, repo_root, fix_dry_run) {
+            Ok(p) => p,
+            Err(e) => {
+                if json {
+                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
+                } else {
+                    eprintln!("error: {e}");
+                }
+                return Ok(2);
+            }
+        };
+
+        if fix_dry_run {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "fixes": plan.fixes,
+                        "skipped": plan.skipped,
+                        "errors": diagnostics,
+                    }))
+                    .unwrap()
+                );
+            } else if plan.fixes.is_empty() && plan.skipped.is_empty() {
+                println!("no fixes to apply");
+            } else {
+                for f in &plan.fixes {
+                    println!("fix: {} line {}: {} -> {}", f.file, f.line, f.old_href, f.new_href);
+                }
+                for s in &plan.skipped {
+                    println!("skip: {} line {}: {}", s.file, s.line, s.reason);
+                }
+            }
+            if !diagnostics.is_empty() && !no_exit_code {
+                return Ok(1);
+            }
+            return Ok(0);
+        }
+
+        // Non-dry-run: stub returns empty plan, so just re-collect and emit post-fix diagnostics.
+        let post_diagnostics =
+            match collect_for_files(&files, &index_files, repo_root, no_mesh, source) {
+                Ok(d) => d,
+                Err(e) => {
+                    if json {
+                        eprintln!("{}", serde_json::json!({"error": e.to_string()}));
+                    } else {
+                        eprintln!("error: {e}");
+                    }
+                    return Ok(2);
+                }
+            };
+
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({ "errors": post_diagnostics })
+                )
+                .unwrap()
+            );
+        } else {
+            for d in &post_diagnostics {
+                print!(
+                    "{}",
+                    format_diagnostic(&d.kind, &d.file, d.line, &d.message)
+                );
+            }
+        }
+
+        if !post_diagnostics.is_empty() && !no_exit_code {
+            return Ok(1);
+        }
+        return Ok(0);
+    }
 
     if json {
         println!(
@@ -507,6 +589,8 @@ mod tests {
             false,
             false,
             crate::index::DocSource::WorkingTree,
+            false,
+            false,
         )
         .expect("run");
         assert_eq!(code, 0);
@@ -527,6 +611,8 @@ mod tests {
             false,
             false,
             crate::index::DocSource::WorkingTree,
+            false,
+            false,
         )
         .expect("run");
         assert_eq!(code, 1);
@@ -547,6 +633,8 @@ mod tests {
             false,
             false,
             crate::index::DocSource::WorkingTree,
+            false,
+            false,
         )
         .expect("run");
         assert_eq!(code, 2);
@@ -647,6 +735,8 @@ mod tests {
             false,
             false,
             crate::index::DocSource::WorkingTree,
+            false,
+            false,
         )
         .expect("run");
         assert_eq!(code, 0);
@@ -699,6 +789,8 @@ mod tests {
             false,
             false,
             crate::index::DocSource::WorkingTree,
+            false,
+            false,
         )
         .expect("run");
         assert_eq!(code, 1);
@@ -735,6 +827,8 @@ mod tests {
             false,
             false,
             crate::index::DocSource::WorkingTree,
+            false,
+            false,
         )
         .expect("run");
         assert_eq!(code, 0);
@@ -793,6 +887,443 @@ mod tests {
             diags_idx.iter().any(|d| d.kind == "broken_anchor"),
             "index should see staged broken anchor, got: {:?}",
             diags_idx
+        );
+    }
+
+    // ── Fix pass integration tests (all #[ignore] until fix logic is implemented) ──
+
+    /// Fix 1: when a link target was renamed in git, --fix rewrites the path.
+    #[test]
+    #[ignore]
+    fn fix1_broken_link_rewrites_renamed_path() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file("src/old.rs", "fn a() {}\n");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [old](/src/old.rs#L1)."),
+        );
+        repo.commit("baseline");
+
+        // Rename the target file.
+        repo.git(&["mv", "src/old.rs", "src/new.rs"]);
+        // (do not commit so worktree sees the rename in the index)
+
+        let code = run(
+            &[],
+            false,
+            repo.path(),
+            false,
+            true, // no_mesh
+            crate::index::DocSource::WorkingTree,
+            true,  // fix
+            false, // fix_dry_run
+        )
+        .expect("run");
+
+        let content = std::fs::read_to_string(repo.path().join("wiki/page.md"))
+            .expect("read page");
+        assert!(
+            content.contains("/src/new.rs"),
+            "expected link rewritten to new path, got:\n{content}"
+        );
+        assert_eq!(code, 0, "expected exit 0 after fix");
+    }
+
+    /// Fix 1 skip: when the rename target was deleted (not moved), skip the fix.
+    #[test]
+    #[ignore]
+    fn fix1_skips_when_target_deleted() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file("src/gone.rs", "fn a() {}\n");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [gone](/src/gone.rs#L1)."),
+        );
+        repo.commit("baseline");
+
+        repo.git(&["rm", "src/gone.rs"]);
+
+        let diags = collect_with_source(&[], repo.path(), crate::index::DocSource::WorkingTree)
+            .expect("collect");
+        // A deletion is not a rename; fix should produce a SkippedFix.
+        // Post-fix diagnostics must still contain broken_link.
+        assert!(
+            diags.iter().any(|d| d.kind == "broken_link"),
+            "expected broken_link for deleted target: {diags:?}"
+        );
+    }
+
+    /// Fix 1 skip: when a path maps to multiple rename targets, skip (ambiguous).
+    #[test]
+    #[ignore]
+    fn fix1_skips_when_rename_ambiguous() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file("src/shared.rs", "fn a() {}\n");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [shared](/src/shared.rs#L1)."),
+        );
+        repo.commit("baseline");
+
+        // Simulate ambiguity: two copies of the file exist under different names.
+        repo.create_file("src/copy_a.rs", "fn a() {}\n");
+        repo.create_file("src/copy_b.rs", "fn a() {}\n");
+        repo.git(&["rm", "src/shared.rs"]);
+
+        // With two possible rename destinations, fix must not apply automatically.
+        let code = run(
+            &[],
+            false,
+            repo.path(),
+            false,
+            true,
+            crate::index::DocSource::WorkingTree,
+            true,
+            false,
+        )
+        .expect("run");
+        // Link is still broken → exit 1.
+        assert_eq!(code, 1);
+    }
+
+    /// Fix 2: when a line-range anchor drifted because lines were inserted above it,
+    /// --fix updates the range to track the new position reported by the mesh.
+    #[test]
+    #[ignore]
+    fn fix2_mesh_anchor_follows_line_shift() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file("src/code.rs", "fn a() {}\n");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
+        );
+        repo.commit("baseline with mesh");
+
+        repo.git_mesh(&["add", "fix2-mesh", "wiki/page.md", "src/code.rs#L1-L1"]);
+        repo.git_mesh(&["why", "fix2-mesh", "-m", "Test mesh."]);
+        repo.git_mesh(&["commit"]);
+
+        // Insert a line before the anchored function.
+        repo.create_file("src/code.rs", "// preamble\nfn a() {}\n");
+
+        let code = run(
+            &[],
+            false,
+            repo.path(),
+            false,
+            false,
+            crate::index::DocSource::WorkingTree,
+            true,
+            false,
+        )
+        .expect("run");
+
+        let content = std::fs::read_to_string(repo.path().join("wiki/page.md"))
+            .expect("read page");
+        assert!(
+            content.contains("#L2-L2"),
+            "expected anchor updated to L2-L2, got:\n{content}"
+        );
+        assert_eq!(code, 0);
+    }
+
+    /// Fix 2 skip: when the anchored range changed content (not just shifted),
+    /// do not apply the fix.
+    #[test]
+    #[ignore]
+    fn fix2_skips_when_changed_sibling_present() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file("src/code.rs", "fn a() {}\nfn b() {}\n");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L2)."),
+        );
+        repo.commit("baseline with mesh");
+
+        repo.git_mesh(&["add", "fix2-changed-mesh", "wiki/page.md", "src/code.rs#L1-L2"]);
+        repo.git_mesh(&["why", "fix2-changed-mesh", "-m", "Test mesh."]);
+        repo.git_mesh(&["commit"]);
+
+        // Modify the anchored range (content change, not just a shift).
+        repo.create_file("src/code.rs", "fn a_renamed() {}\nfn b() {}\n");
+
+        let diags = collect_with_source(&[], repo.path(), crate::index::DocSource::WorkingTree)
+            .expect("collect");
+        // The fix pass should skip this; a mesh_uncovered or broken_anchor diagnostic remains.
+        assert!(
+            !diags.is_empty(),
+            "expected diagnostics when content changed: {diags:?}"
+        );
+    }
+
+    /// Fix 3: when a link uses a heading alias slug, --fix rewrites it to the canonical slug.
+    #[test]
+    #[ignore]
+    fn fix3_alias_rewrites_to_canonical_slug() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file(
+            "wiki/target.md",
+            &make_wiki_page("Target", "## My Section\n\nbody\n"),
+        );
+        repo.create_file(
+            "wiki/source.md",
+            // Use a non-canonical alias slug (e.g. with different capitalisation).
+            &make_wiki_page("Source", "See [target](target.md#My-Section)."),
+        );
+        repo.commit("add pages");
+
+        let code = run(
+            &[],
+            false,
+            repo.path(),
+            false,
+            true,
+            crate::index::DocSource::WorkingTree,
+            true,
+            false,
+        )
+        .expect("run");
+
+        let content = std::fs::read_to_string(repo.path().join("wiki/source.md"))
+            .expect("read source");
+        assert!(
+            content.contains("#my-section"),
+            "expected anchor rewritten to canonical slug, got:\n{content}"
+        );
+        assert_eq!(code, 0);
+    }
+
+    /// Fix 3 skip: when an alias matches multiple headings, skip the rewrite.
+    #[test]
+    #[ignore]
+    fn fix3_skips_when_alias_resolves_to_multiple_headings() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file(
+            "wiki/target.md",
+            &make_wiki_page(
+                "Target",
+                "## Section One\n\nbody\n\n## Section One\n\nbody\n",
+            ),
+        );
+        repo.create_file(
+            "wiki/source.md",
+            &make_wiki_page("Source", "See [target](target.md#section-one)."),
+        );
+        repo.commit("add pages");
+
+        // With duplicate headings the fix cannot unambiguously choose; it must skip.
+        let diags = collect_with_source(&[], repo.path(), crate::index::DocSource::WorkingTree)
+            .expect("collect");
+        assert!(
+            !diags.is_empty(),
+            "expected diagnostics with ambiguous heading: {diags:?}"
+        );
+    }
+
+    /// Fix 5: when a heading was renamed in place (same section position), --fix
+    /// updates the anchor in all linking wiki pages.
+    #[test]
+    #[ignore]
+    fn fix5_heading_rename_same_position_rewrites() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file(
+            "wiki/target.md",
+            &make_wiki_page("Target", "## Old Heading\n\nbody\n"),
+        );
+        repo.create_file(
+            "wiki/source.md",
+            &make_wiki_page("Source", "See [target](target.md#old-heading)."),
+        );
+        repo.commit("baseline");
+
+        // Rename the heading.
+        repo.create_file(
+            "wiki/target.md",
+            &make_wiki_page("Target", "## New Heading\n\nbody\n"),
+        );
+
+        let code = run(
+            &[],
+            false,
+            repo.path(),
+            false,
+            true,
+            crate::index::DocSource::WorkingTree,
+            true,
+            false,
+        )
+        .expect("run");
+
+        let content = std::fs::read_to_string(repo.path().join("wiki/source.md"))
+            .expect("read source");
+        assert!(
+            content.contains("#new-heading"),
+            "expected anchor updated to new-heading, got:\n{content}"
+        );
+        assert_eq!(code, 0);
+    }
+
+    /// Fix 5 skip: when a heading was split into two or more headings, do not apply.
+    #[test]
+    #[ignore]
+    fn fix5_skips_when_heading_split() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file(
+            "wiki/target.md",
+            &make_wiki_page("Target", "## Combined\n\nbody\n"),
+        );
+        repo.create_file(
+            "wiki/source.md",
+            &make_wiki_page("Source", "See [target](target.md#combined)."),
+        );
+        repo.commit("baseline");
+
+        // Split into two headings.
+        repo.create_file(
+            "wiki/target.md",
+            &make_wiki_page("Target", "## Part One\n\nbody\n\n## Part Two\n\nbody\n"),
+        );
+
+        let diags = collect_with_source(&[], repo.path(), crate::index::DocSource::WorkingTree)
+            .expect("collect");
+        assert!(
+            !diags.is_empty(),
+            "expected diagnostics when heading was split: {diags:?}"
+        );
+    }
+
+    /// Fix 5 skip: when the heading was removed and other headings were restructured,
+    /// do not attempt a fix.
+    #[test]
+    #[ignore]
+    fn fix5_skips_when_heading_restructured() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file(
+            "wiki/target.md",
+            &make_wiki_page("Target", "## Section A\n\nbody\n## Section B\n\nbody\n"),
+        );
+        repo.create_file(
+            "wiki/source.md",
+            &make_wiki_page("Source", "See [target](target.md#section-a)."),
+        );
+        repo.commit("baseline");
+
+        // Restructure: remove Section A and rename Section B.
+        repo.create_file(
+            "wiki/target.md",
+            &make_wiki_page("Target", "## Renamed B\n\nbody\n"),
+        );
+
+        let diags = collect_with_source(&[], repo.path(), crate::index::DocSource::WorkingTree)
+            .expect("collect");
+        assert!(
+            !diags.is_empty(),
+            "expected diagnostics when heading was restructured: {diags:?}"
+        );
+    }
+
+    /// Running --fix twice must produce no further rewrites on the second pass.
+    #[test]
+    #[ignore]
+    fn wiki_check_fix_is_idempotent() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file("src/old.rs", "fn a() {}\n");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [old](/src/old.rs#L1)."),
+        );
+        repo.commit("baseline");
+
+        repo.git(&["mv", "src/old.rs", "src/new.rs"]);
+
+        // First pass.
+        run(
+            &[],
+            false,
+            repo.path(),
+            false,
+            true,
+            crate::index::DocSource::WorkingTree,
+            true,
+            false,
+        )
+        .expect("first fix pass");
+
+        let content_after_first =
+            std::fs::read_to_string(repo.path().join("wiki/page.md")).expect("read page");
+
+        // Second pass.
+        run(
+            &[],
+            false,
+            repo.path(),
+            false,
+            true,
+            crate::index::DocSource::WorkingTree,
+            true,
+            false,
+        )
+        .expect("second fix pass");
+
+        let content_after_second =
+            std::fs::read_to_string(repo.path().join("wiki/page.md")).expect("read page");
+
+        assert_eq!(
+            content_after_first, content_after_second,
+            "--fix must be idempotent: file changed on second pass"
+        );
+    }
+
+    /// --fix must be rejected when --source is not worktree.
+    #[test]
+    #[ignore]
+    fn wiki_check_fix_rejects_non_worktree_source() {
+        // This test validates the CLI guard in main.rs; since tests call
+        // commands::check::run directly (bypassing main.rs), we verify the
+        // documented contract by calling run() with a non-worktree source and
+        // fix=true, and asserting that the function itself does not mutate any
+        // files. (The main.rs guard prints an error and returns Ok(2) before
+        // reaching this function.)
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file("src/old.rs", "fn a() {}\n");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [old](/src/old.rs#L1)."),
+        );
+        repo.commit("baseline");
+
+        let original =
+            std::fs::read_to_string(repo.path().join("wiki/page.md")).expect("read page");
+
+        // Calling run directly with Index source and fix=true; no files should change.
+        let _code = run(
+            &[],
+            false,
+            repo.path(),
+            false,
+            true,
+            crate::index::DocSource::Index,
+            true,
+            false,
+        )
+        .expect("run");
+
+        let after = std::fs::read_to_string(repo.path().join("wiki/page.md")).expect("read page");
+        assert_eq!(
+            original, after,
+            "file must not be mutated when source != worktree"
         );
     }
 }

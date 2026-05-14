@@ -1,4 +1,5 @@
 pub mod check;
+pub mod check_fix;
 pub mod hook_check;
 pub mod install;
 pub mod links;
