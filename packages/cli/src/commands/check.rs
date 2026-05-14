@@ -1135,16 +1135,17 @@ mod tests {
         assert_eq!(code, 0);
     }
 
-    /// Fix 3 skip: when the target page lists an alias but has no heading matching
-    /// the title slug, Fix #3 declines rather than rewriting to a non-existent anchor.
+    /// Fix 3 skip: when the target page lists an alias but has no headings at
+    /// all, Fix #3 declines rather than rewriting to a non-existent anchor.
     #[test]
-    fn fix3_skips_when_title_has_no_matching_heading() {
+    fn fix3_skips_when_target_has_no_headings() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-        // Title is "Overview" but no `## Overview` heading exists; only an aliased section.
+        // Title is "Overview" and an alias is listed, but the page body has
+        // no headings whatsoever — no canonical destination exists.
         repo.create_file(
             "wiki/target.md",
-            "---\ntitle: Overview\nsummary: s.\naliases:\n  - introduction\n---\n## Body\n",
+            "---\ntitle: Overview\nsummary: s.\naliases:\n  - introduction\n---\nJust prose, no headings.\n",
         );
         repo.create_file(
             "wiki/source.md",
@@ -1173,6 +1174,87 @@ mod tests {
         // Post-fix the diagnostic should still be present (link still broken).
         // Exit 1 because broken_anchor persists.
         assert_eq!(code, 1);
+    }
+
+    /// Fix 3 fallback: title slug does not match a heading, but the page has a
+    /// first H1 — rewrite to the H1's slug.
+    #[test]
+    fn fix3_falls_back_to_first_h1_when_title_mismatch() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        // Title is "Authentication" but H1 is "Auth & Authorization".
+        repo.create_file(
+            "wiki/target.md",
+            "---\ntitle: Authentication\nsummary: s.\naliases:\n  - introduction\n---\n# Auth & Authorization\n\nbody\n",
+        );
+        repo.create_file(
+            "wiki/source.md",
+            &make_wiki_page("Source", "See [intro](target.md#introduction)."),
+        );
+        repo.commit("baseline");
+
+        let code = run(
+            &[],
+            false,
+            repo.path(),
+            false,
+            true,
+            crate::index::DocSource::WorkingTree,
+            true,
+            false,
+        )
+        .expect("run");
+
+        let content = std::fs::read_to_string(repo.path().join("wiki/source.md"))
+            .expect("read source");
+        // First H1 is "Auth & Authorization"; github_slug gives "auth--authorization"
+        // (the ampersand drops, leaving the two surrounding spaces as hyphens).
+        assert!(
+            content.contains("target.md#auth--authorization"),
+            "expected anchor rewritten to first-H1 slug, got:\n{content}"
+        );
+        assert!(!content.contains("#introduction"));
+        assert_eq!(code, 0);
+    }
+
+    /// Fix 3 fallback: no heading matches the title and there is no H1 —
+    /// rewrite to the first heading at any level.
+    #[test]
+    fn fix3_falls_back_to_first_heading_when_no_h1() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        // Title is "Overview" but only a `## Body` heading exists — matches
+        // the reproducer in the card.
+        repo.create_file(
+            "wiki/target.md",
+            "---\ntitle: Overview\nsummary: s.\naliases:\n  - introduction\n---\n## Body\n\nbody\n",
+        );
+        repo.create_file(
+            "wiki/source.md",
+            &make_wiki_page("Source", "See [intro](target.md#introduction)."),
+        );
+        repo.commit("baseline");
+
+        let code = run(
+            &[],
+            false,
+            repo.path(),
+            false,
+            true,
+            crate::index::DocSource::WorkingTree,
+            true,
+            false,
+        )
+        .expect("run");
+
+        let content = std::fs::read_to_string(repo.path().join("wiki/source.md"))
+            .expect("read source");
+        assert!(
+            content.contains("target.md#body"),
+            "expected anchor rewritten to first-heading slug `body`, got:\n{content}"
+        );
+        assert!(!content.contains("#introduction"));
+        assert_eq!(code, 0);
     }
 
     /// Fix 5: when a heading was renamed in place (same section position), --fix

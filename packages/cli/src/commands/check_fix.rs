@@ -970,7 +970,23 @@ pub fn run_fix_pass(
     // For each in-scope file, parse fragment links. For each non-line-range
     // fragment link whose anchor does NOT resolve against the target's headings,
     // check whether the anchor matches an alias in the target's frontmatter.
-    // If so, rewrite the anchor to the canonical title slug.
+    // If so, rewrite the anchor to the target's *canonical* heading slug.
+    //
+    // Canonical-slug resolution rule (highest confidence first):
+    //   1. Slug of the page's frontmatter `title`, if a heading with that slug
+    //      exists. Matches the wiki convention "the H1 names the page".
+    //   2. Slug of the page's first H1 heading, if any.
+    //   3. Slug of the page's first heading at any level.
+    //   4. Skip with a reason that names every candidate we tried.
+    //
+    // The fallback chain exists because not every wiki page repeats its title
+    // as the top-level heading: some pages open with a `##` section, some use
+    // a leading prose paragraph and only sub-headings, and some title fields
+    // intentionally differ from the visible H1 (e.g. "Authentication" titles
+    // a page whose H1 is `# Auth & Authorization`). Falling back to a real
+    // heading still satisfies the card's intent — give the alias a current
+    // canonical destination so the alias entry can be retired without
+    // breaking inbound links.
 
     for file in files {
         // Use the in-memory patched content if Fix #1 rewrote this file.
@@ -1049,21 +1065,29 @@ pub fn run_fix_pass(
                 continue;
             }
 
-            let canonical = github_slug(&fm.title);
+            // Resolve the canonical heading slug via the documented fallback
+            // chain: title-slug → first H1 → first heading.
+            let title_slug = github_slug(&fm.title);
+            let title_match = resolve_heading(&title_slug, &headings);
 
-            // Verify the canonical slug has a matching heading.
-            if !resolve_heading(&canonical, &headings) {
+            let (canonical, source_label) = if title_match {
+                (title_slug.clone(), "title")
+            } else if let Some(h1) = headings.iter().find(|h| h.level == 1) {
+                (h1.slug.clone(), "first H1")
+            } else if let Some(first) = headings.first() {
+                (first.slug.clone(), "first heading")
+            } else {
                 skipped.push(SkippedFix {
                     file: file_rel.clone(),
                     line: link.source_line,
                     kind: FixKind::AliasToCanonical,
                     reason: format!(
-                        "alias `{}` listed but no heading matches title slug `{}`",
-                        anchor, canonical
+                        "alias `{}` listed but target has no headings (tried title slug `{}`, first H1, first heading)",
+                        anchor, title_slug
                     ),
                 });
                 continue;
-            }
+            };
 
             // Build the new href: replace just the fragment part after `#`.
             let path_part = match link.original_href.find('#') {
@@ -1081,8 +1105,8 @@ pub fn run_fix_pass(
                 old_href: link.original_href.clone(),
                 new_href: new_href.clone(),
                 reason: format!(
-                    "anchor `{}` is an alias for title `{}`; rewriting to canonical slug `{}`",
-                    anchor, fm.title, canonical
+                    "anchor `{}` is an alias for title `{}`; rewriting to canonical slug `{}` ({})",
+                    anchor, fm.title, canonical, source_label
                 ),
                 confidence: Confidence::High,
             });

@@ -11,6 +11,8 @@ pub struct Heading {
     pub slug: String,
     /// 1-based line number in the source file.
     pub line: usize,
+    /// ATX heading level (1 for `#`, 2 for `##`, … 6 for `######`).
+    pub level: u8,
 }
 
 // ── Slug algorithm ────────────────────────────────────────────────────────────
@@ -53,7 +55,7 @@ pub fn extract_headings(content: &str) -> Vec<Heading> {
 
     for (line_idx, line) in content.lines().enumerate() {
         let line_num = line_idx + 1;
-        let Some(text) = parse_heading_line(line) else {
+        let Some((level, text)) = parse_heading_line(line) else {
             continue;
         };
 
@@ -70,24 +72,30 @@ pub fn extract_headings(content: &str) -> Vec<Heading> {
             text: text.to_string(),
             slug,
             line: line_num,
+            level,
         });
     }
 
     headings
 }
 
-/// Extract the heading text from a line starting with one or more `#` characters.
-/// Returns `None` if the line is not a heading.
-fn parse_heading_line(line: &str) -> Option<&str> {
+/// Extract the ATX heading level and text from a line starting with one or more
+/// `#` characters. Returns `None` if the line is not a heading or has more than
+/// six leading `#` characters.
+fn parse_heading_line(line: &str) -> Option<(u8, &str)> {
     if !line.starts_with('#') {
         return None;
     }
-    let rest = line.trim_start_matches('#');
+    let hash_count = line.chars().take_while(|&c| c == '#').count();
+    if hash_count == 0 || hash_count > 6 {
+        return None;
+    }
+    let rest = &line[hash_count..];
     // Must be followed by a space (ATX heading syntax)
     if !rest.starts_with(' ') {
         return None;
     }
-    Some(rest.trim())
+    Some((hash_count as u8, rest.trim()))
 }
 
 // ── Heading resolution ────────────────────────────────────────────────────────
@@ -196,12 +204,24 @@ mod tests {
         assert_eq!(headings[0].text, "H1");
         assert_eq!(headings[0].slug, "h1");
         assert_eq!(headings[0].line, 1);
+        assert_eq!(headings[0].level, 1);
         assert_eq!(headings[1].text, "H2");
         assert_eq!(headings[1].slug, "h2");
         assert_eq!(headings[1].line, 3);
+        assert_eq!(headings[1].level, 2);
         assert_eq!(headings[2].text, "H3");
         assert_eq!(headings[2].slug, "h3");
         assert_eq!(headings[2].line, 5);
+        assert_eq!(headings[2].level, 3);
+    }
+
+    #[test]
+    fn test_extract_rejects_more_than_six_hashes() {
+        let content = "####### too many\n# valid\n";
+        let headings = extract_headings(content);
+        assert_eq!(headings.len(), 1);
+        assert_eq!(headings[0].text, "valid");
+        assert_eq!(headings[0].level, 1);
     }
 
     #[test]
