@@ -546,6 +546,10 @@ mod tests {
         fn commit(&self, message: &str) {
             self.git(&["add", "-A"]);
             self.git(&["commit", "-m", message]);
+            // git-mesh stale reads the commit-graph file; some test environments
+            // do not auto-write it, which makes git-mesh exit non-zero. Refresh
+            // it after every commit so mesh-dependent tests are deterministic.
+            self.git(&["commit-graph", "write", "--reachable", "--changed-paths"]);
         }
 
         fn git(&self, args: &[&str]) {

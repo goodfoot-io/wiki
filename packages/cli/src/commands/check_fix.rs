@@ -541,6 +541,150 @@ fn read_head_blob(repo_root: &Path, rel_path: &str) -> Result<Option<String>> {
     Ok(None)
 }
 
+/// Maximum number of historical revisions to inspect when walking `git log
+/// --follow` looking for the layer where a now-broken heading slug last
+/// resolved. The cap exists to avoid pathological cases on long-lived files
+/// where the slug never appears; 100 commits is large enough to cover any
+/// realistic refactor window while still bounding the walk.
+const HEADING_HISTORY_DEPTH_CAP: usize = 100;
+
+/// Walk a target file's content across layers — HEAD first, then HEAD history
+/// via `git log --follow` — and return the first content where `anchor_slug`
+/// resolves as a heading. Bounded by [`HEADING_HISTORY_DEPTH_CAP`].
+///
+/// The worktree and index layers are intentionally not consulted here: callers
+/// already inspect the *current* (patched) content separately. A "baseline" for
+/// Fix #5 is by definition older than the broken state, so we only walk
+/// committed history.
+fn find_baseline_with_slug(
+    repo_root: &Path,
+    rel_path: &str,
+    anchor_slug: &str,
+) -> Result<Option<String>> {
+    // Layer: HEAD
+    if let Some(content) = read_head_blob(repo_root, rel_path)? {
+        let headings = extract_headings(&content);
+        if resolve_heading(anchor_slug, &headings) {
+            return Ok(Some(content));
+        }
+    }
+
+    // Layer: HEAD history via `git log --follow`. Newest-first; stop at the
+    // first revision whose blob contains the slug.
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args([
+            "log",
+            "--follow",
+            "--format=%H",
+            "--name-status",
+            "--",
+            rel_path,
+        ])
+        .output()
+        .map_err(|e| miette::miette!("git log failed: {e}"))?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    // `--name-status --format=%H` interleaves SHAs and rename/path lines.
+    // We need (sha, path-at-that-revision) pairs. The current path follows the
+    // sha; if a rename is encountered the path changes for older revisions.
+    let mut current_path = rel_path.to_string();
+    let mut seen = 0usize;
+    let mut last_sha: Option<String> = None;
+
+    for line in text.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        // SHAs are 40 hex chars with no tab.
+        if !line.contains('\t') && line.len() >= 7 && line.chars().all(|c| c.is_ascii_hexdigit()) {
+            // Process the previous (sha, path) pair before advancing.
+            if let Some(sha) = last_sha.take() {
+                seen += 1;
+                if seen > HEADING_HISTORY_DEPTH_CAP {
+                    return Ok(None);
+                }
+                if let Some(content) = read_blob_at(repo_root, &sha, &current_path)?
+                    && resolve_heading(anchor_slug, &extract_headings(&content))
+                {
+                    return Ok(Some(content));
+                }
+            }
+            last_sha = Some(line.to_string());
+            continue;
+        }
+
+        // Name-status line. Formats:
+        //   M\tpath
+        //   A\tpath
+        //   D\tpath
+        //   R<score>\told\tnew
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let status = parts[0];
+        if status.starts_with('R') && parts.len() == 3 {
+            // For an R record on commit X with old=O new=N, parents of X had
+            // the file at O. We want the path at the *commit being examined*
+            // (the sha we just read). After processing this commit, the path
+            // for older revisions becomes `old`.
+            // Examine current commit at `new`:
+            if let Some(sha) = last_sha.take() {
+                seen += 1;
+                if seen > HEADING_HISTORY_DEPTH_CAP {
+                    return Ok(None);
+                }
+                if let Some(content) = read_blob_at(repo_root, &sha, parts[2])?
+                    && resolve_heading(anchor_slug, &extract_headings(&content))
+                {
+                    return Ok(Some(content));
+                }
+            }
+            current_path = parts[1].to_string();
+        } else if parts.len() >= 2 {
+            // Non-rename: path is parts[1], unchanged.
+            current_path = parts[1].to_string();
+        }
+    }
+
+    // Drain the trailing sha (last commit had no rename line follow-up before
+    // EOF, which means we haven't read it yet).
+    if let Some(sha) = last_sha.take() {
+        seen += 1;
+        if seen <= HEADING_HISTORY_DEPTH_CAP
+            && let Some(content) = read_blob_at(repo_root, &sha, &current_path)?
+            && resolve_heading(anchor_slug, &extract_headings(&content))
+        {
+            return Ok(Some(content));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Read `git show <sha>:<path>` as a UTF-8 string. Returns `Ok(None)` on any
+/// git error or non-UTF-8 blob.
+fn read_blob_at(repo_root: &Path, sha: &str, path: &str) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(["show", &format!("{sha}:{path}")])
+        .output()
+        .map_err(|e| miette::miette!("git show failed: {e}"))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    match String::from_utf8(output.stdout) {
+        Ok(s) => Ok(Some(s)),
+        Err(_) => Ok(None),
+    }
+}
+
 // ── Fix #2: mesh auto-follow ──────────────────────────────────────────────────
 
 /// A MOVED anchor found by `git mesh stale --format=porcelain` that passes the
@@ -1243,26 +1387,29 @@ pub fn run_fix_pass(
                 .to_string_lossy()
                 .into_owned();
 
-            // Get HEAD content for the target.
-            let baseline_opt = head_cache
-                .entry(target_rel.clone())
-                .or_insert_with(|| read_head_blob(repo_root, &target_rel).unwrap_or(None));
+            // Walk layers (HEAD, then HEAD history via `git log --follow`,
+            // capped at HEADING_HISTORY_DEPTH_CAP commits) to find the most
+            // recent baseline where the broken slug resolves. Newest-first;
+            // stops at the first match.
+            let anchor_slug = github_slug(anchor);
+            let cache_key = format!("{target_rel}#{anchor_slug}");
+            let baseline_opt = head_cache.entry(cache_key).or_insert_with(|| {
+                find_baseline_with_slug(repo_root, &target_rel, &anchor_slug).unwrap_or(None)
+            });
 
             let Some(baseline_content) = baseline_opt.as_ref() else {
-                // No HEAD baseline — cannot determine what changed.
+                // Slug not found in HEAD or any historical revision — record
+                // an explicit skip so the operator knows Fix #5 declined.
+                skipped.push(SkippedFix {
+                    file: file_rel.clone(),
+                    line: link.source_line,
+                    kind: FixKind::HeadingRename,
+                    reason: "heading not found in any layer".to_string(),
+                });
                 continue;
             };
 
-            let baseline_headings = extract_headings(baseline_content);
-
-            // Check that the anchor resolves in the baseline.
-            if !resolve_heading(anchor, &baseline_headings) {
-                // Slug not found in baseline either — skip (already broken before).
-                continue;
-            }
-
             // Find the structural position of the matching heading in baseline.
-            let anchor_slug = github_slug(anchor);
             let baseline_positions = heading_positions(baseline_content);
             let Some((_, baseline_pos)) = baseline_positions
                 .iter()
@@ -1415,4 +1562,168 @@ fn get_new_anchor_coords(repo_root: &Path, path: &Path) -> Result<Option<(u32, u
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    struct TestRepo {
+        dir: TempDir,
+    }
+
+    impl TestRepo {
+        fn new() -> Self {
+            let dir = TempDir::new().expect("tempdir");
+            let repo = TestRepo { dir };
+            repo.git(&["init", "-q"]);
+            repo.git(&["checkout", "-q", "-b", "main"]);
+            repo
+        }
+
+        fn path(&self) -> &Path {
+            self.dir.path()
+        }
+
+        fn write(&self, rel: &str, content: &str) {
+            let full = self.dir.path().join(rel);
+            if let Some(parent) = full.parent() {
+                fs::create_dir_all(parent).expect("create_dir_all");
+            }
+            fs::write(&full, content).expect("write file");
+        }
+
+        fn commit(&self, message: &str) {
+            self.git(&["add", "-A"]);
+            self.git(&["commit", "-q", "-m", message]);
+        }
+
+        fn git(&self, args: &[&str]) {
+            let output = Command::new("git")
+                .current_dir(self.dir.path())
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test Author")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test Committer")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .expect("spawn git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed:\n{}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    fn wiki_page(title: &str, body: &str) -> String {
+        format!("---\ntitle: {title}\nsummary: A page about {title}.\n---\n{body}")
+    }
+
+    /// Fix #5 walks HEAD history to recover the prior heading slug after the
+    /// rename has already been committed.
+    #[test]
+    fn fix5_walks_head_history_for_renamed_heading() {
+        let repo = TestRepo::new();
+        repo.write(
+            "wiki/target.md",
+            &wiki_page("Target", "## Installation\n\nbody\n"),
+        );
+        repo.write(
+            "wiki/source.md",
+            &wiki_page("Source", "See [setup](./target.md#installation).\n"),
+        );
+        repo.commit("seed");
+
+        // Rename the heading and commit it, so HEAD no longer holds the old slug.
+        repo.write(
+            "wiki/target.md",
+            &wiki_page("Target", "## Setup and Installation\n\nbody\n"),
+        );
+        repo.commit("rename heading");
+
+        let source = repo.path().join("wiki/source.md");
+        let target = repo.path().join("wiki/target.md");
+        let plan = run_fix_pass(
+            &[source.clone(), target.clone()],
+            repo.path(),
+            /* dry_run */ true,
+        )
+        .expect("fix pass");
+
+        assert!(
+            plan.fixes
+                .iter()
+                .any(|f| matches!(f.kind, FixKind::HeadingRename)
+                    && f.new_href.ends_with("#setup-and-installation")
+                    && f.old_href.ends_with("#installation")),
+            "expected a HeadingRename fix rewriting #installation → #setup-and-installation; \
+             got fixes={:?} skipped={:?}",
+            plan.fixes,
+            plan.skipped,
+        );
+    }
+
+    /// `heading_positions` assigns a unique `(depth, parent_slug,
+    /// sibling_index)` triple to every heading, so `headings_at_position`
+    /// returns at most one match. This test pins that invariant — the multi-
+    /// replacement skip path in Fix #5 is reached only through duplicate-
+    /// position content, which `heading_positions` does not produce.
+    #[test]
+    fn headings_at_position_is_at_most_one() {
+        let baseline = "## Installation\n\nbody\n";
+        let positions = heading_positions(baseline);
+        let pos = positions
+            .iter()
+            .find(|(h, _)| h.slug == "installation")
+            .unwrap()
+            .1
+            .clone();
+
+        // Current content with two same-depth siblings — positions differ in
+        // sibling_index, so at most one matches the baseline position.
+        let split = headings_at_position("## Setup\n\nx\n## Installation Details\n\ny\n", &pos);
+        assert!(
+            split.len() <= 1,
+            "headings_at_position should return at most one heading per position; got {:?}",
+            split
+        );
+    }
+
+    /// When the broken slug does not resolve in HEAD or any historical
+    /// revision, Fix #5 must emit a SkippedFix with the canonical reason.
+    #[test]
+    fn fix5_skips_when_heading_absent_from_all_layers() {
+        let repo = TestRepo::new();
+        repo.write(
+            "wiki/target.md",
+            &wiki_page("Target", "## Something Else\n\nbody\n"),
+        );
+        repo.write(
+            "wiki/source.md",
+            &wiki_page("Source", "See [setup](./target.md#installation).\n"),
+        );
+        repo.commit("seed without installation heading");
+
+        let source = repo.path().join("wiki/source.md");
+        let target = repo.path().join("wiki/target.md");
+        let plan = run_fix_pass(
+            &[source.clone(), target.clone()],
+            repo.path(),
+            /* dry_run */ true,
+        )
+        .expect("fix pass");
+
+        assert!(
+            plan.skipped.iter().any(|s| matches!(s.kind, FixKind::HeadingRename)
+                && s.reason == "heading not found in any layer"),
+            "expected SkippedFix(HeadingRename, 'heading not found in any layer'); \
+             got fixes={:?} skipped={:?}",
+            plan.fixes,
+            plan.skipped,
+        );
+    }
 }
