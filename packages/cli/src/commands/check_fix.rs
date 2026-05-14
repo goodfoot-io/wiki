@@ -687,8 +687,15 @@ fn read_blob_at(repo_root: &Path, sha: &str, path: &str) -> Result<Option<String
 
 // ── Fix #2: mesh auto-follow ──────────────────────────────────────────────────
 
-/// A MOVED anchor found by `git mesh stale --format=porcelain` that passes the
+/// A MOVED anchor found by `git mesh stale --format=json` that passes the
 /// four guardrails (verbatim blob, same path, no Changed sibling, opt-in active).
+///
+/// Carries both the anchored (old) coordinates and the destination (new)
+/// coordinates so callers can rewrite wiki link fragments without depending on
+/// `git mesh stale --compact --auto-follow` having advanced the mesh state.
+/// `--auto-follow` is a no-op against staged-but-not-committed content; reading
+/// `moved_to.extent` directly is the only path that works in both staged and
+/// committed cases.
 #[derive(Debug)]
 pub struct MeshMovePlan {
     #[allow(dead_code)]
@@ -696,14 +703,18 @@ pub struct MeshMovePlan {
     pub old_path: PathBuf,
     pub old_start: u32,
     pub old_end: u32,
+    #[allow(dead_code)]
+    pub new_path: PathBuf,
+    pub new_start: u32,
+    pub new_end: u32,
 }
 
-/// Run `git mesh stale --format=porcelain` and return all MOVED anchors whose
-/// mesh has no CHANGED sibling. Returns `Ok(vec![])` when git-mesh is not found.
+/// Run `git mesh stale --format=json` and return all MOVED anchors whose mesh
+/// has no CHANGED sibling. Returns `Ok(vec![])` when git-mesh is not found.
 pub fn plan_mesh_follows(repo_root: &Path) -> Result<Vec<MeshMovePlan>> {
     let mut cmd = Command::new("git-mesh");
     cmd.current_dir(repo_root)
-        .args(["stale", "--format=porcelain"])
+        .args(["stale", "--format=json"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -730,42 +741,89 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<Vec<MeshMovePlan>> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim().is_empty() {
+        return Ok(vec![]);
+    }
 
-    // Porcelain format: `# porcelain v2` header, then lines:
-    //   STATUS\t-\t<mesh>\t<path>\t<start>\t<end>
-    // We skip comment lines starting with `#`.
+    parse_stale_json(&stdout)
+}
 
-    // First pass: collect all rows grouped by mesh name.
+/// Parse the JSON document emitted by `git mesh stale --format=json` into
+/// MOVED plans. Free function so unit tests can feed canned JSON.
+fn parse_stale_json(stdout: &str) -> Result<Vec<MeshMovePlan>> {
+    let v: serde_json::Value = serde_json::from_str(stdout)
+        .map_err(|e| miette::miette!("git-mesh stale --format=json: parse error: {e}"))?;
+
+    let findings = match v.get("findings").and_then(|f| f.as_array()) {
+        Some(a) => a,
+        None => return Ok(vec![]),
+    };
+
     struct Row {
         status: String,
         mesh: String,
-        path: PathBuf,
-        start: u32,
-        end: u32,
+        old_path: PathBuf,
+        old_start: u32,
+        old_end: u32,
+        new_path: Option<PathBuf>,
+        new_start: Option<u32>,
+        new_end: Option<u32>,
     }
 
     let mut rows: Vec<Row> = Vec::new();
-    for line in stdout.lines() {
-        if line.starts_with('#') || line.trim().is_empty() {
-            continue;
-        }
-        let parts: Vec<&str> = line.splitn(6, '\t').collect();
-        if parts.len() < 6 {
-            continue;
-        }
-        let status = parts[0];
-        // parts[1] is "-"
-        let mesh = parts[2];
-        let path = parts[3];
-        let start: u32 = parts[4].parse().unwrap_or(0);
-        let end: u32 = parts[5].parse().unwrap_or(0);
+    for f in findings {
+        let status = f
+            .get("status")
+            .and_then(|s| s.get("code"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+        let mesh = f
+            .get("mesh")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let anchored = f.get("anchored");
+        let old_path = anchored
+            .and_then(|a| a.get("path"))
+            .and_then(|p| p.as_str())
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        let old_extent = anchored.and_then(|a| a.get("extent"));
+        let old_start = old_extent
+            .and_then(|e| e.get("start"))
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0) as u32;
+        let old_end = old_extent
+            .and_then(|e| e.get("end"))
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0) as u32;
+
+        let moved_to = f.get("moved_to");
+        let new_path = moved_to
+            .and_then(|m| m.get("path"))
+            .and_then(|p| p.as_str())
+            .map(PathBuf::from);
+        let new_extent = moved_to.and_then(|m| m.get("extent"));
+        let new_start = new_extent
+            .and_then(|e| e.get("start"))
+            .and_then(|n| n.as_u64())
+            .map(|n| n as u32);
+        let new_end = new_extent
+            .and_then(|e| e.get("end"))
+            .and_then(|n| n.as_u64())
+            .map(|n| n as u32);
 
         rows.push(Row {
-            status: status.to_string(),
-            mesh: mesh.to_string(),
-            path: PathBuf::from(path),
-            start,
-            end,
+            status,
+            mesh,
+            old_path,
+            old_start,
+            old_end,
+            new_path,
+            new_start,
+            new_end,
         });
     }
 
@@ -777,15 +835,24 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<Vec<MeshMovePlan>> {
         }
     }
 
-    // Return MOVED rows whose mesh has no CHANGED sibling.
+    // Return MOVED rows whose mesh has no CHANGED sibling and that carry
+    // destination coordinates.
     let plans: Vec<MeshMovePlan> = rows
         .into_iter()
         .filter(|r| r.status == "MOVED" && !changed_meshes.contains(&r.mesh))
-        .map(|r| MeshMovePlan {
-            mesh_name: r.mesh,
-            old_path: r.path,
-            old_start: r.start,
-            old_end: r.end,
+        .filter_map(|r| {
+            let new_path = r.new_path?;
+            let new_start = r.new_start?;
+            let new_end = r.new_end?;
+            Some(MeshMovePlan {
+                mesh_name: r.mesh,
+                old_path: r.old_path,
+                old_start: r.old_start,
+                old_end: r.old_end,
+                new_path,
+                new_start,
+                new_end,
+            })
         })
         .collect();
 
@@ -1137,28 +1204,32 @@ pub fn run_fix_pass(
     // page fragment hrefs.
 
     // Planning phase — always run (even in dry_run) to emit SkippedFix records.
+    // `git mesh stale --format=json` reports `moved_to.extent` for every MOVED
+    // finding regardless of whether the code shift is staged or committed, so
+    // we can drive both dry-run previews and real-fix rewrites from this single
+    // read-only call. No dependence on `--auto-follow` having advanced the mesh.
     let move_plans = plan_mesh_follows(repo_root)?;
 
-    // Build a set of (path, old_start, old_end) that are eligible for rewrite.
-    let eligible: std::collections::HashSet<(PathBuf, u32, u32)> = move_plans
+    // Map (path, old_start, old_end) → (new_start, new_end) for direct lookup.
+    let eligible: HashMap<(PathBuf, u32, u32), (u32, u32)> = move_plans
         .iter()
-        .map(|p| (p.old_path.clone(), p.old_start, p.old_end))
+        .map(|p| {
+            (
+                (p.old_path.clone(), p.old_start, p.old_end),
+                (p.new_start, p.new_end),
+            )
+        })
         .collect();
 
     // Build the initial MeshIndex (before auto-follow) using all in-scope files.
     let mesh_index_opt = build_mesh_index(repo_root, files)?;
 
     if !dry_run {
-        // Application phase: invoke auto-follow to advance the mesh.
+        // Best-effort: try to advance the mesh state so later runs see HEAD.
+        // No-op when the code shift is only staged — that's fine, the wiki link
+        // rewrite below uses the planned `moved_to` coords directly.
         run_auto_follow(repo_root)?;
     }
-
-    // Rebuild the MeshIndex after auto-follow to get new coordinates.
-    let new_mesh_index_opt = if dry_run {
-        None
-    } else {
-        build_mesh_index(repo_root, files)?
-    };
 
     // For each wiki file, rewrite broken line-range links that are now covered
     // by the updated mesh.
@@ -1210,11 +1281,13 @@ pub fn run_fix_pass(
 
             // The primary signal for Fix #2 is that the mesh reports this anchor
             // as MOVED. Only attempt to rewrite links whose (target, start, end)
-            // triple is in the MOVED eligible set — even if the range is still
-            // technically within bounds (the mesh has shifted to a new position).
-            if !eligible.contains(&(resolved.clone(), old_start, old_end)) {
+            // triple matches a MOVED plan — even if the range is still technically
+            // within bounds (the mesh has shifted to a new position).
+            let Some(&(new_start, new_end)) =
+                eligible.get(&(resolved.clone(), old_start, old_end))
+            else {
                 continue;
-            }
+            };
 
             // Check initial mesh coverage (before auto-follow) to confirm both
             // the wiki page and target path are in the same mesh.
@@ -1232,58 +1305,6 @@ pub fn run_fix_pass(
                 });
                 continue;
             }
-
-            // Check if the mesh has a Changed sibling — plan_mesh_follows already
-            // filtered these out, but double-check by verifying the anchor is in `eligible`.
-            // (Already confirmed above.)
-
-            if dry_run {
-                skipped.push(SkippedFix {
-                    file: file_rel.clone(),
-                    line: link.source_line,
-                    kind: FixKind::MeshAnchorShift,
-                    reason: "dry-run: cannot preview mesh auto-follow without mutation".to_string(),
-                });
-                continue;
-            }
-
-            // Look up the new coordinates from the refreshed MeshIndex.
-            let Some(ref new_idx) = new_mesh_index_opt else {
-                continue;
-            };
-
-            // Find the new range by scanning all possible candidates. The updated
-            // MeshIndex stores the new (start, end) for this path in `by_anchor`.
-            // We need to find the new entry for `resolved` after auto-follow.
-            // Strategy: look for any anchor on `resolved` that now exists in the
-            // new index but was not in `eligible` (i.e., a different start/end).
-            let new_range = new_idx.owning_mesh_for_exact(&resolved, old_start, old_end);
-            if new_range.is_some() {
-                // The old range is still present — auto-follow didn't rewrite it.
-                // This can happen if the mesh is at HEAD already.
-                skipped.push(SkippedFix {
-                    file: file_rel.clone(),
-                    line: link.source_line,
-                    kind: FixKind::MeshAnchorShift,
-                    reason: "mesh anchor unchanged after auto-follow (already at HEAD)".to_string(),
-                });
-                continue;
-            }
-
-            // We don't have a direct API to query the new range by old path from the
-            // MeshIndex. We need to find the new (start, end) for `resolved` in the
-            // new index. Parse `git-mesh list --porcelain` for just this path.
-            let new_coords = get_new_anchor_coords(repo_root, &resolved)?;
-            let Some((new_start, new_end)) = new_coords else {
-                skipped.push(SkippedFix {
-                    file: file_rel.clone(),
-                    line: link.source_line,
-                    kind: FixKind::MeshAnchorShift,
-                    reason: "could not determine new anchor coordinates after auto-follow"
-                        .to_string(),
-                });
-                continue;
-            };
 
             if new_start == old_start && new_end == old_end {
                 // No actual change — skip.
@@ -1522,6 +1543,10 @@ pub fn run_fix_pass(
 
 /// Run `git-mesh list --porcelain` and find the current anchor coordinates for
 /// `path` (repo-relative). Returns the first match found, or `None`.
+///
+/// No longer used by Fix #2 (which now reads `moved_to` from
+/// `git mesh stale --format=json` directly), but kept for potential reuse.
+#[allow(dead_code)]
 fn get_new_anchor_coords(repo_root: &Path, path: &Path) -> Result<Option<(u32, u32)>> {
     let mut cmd = Command::new("git-mesh");
     cmd.current_dir(repo_root)

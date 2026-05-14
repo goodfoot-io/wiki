@@ -1097,6 +1097,92 @@ mod tests {
         assert_eq!(code, 1, "expected exit 1 (broken anchor remains)");
     }
 
+    /// Fix 2: dry-run previews a staged-but-not-committed line shift using the
+    /// `moved_to` coordinates from `git mesh stale --format=json` — no mutation
+    /// required, and the mesh state need not have been advanced via
+    /// `--compact --auto-follow` (which is a no-op against staged content).
+    #[test]
+    fn fix2_dry_run_previews_staged_shift() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file("src/code.rs", "fn a() {}\n");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
+        );
+        repo.commit("baseline with mesh");
+
+        repo.git_mesh(&["add", "fix2-dry-mesh", "wiki/page.md", "src/code.rs#L1-L1"]);
+        repo.git_mesh(&["why", "fix2-dry-mesh", "-m", "Test mesh."]);
+        repo.git_mesh(&["commit"]);
+
+        // STAGE the code shift but do NOT commit it.
+        repo.create_file("src/code.rs", "// preamble\nfn a() {}\n");
+        repo.git(&["add", "src/code.rs"]);
+
+        // Dry-run via run_fix_pass so we can inspect the plan directly.
+        let files = vec![repo.path().join("wiki/page.md")];
+        let plan = check_fix::run_fix_pass(&files, repo.path(), true).expect("run_fix_pass");
+        let mesh_fix = plan
+            .fixes
+            .iter()
+            .find(|f| matches!(f.kind, check_fix::FixKind::MeshAnchorShift))
+            .expect("expected a mesh_anchor_shift fix");
+        assert_eq!(mesh_fix.old_href, "/src/code.rs#L1-L1");
+        assert_eq!(mesh_fix.new_href, "/src/code.rs#L2-L2");
+
+        // Dry-run must not have mutated the file on disk.
+        let content = std::fs::read_to_string(repo.path().join("wiki/page.md"))
+            .expect("read page");
+        assert!(
+            content.contains("#L1-L1"),
+            "expected dry-run NOT to mutate page, got:\n{content}"
+        );
+    }
+
+    /// Fix 2: real-fix rewrites the wiki link when the code shift is only staged
+    /// (not committed). The mesh anchor itself stays at the old coordinates until
+    /// the user commits and runs `git mesh stale --compact --auto-follow`, but
+    /// the wiki link reflects the planned destination immediately.
+    #[test]
+    fn fix2_applies_to_staged_shift() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file("src/code.rs", "fn a() {}\n");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
+        );
+        repo.commit("baseline with mesh");
+
+        repo.git_mesh(&["add", "fix2-staged-mesh", "wiki/page.md", "src/code.rs#L1-L1"]);
+        repo.git_mesh(&["why", "fix2-staged-mesh", "-m", "Test mesh."]);
+        repo.git_mesh(&["commit"]);
+
+        // STAGE the code shift but do NOT commit it.
+        repo.create_file("src/code.rs", "// preamble\nfn a() {}\n");
+        repo.git(&["add", "src/code.rs"]);
+
+        let _code = run(
+            &[],
+            false,
+            repo.path(),
+            true, // no_exit_code — mesh still drifted, but that's expected
+            false,
+            crate::index::DocSource::WorkingTree,
+            true,
+            false,
+        )
+        .expect("run");
+
+        let content = std::fs::read_to_string(repo.path().join("wiki/page.md"))
+            .expect("read page");
+        assert!(
+            content.contains("#L2-L2"),
+            "expected wiki link rewritten to L2-L2 for staged shift, got:\n{content}"
+        );
+    }
+
     /// Fix 3: when an inbound link uses an aliased slug, --fix rewrites it to the
     /// canonical title slug so the alias entry can later be retired.
     #[test]
