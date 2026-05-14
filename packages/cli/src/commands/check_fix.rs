@@ -37,6 +37,8 @@ pub enum FixKind {
 pub enum Confidence {
     /// One unambiguous rename; safe to apply automatically.
     High,
+    /// Plausible; one replacement at the same structural position.
+    Medium,
     /// Plausible but could be wrong; requires human review.
     Low,
 }
@@ -432,6 +434,111 @@ fn normalize_path(path: &Path) -> PathBuf {
         }
     }
     result
+}
+
+// ── Fix #5: heading position computation ─────────────────────────────────────
+
+/// Structural position of a heading within a document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadingPosition {
+    /// ATX depth (number of `#` characters): 1–6.
+    pub depth: usize,
+    /// Slug of the nearest ancestor heading with strictly smaller depth.
+    /// Empty string when there is no ancestor (top-level heading).
+    pub parent_slug: String,
+    /// 0-based index among same-depth headings sharing the same parent, in document order.
+    pub sibling_index: usize,
+}
+
+/// Compute `(Heading, HeadingPosition)` for each heading in `content`.
+///
+/// Uses `extract_headings` for slugs and depth is measured by counting leading `#` on each line.
+pub fn heading_positions(content: &str) -> Vec<(crate::headings::Heading, HeadingPosition)> {
+    // First, extract headings with their slugs via the canonical algorithm.
+    let headings = extract_headings(content);
+    if headings.is_empty() {
+        return vec![];
+    }
+
+    // Compute depth for each heading by re-scanning the content.
+    let mut depth_by_line: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for line in content.lines().enumerate().map(|(i, l)| (i + 1, l)) {
+        let (line_num, text) = line;
+        if text.starts_with('#') {
+            let depth = text.chars().take_while(|&c| c == '#').count();
+            let rest = &text[depth..];
+            if rest.starts_with(' ') {
+                depth_by_line.insert(line_num, depth);
+            }
+        }
+    }
+
+    // Track the most recent heading slug at each depth for parent computation.
+    // depth_stack[d] = slug of the most recent heading at depth d (1-indexed).
+    let mut depth_stack: Vec<Option<String>> = vec![None; 7]; // index 1..=6
+
+    // sibling_count[(depth, parent_slug)] = count so far
+    let mut sibling_counts: std::collections::HashMap<(usize, String), usize> = std::collections::HashMap::new();
+
+    let mut result = Vec::with_capacity(headings.len());
+    for h in &headings {
+        let depth = *depth_by_line.get(&h.line).unwrap_or(&1);
+
+        // Parent: most recent heading with strictly smaller depth.
+        let parent_slug = (1..depth)
+            .rev()
+            .find_map(|d| depth_stack[d].clone())
+            .unwrap_or_default();
+
+        let key = (depth, parent_slug.clone());
+        let sibling_index = *sibling_counts.get(&key).unwrap_or(&0);
+        sibling_counts.insert(key, sibling_index + 1);
+
+        // Update depth stack: clear all deeper levels when we see this depth.
+        if depth <= 6 {
+            depth_stack[depth] = Some(h.slug.clone());
+            // Clear all strictly deeper depths (they are no longer valid parents).
+            for slot in depth_stack.iter_mut().take(7).skip(depth + 1) {
+                *slot = None;
+            }
+        }
+
+        result.push((
+            h.clone(),
+            HeadingPosition {
+                depth,
+                parent_slug,
+                sibling_index,
+            },
+        ));
+    }
+
+    result
+}
+
+/// Find the heading at position `pos` in `content`. Returns the heading's slug if
+/// exactly one heading occupies that position, `None` if zero, and signals multiple
+/// via the returned `Vec` length.
+fn headings_at_position(content: &str, pos: &HeadingPosition) -> Vec<String> {
+    heading_positions(content)
+        .into_iter()
+        .filter(|(_, p)| p == pos)
+        .map(|(h, _)| h.slug)
+        .collect()
+}
+
+/// Read the HEAD blob for `rel_path` (repo-relative). Returns `Ok(None)` when not
+/// found or on any git error.
+fn read_head_blob(repo_root: &Path, rel_path: &str) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(["show", &format!("HEAD:{rel_path}")])
+        .output()
+        .map_err(|e| miette::miette!("git show failed: {e}"))?;
+    if output.status.success() && let Ok(s) = String::from_utf8(output.stdout) {
+        return Ok(Some(s));
+    }
+    Ok(None)
 }
 
 // ── Fix #2: mesh auto-follow ──────────────────────────────────────────────────
@@ -1037,6 +1144,183 @@ pub fn run_fix_pass(
                 confidence: Confidence::High,
             });
             file_patches.push((link.href_byte_start, link.href_byte_end, new_href));
+        }
+
+        if !file_patches.is_empty() {
+            file_patches.sort_by_key(|p| Reverse(p.0));
+            let base = if let Some(existing) = patches.get(file) {
+                existing.clone()
+            } else {
+                content.clone()
+            };
+            let mut patched = base;
+            for (start, end, replacement) in file_patches {
+                patched.replace_range(start..end, &replacement);
+            }
+            patches.insert(file.clone(), patched);
+        }
+    }
+
+    // ── Fix #5: heading-rename anchor rewrite ────────────────────────────────
+    //
+    // For broken_anchor diagnostics not resolved by Fix #3 (alias), find the
+    // slug in the target file's HEAD content, compute its structural position,
+    // then check the current (worktree) content for a singleton replacement at
+    // the same position. If found, rewrite the anchor.
+
+    // Cache: rel_path → HEAD content
+    let mut head_cache: HashMap<String, Option<String>> = HashMap::new();
+
+    for file in files {
+        // Use in-memory patched content if prior fixes already rewrote this file.
+        let content = if let Some(patched) = patches.get(file) {
+            patched.clone()
+        } else {
+            match std::fs::read_to_string(file) {
+                Ok(c) => c,
+                Err(_) => continue,
+            }
+        };
+
+        let frag_links = parse_fragment_links(&content);
+        let mut file_patches: Vec<(usize, usize, String)> = Vec::new();
+
+        let file_rel = file
+            .strip_prefix(repo_root)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| file.to_string_lossy().into_owned());
+
+        for link in &frag_links {
+            if link.kind == LinkKind::External {
+                continue;
+            }
+            if link.original_href.starts_with("mailto:") {
+                continue;
+            }
+
+            // Only handle non-line-range fragment links.
+            let has_fragment = link.original_href.contains('#');
+            if !has_fragment || link.start_line.is_some() {
+                continue;
+            }
+
+            let anchor = match link.original_href.find('#') {
+                Some(idx) => &link.original_href[idx + 1..],
+                None => continue,
+            };
+            if anchor.is_empty() {
+                continue;
+            }
+
+            // Resolve target file using the in-memory patched view from Fix #1.
+            let resolved = crate::commands::resolve_link_path(&link.path, file, repo_root);
+            let target_abs = repo_root.join(&resolved);
+
+            // Read current (worktree/patched) content for the target.
+            let current_target = if let Some(patched) = patches.get(&target_abs) {
+                patched.clone()
+            } else {
+                match std::fs::read_to_string(&target_abs) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                }
+            };
+
+            let current_headings = extract_headings(&current_target);
+
+            // If anchor already resolves in current content, nothing to do.
+            if resolve_heading(anchor, &current_headings) {
+                continue;
+            }
+
+            // Already handled by Fix #3 if the content still breaks — only
+            // attempt Fix #5 for anchors that Fix #3 also could not repair.
+            // (Fix #3 runs earlier; if it emitted a Fix, the patch is in
+            // `file_patches` for the *source* file. We detect that no fix was
+            // applied by the anchor still not resolving.)
+
+            let target_rel = resolved
+                .to_string_lossy()
+                .into_owned();
+
+            // Get HEAD content for the target.
+            let baseline_opt = head_cache
+                .entry(target_rel.clone())
+                .or_insert_with(|| read_head_blob(repo_root, &target_rel).unwrap_or(None));
+
+            let Some(baseline_content) = baseline_opt.as_ref() else {
+                // No HEAD baseline — cannot determine what changed.
+                continue;
+            };
+
+            let baseline_headings = extract_headings(baseline_content);
+
+            // Check that the anchor resolves in the baseline.
+            if !resolve_heading(anchor, &baseline_headings) {
+                // Slug not found in baseline either — skip (already broken before).
+                continue;
+            }
+
+            // Find the structural position of the matching heading in baseline.
+            let anchor_slug = github_slug(anchor);
+            let baseline_positions = heading_positions(baseline_content);
+            let Some((_, baseline_pos)) = baseline_positions
+                .iter()
+                .find(|(h, _)| h.slug == anchor_slug)
+                .cloned()
+            else {
+                continue;
+            };
+
+            // Find headings at the same structural position in current content.
+            let replacements = headings_at_position(&current_target, &baseline_pos);
+
+            match replacements.len() {
+                0 => {
+                    skipped.push(SkippedFix {
+                        file: file_rel.clone(),
+                        line: link.source_line,
+                        kind: FixKind::HeadingRename,
+                        reason: "heading deleted; no replacement".to_string(),
+                    });
+                }
+                1 => {
+                    let new_slug = &replacements[0];
+                    if new_slug == &anchor_slug {
+                        // Same slug — nothing changed; a different fix is needed.
+                        continue;
+                    }
+
+                    let path_part = match link.original_href.find('#') {
+                        Some(idx) => &link.original_href[..idx],
+                        None => continue,
+                    };
+                    let new_href = format!("{path_part}#{new_slug}");
+
+                    fixes.push(Fix {
+                        file: file_rel.clone(),
+                        line: link.source_line,
+                        kind: FixKind::HeadingRename,
+                        byte_start: link.href_byte_start,
+                        byte_end: link.href_byte_end,
+                        old_href: link.original_href.clone(),
+                        new_href: new_href.clone(),
+                        reason: format!(
+                            "heading `{anchor_slug}` renamed to `{new_slug}` at same structural position"
+                        ),
+                        confidence: Confidence::Medium,
+                    });
+                    file_patches.push((link.href_byte_start, link.href_byte_end, new_href));
+                }
+                n => {
+                    skipped.push(SkippedFix {
+                        file: file_rel.clone(),
+                        line: link.source_line,
+                        kind: FixKind::HeadingRename,
+                        reason: format!("heading split into {n} replacements"),
+                    });
+                }
+            }
         }
 
         if !file_patches.is_empty() {

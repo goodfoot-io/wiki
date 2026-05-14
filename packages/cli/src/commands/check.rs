@@ -1174,7 +1174,6 @@ mod tests {
     /// Fix 5: when a heading was renamed in place (same section position), --fix
     /// updates the anchor in all linking wiki pages.
     #[test]
-    #[ignore]
     fn fix5_heading_rename_same_position_rewrites() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
@@ -1217,7 +1216,6 @@ mod tests {
 
     /// Fix 5 skip: when a heading was split into two or more headings, do not apply.
     #[test]
-    #[ignore]
     fn fix5_skips_when_heading_split() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
@@ -1248,7 +1246,6 @@ mod tests {
     /// Fix 5 skip: when the heading was removed and other headings were restructured,
     /// do not attempt a fix.
     #[test]
-    #[ignore]
     fn fix5_skips_when_heading_restructured() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
