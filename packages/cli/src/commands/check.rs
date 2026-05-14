@@ -191,7 +191,20 @@ pub fn run(
             return Ok(0);
         }
 
-        // Non-dry-run: stub returns empty plan, so just re-collect and emit post-fix diagnostics.
+        // Emit human-readable fix/skip summary before re-checking.
+        if !json {
+            for f in &plan.fixes {
+                println!(
+                    "fixed: {}:{}  broken_link  {} → {}  ({})",
+                    f.file, f.line, f.old_href, f.new_href, f.reason
+                );
+            }
+            for s in &plan.skipped {
+                println!("skipped: {}:{}  broken_link  reason: {}", s.file, s.line, s.reason);
+            }
+        }
+
+        // Non-dry-run: re-collect and emit post-fix diagnostics.
         let post_diagnostics =
             match collect_for_files(&files, &index_files, repo_root, no_mesh, source) {
                 Ok(d) => d,
@@ -208,9 +221,11 @@ pub fn run(
         if json {
             println!(
                 "{}",
-                serde_json::to_string_pretty(
-                    &serde_json::json!({ "errors": post_diagnostics })
-                )
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "fixes": plan.fixes,
+                    "skipped": plan.skipped,
+                    "errors": post_diagnostics,
+                }))
                 .unwrap()
             );
         } else {
@@ -894,7 +909,6 @@ mod tests {
 
     /// Fix 1: when a link target was renamed in git, --fix rewrites the path.
     #[test]
-    #[ignore]
     fn fix1_broken_link_rewrites_renamed_path() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
@@ -932,7 +946,6 @@ mod tests {
 
     /// Fix 1 skip: when the rename target was deleted (not moved), skip the fix.
     #[test]
-    #[ignore]
     fn fix1_skips_when_target_deleted() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
@@ -957,7 +970,6 @@ mod tests {
 
     /// Fix 1 skip: when a path maps to multiple rename targets, skip (ambiguous).
     #[test]
-    #[ignore]
     fn fix1_skips_when_rename_ambiguous() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
