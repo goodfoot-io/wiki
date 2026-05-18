@@ -6,8 +6,13 @@ CLI_PKG="$REPO_ROOT/packages/cli/package.json"
 EXT_PKG="$REPO_ROOT/packages/extension/package.json"
 
 # --- Read versions ---
-CLI_VERSION=$(node -pe "require('$CLI_PKG').version")
-EXT_VERSION=$(node -pe "require('$EXT_PKG').version")
+# Pass paths through the environment: a Windows path interpolated into the JS
+# source would have its backslashes eaten as escape sequences.
+read_version() {
+  P="$1" node -e 'console.log(JSON.parse(require("fs").readFileSync(process.env.P,"utf8")).version || "")'
+}
+CLI_VERSION=$(read_version "$CLI_PKG")
+EXT_VERSION=$(read_version "$EXT_PKG")
 
 if [[ ! "$CLI_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "ERROR: Version '$CLI_VERSION' in packages/cli/package.json is not valid semver." >&2

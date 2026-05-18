@@ -100,6 +100,36 @@ jobs:
             cd ../..
           done
 
+      - name: Verify committed bin stub
+        working-directory: packages/cli
+        run: |
+          ls -la bin/
+          STUB=bin/wiki.exe
+          if [ ! -f "$STUB" ] || [ -L "$STUB" ]; then
+            echo "ERROR: packages/cli/$STUB must be a regular file, not a symlink or missing." >&2
+            echo "       A symlink here is silently dropped by npm publish, breaking bin-linking on consumers." >&2
+            exit 1
+          fi
+          # The committed bin/wiki.exe is a harmless text stub that
+          # postinstall replaces with the native binary. The `bin` field points
+          # at it on every platform: the `.exe` suffix makes npm/yarn/pnpm
+          # cmd-shim emit a direct exec that runs on Windows, while Unix
+          # ignores the suffix and execs by mode bit. The stub's first line
+          # must have NO `#!` shebang or npm would route it through /bin/sh
+          # (which fails on a Windows PE). Guard: small, no shebang, sentinel.
+          if [ "$(wc -c < "$STUB")" -gt 1024 ]; then
+            echo "ERROR: packages/cli/$STUB is too large to be the stub (real binary committed?)." >&2
+            exit 1
+          fi
+          if head -c 2 "$STUB" | grep -q '#!'; then
+            echo "ERROR: packages/cli/$STUB has a shebang; npm would route it through /bin/sh and break Windows." >&2
+            exit 1
+          fi
+          if ! grep -q 'replaces this file' "$STUB"; then
+            echo "ERROR: packages/cli/$STUB does not look like the expected stub." >&2
+            exit 1
+          fi
+
       - name: Publish meta-package
         working-directory: packages/cli
         run: |

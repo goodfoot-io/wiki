@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::commands::resolve_link_path;
 use crate::parser::{LinkKind, parse_fragment_links};
@@ -206,7 +206,7 @@ fn run_git_mesh_ls_all(
     files: &[PathBuf],
     out: &mut Vec<CheckDiagnostic>,
 ) -> Result<Option<MeshIndex>, miette::Error> {
-    let mut cmd = Command::new("git-mesh");
+    let mut cmd = super::git_mesh_command();
     cmd.current_dir(repo_root)
         .args(["list", "--porcelain", "--batch"])
         .stdin(Stdio::piped())

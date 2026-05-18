@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Every Node invocation here receives paths and values through the environment,
+# never string-interpolated into the JS source. On Windows a path such as
+# `C:\Users\johnw` interpolated into a JS string literal has its backslashes
+# consumed as escape sequences (`\U`, `\j`, ...) and silently corrupts, which
+# previously broke `yarn bump`.
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SOURCE="$REPO_ROOT/packages/cli/package.json"
 
@@ -9,7 +15,20 @@ if [ ! -f "$SOURCE" ]; then
   exit 1
 fi
 
-VERSION=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$SOURCE','utf8')).version)")
+read_version() {
+  P="$1" node -e 'console.log(JSON.parse(require("fs").readFileSync(process.env.P,"utf8")).version || "")'
+}
+
+set_version() {
+  P="$1" V="$2" node -e '
+    const fs = require("fs");
+    const pkg = JSON.parse(fs.readFileSync(process.env.P, "utf8"));
+    pkg.version = process.env.V;
+    fs.writeFileSync(process.env.P, JSON.stringify(pkg, null, 2) + "\n");
+  '
+}
+
+VERSION=$(read_version "$SOURCE")
 
 if [ -z "$VERSION" ]; then
   echo "Error: Could not read version from $SOURCE" >&2
@@ -26,14 +45,9 @@ updated=0
 for pkg_dir in "$REPO_ROOT"/npm/wiki-*/; do
   pkg_json="$pkg_dir/package.json"
   if [ -f "$pkg_json" ]; then
-    current=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$pkg_json','utf8')).version)")
+    current=$(read_version "$pkg_json")
     if [ "$current" != "$VERSION" ]; then
-      node -e "
-        const fs = require('fs');
-        const pkg = JSON.parse(fs.readFileSync('$pkg_json', 'utf8'));
-        pkg.version = '$VERSION';
-        fs.writeFileSync('$pkg_json', JSON.stringify(pkg, null, 2) + '\n');
-      "
+      set_version "$pkg_json" "$VERSION"
       echo "Updated: $pkg_json ($current -> $VERSION)"
       updated=$((updated + 1))
     else
@@ -45,42 +59,38 @@ done
 # Update optionalDependencies in packages/cli/package.json
 cli_json="$REPO_ROOT/packages/cli/package.json"
 if [ -f "$cli_json" ]; then
-  node -e "
-    const fs = require('fs');
-    const pkg = JSON.parse(fs.readFileSync('$cli_json', 'utf8'));
+  result=$(P="$cli_json" V="$VERSION" node -e '
+    const fs = require("fs");
+    const pkg = JSON.parse(fs.readFileSync(process.env.P, "utf8"));
     let changed = false;
     if (pkg.optionalDependencies) {
       for (const [name, ver] of Object.entries(pkg.optionalDependencies)) {
-        if (ver !== '$VERSION') {
-          pkg.optionalDependencies[name] = '$VERSION';
+        if (ver !== process.env.V) {
+          pkg.optionalDependencies[name] = process.env.V;
           changed = true;
         }
       }
     }
     if (changed) {
-      fs.writeFileSync('$cli_json', JSON.stringify(pkg, null, 2) + '\n');
+      fs.writeFileSync(process.env.P, JSON.stringify(pkg, null, 2) + "\n");
     }
-    process.stdout.write(changed ? 'updated' : 'ok');
-  "
-  result=$?
+    process.stdout.write(changed ? "updated" : "ok");
+  ')
   echo ""
-  if [ $result -eq 0 ]; then
+  if [ "$result" = "updated" ]; then
     echo "Updated: $cli_json optionalDependencies -> $VERSION"
     updated=$((updated + 1))
+  else
+    echo "OK:      $cli_json optionalDependencies (already $VERSION)"
   fi
 fi
 
 # Update packages/extension/package.json
 ext_json="$REPO_ROOT/packages/extension/package.json"
 if [ -f "$ext_json" ]; then
-  current=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$ext_json','utf8')).version)")
+  current=$(read_version "$ext_json")
   if [ "$current" != "$VERSION" ]; then
-    node -e "
-      const fs = require('fs');
-      const pkg = JSON.parse(fs.readFileSync('$ext_json', 'utf8'));
-      pkg.version = '$VERSION';
-      fs.writeFileSync('$ext_json', JSON.stringify(pkg, null, 2) + '\n');
-    "
+    set_version "$ext_json" "$VERSION"
     echo "Updated: $ext_json ($current -> $VERSION)"
     updated=$((updated + 1))
   else
@@ -142,14 +152,9 @@ fi
 for plugin_dir in "$REPO_ROOT"/plugins/*/; do
   plugin_json="$plugin_dir/.claude-plugin/plugin.json"
   if [ -f "$plugin_json" ]; then
-    current=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$plugin_json','utf8')).version || '')")
+    current=$(read_version "$plugin_json")
     if [ -n "$current" ] && [ "$current" != "$VERSION" ]; then
-      node -e "
-        const fs = require('fs');
-        const pkg = JSON.parse(fs.readFileSync('$plugin_json', 'utf8'));
-        pkg.version = '$VERSION';
-        fs.writeFileSync('$plugin_json', JSON.stringify(pkg, null, 2) + '\n');
-      "
+      set_version "$plugin_json" "$VERSION"
       echo "Updated: $plugin_json ($current -> $VERSION)"
       updated=$((updated + 1))
     else
@@ -161,21 +166,21 @@ done
 # Update marketplace manifest at .claude-plugin/marketplace.json
 market_json="$REPO_ROOT/.claude-plugin/marketplace.json"
 if [ -f "$market_json" ]; then
-  result=$(node -e "
-    const fs = require('fs');
-    const data = JSON.parse(fs.readFileSync('$market_json', 'utf8'));
+  result=$(P="$market_json" V="$VERSION" node -e '
+    const fs = require("fs");
+    const data = JSON.parse(fs.readFileSync(process.env.P, "utf8"));
     let changed = false;
     for (const p of (data.plugins || [])) {
-      if (p && Object.prototype.hasOwnProperty.call(p, 'version') && p.version !== '$VERSION') {
-        p.version = '$VERSION';
+      if (p && Object.prototype.hasOwnProperty.call(p, "version") && p.version !== process.env.V) {
+        p.version = process.env.V;
         changed = true;
       }
     }
     if (changed) {
-      fs.writeFileSync('$market_json', JSON.stringify(data, null, 2) + '\n');
+      fs.writeFileSync(process.env.P, JSON.stringify(data, null, 2) + "\n");
     }
-    process.stdout.write(changed ? 'updated' : 'ok');
-  ")
+    process.stdout.write(changed ? "updated" : "ok");
+  ')
   if [ "$result" = "updated" ]; then
     echo "Updated: $market_json -> $VERSION"
     updated=$((updated + 1))

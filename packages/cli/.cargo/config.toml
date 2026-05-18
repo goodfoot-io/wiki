@@ -1,0 +1,7 @@
+# On Windows the validate/build scripts run cargo from an MSYS bash shell whose
+# /usr/bin is ahead on PATH, so rustc resolves `link.exe` to GNU coreutils'
+# `link` (from Git for Windows) instead of the MSVC linker, breaking the link
+# step. Use the linker bundled with the Rust toolchain for the MSVC target so
+# linking is independent of PATH ordering. Target-gated: Linux/macOS unaffected.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"

@@ -712,7 +712,7 @@ pub struct MeshMovePlan {
 /// Run `git mesh stale --format=json` and return all MOVED anchors whose mesh
 /// has no CHANGED sibling. Returns `Ok(vec![])` when git-mesh is not found.
 pub fn plan_mesh_follows(repo_root: &Path) -> Result<Vec<MeshMovePlan>> {
-    let mut cmd = Command::new("git-mesh");
+    let mut cmd = super::git_mesh_command();
     cmd.current_dir(repo_root)
         .args(["stale", "--format=json"])
         .stdin(Stdio::null())
@@ -866,7 +866,7 @@ fn parse_stale_json(stdout: &str) -> Result<Vec<MeshMovePlan>> {
 /// After auto-follow completes, re-read the `MeshIndex` via `build_mesh_index` so
 /// callers can query the new line ranges for each anchor.
 fn run_auto_follow(repo_root: &Path) -> Result<()> {
-    let mut cmd = Command::new("git-mesh");
+    let mut cmd = super::git_mesh_command();
     cmd.current_dir(repo_root)
         .args(["stale", "--compact", "--auto-follow", "--format=json"])
         .stdin(Stdio::null())
@@ -1548,7 +1548,7 @@ pub fn run_fix_pass(
 /// `git mesh stale --format=json` directly), but kept for potential reuse.
 #[allow(dead_code)]
 fn get_new_anchor_coords(repo_root: &Path, path: &Path) -> Result<Option<(u32, u32)>> {
-    let mut cmd = Command::new("git-mesh");
+    let mut cmd = super::git_mesh_command();
     cmd.current_dir(repo_root)
         .args(["list", "--porcelain"])
         .stdin(Stdio::piped())

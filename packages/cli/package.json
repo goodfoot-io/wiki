@@ -1,7 +1,7 @@
 {
   "name": "@goodfoot/wiki",
-  "version": "0.5.63",
-  "bin": "bin/wiki",
+  "version": "0.5.64",
+  "bin": "bin/wiki.exe",
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
     "build": "env PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=target/build cargo build --release",
@@ -12,15 +12,15 @@
     "typecheck": "env PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=target/typecheck cargo check --quiet"
   },
   "files": [
-    "bin/",
+    "bin/wiki.exe",
     "scripts/postinstall.js"
   ],
   "optionalDependencies": {
-    "@goodfoot/wiki-darwin-arm64": "0.5.63",
-    "@goodfoot/wiki-darwin-x64": "0.5.63",
-    "@goodfoot/wiki-linux-arm64": "0.5.63",
-    "@goodfoot/wiki-linux-x64": "0.5.63",
-    "@goodfoot/wiki-win32-x64": "0.5.63"
+    "@goodfoot/wiki-darwin-arm64": "0.5.64",
+    "@goodfoot/wiki-darwin-x64": "0.5.64",
+    "@goodfoot/wiki-linux-arm64": "0.5.64",
+    "@goodfoot/wiki-linux-x64": "0.5.64",
+    "@goodfoot/wiki-win32-x64": "0.5.64"
   },
   "repository": {
     "type": "git",

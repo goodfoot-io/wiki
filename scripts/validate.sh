@@ -12,18 +12,37 @@ else
   BUILD_CMD="SKIP_INSTALL=1 yarn build"
 fi
 
-# Prefer the locally-built wiki binary so that wiki check uses the same version
-# of the CLI that the repo builds (avoids ancestor-walk behaviour in older installs).
+# `wiki check` must run the CLI built from THIS tree, not whatever stale `wiki`
+# is on PATH (e.g. the VS Code extension's installed binary), or it will miss
+# fixes in this commit. Build the CLI release up front, then prepend its
+# directory to PATH. Binary name and target dir are platform/script specific:
+# `yarn build` uses CARGO_TARGET_DIR=target/build, and Windows produces
+# `wiki.exe`.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LOCAL_WIKI="$SCRIPT_DIR/../packages/cli/target/release/wiki"
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) BIN_NAME="wiki.exe" ;;
+  *) BIN_NAME="wiki" ;;
+esac
+
+echo "validate.sh: building CLI release so wiki check uses this tree's binary..." >&2
+if ! yarn workspace @goodfoot/wiki build; then
+  echo "validate.sh: CLI release build failed" >&2
+  exit 1
+fi
+
+LOCAL_WIKI="$SCRIPT_DIR/../packages/cli/target/build/release/$BIN_NAME"
 if [ -x "$LOCAL_WIKI" ]; then
   export PATH="$(dirname "$LOCAL_WIKI"):$PATH"
+  echo "validate.sh: using $("$LOCAL_WIKI" --version 2>/dev/null || echo "$LOCAL_WIKI")" >&2
+else
+  echo "validate.sh: expected built binary not found at $LOCAL_WIKI" >&2
+  exit 1
 fi
 
 {
   yarn typecheck &&
   yarn lint &&
-  wiki check &&
+  "$LOCAL_WIKI" check &&
   yarn test &&
   eval "$BUILD_CMD"
 } 2>&1 | tee yarn-validate-output.log

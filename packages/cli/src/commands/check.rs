@@ -528,6 +528,14 @@ mod tests {
             let repo = TestRepo { dir };
             repo.git(&["init"]);
             repo.git(&["checkout", "-b", "main"]);
+            // Persist identity in the repo's local config, not just via env on
+            // our own `git` calls. `wiki check --fix` spawns `git-mesh`
+            // (auto-follow) as a subprocess that does NOT inherit our per-call
+            // env vars; without a configured identity that subprocess cannot
+            // record the advanced anchor, so coverage would see stale ranges.
+            // Real environments always have a git identity — mirror that.
+            repo.git(&["config", "user.email", "test@example.com"]);
+            repo.git(&["config", "user.name", "Test Author"]);
             repo
         }
 
@@ -571,7 +579,7 @@ mod tests {
         }
 
         fn git_mesh(&self, args: &[&str]) {
-            let output = Command::new("git-mesh")
+            let output = crate::commands::git_mesh_command()
                 .current_dir(self.dir.path())
                 .args(args)
                 .env("GIT_AUTHOR_NAME", "Test Author")
@@ -782,7 +790,7 @@ mod tests {
 
     #[test]
     fn mesh_uncovered_link_exits_1() {
-        let _guard = PATH_MUTEX.lock().expect("path mutex");
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file(
@@ -817,7 +825,7 @@ mod tests {
 
     #[test]
     fn mesh_covered_link_exits_0() {
-        let _guard = PATH_MUTEX.lock().expect("path mutex");
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file(
