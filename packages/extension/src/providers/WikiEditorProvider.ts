@@ -24,6 +24,30 @@ interface WikiSummaryJson {
 }
 
 /**
+ * Resolve a webview link's path component to an absolute filesystem path.
+ *
+ * A leading-`/` path is workspace-root-absolute (mirroring the Rust
+ * resolver [resolve_link_path](../../../cli/src/commands/mod.rs)): the
+ * leading slash is stripped and the remainder resolved against
+ * `workspaceRoot`. The leading slash is detected explicitly, before
+ * `path.isAbsolute`, because on POSIX `/foo` is filesystem-absolute and
+ * would otherwise be opened as a non-existent root path. Genuine
+ * (non-`/`-rooted) absolute paths and relative paths are unchanged.
+ *
+ * @param rawPath       - The link's path component (fragment already stripped).
+ * @param sourceDir     - Directory of the linking document.
+ * @param workspaceRoot - Absolute path to the workspace root.
+ * @returns The absolute target path.
+ */
+export function resolveWebviewLinkPath(rawPath: string, sourceDir: string, workspaceRoot?: string): string {
+  if (rawPath.startsWith('/')) {
+    const rest = rawPath.replace(/^\/+/, '');
+    return workspaceRoot != null ? path.resolve(workspaceRoot, rest) : rawPath;
+  }
+  return path.isAbsolute(rawPath) ? rawPath : path.resolve(sourceDir, rawPath);
+}
+
+/**
  * Registers as a custom text editor for `.md` files. Each open document gets
  * its own webview panel with isolated state.
  */
@@ -204,7 +228,7 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     }
 
     const sourceDir = path.dirname(documentUri.fsPath);
-    const absPath = path.isAbsolute(rawPath) ? rawPath : path.resolve(sourceDir, rawPath);
+    const absPath = resolveWebviewLinkPath(rawPath, sourceDir, this._workspaceRoot());
     const targetUri = vscode.Uri.file(absPath);
 
     try {

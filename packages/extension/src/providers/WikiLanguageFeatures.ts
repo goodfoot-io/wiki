@@ -83,16 +83,30 @@ async function readFrontmatter(absPath: string): Promise<FrontmatterInfo | null>
  * `fromFile`'s directory. Returns null for non-internal targets (http(s)/mailto/
  * fragment-only).
  *
- * @param href     - Raw markdown link target.
- * @param fromFile - Absolute path to the linking file.
+ * A leading-`/` href is workspace-root-absolute (mirroring the Rust
+ * resolver [resolve_link_path](../../../cli/src/commands/mod.rs)): the
+ * leading slash is stripped and the remainder resolved against
+ * `workspaceRoot`. This is detected explicitly, before `path.isAbsolute`,
+ * because on POSIX `/foo` is filesystem-absolute and would otherwise be
+ * mis-resolved to a non-existent root path.
+ *
+ * @param href          - Raw markdown link target.
+ * @param fromFile      - Absolute path to the linking file.
+ * @param workspaceRoot - Absolute path to the workspace root, used to
+ *                        resolve workspace-root-absolute (`/`-rooted) links.
  * @returns The absolute target path, or null when the link is external/empty.
  */
-function resolveLinkTarget(href: string, fromFile: string): string | null {
+export function resolveLinkTarget(href: string, fromFile: string, workspaceRoot?: string): string | null {
   if (href === '' || href.startsWith('#')) return null;
   if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return null;
   const hashIdx = href.indexOf('#');
   const rawPath = hashIdx >= 0 ? href.slice(0, hashIdx) : href;
   if (rawPath === '') return null;
+  if (rawPath.startsWith('/')) {
+    const rest = rawPath.replace(/^\/+/, '');
+    if (workspaceRoot != null) return path.normalize(path.resolve(workspaceRoot, rest));
+    return path.normalize(rawPath);
+  }
   if (path.isAbsolute(rawPath)) return path.normalize(rawPath);
   return path.normalize(path.resolve(path.dirname(fromFile), rawPath));
 }
@@ -272,7 +286,7 @@ export class WikiLanguageFeatures {
         const link = this._findMarkdownLinkAtPosition(document, position);
         if (link == null) return undefined;
 
-        const absTarget = resolveLinkTarget(link.href, document.uri.fsPath);
+        const absTarget = resolveLinkTarget(link.href, document.uri.fsPath, this._workspaceRoot());
         if (absTarget == null) return undefined;
 
         const fm = await readFrontmatter(absTarget);
@@ -338,7 +352,8 @@ export class WikiLanguageFeatures {
         if (!this._isMarkdownFile(document.uri)) return undefined;
 
         const link = this._findMarkdownLinkAtPosition(document, position);
-        const targetPath = link != null ? resolveLinkTarget(link.href, document.uri.fsPath) : document.uri.fsPath;
+        const targetPath =
+          link != null ? resolveLinkTarget(link.href, document.uri.fsPath, this._workspaceRoot()) : document.uri.fsPath;
         if (targetPath == null) return undefined;
 
         return this._findIncomingLinks(targetPath);
@@ -372,7 +387,7 @@ export class WikiLanguageFeatures {
         let match: RegExpExecArray | null;
         for (match = re.exec(lineText); match !== null; match = re.exec(lineText)) {
           const href = match[2]!;
-          const resolved = resolveLinkTarget(href, fileUri.fsPath);
+          const resolved = resolveLinkTarget(href, fileUri.fsPath, this._workspaceRoot());
           if (resolved !== targetAbsPath) continue;
           const hrefStart = lineText.indexOf(href, match.index);
           if (hrefStart < 0) continue;
@@ -422,7 +437,7 @@ export class WikiLanguageFeatures {
           const hashIdx = href.indexOf('#');
           const rawPath = hashIdx >= 0 ? href.slice(0, hashIdx) : href;
           const fragment = hashIdx >= 0 ? href.slice(hashIdx) : '';
-          const resolved = resolveLinkTarget(rawPath, fileUri.fsPath);
+          const resolved = resolveLinkTarget(rawPath, fileUri.fsPath, this._workspaceRoot());
           if (resolved !== oldAbsPath) continue;
 
           const newRel = path.relative(path.dirname(fileUri.fsPath), newAbsPath);
@@ -457,7 +472,7 @@ export class WikiLanguageFeatures {
         const link = this._findMarkdownLinkAtPosition(document, position);
         if (link == null) return undefined;
 
-        const oldAbs = resolveLinkTarget(link.href, document.uri.fsPath);
+        const oldAbs = resolveLinkTarget(link.href, document.uri.fsPath, this._workspaceRoot());
         if (oldAbs == null) return undefined;
 
         // newName is the user-supplied new relative href, interpreted from
