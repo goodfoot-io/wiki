@@ -1,16 +1,23 @@
 #!/bin/bash
 # Repository post-commit hook: wiki validation (informational)
 
+# --- Wiki mesh-coverage scaffolding (deferred, non-blocking) ---
+# Blocking link/frontmatter validation runs in pre-commit. Here we surface
+# fragment links that lack git mesh coverage and print the exact
+# `git mesh add` / `git mesh why` commands for the committer to review.
 WIKI_BIN=$(command -v wiki || true)
 if [ -n "$WIKI_BIN" ]; then
   WIKI_JSON=$("$WIKI_BIN" check --format json --no-exit-code 2>&1) || true
 
   if command -v jq >/dev/null 2>&1 && [ -n "$WIKI_JSON" ]; then
-    MESH_FILES=$(echo "$WIKI_JSON" | jq -r '[.errors[] | select(.kind == "mesh_uncovered") | .file] | unique | .[]' 2>/dev/null || true)
-    if [ -n "$MESH_FILES" ]; then
-      MESH_ARGS=$(echo "$MESH_FILES" | tr '\n' ' ')
-      # shellcheck disable=SC2086
-      "$WIKI_BIN" scaffold $MESH_ARGS
+    # Read one path per line into an array (mapfile -t) and pass the array
+    # quoted to scaffold, so paths containing spaces survive as single args.
+    mapfile -t MESH_FILES < <(echo "$WIKI_JSON" \
+      | jq -r '[.errors[] | select(.kind == "mesh_uncovered") | .file] | unique | .[]' \
+      2>/dev/null || true)
+    if [ ${#MESH_FILES[@]} -gt 0 ]; then
+      echo "Wiki fragment links lack mesh coverage. Review and run:"
+      "$WIKI_BIN" scaffold "${MESH_FILES[@]}"
     fi
   fi
 fi

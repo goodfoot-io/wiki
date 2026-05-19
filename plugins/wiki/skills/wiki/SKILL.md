@@ -100,4 +100,4 @@ git commit
 
 - **`references/cli.md`** — full CLI surface (less-common subcommands and flags: `summary`, `links`, `refs`, `list`, `extract`, `hook`, `install`; `--no-mesh`, `--no-exit-code`, `--format json`, `--source`, `-l/-o`). **Use when** reaching past the day-to-day commands above.
 - **`references/maintenance.md`** — keeping a wiki current with `git mesh`: `git mesh stale` → re-anchor → `wiki check` → `wiki scaffold`, and writing a durable `why`. **Use when** anchors have drifted, when meshes go stale, or when curating wiki health.
-- **`references/git-hook-setup.md`** — two-phase git hooks: `pre-commit` blocks broken links and bad frontmatter; `post-commit` auto-scaffolds mesh coverage. **Use when** wiring wiki validation into a repo for the first time, or debugging why a commit was blocked or auto-scaffolded.
+- **`references/git-hook-setup.md`** — two-phase git hooks: `pre-commit` auto-fixes drifted links/frontmatter and re-stages them; `post-commit` auto-scaffolds mesh coverage. **Use when** wiring wiki validation into a repo for the first time, or debugging why files were re-staged or mesh scaffolding was suggested.
