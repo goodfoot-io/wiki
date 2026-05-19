@@ -108,7 +108,8 @@ If you want to add a `why` to a mesh for curation purposes, do so separately aft
 
 ```bash
 git mesh why <slug> -m "Description of what this mesh covers."
-git mesh commit
+git add .mesh/
+git commit -m "wiki: add mesh why for <slug>"
 ```
 
 ---

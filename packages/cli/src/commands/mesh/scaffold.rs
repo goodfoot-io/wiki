@@ -60,12 +60,34 @@ pub(crate) struct ParseError {
 
 // ── JSON output types ─────────────────────────────────────────────────────────
 
-/// A mesh that was dropped because one of its anchor paths does not exist.
+/// Why a draft was dropped pre-apply.
+///
+/// Both variants are *fixable wiki conditions* surfaced as advisories — they
+/// must NOT escalate to a non-zero exit, otherwise a routine drifted wiki link
+/// would lock the repository via the fail-closed pre-commit hook.
+#[derive(Debug, Clone)]
+pub(crate) enum DropReason {
+    /// An anchor's code target file is absent in the active source.
+    MissingPath { path: String },
+    /// An anchor is statically invalid for git-mesh: line range exceeds the
+    /// target file's line count, start > end, or start < 1.
+    InvalidAnchor { anchor: String, detail: String },
+}
+
+/// A mesh that was dropped pre-apply (missing target or invalid anchor).
 #[derive(Debug, Clone)]
 pub(crate) struct DroppedMesh {
     pub(crate) slug: String,
-    pub(crate) missing_path: String,
+    pub(crate) reason: DropReason,
     pub(crate) page: String,
+}
+
+/// Machine-stable dropped-mesh category tags.
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DroppedMeshCategory {
+    MissingPath,
+    InvalidAnchor,
 }
 
 /// JSON representation of a dropped mesh.
@@ -73,7 +95,12 @@ pub(crate) struct DroppedMesh {
 #[serde(rename_all = "camelCase")]
 struct DroppedMeshJson {
     slug: String,
-    missing_path: String,
+    category: DroppedMeshCategory,
+    /// The missing path (missing-path drops) or the offending anchor
+    /// (invalid-anchor drops).
+    anchor: String,
+    /// Human-readable reason; for missing paths this is empty.
+    detail: String,
     page: String,
 }
 
@@ -306,7 +333,31 @@ pub fn run(
             if missing {
                 dropped_meshes.push(DroppedMesh {
                     slug: draft.slug.clone(),
-                    missing_path: anchor.path.clone(),
+                    reason: DropReason::MissingPath {
+                        path: anchor.path.clone(),
+                    },
+                    page: draft.page_path.clone(),
+                });
+                return false;
+            }
+            // The path exists — statically validate the anchor's line range
+            // against the target file before it ever reaches `git mesh add`.
+            // An over-range / inverted / zero-start anchor is a drifted wiki
+            // link (a fixable wiki condition), NOT a hard build failure: drop
+            // it with a named advisory and let scaffold exit 0 so the
+            // fail-closed pre-commit hook does not lock the whole repository.
+            if let Some(detail) =
+                invalid_anchor_detail(repo_root, anchor, source, &source_paths)
+            {
+                dropped_meshes.push(DroppedMesh {
+                    slug: draft.slug.clone(),
+                    reason: DropReason::InvalidAnchor {
+                        anchor: format!(
+                            "{}#L{}-L{}",
+                            anchor.path, anchor.start_line, anchor.end_line
+                        ),
+                        detail,
+                    },
                     page: draft.page_path.clone(),
                 });
                 return false;
@@ -326,10 +377,21 @@ pub fn run(
             .collect();
         let dropped_meshes_json: Vec<DroppedMeshJson> = dropped_meshes
             .iter()
-            .map(|d| DroppedMeshJson {
-                slug: d.slug.clone(),
-                missing_path: d.missing_path.clone(),
-                page: d.page.clone(),
+            .map(|d| match &d.reason {
+                DropReason::MissingPath { path } => DroppedMeshJson {
+                    slug: d.slug.clone(),
+                    category: DroppedMeshCategory::MissingPath,
+                    anchor: path.clone(),
+                    detail: String::new(),
+                    page: d.page.clone(),
+                },
+                DropReason::InvalidAnchor { anchor, detail } => DroppedMeshJson {
+                    slug: d.slug.clone(),
+                    category: DroppedMeshCategory::InvalidAnchor,
+                    anchor: anchor.clone(),
+                    detail: detail.clone(),
+                    page: d.page.clone(),
+                },
             })
             .collect();
         let pages = build_pages_json(&consolidated, &page_titles, &parse_error_paths);
@@ -417,8 +479,12 @@ fn apply_drafts(drafts: &[MeshDraft], repo_root: &Path) -> Result<i32> {
                 );
             } else {
                 let already = applied.join(", ");
+                // git-mesh stderr has no trailing newline; emit an explicit
+                // newline so the failure reason and the partial-mutation
+                // disclosure never run together on one line.
+                let stderr = stderr.trim_end();
                 eprintln!(
-                    "wiki scaffold: `git mesh add {slug}` failed: {stderr}\
+                    "wiki scaffold: `git mesh add {slug}` failed: {stderr}\n\
                      already created this run: {already}; aborted at {slug}"
                 );
             }
@@ -955,6 +1021,62 @@ fn path_relative_to(path: &Path, repo_root: &Path) -> String {
     rel.to_string_lossy().replace('\\', "/")
 }
 
+/// Statically validate a structured anchor's line range against the target
+/// file the same way git-mesh would, *before* `git mesh add` is invoked.
+///
+/// Returns `Some(detail)` describing why the anchor is invalid (mirroring
+/// git-mesh's own diagnostics), or `None` when the anchor is acceptable.
+/// `None` here means "let it through" — a genuine `git mesh add` failure on
+/// an otherwise-valid anchor must still fail closed downstream.
+fn invalid_anchor_detail(
+    repo_root: &Path,
+    anchor: &draft::StructuredAnchor,
+    source: DocSource,
+    source_paths: &Option<std::collections::HashSet<String>>,
+) -> Option<String> {
+    let (start, end) = (anchor.start_line, anchor.end_line);
+    // start < 1 (git-mesh uses 1-based inclusive line numbers).
+    if start < 1 {
+        return Some(format!("start line {start} is below 1"));
+    }
+    // Inverted / zero-length range.
+    if start > end {
+        return Some(format!("start line {start} exceeds end line {end}"));
+    }
+    // Over-range: end beyond the file's line count.
+    let content = if source_paths.is_none() {
+        // WorkingTree — read from disk.
+        fs::read_to_string(repo_root.join(&anchor.path)).ok()?
+    } else {
+        // Index / Head — read the snapshot so the count matches discovery.
+        let abs = repo_root.join(&anchor.path);
+        read_via_source(&abs, repo_root, source).ok()?
+    };
+    let line_count = count_lines(&content);
+    if u64::from(end) > line_count {
+        return Some(format!(
+            "end exceeds file line count {line_count}"
+        ));
+    }
+    None
+}
+
+/// Count the lines in `content` the way git-mesh does: a trailing newline does
+/// not introduce a phantom final line, and empty content has zero lines.
+fn count_lines(content: &str) -> u64 {
+    if content.is_empty() {
+        return 0;
+    }
+    let mut n = content.lines().count() as u64;
+    // `str::lines` already drops a single trailing newline's empty segment, so
+    // "a\n" → 1 line, "a\nb" → 2 lines, "a\nb\n" → 2 lines. That matches
+    // git-mesh's inclusive line-count semantics.
+    if n == 0 {
+        n = 1;
+    }
+    n
+}
+
 fn locate_existing_suffix(rel_path: &str, repo_root: &Path) -> Option<String> {
     if repo_root.join(rel_path).exists() {
         return Some(rel_path.to_string());
@@ -1344,7 +1466,9 @@ mod tests {
                 if !abs.is_file() {
                     dropped.push(DroppedMesh {
                         slug: draft.slug.clone(),
-                        missing_path: anchor.path.clone(),
+                        reason: DropReason::MissingPath {
+                            path: anchor.path.clone(),
+                        },
                         page: draft.page_path.clone(),
                     });
                     return false;
@@ -1361,6 +1485,74 @@ mod tests {
         assert_eq!(drafts[0].page_path, "wiki/a.md");
         assert_eq!(dropped.len(), 1, "one mesh should be dropped");
         assert_eq!(dropped[0].page, "wiki/b.md");
-        assert_eq!(dropped[0].missing_path, "src/missing.rs");
+        match &dropped[0].reason {
+            DropReason::MissingPath { path } => assert_eq!(path, "src/missing.rs"),
+            other => panic!("expected MissingPath, got {other:?}"),
+        }
+    }
+
+    // ── invalid-anchor static validation ─────────────────────────────────────
+
+    #[test]
+    fn invalid_anchor_detail_flags_over_range() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_root = tmp.path();
+        std::fs::create_dir_all(repo_root.join("src")).unwrap();
+        std::fs::write(repo_root.join("src/lib.rs"), "// l1\n// l2\n").unwrap();
+        let anchor = StructuredAnchor {
+            path: "src/lib.rs".to_string(),
+            start_line: 1,
+            end_line: 999,
+        };
+        let detail =
+            invalid_anchor_detail(repo_root, &anchor, DocSource::WorkingTree, &None);
+        assert_eq!(
+            detail,
+            Some("end exceeds file line count 2".to_string()),
+            "over-range anchor must be flagged"
+        );
+    }
+
+    #[test]
+    fn invalid_anchor_detail_accepts_valid_range() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_root = tmp.path();
+        std::fs::create_dir_all(repo_root.join("src")).unwrap();
+        std::fs::write(repo_root.join("src/lib.rs"), "// l1\n// l2\n// l3\n").unwrap();
+        let anchor = StructuredAnchor {
+            path: "src/lib.rs".to_string(),
+            start_line: 1,
+            end_line: 3,
+        };
+        assert_eq!(
+            invalid_anchor_detail(repo_root, &anchor, DocSource::WorkingTree, &None),
+            None,
+            "valid anchor must pass through (preserve fail-closed downstream)"
+        );
+    }
+
+    #[test]
+    fn invalid_anchor_detail_flags_inverted_range() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_root = tmp.path();
+        std::fs::create_dir_all(repo_root.join("src")).unwrap();
+        std::fs::write(repo_root.join("src/lib.rs"), "// l1\n// l2\n").unwrap();
+        let anchor = StructuredAnchor {
+            path: "src/lib.rs".to_string(),
+            start_line: 2,
+            end_line: 1,
+        };
+        assert_eq!(
+            invalid_anchor_detail(repo_root, &anchor, DocSource::WorkingTree, &None),
+            Some("start line 2 exceeds end line 1".to_string())
+        );
+    }
+
+    #[test]
+    fn count_lines_matches_git_mesh_semantics() {
+        assert_eq!(count_lines(""), 0);
+        assert_eq!(count_lines("a\n"), 1);
+        assert_eq!(count_lines("a\nb"), 2);
+        assert_eq!(count_lines("a\nb\n"), 2);
     }
 }

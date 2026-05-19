@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::draft::MeshDraft;
-use super::scaffold::{DroppedMesh, ParseError};
+use super::scaffold::{DropReason, DroppedMesh, ParseError};
 
 /// Render `meshes` (already grouped per-page in declaration order) and the
 /// per-page titles (frontmatter `title` keyed by `page_path`, `None` when
@@ -126,11 +126,22 @@ pub(crate) fn render_advisories(
         out.push('\n');
     }
     for d in dropped_meshes {
-        let _ = writeln!(
-            out,
-            "Skipped mesh `{}` — references missing path `{}`.",
-            d.slug, d.missing_path
-        );
+        match &d.reason {
+            DropReason::MissingPath { path } => {
+                let _ = writeln!(
+                    out,
+                    "Skipped mesh `{}` — references missing path `{}` (page `{}`).",
+                    d.slug, path, d.page
+                );
+            }
+            DropReason::InvalidAnchor { anchor, detail } => {
+                let _ = writeln!(
+                    out,
+                    "Skipped mesh `{}` — invalid anchor `{}` ({}) (page `{}`).",
+                    d.slug, anchor, detail, d.page
+                );
+            }
+        }
     }
     if !dropped_meshes.is_empty() {
         out.push('\n');

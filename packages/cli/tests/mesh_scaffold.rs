@@ -128,7 +128,11 @@ fn mesh_scaffold_parse_error_block() {
     // Create a src/lib.rs file that the link points to.
     let src_dir = tmp.path().join("src");
     std::fs::create_dir_all(&src_dir).unwrap();
-    std::fs::write(src_dir.join("lib.rs"), "// lib\n").unwrap();
+    std::fs::write(
+        src_dir.join("lib.rs"),
+        "// lib l1\n// l2\n// l3\n// l4\n// l5\n",
+    )
+    .unwrap();
 
     git(tmp.path(), &["init", "-q", "-b", "main"]);
     git(
@@ -294,7 +298,11 @@ fn mesh_scaffold_json_shape_and_fields() {
     .unwrap();
     let src_dir = tmp.path().join("src");
     std::fs::create_dir_all(&src_dir).unwrap();
-    std::fs::write(src_dir.join("charge.rs"), "// charge\n").unwrap();
+    std::fs::write(
+        src_dir.join("charge.rs"),
+        "// charge l1\n// l2\n// l3\n// l4\n// l5\n",
+    )
+    .unwrap();
 
     git(tmp.path(), &["init", "-q", "-b", "main"]);
     git(
@@ -580,7 +588,7 @@ fn mesh_scaffold_json_top_of_file_link_empty_chain() {
     .unwrap();
     let src_dir = tmp.path().join("src");
     std::fs::create_dir_all(&src_dir).unwrap();
-    std::fs::write(src_dir.join("x.rs"), "// x\n").unwrap();
+    std::fs::write(src_dir.join("x.rs"), "// x l1\n// x l2\n").unwrap();
 
     git(tmp.path(), &["init", "-q", "-b", "main"]);
     git(
@@ -644,8 +652,8 @@ fn mesh_scaffold_json_parse_error_page_not_in_pages() {
 
     let src_dir = tmp.path().join("src");
     std::fs::create_dir_all(&src_dir).unwrap();
-    std::fs::write(src_dir.join("x.rs"), "// x\n").unwrap();
-    std::fs::write(src_dir.join("y.rs"), "// y\n").unwrap();
+    std::fs::write(src_dir.join("x.rs"), "// x l1\n// x l2\n").unwrap();
+    std::fs::write(src_dir.join("y.rs"), "// y l1\n// y l2\n").unwrap();
 
     git(tmp.path(), &["init", "-q", "-b", "main"]);
     git(
@@ -727,7 +735,7 @@ fn mesh_scaffold_json_unreadable_file_in_parse_errors() {
 
     let src_dir = tmp.path().join("src");
     std::fs::create_dir_all(&src_dir).unwrap();
-    std::fs::write(src_dir.join("x.rs"), "// x\n").unwrap();
+    std::fs::write(src_dir.join("x.rs"), "// x l1\n// x l2\n").unwrap();
 
     git(tmp.path(), &["init", "-q", "-b", "main"]);
     git(
@@ -1383,12 +1391,17 @@ fn mesh_scaffold_fail_closed_on_add_failure() {
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
     std::fs::create_dir_all(root.join("src")).unwrap();
-    // A file with only 1 line, but the anchor says L1-L999, which git-mesh
-    // rejects as "end exceeds file line count".
-    std::fs::write(root.join("src/lib.rs"), "// one line\n").unwrap();
+    // The anchor targets a *binary* file. The path exists (so the missing-path
+    // drop does not fire) and the static line-range check cannot read it as
+    // UTF-8 so it is let through (so the invalid-anchor pre-apply drop does not
+    // fire either). git-mesh itself rejects a line anchor on a binary path —
+    // a genuine `git mesh add` failure on an otherwise-valid-looking anchor.
+    // Scaffold must still fail closed (exit non-zero), proving the
+    // invalid-anchor pre-apply path did NOT weaken real fail-closed behavior.
+    std::fs::write(root.join("src/lib.rs"), [0x00u8, 0x01, 0xff, 0xfe]).unwrap();
     std::fs::write(
         root.join("wiki/page.md"),
-        "---\ntitle: Page\nsummary: A page.\n---\n\nSee [lib](../src/lib.rs#L1-L999) for details.\n",
+        "---\ntitle: Page\nsummary: A page.\n---\n\nSee [lib](../src/lib.rs#L1-L1) for details.\n",
     )
     .unwrap();
 
@@ -1429,8 +1442,12 @@ fn mesh_scaffold_fail_closed_reports_partial_mutation() {
     std::fs::create_dir_all(root.join("src")).unwrap();
     // First source file: valid, 3 lines — will succeed.
     std::fs::write(root.join("src/good.rs"), "// line1\n// line2\n// line3\n").unwrap();
-    // Second source file: 1 line, but anchor says L1-L999 — git-mesh rejects it.
-    std::fs::write(root.join("src/bad.rs"), "// one line\n").unwrap();
+    // Second draft anchors a *binary* file. The path exists and the static
+    // line-range check cannot read it as UTF-8 so it is let through; neither
+    // pre-apply drop fires — git-mesh itself rejects the line anchor on a
+    // binary path mid-run. This proves genuine fail-closed behavior survived
+    // the invalid-anchor pre-apply work.
+    std::fs::write(root.join("src/bin.dat"), [0x00u8, 0x01, 0xff, 0xfe]).unwrap();
 
     // Two sections on different pages so scaffold produces two separate drafts.
     std::fs::write(
@@ -1440,7 +1457,7 @@ fn mesh_scaffold_fail_closed_reports_partial_mutation() {
     .unwrap();
     std::fs::write(
         root.join("wiki/page_b.md"),
-        "---\ntitle: Page B\nsummary: B.\n---\n\nSee [bad](../src/bad.rs#L1-L999) for details.\n",
+        "---\ntitle: Page B\nsummary: B.\n---\n\nSee [bad](../src/bin.dat#L1-L1) for details.\n",
     )
     .unwrap();
 
@@ -1471,6 +1488,21 @@ fn mesh_scaffold_fail_closed_reports_partial_mutation() {
         stderr.contains("already created this run"),
         "stderr must disclose already-applied slugs; got:\n{stderr}"
     );
+    // The disclosure must be on its own line — the failure reason (git-mesh
+    // stderr) must NOT run together with "already created this run".
+    assert!(
+        stderr.contains("\nalready created this run"),
+        "the partial-mutation disclosure must start on a fresh line \
+         (clear separator between git-mesh stderr and the disclosure); got:\n{stderr}"
+    );
+    // And the boundary must be unambiguous: no non-newline char immediately
+    // precedes the disclosure token.
+    let idx = stderr.find("already created this run").unwrap();
+    assert_eq!(
+        stderr.as_bytes()[idx - 1],
+        b'\n',
+        "char before the disclosure must be a newline; got:\n{stderr}"
+    );
 }
 
 /// When a fragment link references a source path that does not exist on disk,
@@ -1491,7 +1523,11 @@ fn mesh_scaffold_drops_mesh_with_missing_anchor_path() {
     .unwrap();
     let src_dir = tmp.path().join("src");
     std::fs::create_dir_all(&src_dir).unwrap();
-    std::fs::write(src_dir.join("present.rs"), "// present\n").unwrap();
+    std::fs::write(
+        src_dir.join("present.rs"),
+        "// present l1\n// l2\n// l3\n// l4\n// l5\n",
+    )
+    .unwrap();
     // src/missing.rs intentionally NOT created.
 
     git(tmp.path(), &["init", "-q", "-b", "main"]);
@@ -1544,6 +1580,125 @@ fn mesh_scaffold_drops_mesh_with_missing_anchor_path() {
     assert!(
         stdout.contains("Skipped mesh") && stdout.contains("src/missing.rs"),
         "advisory line for dropped mesh must appear:\n{stdout}"
+    );
+}
+
+/// An over-range fragment anchor (code shrank under the link) is a fixable
+/// wiki drift, NOT a hard build failure: scaffold drops the draft pre-apply,
+/// emits a named advisory (page + offending anchor + reason), and exits 0 so
+/// the fail-closed pre-commit hook does not lock the whole repository.
+#[test]
+fn mesh_scaffold_over_range_anchor_dropped_with_named_advisory_exit_0() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    // lib.rs has 2 lines; the fragment link says L1-L999 (drifted).
+    std::fs::write(root.join("src/lib.rs"), "// l1\n// l2\n").unwrap();
+    std::fs::write(
+        root.join("wiki/page.md"),
+        "---\ntitle: Page\nsummary: A page.\n---\n\nSee [x](../src/lib.rs#L1-L999) for details.\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("run wiki scaffold");
+
+    assert!(
+        output.status.success(),
+        "over-range anchor must NOT lock the repo — scaffold must exit 0; \
+         stderr=\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("Skipped mesh")
+            && combined.contains("invalid anchor")
+            && combined.contains("src/lib.rs#L1-L999")
+            && combined.contains("end exceeds file line count 2")
+            && combined.contains("page.md"),
+        "advisory must name the page, the offending anchor, and the reason; got:\n{combined}"
+    );
+}
+
+/// A sibling draft with a valid anchor in the same run is still created when
+/// another draft is dropped for an over-range anchor.
+#[test]
+fn mesh_scaffold_sibling_valid_draft_created_when_other_dropped() {
+    if Command::new("git-mesh").arg("--version").output().is_err() {
+        eprintln!("skipping: git-mesh not installed");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/good.rs"), "// l1\n// l2\n// l3\n").unwrap();
+    std::fs::write(root.join("src/short.rs"), "// only\n").unwrap();
+    std::fs::write(
+        root.join("wiki/page_a.md"),
+        "---\ntitle: Page A\nsummary: A.\n---\n\nSee [good](../src/good.rs#L1-L3).\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("wiki/page_b.md"),
+        "---\ntitle: Page B\nsummary: B.\n---\n\nSee [bad](../src/short.rs#L1-L999).\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("run wiki scaffold");
+
+    assert!(
+        output.status.success(),
+        "scaffold must exit 0 (drifted link is fixable, not fatal); stderr=\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The dropped draft must be reported as an invalid-anchor advisory.
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("invalid anchor") && combined.contains("src/short.rs#L1-L999"),
+        "dropped sibling must be named in an invalid-anchor advisory; got:\n{combined}"
+    );
+
+    // The valid sibling mesh must have actually been created.
+    let mesh_dir = root.join(".mesh");
+    let created = walkdir_mesh(&mesh_dir);
+    let blob = created
+        .iter()
+        .map(|(_, c)| c.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        blob.contains("src/good.rs#L1-L3"),
+        "the sibling valid draft must still be created in .mesh; got files:\n{:?}\ncontent:\n{blob}",
+        created.iter().map(|(p, _)| p).collect::<Vec<_>>()
     );
 }
 
@@ -1604,9 +1759,14 @@ fn mesh_scaffold_json_dropped_meshes_array() {
     let entry = &dropped[0];
     assert!(entry["slug"].is_string(), "slug must be string:\n{stdout}");
     assert_eq!(
-        entry["missingPath"].as_str().unwrap_or(""),
+        entry["category"].as_str().unwrap_or(""),
+        "missing_path",
+        "category must be missing_path:\n{stdout}"
+    );
+    assert_eq!(
+        entry["anchor"].as_str().unwrap_or(""),
         "src/missing.rs",
-        "missingPath must be the missing file:\n{stdout}"
+        "anchor must be the missing file:\n{stdout}"
     );
     assert!(entry["page"].is_string(), "page must be string:\n{stdout}");
 }
@@ -1628,7 +1788,11 @@ fn mesh_scaffold_missing_path_check_respects_source_mode() {
     .unwrap();
     let src_dir = tmp.path().join("src");
     std::fs::create_dir_all(&src_dir).unwrap();
-    std::fs::write(src_dir.join("target.rs"), "// target\n").unwrap();
+    std::fs::write(
+        src_dir.join("target.rs"),
+        "// target l1\n// l2\n// l3\n// l4\n// l5\n",
+    )
+    .unwrap();
 
     git(tmp.path(), &["init", "-q", "-b", "main"]);
     git(
@@ -1672,7 +1836,11 @@ fn mesh_scaffold_missing_path_check_respects_source_mode() {
         "worktree mode must drop the mesh:\n{worktree_stdout}"
     );
     assert_eq!(
-        worktree_dropped[0]["missingPath"].as_str().unwrap_or(""),
+        worktree_dropped[0]["category"].as_str().unwrap_or(""),
+        "missing_path"
+    );
+    assert_eq!(
+        worktree_dropped[0]["anchor"].as_str().unwrap_or(""),
         "src/target.rs"
     );
 

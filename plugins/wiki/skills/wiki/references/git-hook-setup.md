@@ -55,6 +55,9 @@ If `wiki` is not installed (`command -v` fails), the hook silently passes — wi
 
 ```bash
 #!/bin/bash
+# Fail-closed: create git meshes for any fragment links lacking coverage,
+# then stage the created .mesh/ files so they join the commit.
+# Runs after pre-commit.wiki.sh (link/anchor auto-fix must precede coverage).
 set -e
 
 command -v wiki >/dev/null 2>&1 || exit 0
@@ -62,22 +65,42 @@ WIKI_BIN=$(command -v wiki)
 
 command -v jq >/dev/null 2>&1 || exit 0
 
-WIKI_JSON=$("$WIKI_BIN" check --format json --no-exit-code 2>&1) || true
+# Capture stdout only; let stderr flow to the terminal.
+# --no-exit-code means wiki check exits 0 even when validation errors exist,
+# so a non-zero exit here means a real failure (crash/bad invocation) → fail closed.
+WIKI_JSON=$("$WIKI_BIN" check --format json --no-exit-code)
 [ -n "$WIKI_JSON" ] || exit 0
 
-mapfile -t MESH_FILES < <(echo "$WIKI_JSON" \
-    | jq -r '[.errors[] | select(.kind == "mesh_uncovered") | .file] | unique | .[]' \
-    2>/dev/null || true)
-if [ ${#MESH_FILES[@]} -gt 0 ]; then
-    "$WIKI_BIN" scaffold "${MESH_FILES[@]}"
-    git add .mesh/
+# Parse the JSON; if jq cannot parse it, that is an error condition → fail closed.
+# shellcheck disable=SC2312
+MESH_FILES_RAW=$(echo "$WIKI_JSON" \
+    | jq -r '[.errors[] | select(.kind == "mesh_uncovered") | .file] | unique | .[]')
+
+# Read one path per line into an array (mapfile -t) and pass it quoted to
+# scaffold, so paths containing spaces survive as single args.
+mapfile -t MESH_FILES <<< "$MESH_FILES_RAW"
+
+# Filter out empty entries (jq emits nothing when there are no matches; mapfile
+# then produces a one-element array containing the empty string).
+NON_EMPTY=()
+for f in "${MESH_FILES[@]}"; do
+    [ -n "$f" ] && NON_EMPTY+=("$f")
+done
+
+if [ ${#NON_EMPTY[@]} -gt 0 ]; then
+    "$WIKI_BIN" scaffold "${NON_EMPTY[@]}"
+    # Only stage when the directory was actually created; absence of .mesh/ is
+    # legitimate (e.g. all drafts dropped because a code target is missing).
+    if [ -d .mesh ]; then
+        git add .mesh/
+    fi
 fi
 exit 0
 ```
 
 This hook runs after the link auto-fix phase (so repaired links are already staged). It must run in pre-commit so the created `.mesh/` files can be staged into the commit that introduced the fragment links.
 
-`--format json` produces structured output that `jq` can filter. `--no-exit-code` lets the hook parse coverage results without failing on them — the fail-closed behavior comes from `set -e` and `wiki scaffold`'s own non-zero exit on failure.
+`--format json` produces structured output that `jq` can filter. `--no-exit-code` lets the hook parse coverage results without failing on them — stderr flows to the terminal separately so a real crash (non-zero exit) is not swallowed. The fail-closed behavior comes from `set -e`: any unexpected non-zero exit (jq parse failure, `wiki scaffold` failure) aborts the commit immediately.
 
 **The jq filter** selects errors where `kind == "mesh_uncovered"`, extracts the `file` field, and deduplicates. All collected files are passed to `wiki scaffold` in a single invocation.
 
