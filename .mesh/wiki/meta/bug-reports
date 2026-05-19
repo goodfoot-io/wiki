@@ -1,0 +1,6 @@
+packages/cli/src/commands/check.rs#L203-L270 sha256:8d5d374285cb85b06de0ccb0a6637105309a46540cd1bc69dc4385065e10c1cd
+packages/cli/src/commands/mod.rs#L356-L368 sha256:575efcab32d3055108b9e736d05e79888346045d2bc3389588c2e5ba3870a538
+packages/cli/src/commands/mod.rs#L373-L378 sha256:e5171067f5b60b29573cb5cdb95d9214c99adb1827f499969341ec631d80079b
+wiki/meta/wiki-feedback.md#L17-L19 sha256:b732e5e0e4ce5d41c2e1687f3fa27d142f3204537cd619ccb1de30a4dde4f4c4
+
+Bug report of `wiki check`'s gitignore-aware discovery that exposes a duplicate-page fix to the wiki-feedback reader.

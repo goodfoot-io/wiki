@@ -1,0 +1,4 @@
+packages/cli/src/wiki_config.rs#L163-L166 sha256:605042e61d06336b603d40663c9ce8366491a91a8f08f82c2d384fa5dadfe672
+wiki/guides/manual-testing-procedure.md#L247-L253 sha256:4f70e23d8bb01c751b9a2d715181aaa5370d7598fe20bed0101920ccd3225d8c
+
+Fixture of the unknown-namespace lookup branch that returns a miette diagnostic to the manual-testing acceptance step.

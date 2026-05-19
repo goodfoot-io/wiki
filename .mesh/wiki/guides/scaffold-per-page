@@ -1,0 +1,5 @@
+packages/cli/src/commands/mesh/render.rs#L15-L71 sha256:d5a7d7d856d210612e28c89fd1d005f0b891ade5522bc1aedb7f297809a11414
+packages/cli/src/commands/mesh/render.rs#L128-L138 sha256:8e6346c984ebecd686436f5996be06bc66613ea32ff348de57234602a8ee9db6
+wiki/guides/adding-mesh-coverage.md#L22-L39 sha256:a2036c3614acf543606d734a8a94740750ef1a18194bb3766b612bcc61e2a992
+
+Surface of `render_markdown` that exposes a per-page markdown string to the scaffold command.

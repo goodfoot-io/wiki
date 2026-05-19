@@ -1,0 +1,4 @@
+wiki/meta/wiki-documentation-touchpoints.md sha256:08ed54c69381186e678f0117610ff90c98374c753507d41afa580bc169631979
+wiki/meta/wiki-feedback.md#L11-L11 sha256:36e69ae6b691f66a9dfe3437feae4f2bb7c3171aff5417b63c9baed6189a3a35
+
+Wiki feedback log where observed friction from CLI/doc mismatches is recorded; the touchpoints register names it as the canonical place to capture that friction.

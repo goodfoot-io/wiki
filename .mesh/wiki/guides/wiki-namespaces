@@ -1,0 +1,4 @@
+packages/cli/src/commands/namespaces.rs#L74-L84 sha256:80ce71ac511b1f9101051d8c258f06e3c3ab907aee2d1878a28e327f84dcbcad
+wiki/guides/manual-testing-procedure.md#L75-L88 sha256:67ab4d81b2e4bc48ad11230335f2ba8ec83339cdca0c17704b72924286444b30
+
+Contract of the `namespaces` sort comparator that returns a row ordering to the manual-testing checklist.

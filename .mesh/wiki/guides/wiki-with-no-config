@@ -1,0 +1,4 @@
+packages/cli/src/wiki_config.rs#L83-L88 sha256:5662e95c7ec6758f6c83279d4e704419ee166e6354079e273c905b871b337a81
+wiki/guides/manual-testing-procedure.md#L23-L35 sha256:39d29a81e9695984d89c085096014be3dd1a275c59368b8b003f6767c8dd6302
+
+Vocabulary of the missing-config diagnostic that the `no wiki.toml found under <WORK>` string returns to the manual-test operator.

@@ -1,0 +1,4 @@
+packages/cli/src/index.rs#L567-L567 sha256:cb01c59ea216ce29f7c122e566721c5e61b7d0350d6c66ef0436e5eea2a44491
+wiki/architecture/wikilink-resolution.md sha256:11fe3a0cca7f7d998df84a0226f7a0364c7bdec79bf84148a1e5cf2e0323daa5
+
+WikiIndex construction that scans every page for titles, aliases, and fragment links into the SQLite store the resolution design relies on for O(1) wikilink lookup.

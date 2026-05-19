@@ -1,0 +1,4 @@
+packages/cli/src/commands/mod.rs#L261-L261 sha256:296b0b5af465d30cc4c6f0ec77f950ba4bb8d8aaf697b05b8ec6a86ab24d7530
+wiki/guides/wiki-performance-optimization.md sha256:a5bc54acc1758122c8093fb76a6a4ac33e7797656daf26154d62aa5bc2b6d3ba
+
+Parallel directory walk that backs wiki file discovery so metadata enumeration scales across large monorepos.

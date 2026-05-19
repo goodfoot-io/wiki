@@ -691,11 +691,9 @@ fn read_blob_at(repo_root: &Path, sha: &str, path: &str) -> Result<Option<String
 /// four guardrails (verbatim blob, same path, no Changed sibling, opt-in active).
 ///
 /// Carries both the anchored (old) coordinates and the destination (new)
-/// coordinates so callers can rewrite wiki link fragments without depending on
-/// `git mesh stale --compact --auto-follow` having advanced the mesh state.
-/// `--auto-follow` is a no-op against staged-but-not-committed content; reading
-/// `moved_to.extent` directly is the only path that works in both staged and
-/// committed cases.
+/// coordinates so callers can rewrite wiki link fragments. In the v1.0.80
+/// file-backed model there is no mesh-advancing step; reading
+/// `moved_to.extent` directly works in both staged and committed cases.
 #[derive(Debug)]
 pub struct MeshMovePlan {
     #[allow(dead_code)]
@@ -857,48 +855,6 @@ fn parse_stale_json(stdout: &str) -> Result<Vec<MeshMovePlan>> {
         .collect();
 
     Ok(plans)
-}
-
-/// Invoke `git mesh stale --compact --auto-follow --format=json` and parse the
-/// compact-v1 JSON to determine which meshes advanced. Returns `Ok(vec![])` when
-/// git-mesh is not found or no meshes advanced.
-///
-/// After auto-follow completes, re-read the `MeshIndex` via `build_mesh_index` so
-/// callers can query the new line ranges for each anchor.
-fn run_auto_follow(repo_root: &Path) -> Result<()> {
-    let mut cmd = super::git_mesh_command();
-    cmd.current_dir(repo_root)
-        .args(["stale", "--compact", "--auto-follow", "--format=json"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let child = match cmd.spawn() {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(miette::miette!("git-mesh stale --compact failed: {e}")),
-        Ok(c) => c,
-    };
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| miette::miette!("git-mesh stale --compact failed: {e}"))?;
-
-    // Non-zero exit is acceptable (drift found) — parse what we can.
-    // Only bail on hard errors (exit code 2+).
-    if let Some(code) = output.status.code()
-        && code > 1
-    {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(miette::miette!(
-            "git-mesh stale --compact exited with status {code}: {}",
-            stderr.trim()
-        ));
-    }
-
-    // We don't need to parse the JSON for the new ranges; we'll re-read the
-    // MeshIndex after auto-follow to get them.
-    let _ = output.stdout;
-    Ok(())
 }
 
 // ── Fix #1 implementation ─────────────────────────────────────────────────────
@@ -1198,16 +1154,14 @@ pub fn run_fix_pass(
 
     // ── Fix #2: mesh auto-follow (line-range anchors) ─────────────────────────
     //
-    // Planning phase (read-only): find MOVED anchors with no Changed sibling.
-    // Application phase (mutation): invoke --compact --auto-follow, then
-    // re-read the MeshIndex to obtain the new line ranges and rewrite wiki
-    // page fragment hrefs.
-
-    // Planning phase — always run (even in dry_run) to emit SkippedFix records.
+    // Find MOVED anchors with no Changed sibling, then rewrite wiki page
+    // fragment hrefs directly from the planned `moved_to` coords.
+    //
+    // Always run (even in dry_run) to emit SkippedFix records.
     // `git mesh stale --format=json` reports `moved_to.extent` for every MOVED
     // finding regardless of whether the code shift is staged or committed, so
     // we can drive both dry-run previews and real-fix rewrites from this single
-    // read-only call. No dependence on `--auto-follow` having advanced the mesh.
+    // read-only call. The v1.0.80 file-backed model has no mesh-advancing step.
     let move_plans = plan_mesh_follows(repo_root)?;
 
     // Map (path, old_start, old_end) → (new_start, new_end) for direct lookup.
@@ -1221,15 +1175,8 @@ pub fn run_fix_pass(
         })
         .collect();
 
-    // Build the initial MeshIndex (before auto-follow) using all in-scope files.
+    // Build the MeshIndex using all in-scope files.
     let mesh_index_opt = build_mesh_index(repo_root, files)?;
-
-    if !dry_run {
-        // Best-effort: try to advance the mesh state so later runs see HEAD.
-        // No-op when the code shift is only staged — that's fine, the wiki link
-        // rewrite below uses the planned `moved_to` coords directly.
-        run_auto_follow(repo_root)?;
-    }
 
     // For each wiki file, rewrite broken line-range links that are now covered
     // by the updated mesh.

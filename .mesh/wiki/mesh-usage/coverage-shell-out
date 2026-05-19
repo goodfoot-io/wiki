@@ -1,0 +1,4 @@
+packages/cli/src/commands/mesh_coverage.rs#L157-L159 sha256:068a6c773dc517e6e5f4934150f1a5a60c773fe44cd65925bffc86dda05c2534
+wiki/reference/git-mesh-usage.md sha256:d1b11abefa282b4679d7ef2f7ad9738cfb08494adaed369ea0a43bd46e8425a3
+
+Coverage check shell-out that runs `git mesh ls --porcelain` for each fragment-link anchor and feeds its output to the wiki coverage rule the reference page documents.

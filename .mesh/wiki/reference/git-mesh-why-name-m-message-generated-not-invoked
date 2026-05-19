@@ -1,0 +1,4 @@
+packages/cli/src/commands/mesh/render.rs#L147-L147 sha256:d30ef93e040257e4c2a7bdc90d61eac6b62869e0be36550c9fbca8b3483deb5f
+wiki/reference/git-mesh-usage.md sha256:48488d87eda1872b22fa294f49adb5efec4e310a59b080b2c7719fe2fe7f0856
+
+Where wiki scaffold renders the generated 'git mesh why' placeholder line that follows each scaffolded add command.

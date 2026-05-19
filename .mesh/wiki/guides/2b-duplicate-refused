@@ -1,0 +1,4 @@
+packages/cli/src/commands/init.rs#L21-L26 sha256:3a165387e1e61ba621f2fb8c4e27618c892db18dab7b3a54b1f2d2584850e294
+wiki/guides/manual-testing-procedure.md#L49-L55 sha256:5014903a79dc458e867ae719173ddf766feb1e1dd61110acb005c835f6a8fb75
+
+Fixture of the duplicate-init refusal that exposes the exact diagnostic vocabulary `wiki init` returns to the manual tester.

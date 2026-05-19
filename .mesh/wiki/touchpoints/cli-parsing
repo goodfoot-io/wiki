@@ -1,0 +1,4 @@
+packages/cli/src/main.rs#L26-L26 sha256:24f0a41684286b827584d41fbaeee1e314d2babaadeea20134b20f05a5a49d27
+wiki/meta/wiki-documentation-touchpoints.md sha256:08ed54c69381186e678f0117610ff90c98374c753507d41afa580bc169631979
+
+Top-level CLI parsing surface (Clap configuration, query positional, reserved subcommand set) that the touchpoints register names as the first source of truth to confirm whenever wiki command behavior changes.

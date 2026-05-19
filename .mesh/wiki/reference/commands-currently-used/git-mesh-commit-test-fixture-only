@@ -1,0 +1,6 @@
+packages/cli/src/commands/check.rs#L203-L270 sha256:8d5d374285cb85b06de0ccb0a6637105309a46540cd1bc69dc4385065e10c1cd
+packages/cli/src/commands/check.rs#L681-L681 sha256:c02ad4986afcbb49570f5f5f4586d76181d499f251b4b7bca8b330334672a67c
+packages/cli/src/commands/check.rs#L1109-L1130 sha256:a8b907ed5319592f07c92f9df86d912225066fff1c1c987624935ddb31077b3e
+wiki/reference/git-mesh-usage.md#L62-L70 sha256:4ac3af92758960d9f4ba860dac201a564183be7fc49bb77f4dd2d5f830329d73
+
+Integration test fixtures that run git mesh commit against a temp repo to exercise wiki check's mesh coverage in CI.

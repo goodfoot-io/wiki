@@ -1,0 +1,4 @@
+packages/cli/src/commands/hook_check.rs#L16-L16 sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b
+wiki/architecture/wiki-cli.md sha256:ae29c3ccfda44739f95922e80f1e08f063f3178e62275dde9edf588fa34d30ea
+
+PostToolUse integration that runs the wiki check pipeline against files an external agent just wrote and emits a JSON systemMessage when validation fails.

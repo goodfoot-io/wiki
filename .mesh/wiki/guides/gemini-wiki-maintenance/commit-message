@@ -1,0 +1,5 @@
+examples/githooks/scripts/gemini-wiki-maintenance.sh#L136-L145 sha256:11ff5a8289c2a4e0a8b8e4e9da4a3d5bae602b86b26944756771724cbdf2e989
+examples/githooks/scripts/gemini-wiki-maintenance.sh#L167-L173 sha256:7e5cc6c15e1c0acad55d256d4d86a750038651596bf4c627a325ac40240775b7
+wiki/guides/gemini-wiki-maintenance.md#L50-L52 sha256:b34b589b84925245a2cab53b3db95d5467f09b4d53c53537cf3b38f409b15874
+
+Commit-message handoff: the prompt instructs Gemini to write the message to gemini-commit-message.txt, and the shell script reads that file (falling back to a fixed default if absent or empty).

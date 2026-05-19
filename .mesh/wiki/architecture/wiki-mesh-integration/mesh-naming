@@ -1,0 +1,4 @@
+packages/cli/src/commands/mesh/draft.rs#L164-L164 sha256:ad4589102a8674c0b292e25307b2c862f3f7ea89ec7a2c801a992ac9fb606881
+wiki/architecture/wiki-mesh-integration.md#L54-L61 sha256:cefd30d449dd9d8bdedf91f82446835b5a371d8a6652a719daa28dbf4d50fb7c
+
+Contract of `derive_noun` that returns the target-slug vocabulary consumed by mesh-name composition.

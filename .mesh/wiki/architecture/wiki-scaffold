@@ -1,0 +1,4 @@
+packages/cli/src/commands/mesh/scaffold.rs#L159-L166 sha256:1edec55a3583d32817d1d1734418063d81bb0af6ce9cd37cce682c5ee5ee5716
+wiki/architecture/wiki-mesh-integration.md#L28-L52 sha256:247d304cde6a3d880f1dc3f9360c66a83edc3b41663e5e4131fd68f7363bca4d
+
+wiki scaffold output generator that emits ready-to-run git mesh add and git mesh why commands for fragment-linked sections.

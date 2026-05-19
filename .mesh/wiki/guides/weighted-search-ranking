@@ -1,0 +1,4 @@
+packages/cli/src/index.rs#L1359-L1407 sha256:c5ed62cd5460449036b003542290854c3acaab089b5e2cd34db46a8cb5120eb5
+wiki/guides/wiki-performance-optimization.md#L30-L34 sha256:1599741057e21e0baf04924a2423a749b23816e8df35bb05bfd28671c4f9ecfe
+
+Reference of change-set construction that returns a ChangeSet to the index synchronizer.

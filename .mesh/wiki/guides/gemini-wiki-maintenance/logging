@@ -1,0 +1,4 @@
+examples/githooks/scripts/gemini-wiki-maintenance.sh#L25-L29 sha256:a8a5aa358cbe5bd1a87f53db5fd75bc3048bbec7519a5cd318d2a0c734e9f6b7
+wiki/guides/gemini-wiki-maintenance.md#L54-L62 sha256:e49e99592e64b66411300bdac4b50d16062ab21e8ebeed61eed2a34585255b99
+
+All maintenance-run output is tee'd to a log file delimited by timestamp+PID banners that the guide reproduces for diagnostics.

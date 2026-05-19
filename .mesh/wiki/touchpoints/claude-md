@@ -1,0 +1,4 @@
+CLAUDE.md#L83-L83 sha256:a37cbc45ce7dc4f6ab491d791f98dbe7d95d138c6781f7827e3e00e4170b6b75
+wiki/meta/wiki-documentation-touchpoints.md sha256:08ed54c69381186e678f0117610ff90c98374c753507d41afa580bc169631979
+
+Workspace CLAUDE.md wiki-instructions block that tells agents how to search and read wiki content; the touchpoints register keeps it in lockstep with CLI behavior.

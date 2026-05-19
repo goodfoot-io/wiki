@@ -1,0 +1,4 @@
+packages/cli/src/commands/mesh/draft.rs#L167-L167 sha256:ad4589102a8674c0b292e25307b2c862f3f7ea89ec7a2c801a992ac9fb606881
+wiki/architecture/wiki-mesh-integration.md#L54-L61 sha256:defd12dfc7c62bbed70b1fc56be1ad389ed2bbda36a4c0a28350b4ea16809128
+
+Mesh slug derivation that turns a wiki page's namespace and section heading into the slug the scaffold output prints.

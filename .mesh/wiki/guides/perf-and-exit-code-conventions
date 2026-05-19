@@ -1,0 +1,4 @@
+packages/cli/src/perf.rs#L50-L61 sha256:fc597dba37ab5f7d6be6771bc8c9f2e4eb243b722181c9619c8860e7f84ae07e
+wiki/guides/manual-testing-procedure.md#L386-L401 sha256:698c8c9b87ba8d814865f28aa31f382be06b0e8d6bc8bdb2e8e3c3496c6a2e33
+
+Demonstration of Span's Drop that exposes a per-event stderr timing line to the `--perf` operator.

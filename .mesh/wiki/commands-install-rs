@@ -1,0 +1,8 @@
+packages/cli/logging.wiki.md#L173-L181 sha256:8102869c5d34cf0847f3d8916321961382a31d35d2b377a31889cd2e925278b2
+packages/cli/src/commands/install.rs#L679-L679 sha256:569f56053a7cae279a071e19954c54f5ccadbe55fe6ec1949c9ffeca090bfa75
+packages/cli/src/commands/install.rs#L927-L927 sha256:184c30a6baa5f027aeb28b617830edcd3624d448aa06ef631dd4260976de4d5b
+packages/cli/src/commands/install.rs#L946-L946 sha256:71d480b0ce63afec27d2def1b48eda5bb781db31f41f9b42291f8f6a9cdebfac
+packages/cli/src/commands/install.rs#L991-L991 sha256:e9a9cc4ae8a5a96ae0d46069a024e36afa2237f8fb2897eb766c2540b4662870
+packages/cli/src/commands/install.rs#L1024-L1024 sha256:13225551e6d4c482c719da868842ae33c2c909a7160664a646a5b8bcc70437ef
+
+Reference of `commands/install.rs` print helpers that exposes the install-flow banner vocabulary to the operator console.

@@ -1,0 +1,5 @@
+packages/cli/logging.wiki.md#L6-L14 sha256:0aca1934c9e44057f7d0863ac6f009800fe3b9bdefbe6004e5ab02cd4b544fce
+packages/cli/src/perf.rs#L118-L128 sha256:64a165de1736a1d056f4418d0929493666d02d9bba57cb3bb43de7d151e3c4ed
+packages/cli/src/perf.rs#L130-L139 sha256:2c4f8a007c4411cfbdb6a092e42f7bdab1b1c7256a242abaa014310ba83bbd59
+
+Reference of `perf::scope_result` and `perf::scope_async_result` that returns a JSON event line to `wiki.log`.

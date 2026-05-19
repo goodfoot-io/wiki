@@ -1,0 +1,4 @@
+wiki/architecture/wiki-cli.md#L8-L8 sha256:9ddc0733c1b67eeb310314e6f4760cb1a01d86ed06ec415f7400c77aa8246ec2
+wiki/meta/wiki-documentation-touchpoints.md sha256:08ed54c69381186e678f0117610ff90c98374c753507d41afa580bc169631979
+
+Wiki CLI architecture page that the touchpoints register lists as the deeper reference companion to the operator-facing surfaces.

@@ -1,0 +1,4 @@
+packages/cli/src/commands/mesh/render.rs#L138-L148 sha256:5d318f9aced7ca9c05f80dd0b15b46032f77ca28c7314933d0e2fc02a7a433fd
+wiki/reference/git-mesh-usage.md sha256:d1b11abefa282b4679d7ef2f7ad9738cfb08494adaed369ea0a43bd46e8425a3
+
+`wiki mesh scaffold` shell-script emitter that prints the `git mesh add` and `git mesh why` commands a reviewer runs to cover uncovered fragment links.

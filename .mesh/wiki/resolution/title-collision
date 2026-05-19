@@ -1,0 +1,4 @@
+packages/cli/src/commands/check.rs#L28-L28 sha256:85fb97c654c2dab9cbb1f43fa4368644c531080ac79b5f4bdbac25d70b5331e6
+wiki/architecture/wikilink-resolution.md sha256:11fe3a0cca7f7d998df84a0226f7a0364c7bdec79bf84148a1e5cf2e0323daa5
+
+Title-and-alias uniqueness guarantee that the resolution model depends on: wiki check rejects any pair of pages that would make a wikilink ambiguous.

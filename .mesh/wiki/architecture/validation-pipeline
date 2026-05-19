@@ -1,0 +1,5 @@
+packages/cli/src/commands/check.rs#L28-L29 sha256:4d54d80de38b032cc1f9aa30cd25bb1768e6748f2cd76694872242b504aacf21
+packages/cli/src/frontmatter.rs#L56-L56 sha256:7db0ae23b46ed69fe4a3613f6e4dc628cfedf423f63ffe9c15828b9155a09cbe
+wiki/architecture/wiki-cli.md#L14-L16 sha256:cec761459fcb1894b3c6671b506aafcea49736f29bc4b4c8d2fb6b6f55d9fa96
+
+End-to-end wiki check validation pipeline that drives frontmatter parsing and link resolution as described in the architecture page.

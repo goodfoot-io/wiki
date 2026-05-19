@@ -1,0 +1,4 @@
+packages/cli/src/commands/check.rs#L18-L19 sha256:4d54d80de38b032cc1f9aa30cd25bb1768e6748f2cd76694872242b504aacf21
+wiki/architecture/wikilink-resolution.md#L12-L14 sha256:06f5c87193a2671b516556c18caf8011bd25329722557f87f8916d2d8d60fde4
+
+Contract of the check command that exposes title-and-alias uniqueness to the wikilink resolver.

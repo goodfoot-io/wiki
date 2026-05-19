@@ -1,0 +1,4 @@
+packages/cli/src/commands/links.rs#L115-L150 sha256:0b62b494eb6f5ac00dd0f6a263c2d82b27ca45cfedd1eda1d81b89988afc48c9
+wiki/reference/wiki-cli-advanced-usage.md#L22-L32 sha256:e290861061a044819e2c6a390cc1ab056e32c6df7dc4393193a3f02c1e55eb54
+
+Reference of `wiki links` that exposes an inbound-link result set to the CLI user.

@@ -1,0 +1,7 @@
+packages/cli/src/parser.rs#L6-L12 sha256:640f0daad55e844d3260690863b1d5119fc2ac4f2231aa12e8499e9a96fc7a83
+packages/cli/src/parser.rs#L79-L79 sha256:00519d93f10a8856abc867f189fc06d1200dc3294c61118a5003956e59e19033
+packages/cli/src/parser.rs#L213-L213 sha256:4239e6c4a6dd8222ca884efa224a0a952658c523c0bccbf5f16b3bc1bb7d30e5
+packages/cli/src/parser.rs#L304-L304 sha256:094e295ae5d7e912e113fd52d2790728543e26c1f4122fdd436eabcfc417cf1b
+wiki/architecture/wiki-cli.md#L10-L12 sha256:b7cc86100199fa20ddb307c23bdebd5f237d6367584b5fee3d3c26794320db72
+
+Fragment-link and wikilink parsing routines that the wiki CLI architecture page documents as the entry point for link extraction.

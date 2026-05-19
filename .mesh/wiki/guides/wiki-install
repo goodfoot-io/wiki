@@ -1,0 +1,4 @@
+packages/cli/src/commands/install.rs#L1102-L1119 sha256:4518579486a4532992b40e065a294b0d44b5d07806516ccf4006164cdde3c597
+wiki/guides/manual-testing-procedure.md#L365-L384 sha256:daebf391513e924f96facf637693f83700c6bf98da68c86acea1ad973d65e4e4
+
+Contract of the `wiki install` flag dispatch that exposes a mutually-exclusive target selection to the operator running the manual-testing procedure.

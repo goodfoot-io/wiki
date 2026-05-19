@@ -1,0 +1,4 @@
+packages/cli/src/commands/mod.rs#L260-L279 sha256:c0adbddfad9e2d6dd87af0690cbc5e12c56f4bfea7f8bdb4796b9136f2afdd79
+wiki/guides/wiki-performance-optimization.md#L14-L16 sha256:09a74a955c3a30556bc62eee1c06d786611df503e05b6cee00b97c667afede93
+
+Reference of `matches_default_discovery_path` that exposes a markdown-suffix predicate to the file-discovery collector, not the parallel `WalkBuilder` traversal the surrounding prose advertises.

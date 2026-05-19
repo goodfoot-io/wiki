@@ -1,0 +1,4 @@
+packages/cli/src/commands/mesh/render.rs#L85-L92 sha256:85f3e9a801fdf4d96e35c56fcc6c7798a97973d8d4cde55be0744613e0b1730f
+wiki/guides/manual-testing-procedure.md#L354-L363 sha256:21a0b9a7fe1f30697398a1a9528d939e4f496cc7ef8d0028cb18508655b505bb
+
+Fixture of the empty-scaffold branch that returns the single-paragraph "no uncovered fragment links" notice to the `wiki scaffold` operator.

@@ -923,7 +923,23 @@ fn mesh_scaffold_renames_on_existing_mesh_collision() {
     };
     stage(&["add", "wiki/charge-handler", "src/charge.ts#L1-L1"]);
     stage(&["why", "wiki/charge-handler", "-m", "pre-existing"]);
-    stage(&["commit", "wiki/charge-handler"]);
+    git(
+        root,
+        &["-c", "user.email=t@t", "-c", "user.name=t", "add", ".mesh"],
+    );
+    git(
+        root,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "commit mesh",
+        ],
+    );
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
@@ -1083,7 +1099,23 @@ fn mesh_scaffold_extends_existing_section_mesh_with_new_code_links() {
         "-m",
         "pre-existing fully covered",
     ]);
-    stage(&["commit", "billing/fully-covered"]);
+    git(
+        root,
+        &["-c", "user.email=t@t", "-c", "user.name=t", "add", ".mesh"],
+    );
+    git(
+        root,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "commit mesh",
+        ],
+    );
 
     stage(&["add", "billing/extend-target", &extend_anchor]);
     stage(&[
@@ -1092,7 +1124,23 @@ fn mesh_scaffold_extends_existing_section_mesh_with_new_code_links() {
         "-m",
         "pre-existing extension target",
     ]);
-    stage(&["commit", "billing/extend-target"]);
+    git(
+        root,
+        &["-c", "user.email=t@t", "-c", "user.name=t", "add", ".mesh"],
+    );
+    git(
+        root,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "commit mesh",
+        ],
+    );
 
     let output = Command::new(bin)
         .args(["scaffold", "**/*.md"])

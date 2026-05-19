@@ -836,7 +836,7 @@ mod tests {
 
         repo.git_mesh(&["add", "test-mesh", "wiki/page.md", "src/code.rs#L1-L1"]);
         repo.git_mesh(&["why", "test-mesh", "-m", "Links wiki page to code."]);
-        repo.git_mesh(&["commit"]);
+        repo.commit("commit mesh");
 
         let diagnostics = collect(&[], repo.path()).expect("collect");
         let mesh_diags: Vec<_> = diagnostics
@@ -1013,8 +1013,12 @@ mod tests {
         assert_eq!(code, 1);
     }
 
-    /// Fix 2: when a line-range anchor drifted because lines were inserted above it,
-    /// --fix updates the range to track the new position reported by the mesh.
+    /// Fix 2: when a line-range anchor drifted because lines were inserted above
+    /// it (committed), --fix updates the wiki link range to the `moved_to`
+    /// position reported by `git mesh stale --format=json`. In the v1.0.80
+    /// file-backed model there is no mesh-advancing step, so the mesh anchor
+    /// stays at its old coordinates and the run still reports drift — the
+    /// assertion is on the rewritten link, not the exit code.
     #[test]
     fn fix2_mesh_anchor_follows_line_shift() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
@@ -1028,18 +1032,18 @@ mod tests {
 
         repo.git_mesh(&["add", "fix2-mesh", "wiki/page.md", "src/code.rs#L1-L1"]);
         repo.git_mesh(&["why", "fix2-mesh", "-m", "Test mesh."]);
-        repo.git_mesh(&["commit"]);
+        repo.commit("commit mesh");
 
         // Insert a line before the anchored function and commit so that
-        // git-mesh stale --compact --auto-follow can advance the mesh anchor.
+        // git-mesh stale --format=json reports the anchor as MOVED.
         repo.create_file("src/code.rs", "// preamble\nfn a() {}\n");
         repo.commit("shift code");
 
-        let code = run(
+        let _code = run(
             &[],
             false,
             repo.path(),
-            false,
+            true, // no_exit_code — mesh stays at old coords, drift expected
             false,
             crate::index::DocSource::WorkingTree,
             true,
@@ -1053,7 +1057,6 @@ mod tests {
             content.contains("#L2-L2"),
             "expected anchor updated to L2-L2, got:\n{content}"
         );
-        assert_eq!(code, 0);
     }
 
     /// Fix 2 skip: when the anchored range has Changed content (not just a pure
@@ -1074,7 +1077,7 @@ mod tests {
         // Mesh covers the wiki page and L2-L3 of code.rs.
         repo.git_mesh(&["add", "fix2-changed-mesh", "wiki/page.md", "src/code.rs#L2-L3"]);
         repo.git_mesh(&["why", "fix2-changed-mesh", "-m", "Test mesh."]);
-        repo.git_mesh(&["commit"]);
+        repo.commit("commit mesh");
 
         // Replace the file with only one line. The anchor L2-L3 is now both
         // out of bounds AND content-changed → git-mesh reports CHANGED (not MOVED).
@@ -1107,8 +1110,8 @@ mod tests {
 
     /// Fix 2: dry-run previews a staged-but-not-committed line shift using the
     /// `moved_to` coordinates from `git mesh stale --format=json` — no mutation
-    /// required, and the mesh state need not have been advanced via
-    /// `--compact --auto-follow` (which is a no-op against staged content).
+    /// required. In the v1.0.80 file-backed model there is no mesh-advancing
+    /// step; the wiki rewrite uses the planned `moved_to` coords directly.
     #[test]
     fn fix2_dry_run_previews_staged_shift() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
@@ -1122,7 +1125,7 @@ mod tests {
 
         repo.git_mesh(&["add", "fix2-dry-mesh", "wiki/page.md", "src/code.rs#L1-L1"]);
         repo.git_mesh(&["why", "fix2-dry-mesh", "-m", "Test mesh."]);
-        repo.git_mesh(&["commit"]);
+        repo.commit("commit mesh");
 
         // STAGE the code shift but do NOT commit it.
         repo.create_file("src/code.rs", "// preamble\nfn a() {}\n");
@@ -1149,9 +1152,9 @@ mod tests {
     }
 
     /// Fix 2: real-fix rewrites the wiki link when the code shift is only staged
-    /// (not committed). The mesh anchor itself stays at the old coordinates until
-    /// the user commits and runs `git mesh stale --compact --auto-follow`, but
-    /// the wiki link reflects the planned destination immediately.
+    /// (not committed). The mesh anchor itself stays at the old coordinates, but
+    /// the wiki link reflects the planned `moved_to` destination immediately
+    /// (`git mesh stale --format=json` reports MOVED for staged shifts too).
     #[test]
     fn fix2_applies_to_staged_shift() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
@@ -1165,7 +1168,7 @@ mod tests {
 
         repo.git_mesh(&["add", "fix2-staged-mesh", "wiki/page.md", "src/code.rs#L1-L1"]);
         repo.git_mesh(&["why", "fix2-staged-mesh", "-m", "Test mesh."]);
-        repo.git_mesh(&["commit"]);
+        repo.commit("commit mesh");
 
         // STAGE the code shift but do NOT commit it.
         repo.create_file("src/code.rs", "// preamble\nfn a() {}\n");

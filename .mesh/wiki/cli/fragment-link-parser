@@ -1,0 +1,4 @@
+packages/cli/src/parser.rs#L6-L6 sha256:e3bbe7854c23470cc61da0d867b515e7e359f47d239a95c0802ae727c18f89c4
+wiki/architecture/wiki-cli.md sha256:ae29c3ccfda44739f95922e80f1e08f063f3178e62275dde9edf588fa34d30ea
+
+Markdown link parser that extracts the fragment-link and wikilink syntaxes the wiki CLI documents and validates.

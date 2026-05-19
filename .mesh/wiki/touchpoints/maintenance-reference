@@ -1,0 +1,4 @@
+.claude/skills/wiki/references/maintenance.md#L1-L1 sha256:ccde8cd23384b7aabcf18e4a862ebd91552573e8fae341b58cf8615c7ae6f0aa
+wiki/meta/wiki-documentation-touchpoints.md sha256:08ed54c69381186e678f0117610ff90c98374c753507d41afa580bc169631979
+
+Stale-page repair workflow inside the wiki skill that the touchpoints register binds to validation, pinning, and discovery changes in the CLI.

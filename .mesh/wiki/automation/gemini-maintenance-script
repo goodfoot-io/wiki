@@ -1,0 +1,4 @@
+examples/githooks/scripts/gemini-wiki-maintenance.sh#L183-L183 sha256:78fbbde689c3ec2e4b004a59d43da7862619e44e9a52e942fc5bd1d2915337ce
+wiki/guides/gemini-wiki-maintenance.md sha256:3211beef0d09ac9b66cdcfbc707121ef0a43bd18aab774418debc9fb08536f21
+
+Automated post-commit wiki maintenance pass: a sandboxed Gemini run inside an isolated worktree that repairs stale fragment links under the policy and prompt the guide describes.

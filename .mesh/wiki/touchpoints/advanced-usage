@@ -1,0 +1,4 @@
+wiki/meta/wiki-documentation-touchpoints.md sha256:08ed54c69381186e678f0117610ff90c98374c753507d41afa580bc169631979
+wiki/reference/wiki-cli-advanced-usage.md#L8-L8 sha256:1110ce5d27dfd123138f97488c2358d3d2acf25a178f2f9b5d283c759360a402
+
+Advanced CLI usage reference covering stdin handling, file paths, explicit globs, and JSON output; the touchpoints register flags it for sync whenever those behaviors change.

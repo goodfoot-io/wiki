@@ -1,0 +1,7 @@
+examples/githooks/scripts/gemini-wiki-maintenance.sh#L13-L17 sha256:6dcc78c60791408263d93fcb6ae098401cf8b188ff2c771a23e066b0859bb636
+examples/githooks/scripts/gemini-wiki-maintenance.sh#L31-L35 sha256:390160706d9dad995a600c526c402869c94cb3992e68b3e367d29f4d167b39d9
+examples/githooks/scripts/gemini-wiki-maintenance.sh#L37-L62 sha256:f489085ea1bba0616df93a82104daa05ca027d7ce0251d3d8083bad416c6a0dd
+examples/githooks/scripts/gemini-wiki-maintenance.sh#L41-L56 sha256:b1fa4aa87b7a707a42066d6e92b5e842220e0a2dbe4f5f665d701d457202f334
+wiki/guides/gemini-wiki-maintenance.md#L14-L20 sha256:100c7cffd93b1f6df0bb30af3a12a3928c11153aceaceb763588acfa2ea36efe
+
+Gating that decides whether the post-commit Gemini maintenance pass actually runs: the GEMINI_WIKI_ACTIVE recursion guard, the fail-closed lockfile, stale-lock detection via live PID probing, and the early exit when 'wiki stale' reports nothing to repair.

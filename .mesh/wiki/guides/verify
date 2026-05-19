@@ -1,0 +1,4 @@
+packages/cli/src/commands/mesh/scaffold.rs#L183-L187 sha256:8e481362754dcbde046ca2d261beb7b34cec263955d8ac1f621e0ce4e2877478
+wiki/guides/adding-mesh-coverage.md#L94-L100 sha256:8b10479297ccf7fc3e2623591851f2b27b4aac0f2662b414854aa6e9d12fb1ef
+
+Explanation of mesh-scaffold fixtures that names the carve-out the scaffold filter satisfies for `wiki check`.

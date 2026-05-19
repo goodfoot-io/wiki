@@ -1,0 +1,6 @@
+packages/cli/src/commands/mesh_coverage.rs#L83-L86 sha256:686ed24f8b3a448c2cfc63a546b211152f8775400632fbfaba678b1bd1d60494
+packages/cli/src/commands/mesh_coverage.rs#L134-L144 sha256:e3230a235609d5ad74f6d6cf682337bb83e9e9dcada4fa1d0cfdcfe10a29fbab
+packages/cli/src/commands/mesh_coverage.rs#L204-L204 sha256:0a782289de8df69d01ed7304a81d1e2a1c6a1bc496bb9a3ad32c07a9c8b4546e
+wiki/architecture/wiki-mesh-integration.md#L16-L26 sha256:74983724bc894375a2fd8217467747798c483535c1a6e8cc68e4ed34ab7877b6
+
+Reference of `wiki check`'s mesh coverage pass that exposes an `mesh_uncovered` diagnostic vocabulary to the check command's error reporter.

@@ -1,0 +1,4 @@
+packages/cli/src/commands/mesh/render.rs#L128-L138 sha256:8e6346c984ebecd686436f5996be06bc66613ea32ff348de57234602a8ee9db6
+wiki/guides/adding-mesh-coverage.md#L28-L28 sha256:777d8c30acda78e218427d227f04653a873bf639537e243e1b11d43f26bcee41
+
+Where 'wiki scaffold' emits each fenced 'git mesh add' command block: the writeln sequence inside render_mesh_block that prints the slug, the anchor list, and the trailing backslash continuation per anchor.

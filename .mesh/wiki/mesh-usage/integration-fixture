@@ -1,0 +1,4 @@
+packages/cli/src/commands/check.rs#L681-L681 sha256:7aec902b3241622d6a2157c03a022d952c08e9c6eafd62517040b4812765ac9a
+wiki/reference/git-mesh-usage.md sha256:d1b11abefa282b4679d7ef2f7ad9738cfb08494adaed369ea0a43bd46e8425a3
+
+Mesh-coverage integration test fixture that drives `git mesh commit` against a temp repo before exercising `wiki check --mesh`, anchoring the test-only usage the reference page calls out.

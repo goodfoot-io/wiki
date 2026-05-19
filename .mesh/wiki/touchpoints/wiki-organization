@@ -1,0 +1,4 @@
+wiki/meta/wiki-documentation-touchpoints.md sha256:08ed54c69381186e678f0117610ff90c98374c753507d41afa580bc169631979
+wiki/meta/wiki-organization.md#L9-L9 sha256:739acd3c6ebfae3753cb4b692cd35483dc93fad017aaa48af6d31e6031fb0537
+
+Wiki organization rules that govern where pages live and how they are titled; the touchpoints register pairs them with the CLI behaviors that depend on those rules.
