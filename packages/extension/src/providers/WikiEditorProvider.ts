@@ -11,7 +11,7 @@ import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { render } from '../rendering/MarkdownRenderer.js';
-import { hasWikiFrontmatter, parseFrontmatter, readFrontmatter } from '../utils/frontmatter.js';
+import { extractFirstHeading, hasWikiFrontmatter, parseFrontmatter, readFrontmatter } from '../utils/frontmatter.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
 import type { HostMessage, WebviewMessage } from '../webviews/wiki/types.js';
 
@@ -266,6 +266,11 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     const { title } = parseFrontmatter(text);
     if (title != null && title !== '') {
       panel.title = title;
+    } else {
+      const heading = extractFirstHeading(text);
+      if (heading != null && heading !== '') {
+        panel.title = heading;
+      }
     }
 
     await Promise.resolve(); // yield: render runs off the read, not synchronously after it
