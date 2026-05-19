@@ -81,12 +81,12 @@ A mesh that only anchors one side does not cover the link. Links without a line 
 ### Fix `mesh_uncovered`
 
 ```bash
-wiki scaffold               # emits the exact `git mesh add` / `git mesh why` commands
-# review and run the emitted commands, then:
+wiki scaffold --dry-run     # preview which meshes will be created (no changes)
+wiki scaffold               # create the meshes (anchors only); then commit
 git commit
 ```
 
-`wiki scaffold` walks the corpus and prints the precise mesh commands needed for every fragment link. Pipe it to a shell, or copy the lines you want.
+`wiki scaffold` walks the corpus, creates a `git mesh` for every uncovered fragment link (anchors only, no why), and exits non-zero if any mesh creation fails. The pre-commit hook runs `wiki scaffold` automatically and stages the resulting `.mesh/` files into the commit; use `--dry-run` to preview what it will do before committing.
 
 ## Authoring workflow
 
@@ -94,10 +94,10 @@ git commit
 2. Write `title` + `summary`; add `aliases` for other names readers will use.
 3. Cross-link with relative markdown links. Run `wiki "..."` first to pick the canonical title.
 4. Cite source code with **line-ranged** fragment links.
-5. `wiki check --root wiki`. For `mesh_uncovered`: `wiki scaffold` → run → commit.
+5. `wiki check --root wiki`. For `mesh_uncovered`: `wiki scaffold --dry-run` (preview) → `git commit` (pre-commit creates and stages meshes automatically).
 
 ## References
 
 - **`references/cli.md`** — full CLI surface (less-common subcommands and flags: `summary`, `links`, `refs`, `list`, `extract`, `hook`, `install`; `--no-mesh`, `--no-exit-code`, `--format json`, `--source`, `-l/-o`). **Use when** reaching past the day-to-day commands above.
 - **`references/maintenance.md`** — keeping a wiki current with `git mesh`: `git mesh stale` → re-anchor → `wiki check` → `wiki scaffold`, and writing a durable `why`. **Use when** anchors have drifted, when meshes go stale, or when curating wiki health.
-- **`references/git-hook-setup.md`** — two-phase git hooks: `pre-commit` auto-fixes drifted links/frontmatter and re-stages them; `post-commit` auto-scaffolds mesh coverage. **Use when** wiring wiki validation into a repo for the first time, or debugging why files were re-staged or mesh scaffolding was suggested.
+- **`references/git-hook-setup.md`** — two-phase git hooks: `pre-commit` auto-fixes drifted links/frontmatter, re-stages them, then creates and stages missing mesh coverage (fail-closed). **Use when** wiring wiki validation into a repo for the first time, or debugging why files were re-staged or meshes were auto-created.

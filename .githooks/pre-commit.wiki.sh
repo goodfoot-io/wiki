@@ -1,6 +1,6 @@
 #!/bin/bash
 # Auto-fix wiki links/frontmatter on staged .md files; re-stage fixes.
-# Non-blocking (--no-exit-code); mesh coverage is deferred to post-commit.
+# Non-blocking (--no-exit-code); mesh coverage is enforced by pre-commit.wiki-mesh.sh.
 set -e
 
 command -v wiki >/dev/null 2>&1 || exit 0

@@ -3,7 +3,6 @@
 # part is reported but never aborts the rest or the commit that landed.
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 PARTS=(
-    post-commit.wiki-mesh.sh
 )
 for part in "${PARTS[@]}"; do
     script="$HOOK_DIR/$part"

@@ -92,12 +92,20 @@ Read each page that links **to** the updated page. If the updated page's behavio
 After all prose edits:
 
 ```bash
-wiki scaffold
+wiki scaffold --dry-run     # preview which meshes will be created (no changes)
+wiki scaffold               # create meshes (anchors only); exits non-zero on any failure
 ```
 
-Review the output. `wiki scaffold` will also surface a `Skipped mesh \`<slug>\` — references missing path \`<path>\`.` advisory for any link whose target no longer exists on disk; fix the wiki link (or remove it if the target is intentionally gone) and rerun. If any fragment links are uncovered, run the generated `git mesh add` and `git mesh why` commands, then commit:
+`wiki scaffold` walks the corpus and creates a `git mesh` for every uncovered fragment link — anchors only, no why. It will also surface a `Skipped mesh \`<slug>\` — references missing path \`<path>\`.` advisory for any link whose target no longer exists on disk; fix the wiki link (or remove it if the target is intentionally gone) and rerun. After creating meshes, commit so the pre-commit hook stages them:
 
 ```bash
+git commit -m "wiki: ..."
+```
+
+If you want to add a `why` to a mesh for curation purposes, do so separately after committing:
+
+```bash
+git mesh why <slug> -m "Description of what this mesh covers."
 git mesh commit
 ```
 
@@ -144,4 +152,4 @@ Report:
 - **Pages updated** — pages where prose changed; one line per page describing what changed and why
 - **Re-pinned only** — pages where only line ranges were adjusted (no prose changes needed)
 - **Flagged (uncertain)** — entries where the diff was ambiguous; describe the judgment call made
-- **New meshes created** — meshes added by `wiki scaffold` for previously uncovered fragment links
+- **New meshes created** — meshes created by `wiki scaffold` (anchors only) for previously uncovered fragment links; note any where you subsequently added a `git mesh why`

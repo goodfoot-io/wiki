@@ -2,7 +2,7 @@
 
 **When to use this:** reaching past the day-to-day commands in `SKILL.md` — inspecting back-references, paginating search, validating specific files, machine-reading diagnostics, or wiring `wiki` into another tool.
 
-The day-to-day commands (`wiki [query]`, `wiki check`, `wiki scaffold`) are documented in `SKILL.md`; this file covers everything else.
+The day-to-day commands (`wiki [query]`, `wiki check`, `wiki scaffold`) are documented in `SKILL.md`; this file covers everything else. `wiki scaffold` creates git meshes (anchors only, no why) for every uncovered fragment link; `--dry-run` previews the plan without mutating anything; `--format json` emits structured drafts and is non-mutating.
 
 ---
 
