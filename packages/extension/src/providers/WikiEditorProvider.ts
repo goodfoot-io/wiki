@@ -11,17 +11,9 @@ import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { render } from '../rendering/MarkdownRenderer.js';
-import { hasWikiFrontmatter, readFrontmatter } from '../utils/frontmatter.js';
-import { getSourceArgs } from '../utils/sourceMode.js';
-import { runWikiCommand } from '../utils/wikiBinary.js';
+import { hasWikiFrontmatter, parseFrontmatter, readFrontmatter } from '../utils/frontmatter.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
-import type { HostMessage, ResolvedRefEntry, WebviewMessage } from '../webviews/wiki/types.js';
-
-interface WikiSummaryJson {
-  title: string;
-  file: string;
-  summary?: string;
-}
+import type { HostMessage, WebviewMessage } from '../webviews/wiki/types.js';
 
 /**
  * Resolve a webview link's path component to an absolute filesystem path.
@@ -262,27 +254,8 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     this._postMessage(webview, { type: 'showLoading' });
 
     let text: string;
-    let summaryResult: Awaited<ReturnType<typeof runWikiCommand>> | null;
-    let refsResult: Awaited<ReturnType<typeof runWikiCommand>> | null;
-
     try {
-      const handle = await this._binaryManager.ready();
-      const sourceArgs = getSourceArgs();
-      [text, summaryResult, refsResult] = await Promise.all([
-        this._readDocumentText(uri),
-        runWikiCommand(
-          handle.path,
-          [...sourceArgs, 'summary', uri.fsPath, '--format', 'json'],
-          undefined,
-          this._workspaceRoot()
-        ).catch(() => null),
-        runWikiCommand(
-          handle.path,
-          [...sourceArgs, 'refs', uri.fsPath, '--format', 'json'],
-          undefined,
-          this._workspaceRoot()
-        ).catch(() => null)
-      ]);
+      text = await this._readDocumentText(uri);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error('[wiki-extension] Failed to read wiki file:', err);
@@ -290,27 +263,15 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
       return;
     }
 
+    const { title } = parseFrontmatter(text);
+    if (title != null && title !== '') {
+      panel.title = title;
+    }
+
+    await Promise.resolve(); // yield: render runs off the read, not synchronously after it
     const html = render(text);
 
-    if (summaryResult != null && summaryResult.exitCode === 0 && summaryResult.stdout.trim() !== '') {
-      try {
-        const summary = JSON.parse(summaryResult.stdout) as WikiSummaryJson;
-        panel.title = summary.title;
-      } catch (parseErr) {
-        console.warn('[wiki-extension] Failed to parse wiki summary JSON:', parseErr);
-      }
-    }
-
-    let refs: ResolvedRefEntry[] | undefined;
-    if (refsResult != null && refsResult.exitCode === 0 && refsResult.stdout.trim() !== '') {
-      try {
-        refs = JSON.parse(refsResult.stdout) as ResolvedRefEntry[];
-      } catch (parseErr) {
-        console.warn('[wiki-extension] Failed to parse wiki refs JSON:', parseErr);
-      }
-    }
-
-    const updateMessage: HostMessage = { type: 'updateContent', html, scrollY, refs };
+    const updateMessage: HostMessage = { type: 'updateContent', html, scrollY };
     this._postMessage(webview, updateMessage);
   }
 
