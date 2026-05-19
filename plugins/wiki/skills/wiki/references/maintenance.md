@@ -69,11 +69,13 @@ After all prose updates for the page are complete, stage updated anchors for eve
 git mesh add <slug> <wiki-file> <source-anchor>   # e.g. packages/cli/src/foo.rs#L10-L40
 ```
 
-Then commit mesh data (or let the post-commit hook do it):
+Then stage the updated `.mesh/` files and include them in the same commit:
 
 ```bash
-git mesh commit
+git add .mesh/
 ```
+
+`.mesh/` files are ordinary tracked files. Stage them alongside your content changes and commit everything together — the pre-commit hook handles this automatically when committing via `git commit`, but running `git mesh add` manually requires staging by hand.
 
 ### 3.6 Check Cross-References
 

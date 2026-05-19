@@ -384,7 +384,11 @@ pub fn run(
 /// git-mesh 1.0.80 appends anchors idempotently.
 ///
 /// Fail-closed: stops on the first non-zero exit and returns `Ok(1)`.
+/// On failure, reports the slugs already applied in this run so the partial
+/// mutation is disclosed rather than silent.
 fn apply_drafts(drafts: &[MeshDraft], repo_root: &Path) -> Result<i32> {
+    let mut applied: Vec<String> = Vec::new();
+
     for draft in drafts {
         let slug = draft
             .extends_existing
@@ -407,11 +411,21 @@ fn apply_drafts(drafts: &[MeshDraft], repo_root: &Path) -> Result<i32> {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!(
-                "wiki scaffold: `git mesh add {slug}` failed: {stderr}"
-            );
+            if applied.is_empty() {
+                eprintln!(
+                    "wiki scaffold: `git mesh add {slug}` failed: {stderr}"
+                );
+            } else {
+                let already = applied.join(", ");
+                eprintln!(
+                    "wiki scaffold: `git mesh add {slug}` failed: {stderr}\
+                     already created this run: {already}; aborted at {slug}"
+                );
+            }
             return Ok(1);
         }
+
+        applied.push(slug.to_string());
     }
     Ok(0)
 }

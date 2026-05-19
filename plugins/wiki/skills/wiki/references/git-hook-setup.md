@@ -41,7 +41,7 @@ Each flag is load-bearing:
 
 - `--fix` rewrites drifted links and anchors in place; it requires `--source=worktree` (you can only rewrite files read from the worktree, not the index or HEAD).
 - `--no-exit-code` keeps the commit from being rejected — the hook repairs drift rather than blocking on it.
-- `--no-mesh` skips the git mesh coverage check so mesh scaffolding is deferred to post-commit and not required before the commit exists.
+- `--no-mesh` skips the git mesh coverage check entirely — coverage enforcement is handled fail-closed in the separate `pre-commit.wiki-mesh.sh` phase; this flag simply omits the check from the link-repair phase.
 
 After `--fix` runs, the rewritten `.md` files are unstaged worktree changes; the hook re-stages them so the fixes land in the same commit. `mapfile -t` + `git add "${WIKI_FIXED[@]}"` passes each path as one argument, so a page path containing whitespace is re-staged intact.
 

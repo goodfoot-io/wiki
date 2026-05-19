@@ -1414,6 +1414,65 @@ fn mesh_scaffold_fail_closed_on_add_failure() {
     );
 }
 
+/// When `git mesh add` fails mid-run, the error output must enumerate the slugs
+/// already applied so the partial mutation is disclosed rather than silent.
+#[test]
+fn mesh_scaffold_fail_closed_reports_partial_mutation() {
+    if Command::new("git-mesh").arg("--version").output().is_err() {
+        eprintln!("skipping: git-mesh not installed");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    // First source file: valid, 3 lines — will succeed.
+    std::fs::write(root.join("src/good.rs"), "// line1\n// line2\n// line3\n").unwrap();
+    // Second source file: 1 line, but anchor says L1-L999 — git-mesh rejects it.
+    std::fs::write(root.join("src/bad.rs"), "// one line\n").unwrap();
+
+    // Two sections on different pages so scaffold produces two separate drafts.
+    std::fs::write(
+        root.join("wiki/page_a.md"),
+        "---\ntitle: Page A\nsummary: A.\n---\n\nSee [good](../src/good.rs#L1-L3) for details.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("wiki/page_b.md"),
+        "---\ntitle: Page B\nsummary: B.\n---\n\nSee [bad](../src/bad.rs#L1-L999) for details.\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("run wiki scaffold");
+
+    assert!(
+        !output.status.success(),
+        "scaffold must exit non-zero when git mesh add fails"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // The error must name the failing command.
+    assert!(
+        stderr.contains("git mesh add"),
+        "stderr must name the failing git mesh add command; got:\n{stderr}"
+    );
+    // The error must disclose the already-applied slug(s) from this run.
+    assert!(
+        stderr.contains("already created this run"),
+        "stderr must disclose already-applied slugs; got:\n{stderr}"
+    );
+}
+
 /// When a fragment link references a source path that does not exist on disk,
 /// the mesh is dropped from scaffold output and an advisory line is emitted.
 #[test]
