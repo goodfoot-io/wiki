@@ -1,15 +1,5 @@
 {
   "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node $CLAUDE_PLUGIN_ROOT/hooks/bin/stop.9889a1c6.mjs"
-          }
-        ]
-      }
-    ],
     "PostToolUse": [
       {
         "hooks": [
@@ -25,9 +15,8 @@
   },
   "__generated": {
     "files": [
-      "stop.9889a1c6.mjs",
       "post-tool-use.37499819.mjs"
     ],
-    "timestamp": "2026-05-19T20:49:36.600Z"
+    "timestamp": "2026-05-19T23:09:10.704Z"
   }
 }

@@ -1,5 +1,6 @@
 packages/cli/src/commands/mesh/render.rs#L151-L151 sha256:2d7e15fc2254f0aac5dd74ad2b155c8c078c9dda11227dac86d6c54ec032ea12
 packages/cli/src/commands/mesh/scaffold.rs#L159-L200 sha256:2222ce4e55a58c85e60b3e66e7d7925e51906cd4aaf8554bc1e9aa2af2bcbd45
 wiki/reference/git-mesh-usage.md#L52-L60 sha256:1207e86e46abe66797d320008ad238cac0635084da6a012067f64ab49a3d36a9
+packages/cli/src/commands/mesh/render.rs#L147-L147 sha256:6a3de1e7dc62a8fccd3316b6afca2ef6ae366dfae66f8c0ea6bfee97f350e9d7
 
 Reference of `git-mesh why` that exposes scaffold markdown to the wiki-scaffold command.
