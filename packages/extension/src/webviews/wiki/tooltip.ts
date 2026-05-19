@@ -3,13 +3,12 @@
  * Floating tooltip for file-link hover previews.
  *
  * Creates a single fixed-position `#wiki-tooltip` element and repositions it
- * on each show call. Styled via `media/tooltip.css` using VSCode hover-widget
- * CSS variables for automatic light/dark support.
+ * on each show call. The tooltip is ALWAYS placed above the hovered link and
+ * re-oriented horizontally at viewport edges. Styled via `media/tooltip.css`
+ * using VSCode hover-widget CSS variables for automatic light/dark support.
  *
  * @summary Floating tooltip DOM management for file-link hover previews.
  */
-
-import '@vscode-elements/elements/dist/vscode-badge/index.js';
 
 let tooltipEl: HTMLDivElement | null = null;
 let bodyEl: HTMLDivElement | null = null;
@@ -18,6 +17,43 @@ let arrowEl: HTMLDivElement | null = null;
 const SIDE_OFFSET = 6;
 const ARROW_HALF = 4;
 const EDGE_MARGIN = 8;
+
+/** Minimal rectangle of the hovered anchor in viewport coordinates. */
+export interface AnchorRect {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+  bottom: number;
+}
+
+/** Measured size of the tooltip box (or the viewport). */
+export interface Size {
+  width: number;
+  height: number;
+}
+
+/** Resolved tooltip placement in viewport coordinates. */
+export interface TooltipPlacement {
+  /** Box top edge (px from viewport top). */
+  top: number;
+  /** Box left edge (px from viewport left). */
+  left: number;
+  /** Arrow orientation — `down` when the box is above the anchor. */
+  arrow: 'down' | 'up';
+  /** Arrow left offset within the box (px from the box's left edge). */
+  arrowLeft: number;
+}
+
+/** Inputs to {@link buildTooltipHtml}. */
+export interface TooltipContent {
+  /** Repo-root-relative path of the link target. */
+  relPath: string;
+  /** Wiki page title (present only when the target is a wiki page). */
+  title?: string;
+  /** Wiki page summary (present only when the target is a wiki page). */
+  summary?: string;
+}
 
 /** Create and append the tooltip element to the document body. Call once at startup. */
 export function initTooltip(): void {
@@ -36,57 +72,64 @@ export function initTooltip(): void {
   document.body.appendChild(tooltipEl);
 }
 
-const FILE_LANG: Record<string, string> = {
-  ts: 'TypeScript',
-  tsx: 'TypeScript',
-  js: 'JavaScript',
-  jsx: 'JavaScript',
-  rs: 'Rust',
-  go: 'Go',
-  py: 'Python',
-  rb: 'Ruby',
-  java: 'Java',
-  c: 'C',
-  cpp: 'C++',
-  cs: 'C#',
-  md: 'Markdown',
-  json: 'JSON',
-  yaml: 'YAML',
-  toml: 'TOML'
-};
+/**
+ * Compute the always-above, edge-aware placement for the tooltip box.
+ *
+ * The box is positioned entirely above the anchor (its bottom never reaches
+ * the anchor's top), with the down-pointing arrow aimed at the anchor's
+ * horizontal center. The box is clamped within the viewport by
+ * `EDGE_MARGIN`; near an edge the box shifts inward while the arrow tracks
+ * the anchor (toward the box's right side near the right edge, toward its
+ * left side near the left edge), and is clamped to remain on the box.
+ *
+ * @param anchor   - The hovered anchor's bounding rectangle.
+ * @param tip      - The measured tooltip box size.
+ * @param viewport - The available viewport size.
+ * @returns The resolved {@link TooltipPlacement}.
+ */
+export function computeTooltipPlacement(anchor: AnchorRect, tip: Size, viewport: Size): TooltipPlacement {
+  const top = anchor.top - tip.height - SIDE_OFFSET;
+
+  const anchorCenterX = anchor.left + anchor.width / 2;
+  const left = Math.max(EDGE_MARGIN, Math.min(anchorCenterX - tip.width / 2, viewport.width - tip.width - EDGE_MARGIN));
+
+  const arrowCenter = Math.max(ARROW_HALF + 2, Math.min(anchorCenterX - left, tip.width - ARROW_HALF - 2));
+
+  return { top, left, arrow: 'down', arrowLeft: arrowCenter - ARROW_HALF };
+}
 
 /**
- * Show a tooltip for a markdown link href that points at a file.
+ * Build the inner HTML for a file-link tooltip.
  *
- * The href may include a line-range fragment (e.g. `path/to/file.ts#L10-L45`)
- * or a `@sha` git pin produced by `wiki check --fix`.
+ * A wiki page (both `title` and `summary` present) renders the bold title,
+ * the repo-root-relative path in gray italics, then the summary as prose.
+ * Any other file renders only the repo-root-relative path in italics. No
+ * badge or line-range is ever rendered.
  *
- * @param anchor - The hovered anchor element.
- * @param href - The raw href attribute of the anchor.
+ * @param content - The resolved link-target info.
+ * @returns Inner HTML string for the tooltip body.
  */
-export function showFileTooltip(anchor: HTMLElement, href: string): void {
-  if (bodyEl == null) return;
-
-  const hashIdx = href.indexOf('#');
-  const rawPath = hashIdx >= 0 ? href.slice(0, hashIdx) : href;
-  const fragment = hashIdx >= 0 ? href.slice(hashIdx + 1) : '';
-
-  const atIdx = rawPath.indexOf('@');
-  const filePath = atIdx >= 0 ? rawPath.slice(0, atIdx) : rawPath;
-
-  const ext = filePath.split('.').pop()?.toLowerCase() ?? '';
-  const lang = FILE_LANG[ext];
-
-  let lineHtml = '';
-  const lineMatch = fragment.match(/^L(\d+)(?:-L?(\d+))?$/i);
-  if (lineMatch) {
-    const [, start, end] = lineMatch;
-    lineHtml = `<div class="wiki-tooltip-summary">${end ? `Lines ${start}–${end}` : `Line ${start}`}</div>`;
+export function buildTooltipHtml(content: TooltipContent): string {
+  const pathHtml = `<div class="wiki-tooltip-path">${escapeHtml(content.relPath)}</div>`;
+  if (content.title != null && content.title.length > 0 && content.summary != null && content.summary.length > 0) {
+    return (
+      `<div class="wiki-tooltip-title">${escapeHtml(content.title)}</div>` +
+      pathHtml +
+      `<div class="wiki-tooltip-summary">${escapeHtml(content.summary)}</div>`
+    );
   }
+  return pathHtml;
+}
 
-  const badgeHtml =
-    lang != null ? `<div class="wiki-tooltip-tags"><vscode-badge>${escapeHtml(lang)}</vscode-badge></div>` : '';
-  bodyEl.innerHTML = `<div class="wiki-tooltip-title">${escapeHtml(filePath)}</div>${lineHtml}${badgeHtml}`;
+/**
+ * Show a tooltip for a resolved file link.
+ *
+ * @param anchor  - The hovered anchor element.
+ * @param content - Resolved repo-root path plus optional wiki title/summary.
+ */
+export function showFileTooltip(anchor: HTMLElement, content: TooltipContent): void {
+  if (bodyEl == null) return;
+  bodyEl.innerHTML = buildTooltipHtml(content);
   positionAndShow(anchor);
 }
 
@@ -97,23 +140,17 @@ function positionAndShow(anchor: HTMLElement): void {
   tooltipEl.classList.add('wiki-tooltip--visible');
 
   const rect = anchor.getBoundingClientRect();
-  const tipWidth = tooltipEl.offsetWidth;
-  const tipHeight = tooltipEl.offsetHeight;
-
-  const showAbove = rect.top > tipHeight + SIDE_OFFSET + EDGE_MARGIN;
-  const top = showAbove ? rect.top - tipHeight - SIDE_OFFSET : rect.bottom + SIDE_OFFSET;
-  arrowEl.className = `wiki-tooltip-arrow wiki-tooltip-arrow--${showAbove ? 'down' : 'up'}`;
-
-  const anchorCenterX = rect.left + rect.width / 2;
-  const left = Math.max(
-    EDGE_MARGIN,
-    Math.min(anchorCenterX - tipWidth / 2, window.innerWidth - tipWidth - EDGE_MARGIN)
+  const placement = computeTooltipPlacement(
+    { top: rect.top, left: rect.left, width: rect.width, height: rect.height, bottom: rect.bottom },
+    { width: tooltipEl.offsetWidth, height: tooltipEl.offsetHeight },
+    { width: window.innerWidth, height: window.innerHeight }
   );
 
-  arrowEl.style.left = `${Math.max(ARROW_HALF + 2, Math.min(anchorCenterX - left, tipWidth - ARROW_HALF - 2)) - ARROW_HALF}px`;
+  arrowEl.className = `wiki-tooltip-arrow wiki-tooltip-arrow--${placement.arrow}`;
+  arrowEl.style.left = `${placement.arrowLeft}px`;
 
-  tooltipEl.style.top = `${top}px`;
-  tooltipEl.style.left = `${left}px`;
+  tooltipEl.style.top = `${placement.top}px`;
+  tooltipEl.style.left = `${placement.left}px`;
   tooltipEl.style.visibility = '';
 }
 

@@ -10,7 +10,8 @@
 export type HostMessage =
   | { type: 'updateContent'; html: string; scrollY?: number }
   | { type: 'showLoading' }
-  | { type: 'showError'; message: string };
+  | { type: 'showError'; message: string }
+  | { type: 'fileInfo'; href: string; relPath: string; title?: string; summary?: string };
 
 // Webview -> Host messages
 export type WebviewMessage =
@@ -20,4 +21,5 @@ export type WebviewMessage =
   | { type: 'openFile'; uri: string; split: boolean }
   | { type: 'openExternal'; uri: string }
   | { type: 'openSearch' }
+  | { type: 'requestFileInfo'; href: string }
   | { type: 'ready' };

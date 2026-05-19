@@ -48,6 +48,13 @@ function isInternalLink(href: string): boolean {
 
 let hoverTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * The anchor + href the user is currently hovering and for which a
+ * `requestFileInfo` is in flight. The host's `fileInfo` reply is matched
+ * against this; stale replies (href no longer pending) are ignored.
+ */
+let pendingHover: { anchor: HTMLElement; href: string } | null = null;
+
 document.addEventListener('mouseover', (e: MouseEvent) => {
   const anchor = (e.target as Element).closest('a');
   if (anchor == null) return;
@@ -56,7 +63,8 @@ document.addEventListener('mouseover', (e: MouseEvent) => {
   if (hoverTimer != null) clearTimeout(hoverTimer);
   if (isInternalLink(href)) {
     hoverTimer = setTimeout(() => {
-      showFileTooltip(anchor as HTMLElement, href);
+      pendingHover = { anchor: anchor as HTMLElement, href };
+      post({ type: 'requestFileInfo', href });
     }, 250);
   }
 });
@@ -71,6 +79,7 @@ document.addEventListener('mouseout', (e: MouseEvent) => {
     clearTimeout(hoverTimer);
     hoverTimer = null;
   }
+  pendingHover = null;
   hideTooltip();
 });
 
@@ -146,6 +155,18 @@ onHostMessage((message: HostMessage) => {
       const errorEl = document.getElementById('error');
       if (errorEl != null) {
         errorEl.style.display = 'none';
+      }
+      break;
+    }
+    case 'fileInfo': {
+      // Ignore stale replies: only show when this href is still the pending
+      // hover target (the user may have moved off the link meanwhile).
+      if (pendingHover != null && pendingHover.href === message.href) {
+        showFileTooltip(pendingHover.anchor, {
+          relPath: message.relPath,
+          title: message.title,
+          summary: message.summary
+        });
       }
       break;
     }

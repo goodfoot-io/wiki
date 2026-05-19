@@ -33,15 +33,15 @@
   margin-bottom: 3px;
 }
 
-.wiki-tooltip-summary {
-  opacity: 0.9;
+.wiki-tooltip-path {
+  font-style: italic;
+  color: var(--vscode-descriptionForeground);
+  margin-bottom: 3px;
+  word-break: break-all;
 }
 
-.wiki-tooltip-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 6px;
+.wiki-tooltip-summary {
+  opacity: 0.9;
 }
 
 .wiki-tooltip-arrow {

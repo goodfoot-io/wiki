@@ -140,6 +140,11 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
           break;
         }
 
+        case 'requestFileInfo': {
+          await this._sendFileInfo(webviewPanel.webview, document.uri, message.href);
+          break;
+        }
+
         case 'openInEditor': {
           const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
           await vscode.commands.executeCommand('wiki.openInEditor', document.uri, { viewColumn, preview: false });
@@ -243,6 +248,36 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     } else {
       await vscode.window.showTextDocument(targetUri, { viewColumn, preview: false });
     }
+  }
+
+  /**
+   * Resolve `href` against the linking document's directory, read the
+   * target's frontmatter, and post a `fileInfo` reply carrying the
+   * repo-root-relative path plus wiki title/summary (only when the target is
+   * a wiki page — both fields non-empty).
+   *
+   * @param webview     - Target webview, used to post the reply.
+   * @param documentUri - URI of the document the hover originated from.
+   * @param href        - Raw markdown link target (may carry `#fragment`/`@sha`).
+   */
+  private async _sendFileInfo(webview: vscode.Webview, documentUri: vscode.Uri, href: string): Promise<void> {
+    const hashIdx = href.indexOf('#');
+    const beforeHash = hashIdx >= 0 ? href.slice(0, hashIdx) : href;
+    const atIdx = beforeHash.indexOf('@');
+    const rawPath = atIdx >= 0 ? beforeHash.slice(0, atIdx) : beforeHash;
+    if (rawPath === '') return;
+
+    const sourceDir = path.dirname(documentUri.fsPath);
+    const wsRoot = this._workspaceRoot();
+    const absPath = resolveWebviewLinkPath(rawPath, sourceDir, wsRoot);
+    const relPath =
+      wsRoot != null && absPath.startsWith(wsRoot + path.sep) ? absPath.slice(wsRoot.length + 1) : absPath;
+
+    const info = await readFrontmatter(absPath);
+    const reply: HostMessage = hasWikiFrontmatter(info)
+      ? { type: 'fileInfo', href, relPath, title: info?.title, summary: info?.summary }
+      : { type: 'fileInfo', href, relPath };
+    this._postMessage(webview, reply);
   }
 
   private async _renderPage(
