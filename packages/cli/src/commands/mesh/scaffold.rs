@@ -1,8 +1,9 @@
 //! `wiki scaffold` end-to-end pipeline.
 //!
-//! Discover wiki files, parse their fragment links, and emit a markdown
-//! document (or JSON) of `git mesh add` / `git mesh why` commands — one mesh
-//! per link.
+//! Discover wiki files, parse their fragment links, and create git meshes
+//! covering those links via `git mesh add`. Use `--dry-run` to preview the
+//! plan as markdown without mutating `.mesh/`. Use `--format json` for a
+//! structured non-mutating output.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -162,6 +163,7 @@ use super::render;
 pub fn run(
     globs: &[String],
     json: bool,
+    dry_run: bool,
     repo_root: &Path,
     source: crate::index::DocSource,
 ) -> Result<i32> {
@@ -342,7 +344,7 @@ pub fn run(
         return Ok(0);
     }
 
-    // ── Markdown mode ─────────────────────────────────────────────────────
+    // ── Dry-run / apply mode ──────────────────────────────────────────────
     // Empty when there were no internal fragment links at all OR when every
     // section already has its links anchored by an existing mesh.
     if all_inputs.is_empty() || consolidated.is_empty() {
@@ -353,14 +355,64 @@ pub fn run(
         return Ok(0);
     }
 
-    let rendered = render::render_markdown(
-        &consolidated,
-        &page_titles,
-        &parse_errors,
-        &parse_error_paths,
-        &dropped_meshes,
-    );
-    print!("{rendered}");
+    if dry_run {
+        let rendered = render::render_markdown(
+            &consolidated,
+            &page_titles,
+            &parse_errors,
+            &parse_error_paths,
+            &dropped_meshes,
+        );
+        print!("{rendered}");
+        return Ok(0);
+    }
+
+    // Default: apply each draft via `git mesh add`.
+    // Print advisories (parse errors, dropped meshes) before applying so the
+    // caller can see which files were skipped, even when not in dry-run mode.
+    if !parse_errors.is_empty() || !dropped_meshes.is_empty() {
+        let mut advisory = String::new();
+        render::render_advisories(&mut advisory, &parse_errors, &dropped_meshes, true);
+        print!("{advisory}");
+    }
+    apply_drafts(&consolidated, repo_root)
+}
+
+/// Apply each `MeshDraft` by invoking `git mesh add <slug> <anchors…>`.
+///
+/// Extension drafts (`extends_existing.is_some()`) re-use the existing slug;
+/// git-mesh 1.0.80 appends anchors idempotently.
+///
+/// Fail-closed: stops on the first non-zero exit and returns `Ok(1)`.
+fn apply_drafts(drafts: &[MeshDraft], repo_root: &Path) -> Result<i32> {
+    for draft in drafts {
+        let slug = draft
+            .extends_existing
+            .as_deref()
+            .unwrap_or(draft.slug.as_str());
+
+        let mut args: Vec<&str> = vec!["mesh", "add", slug];
+        let anchor_strs: Vec<String> = draft.anchors.clone();
+        for a in &anchor_strs {
+            args.push(a.as_str());
+        }
+
+        let output = Command::new("git")
+            .args(&args)
+            .current_dir(repo_root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .into_diagnostic()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!(
+                "wiki scaffold: `git mesh add {slug}` failed: {stderr}"
+            );
+            return Ok(1);
+        }
+    }
     Ok(0)
 }
 

@@ -197,12 +197,16 @@ enum Commands {
         git_ref: String,
     },
 
-    /// Generate a shell script of `git mesh add` / `git mesh why` commands
-    /// for every fragment link found in the given files or globs.
+    /// Create git meshes covering fragment links in the given files or globs.
+    /// Use `--dry-run` to preview the plan without mutating `.mesh/`.
     Scaffold {
         /// Wiki page files or glob patterns (required)
         #[arg(value_name = "glob", num_args = 1..)]
         globs: Vec<String>,
+
+        /// Preview the scaffold plan without creating any meshes.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
     },
 }
 
@@ -392,8 +396,8 @@ fn run(
             codex_home.as_deref(),
             &git_ref,
         ),
-        Some(Commands::Scaffold { globs }) => {
-            commands::mesh::scaffold::run(&globs, json, &repo_root, source)
+        Some(Commands::Scaffold { globs, dry_run }) => {
+            commands::mesh::scaffold::run(&globs, json, dry_run, &repo_root, source)
         }
         None => match query.as_deref() {
             Some(query) => commands::search::run(query, limit, offset, json, &repo_root, source),

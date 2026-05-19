@@ -106,7 +106,7 @@ pub(crate) fn render_empty_markdown(
 /// `has_scaffold_following` controls the parse-error header phrasing:
 /// - `true`  → advisory ("Some wiki pages could not be parsed and were skipped:")
 /// - `false` → hard-stop ("Unable to generate scaffolding due to parsing errors:")
-fn render_advisories(
+pub(crate) fn render_advisories(
     out: &mut String,
     parse_errors: &[ParseError],
     dropped_meshes: &[DroppedMesh],
@@ -156,11 +156,6 @@ fn render_mesh_block(out: &mut String, m: &MeshDraft) {
         } else {
             let _ = writeln!(out, "  {a} \\");
         }
-    }
-    // Suppress `git mesh why` when extending an existing mesh — its why is
-    // already authored and the user should not be invited to overwrite it.
-    if m.extends_existing.is_none() {
-        let _ = writeln!(out, "git mesh why {} -m \"[why]\"", m.slug);
     }
     let _ = writeln!(out, "```");
     out.push('\n');

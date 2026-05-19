@@ -72,7 +72,7 @@ fn mesh_scaffold_byte_equal_with_expected_md() {
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
-        .args(["scaffold", "**/*.md"])
+        .args(["scaffold", "--dry-run", "**/*.md"])
         .current_dir(tmp.path().join("wiki"))
         .output()
         .expect("run wiki binary");
@@ -151,7 +151,7 @@ fn mesh_scaffold_parse_error_block() {
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
-        .args(["scaffold", "**/*.md"])
+        .args(["scaffold", "--dry-run", "**/*.md"])
         .current_dir(&wiki_dir)
         .output()
         .expect("run wiki binary");
@@ -838,7 +838,7 @@ fn mesh_scaffold_handles_file_outside_wiki_dir() {
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
-        .args(["scaffold", "../floats/notes.md"])
+        .args(["scaffold", "--dry-run", "../floats/notes.md"])
         .current_dir(root.join("wiki"))
         .output()
         .expect("run wiki scaffold");
@@ -851,9 +851,8 @@ fn mesh_scaffold_handles_file_outside_wiki_dir() {
          status={:?}\nstdout: {stdout}\nstderr: {stderr}",
         output.status
     );
-    // Scaffold must emit a `git mesh add` line that anchors the file to its
-    // fragment-link target — if the run silently became a no-op the success
-    // assertion alone would not catch it.
+    // Scaffold must emit a `git mesh add` line in dry-run preview — verifies
+    // the file's fragment link is covered and the run did not silently no-op.
     assert!(
         stdout.contains("git mesh add") && stdout.contains("src/code.rs#L1-L1"),
         "scaffold must emit a mesh entry covering the file's fragment link; \
@@ -943,7 +942,7 @@ fn mesh_scaffold_renames_on_existing_mesh_collision() {
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
-        .args(["scaffold", "**/*.md"])
+        .args(["scaffold", "--dry-run", "**/*.md"])
         .current_dir(root.join("wiki"))
         .output()
         .expect("run wiki scaffold");
@@ -1062,7 +1061,7 @@ fn mesh_scaffold_extends_existing_section_mesh_with_new_code_links() {
     // are the section keys we need to stage against.
     let bin = env!("CARGO_BIN_EXE_wiki");
     let baseline = Command::new(bin)
-        .args(["scaffold", "**/*.md"])
+        .args(["scaffold", "--dry-run", "**/*.md"])
         .current_dir(root.join("wiki"))
         .output()
         .expect("run wiki scaffold (baseline)");
@@ -1142,8 +1141,9 @@ fn mesh_scaffold_extends_existing_section_mesh_with_new_code_links() {
         ],
     );
 
+    // Run with --dry-run to inspect which drafts remain after pre-existing meshes filter.
     let output = Command::new(bin)
-        .args(["scaffold", "**/*.md"])
+        .args(["scaffold", "--dry-run", "**/*.md"])
         .current_dir(root.join("wiki"))
         .output()
         .expect("run wiki scaffold");
@@ -1165,7 +1165,7 @@ fn mesh_scaffold_extends_existing_section_mesh_with_new_code_links() {
     );
 
     // 2. Extends existing: emit `git mesh add billing/extend-target src/extend.ts#L1-L1`
-    //    with no `git mesh why billing/extend-target` line.
+    //    with no `git mesh why` line (why emission was removed entirely).
     assert!(
         stdout.contains("git mesh add billing/extend-target"),
         "expected extension block targeting existing mesh; got:\n{stdout}"
@@ -1175,8 +1175,8 @@ fn mesh_scaffold_extends_existing_section_mesh_with_new_code_links() {
         "expected new code anchor in extension block; got:\n{stdout}"
     );
     assert!(
-        !stdout.contains("git mesh why billing/extend-target"),
-        "extension blocks must not invite a why rewrite; got:\n{stdout}"
+        !stdout.contains("git mesh why"),
+        "scaffold must not emit any git mesh why lines; got:\n{stdout}"
     );
     // The section's wiki anchor itself is dropped from the extension emission
     // — git-mesh already carries it.
@@ -1187,14 +1187,230 @@ fn mesh_scaffold_extends_existing_section_mesh_with_new_code_links() {
         "extension block must not re-add the section's wiki anchor; got:\n{stdout}"
     );
 
-    // 3. Fresh section: today's behavior — new slug, with a `git mesh why` line.
+    // 3. Fresh section: new slug created, but no git mesh why (removed).
     assert!(
         stdout.contains("git mesh add wiki/fresh-section"),
         "expected new mesh for the fresh section; got:\n{stdout}"
     );
+
+    // Now run the default (apply) mode and assert .mesh/ files were created.
+    let apply_out = Command::new(bin)
+        .args(["scaffold", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("run wiki scaffold apply");
     assert!(
-        stdout.contains("git mesh why wiki/fresh-section"),
-        "new-mesh blocks still need a why line; got:\n{stdout}"
+        apply_out.status.success(),
+        "scaffold apply failed: {}",
+        String::from_utf8_lossy(&apply_out.stderr)
+    );
+    // The extension target mesh should now contain the new anchor.
+    let mesh_path = root.join(".mesh/billing/extend-target");
+    assert!(
+        mesh_path.exists(),
+        "expected .mesh/billing/extend-target to exist after apply"
+    );
+    let mesh_content = std::fs::read_to_string(&mesh_path).unwrap();
+    assert!(
+        mesh_content.contains("src/extend.ts#L1-L1"),
+        "expected new anchor in applied mesh; got:\n{mesh_content}"
+    );
+    // Fresh section mesh should be created.
+    let fresh_path = root.join(".mesh/wiki/fresh-section");
+    assert!(
+        fresh_path.exists(),
+        "expected .mesh/wiki/fresh-section to exist after apply"
+    );
+}
+
+/// `wiki scaffold` (default, no flags) directly creates `.mesh/` files via
+/// `git mesh add` rather than printing commands.
+#[test]
+fn mesh_scaffold_default_applies_meshes() {
+    if Command::new("git-mesh").arg("--version").output().is_err() {
+        eprintln!("skipping: git-mesh not installed");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "// lib\n// line2\n// line3\n").unwrap();
+    std::fs::write(
+        root.join("wiki/page.md"),
+        "---\ntitle: Page\nsummary: A page.\n---\n\nSee [lib](../src/lib.rs#L1-L3) for details.\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("run wiki scaffold");
+    assert!(
+        output.status.success(),
+        "wiki scaffold failed: stderr=\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // A .mesh/ file must exist for the draft slug.
+    let mesh_dir = root.join(".mesh");
+    assert!(
+        mesh_dir.exists(),
+        ".mesh/ directory must exist after scaffold apply"
+    );
+    // Find any mesh file under .mesh/wiki/.
+    let wiki_mesh = mesh_dir.join("wiki");
+    assert!(wiki_mesh.exists(), ".mesh/wiki/ must exist; got nothing under .mesh/");
+
+    // The mesh must contain the code anchor (not a why).
+    let mesh_file = std::fs::read_dir(&wiki_mesh)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .find(|e| e.file_type().unwrap().is_file())
+        .expect("at least one mesh file under .mesh/wiki/");
+    let mesh_content = std::fs::read_to_string(mesh_file.path()).unwrap();
+    assert!(
+        mesh_content.contains("src/lib.rs#L1-L3"),
+        "mesh must contain the code anchor; got:\n{mesh_content}"
+    );
+    // No why should be set (file contains only path#range sha256:... lines).
+    assert!(
+        !mesh_content.contains("why"),
+        "mesh must not contain a why; got:\n{mesh_content}"
+    );
+}
+
+/// Running `wiki scaffold` twice on an unchanged tree must produce exit 0 both
+/// times and not duplicate anchors (git-mesh idempotency).
+#[test]
+fn mesh_scaffold_idempotent() {
+    if Command::new("git-mesh").arg("--version").output().is_err() {
+        eprintln!("skipping: git-mesh not installed");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "// lib\n// line2\n// line3\n").unwrap();
+    std::fs::write(
+        root.join("wiki/page.md"),
+        "---\ntitle: Page\nsummary: A page.\n---\n\nSee [lib](../src/lib.rs#L1-L3) for details.\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+
+    // First run.
+    let out1 = Command::new(bin)
+        .args(["scaffold", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("first scaffold run");
+    assert!(
+        out1.status.success(),
+        "first scaffold run failed: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+
+    // Record mesh content after first run.
+    let mesh_dir = root.join(".mesh");
+    let first_content: Vec<_> = walkdir_mesh(&mesh_dir);
+
+    // Second run.
+    let out2 = Command::new(bin)
+        .args(["scaffold", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("second scaffold run");
+    assert!(
+        out2.status.success(),
+        "second scaffold run failed: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+
+    let second_content: Vec<_> = walkdir_mesh(&mesh_dir);
+    assert_eq!(
+        first_content, second_content,
+        "mesh content changed between two identical scaffold runs (not idempotent)"
+    );
+}
+
+fn walkdir_mesh(mesh_dir: &std::path::Path) -> Vec<(std::path::PathBuf, String)> {
+    if !mesh_dir.exists() {
+        return vec![];
+    }
+    let mut results = vec![];
+    collect_mesh_files(mesh_dir, &mut results);
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    results
+}
+
+fn collect_mesh_files(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, String)>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_dir() {
+            collect_mesh_files(&path, out);
+        } else if path.is_file() {
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            out.push((path, content));
+        }
+    }
+}
+
+/// `wiki scaffold` exits non-zero when `git mesh add` fails (fail-closed).
+#[test]
+fn mesh_scaffold_fail_closed_on_add_failure() {
+    if Command::new("git-mesh").arg("--version").output().is_err() {
+        eprintln!("skipping: git-mesh not installed");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    // A file with only 1 line, but the anchor says L1-L999, which git-mesh
+    // rejects as "end exceeds file line count".
+    std::fs::write(root.join("src/lib.rs"), "// one line\n").unwrap();
+    std::fs::write(
+        root.join("wiki/page.md"),
+        "---\ntitle: Page\nsummary: A page.\n---\n\nSee [lib](../src/lib.rs#L1-L999) for details.\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("run wiki scaffold");
+
+    assert!(
+        !output.status.success(),
+        "scaffold must exit non-zero when git mesh add fails"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("git mesh add"),
+        "stderr must name the failing git mesh add command; got:\n{stderr}"
     );
 }
 
@@ -1240,7 +1456,7 @@ fn mesh_scaffold_drops_mesh_with_missing_anchor_path() {
 
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
-        .args(["scaffold", "**/*.md"])
+        .args(["scaffold", "--dry-run", "**/*.md"])
         .current_dir(&wiki_dir)
         .output()
         .expect("run wiki binary");
