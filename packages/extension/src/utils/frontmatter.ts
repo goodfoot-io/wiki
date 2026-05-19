@@ -59,11 +59,17 @@ function decodeDoubleQuoted(inner: string): string {
         case 'P':
           return ' ';
         case 'u':
-          return String.fromCodePoint(Number.parseInt(esc.slice(1), 16));
         case 'U':
-          return String.fromCodePoint(Number.parseInt(esc.slice(1), 16));
-        case 'x':
-          return String.fromCodePoint(Number.parseInt(esc.slice(1), 16));
+        case 'x': {
+          const cp = Number.parseInt(esc.slice(1), 16);
+          // Guard against out-of-range code points (> 0x10FFFF) and lone surrogates
+          // (0xD800–0xDFFF), which would cause String.fromCodePoint to throw RangeError.
+          // Degrade to the Unicode replacement character to keep parseFrontmatter total.
+          if (cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) {
+            return '�';
+          }
+          return String.fromCodePoint(cp);
+        }
         default:
           return esc;
       }

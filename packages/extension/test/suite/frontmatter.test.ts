@@ -10,7 +10,7 @@
  */
 
 import * as assert from 'node:assert';
-import { extractFirstHeading, parseFrontmatter } from '../../src/utils/frontmatter.js';
+import { extractFirstHeading, hasWikiFrontmatter, parseFrontmatter } from '../../src/utils/frontmatter.js';
 
 // ── Helper ────────────────────────────────────────────────────────────────────
 
@@ -72,6 +72,32 @@ describe('parseFrontmatter — YAML scalar decode parity', () => {
   it('double-quoted title with \\n escape decodes to newline character', () => {
     const { title } = parseFrontmatter(fm('title: "Line1\\nLine2"\nsummary: s'));
     assert.strictEqual(title, 'Line1\nLine2');
+  });
+
+  it('out-of-range \\U escape does not throw and degrades to replacement character', () => {
+    // \U00110000 exceeds the Unicode max (0x10FFFF) — must not throw RangeError
+    assert.doesNotThrow(() => {
+      parseFrontmatter(fm('title: "\\U00110000"\nsummary: s'));
+    });
+    const { title } = parseFrontmatter(fm('title: "\\U00110000"\nsummary: s'));
+    assert.strictEqual(title, '�');
+  });
+
+  it('lone surrogate \\u escape does not throw and degrades to replacement character', () => {
+    // \uD800 is a lone high surrogate — must not throw RangeError
+    assert.doesNotThrow(() => {
+      parseFrontmatter(fm('title: "\\uD800"\nsummary: s'));
+    });
+    const { title } = parseFrontmatter(fm('title: "\\uD800"\nsummary: s'));
+    assert.strictEqual(title, '�');
+  });
+
+  it('hasWikiFrontmatter gate does not throw on out-of-range \\U escape', () => {
+    // Verifies the gate path does not throw when the title contains a degraded escape.
+    assert.doesNotThrow(() => {
+      const info = parseFrontmatter(fm('title: "\\U00110000"\nsummary: "valid"'));
+      hasWikiFrontmatter(info);
+    });
   });
 });
 
