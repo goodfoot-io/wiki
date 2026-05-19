@@ -121,6 +121,18 @@ pub fn normalize_repo_relative_path(input: &str, repo_root: &Path) -> String {
 /// Resolve a fragment link path relative to the file it was found in,
 /// then return it relative to the repository root.
 pub fn resolve_link_path(link_path: &str, source_file: &Path, repo_root: &Path) -> PathBuf {
+    // A genuine filesystem-absolute path that falls under repo_root is
+    // stripped to repo-relative. This must be checked before the leading-
+    // slash rule below: on POSIX an absolute path *also* starts with `/`,
+    // so stripping the slash first would yield `tmp/.../packages/...`
+    // instead of the repo-relative path.
+    let path = Path::new(link_path);
+    if path.is_absolute()
+        && let Ok(stripped) = path.strip_prefix(repo_root)
+    {
+        return stripped.to_path_buf();
+    }
+
     // Repo-root-absolute links use a POSIX-style leading slash (e.g.
     // `/packages/cli/src/parser.rs`). `Path::is_absolute()` is
     // platform-dependent — on Windows a rootless `/foo` path is *not*
@@ -130,16 +142,8 @@ pub fn resolve_link_path(link_path: &str, source_file: &Path, repo_root: &Path) 
         return PathBuf::from(rest);
     }
 
-    let path = Path::new(link_path);
     if path.is_absolute() {
-        return path
-            .strip_prefix(repo_root)
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|_| {
-                path.strip_prefix("/")
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|_| path.to_path_buf())
-            });
+        return path.to_path_buf();
     }
 
     // Treat as relative to the source file.
