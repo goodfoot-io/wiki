@@ -24,7 +24,7 @@ function checkWikiFile(
 ): { ok: boolean; output: string } {
   let result: ReturnType<typeof spawnSync>;
   try {
-    result = spawnSync('wiki', ['check', filePath], {
+    result = spawnSync('wiki', ['check', '--fix', '--no-mesh', filePath], {
       cwd,
       encoding: 'utf8',
       timeout: 25000,
@@ -48,29 +48,7 @@ function checkWikiFile(
 
   if (result.status === 0) return { ok: true, output: '' };
 
-  let output = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
-  if (!output) return { ok: true, output: '' };
-
-  if (output.includes('mesh_uncovered')) {
-    const filtered = output
-      .split('\n')
-      .filter((line) => !line.includes('mesh_uncovered'))
-      .join('\n')
-      .trim();
-    try {
-      const scaffoldResult = spawnSync('wiki', ['scaffold', filePath], {
-        cwd,
-        encoding: 'utf8',
-        timeout: 25000,
-        env: { ...process.env }
-      });
-      const scaffoldOutput = scaffoldResult.status === 0 && scaffoldResult.stdout ? scaffoldResult.stdout.trim() : '';
-      output = [filtered, scaffoldOutput].filter(Boolean).join('\n\n');
-    } catch {
-      output = filtered;
-    }
-  }
-
+  const output = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
   if (!output) return { ok: true, output: '' };
   return { ok: false, output };
 }

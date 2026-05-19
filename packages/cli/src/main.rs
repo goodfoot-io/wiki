@@ -207,6 +207,12 @@ enum Commands {
         /// Preview the scaffold plan without creating any meshes.
         #[arg(long = "dry-run")]
         dry_run: bool,
+
+        /// In apply mode, print only the repo-relative path of each created or
+        /// extended mesh to stdout (one per line); route advisories to stderr.
+        /// Lets callers stage exactly what this run touched.
+        #[arg(long = "print-applied", conflicts_with = "dry_run")]
+        print_applied: bool,
     },
 }
 
@@ -396,9 +402,18 @@ fn run(
             codex_home.as_deref(),
             &git_ref,
         ),
-        Some(Commands::Scaffold { globs, dry_run }) => {
-            commands::mesh::scaffold::run(&globs, json, dry_run, &repo_root, source)
-        }
+        Some(Commands::Scaffold {
+            globs,
+            dry_run,
+            print_applied,
+        }) => commands::mesh::scaffold::run(
+            &globs,
+            json,
+            dry_run,
+            &repo_root,
+            source,
+            print_applied,
+        ),
         None => match query.as_deref() {
             Some(query) => commands::search::run(query, limit, offset, json, &repo_root, source),
             None => {

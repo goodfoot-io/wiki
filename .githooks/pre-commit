@@ -5,7 +5,6 @@ set -e
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 PARTS=(
     pre-commit.wiki.sh
-    pre-commit.wiki-mesh.sh
     pre-commit.biome.sh
     pre-commit.plugin-version.sh
     pre-commit.version-consistency.sh

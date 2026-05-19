@@ -72,6 +72,11 @@ pub(crate) enum DropReason {
     /// An anchor is statically invalid for git-mesh: line range exceeds the
     /// target file's line count, start > end, or start < 1.
     InvalidAnchor { anchor: String, detail: String },
+    /// The generated slug cannot be created because a pre-existing mesh
+    /// occupies a conflicting path (an ancestor file, or a directory at the
+    /// slug path). `existing` is the conflicting path relative to the mesh
+    /// dir, forward slashes.
+    SlugPathCollision { existing: String },
 }
 
 /// A mesh that was dropped pre-apply (missing target or invalid anchor).
@@ -88,6 +93,7 @@ pub(crate) struct DroppedMesh {
 enum DroppedMeshCategory {
     MissingPath,
     InvalidAnchor,
+    SlugPathCollision,
 }
 
 /// JSON representation of a dropped mesh.
@@ -193,6 +199,7 @@ pub fn run(
     dry_run: bool,
     repo_root: &Path,
     source: crate::index::DocSource,
+    print_applied: bool,
 ) -> Result<i32> {
     let files = match discover_files(globs, repo_root, source) {
         Ok(v) => v
@@ -304,7 +311,10 @@ pub fn run(
     // Resolve slug collisions across both already-assigned slugs in this run
     // and any meshes that already live in the repo. Extension drafts opt out:
     // they reuse the existing mesh's slug verbatim and skip the probe entirely.
-    let probe = |slug: &str| mesh_exists(repo_root, slug);
+    let mesh_dir = resolve_mesh_dir(repo_root);
+    let probe = |slug: &str| {
+        mesh_exists(repo_root, slug) || mesh_fs_prefix_collision(&mesh_dir, slug)
+    };
     resolve_slug_collisions(&mut consolidated, &page_titles, &probe);
 
     // Drop meshes whose non-wiki anchors reference paths that don't exist in
@@ -320,6 +330,70 @@ pub fn run(
         ),
     };
     let mut dropped_meshes: Vec<DroppedMesh> = Vec::new();
+
+    // ── Slug-path-collision pass ──────────────────────────────────────────
+    // A pre-existing mesh occupying a conflicting path makes `git mesh add`
+    // structurally impossible. When the collision is a strict ANCESTOR FILE
+    // (existing shorter mesh `B` blocks new longer slug `B/...`), the remedy
+    // is to RENAME the blocker out of the way (apply mode) / report the
+    // planned rename (dry-run), keeping the new draft. The blocker is read and
+    // its single distinct wiki-page anchor drives a reused-noun leaf for the
+    // rename target. Any failure (non-ancestor-file collision, unreadable
+    // blocker, `git mesh move` non-zero) FAILS OPEN to the legacy
+    // drop-with-advisory path (exit 0) — never fail-closed, never panic.
+    //
+    // Extension drafts reuse an existing slug verbatim, so they are exempt.
+    let section_noun: std::collections::HashMap<(String, u32, u32), String> =
+        consolidated
+            .iter()
+            .filter_map(|d| {
+                d.structured_anchors.first().map(|a| {
+                    (
+                        (a.path.clone(), a.start_line, a.end_line),
+                        d.noun.clone(),
+                    )
+                })
+            })
+            .collect();
+    let mut planned_renames: Vec<PlannedRename> = Vec::new();
+    consolidated.retain(|draft| {
+        if draft.extends_existing.is_some()
+            || !mesh_fs_prefix_collision(&mesh_dir, &draft.slug)
+        {
+            return true;
+        }
+        // Try the rename-the-blocker remedy for the ancestor-file case.
+        match plan_blocker_rename(
+            &mesh_dir,
+            &draft.slug,
+            &draft.page_path,
+            &section_noun,
+        ) {
+            Some(plan) if dry_run => {
+                // Preview only — never mutate. Keep the draft.
+                planned_renames.push(plan);
+                true
+            }
+            Some(plan) if run_blocker_rename(repo_root, &mesh_dir, &plan) => {
+                // Path freed — keep the draft; `apply_drafts` will create it.
+                planned_renames.push(plan);
+                true
+            }
+            // Fail open: not an ancestor-file case, unreadable blocker, or
+            // `git mesh move` failed → drop-with-advisory, exit 0.
+            _ => {
+                dropped_meshes.push(DroppedMesh {
+                    slug: draft.slug.clone(),
+                    reason: DropReason::SlugPathCollision {
+                        existing: mesh_fs_collision_path(&mesh_dir, &draft.slug),
+                    },
+                    page: draft.page_path.clone(),
+                });
+                false
+            }
+        }
+    });
+
     consolidated.retain(|draft| {
         // Check every non-wiki anchor (skip the first anchor which is the page section).
         for anchor in draft.structured_anchors.iter().skip(1) {
@@ -392,6 +466,15 @@ pub fn run(
                     detail: detail.clone(),
                     page: d.page.clone(),
                 },
+                DropReason::SlugPathCollision { existing } => DroppedMeshJson {
+                    slug: d.slug.clone(),
+                    category: DroppedMeshCategory::SlugPathCollision,
+                    anchor: existing.clone(),
+                    detail: format!(
+                        "slug path collides with existing mesh `{existing}`"
+                    ),
+                    page: d.page.clone(),
+                },
             })
             .collect();
         let pages = build_pages_json(&consolidated, &page_titles, &parse_error_paths);
@@ -410,14 +493,17 @@ pub fn run(
     // Empty when there were no internal fragment links at all OR when every
     // section already has its links anchored by an existing mesh.
     if all_inputs.is_empty() || consolidated.is_empty() {
-        print!(
-            "{}",
-            render::render_empty_markdown(&parse_errors, &dropped_meshes)
-        );
+        let mut out = render::render_empty_markdown(&parse_errors, &dropped_meshes);
+        render::render_rename_advisories(&mut out, &planned_renames, dry_run);
+        print!("{out}");
         return Ok(0);
     }
 
     if dry_run {
+        // The planned-rename block is part of the non-mutating preview; it
+        // precedes the mesh plan like other advisories.
+        let mut rename_block = String::new();
+        render::render_rename_advisories(&mut rename_block, &planned_renames, true);
         let rendered = render::render_markdown(
             &consolidated,
             &page_titles,
@@ -425,19 +511,51 @@ pub fn run(
             &parse_error_paths,
             &dropped_meshes,
         );
-        print!("{rendered}");
+        print!("{rename_block}{rendered}");
         return Ok(0);
     }
 
     // Default: apply each draft via `git mesh add`.
-    // Print advisories (parse errors, dropped meshes) before applying so the
-    // caller can see which files were skipped, even when not in dry-run mode.
-    if !parse_errors.is_empty() || !dropped_meshes.is_empty() {
+    // Print advisories (parse errors, dropped meshes, performed renames)
+    // before applying so the caller can see what changed, even when not in
+    // dry-run mode.
+    if !parse_errors.is_empty()
+        || !dropped_meshes.is_empty()
+        || !planned_renames.is_empty()
+    {
         let mut advisory = String::new();
         render::render_advisories(&mut advisory, &parse_errors, &dropped_meshes, true);
-        print!("{advisory}");
+        render::render_rename_advisories(&mut advisory, &planned_renames, false);
+        if print_applied {
+            // Advisories must not pollute stdout when the caller is consuming
+            // stdout as an exact stage list.
+            eprint!("{advisory}");
+        } else {
+            print!("{advisory}");
+        }
     }
-    apply_drafts(&consolidated, repo_root)
+
+    // When `print_applied`, every mesh file this run touched must be emitted
+    // on stdout so the pre-commit hook stages it — including each renamed
+    // blocker's NEW path.
+    if print_applied {
+        for r in &planned_renames {
+            let rel = match mesh_dir.strip_prefix(repo_root) {
+                Ok(d) => {
+                    let d = d.to_string_lossy().replace('\\', "/");
+                    if d.is_empty() {
+                        r.to.clone()
+                    } else {
+                        format!("{d}/{}", r.to)
+                    }
+                }
+                Err(_) => mesh_dir.join(&r.to).to_string_lossy().replace('\\', "/"),
+            };
+            println!("{rel}");
+        }
+    }
+
+    apply_drafts(&consolidated, repo_root, &mesh_dir, print_applied)
 }
 
 /// Apply each `MeshDraft` by invoking `git mesh add <slug> <anchors…>`.
@@ -448,7 +566,19 @@ pub fn run(
 /// Fail-closed: stops on the first non-zero exit and returns `Ok(1)`.
 /// On failure, reports the slugs already applied in this run so the partial
 /// mutation is disclosed rather than silent.
-fn apply_drafts(drafts: &[MeshDraft], repo_root: &Path) -> Result<i32> {
+///
+/// When `print_applied` is set, each successfully applied mesh's repo-relative
+/// path (`.mesh/<slug>`, forward slashes) is printed to stdout, one per line.
+/// This is an additional fail-closed guard: if the deterministic mesh file is
+/// absent on disk after a successful `git mesh add`, that is treated as a hard
+/// failure (error to stderr, returns `Ok(1)`) rather than silently emitting an
+/// incomplete stage list to the caller.
+fn apply_drafts(
+    drafts: &[MeshDraft],
+    repo_root: &Path,
+    mesh_dir: &Path,
+    print_applied: bool,
+) -> Result<i32> {
     let mut applied: Vec<String> = Vec::new();
 
     for draft in drafts {
@@ -489,6 +619,28 @@ fn apply_drafts(drafts: &[MeshDraft], repo_root: &Path) -> Result<i32> {
                 );
             }
             return Ok(1);
+        }
+
+        if print_applied {
+            let mesh_path = mesh_dir.join(slug);
+            let rel = match mesh_dir.strip_prefix(repo_root) {
+                Ok(d) => {
+                    let d = d.to_string_lossy().replace('\\', "/");
+                    if d.is_empty() {
+                        slug.to_string()
+                    } else {
+                        format!("{d}/{slug}")
+                    }
+                }
+                Err(_) => mesh_path.to_string_lossy().replace('\\', "/"),
+            };
+            if !mesh_path.is_file() {
+                eprintln!(
+                    "wiki scaffold: `git mesh add {slug}` reported success but expected mesh file {rel} is absent — refusing to emit an incomplete stage list"
+                );
+                return Ok(1);
+            }
+            println!("{rel}");
         }
 
         applied.push(slug.to_string());
@@ -784,19 +936,320 @@ fn build_meshes(
     consolidated
 }
 
-/// Probe whether a mesh with `slug` already exists in `repo_root` by invoking
-/// `git mesh <slug>` and inspecting the exit code. Treats any error (missing
-/// `git-mesh` binary, non-mesh repo, signal-killed child) as "does not exist"
-/// so scaffold remains usable in environments without `git-mesh` installed.
+/// Resolve the git-mesh storage directory for `repo_root`.
+///
+/// Precedence (highest first):
+/// 1. `GIT_MESH_DIR` environment variable.
+/// 2. `git config --get git-mesh.dir` (non-zero exit / empty value = unset).
+/// 3. Default `.mesh`.
+///
+/// A relative resolved value is joined onto `repo_root`; an absolute value is
+/// used as-is. `wiki` never passes `--mesh-dir`, so that tier is intentionally
+/// not modeled here.
+fn resolve_mesh_dir(repo_root: &Path) -> PathBuf {
+    let configured = std::env::var("GIT_MESH_DIR")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            Command::new("git")
+                .args(["config", "--get", "git-mesh.dir"])
+                .current_dir(repo_root)
+                .stderr(Stdio::null())
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| {
+                    let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if s.is_empty() { None } else { Some(s) }
+                })
+        });
+
+    match configured {
+        Some(v) => {
+            let p = PathBuf::from(&v);
+            if p.is_absolute() {
+                p
+            } else {
+                repo_root.join(p)
+            }
+        }
+        None => repo_root.join(".mesh"),
+    }
+}
+
+/// Probe whether a mesh with `slug` already exists in `repo_root`.
+///
+/// git-mesh stores every mesh as a tracked working-tree file at
+/// `<mesh_dir>/<name>`, where `<name>` is the slug with `/` as real nested
+/// directory separators. Existence is therefore a pure filesystem check: the
+/// mesh exists iff `<mesh_dir>/<slug>` is a regular file. No `git mesh`
+/// subprocess is involved.
 fn mesh_exists(repo_root: &Path, slug: &str) -> bool {
-    Command::new("git")
-        .args(["mesh", slug])
-        .current_dir(repo_root)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    resolve_mesh_dir(repo_root).join(slug).is_file()
+}
+
+/// True if slugs `a` and `b` cannot both exist as nested mesh files: they are
+/// equal, or one is a strict segment-wise path prefix of the other.
+///
+/// Segment-aware: `wiki/scaffold` and `wiki/scaffold-2` do NOT conflict, but
+/// `wiki/scaffold` and `wiki/scaffold/extra` do.
+fn slug_paths_conflict(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let starts_with_segs = |long: &str, short: &str| {
+        long.starts_with(short)
+            && long.as_bytes().get(short.len()) == Some(&b'/')
+    };
+    starts_with_segs(a, b) || starts_with_segs(b, a)
+}
+
+/// True if creating `<mesh_dir>/<slug>` as a regular file is structurally
+/// impossible because:
+/// - `<mesh_dir>/<slug>` already exists as a directory, OR
+/// - any STRICT ancestor `<mesh_dir>/<seg1>/…/<segK>` (K < total segments)
+///   exists as a regular file.
+///
+/// An exact pre-existing file at `<mesh_dir>/<slug>` is NOT this function's
+/// concern — that case belongs to [`mesh_exists`].
+fn mesh_fs_prefix_collision(mesh_dir: &Path, slug: &str) -> bool {
+    let full = mesh_dir.join(slug);
+    if full.is_dir() {
+        return true;
+    }
+    let segs: Vec<&str> = slug.split('/').filter(|s| !s.is_empty()).collect();
+    let mut cur = mesh_dir.to_path_buf();
+    for seg in segs.iter().take(segs.len().saturating_sub(1)) {
+        cur = cur.join(seg);
+        if cur.is_file() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Compute the conflicting ancestor mesh path (relative to `mesh_dir`, forward
+/// slashes) for a slug that fails [`mesh_fs_prefix_collision`]: the first
+/// strict ancestor that exists as a regular file, or `slug` itself if
+/// `<mesh_dir>/<slug>` is an existing directory.
+fn mesh_fs_collision_path(mesh_dir: &Path, slug: &str) -> String {
+    if mesh_dir.join(slug).is_dir() {
+        return slug.to_string();
+    }
+    let segs: Vec<&str> = slug.split('/').filter(|s| !s.is_empty()).collect();
+    let mut cur = mesh_dir.to_path_buf();
+    let mut acc: Vec<&str> = Vec::new();
+    for seg in segs.iter().take(segs.len().saturating_sub(1)) {
+        cur = cur.join(seg);
+        acc.push(seg);
+        if cur.is_file() {
+            return acc.join("/");
+        }
+    }
+    slug.to_string()
+}
+
+/// The first STRICT ancestor of `slug` that exists as a regular file under
+/// `mesh_dir`, returned as a forward-slash mesh-dir-relative name. `None` when
+/// the collision (if any) is a directory at the slug path rather than an
+/// ancestor file — only the ancestor-file case is eligible for the
+/// rename-the-blocker remedy.
+fn ancestor_file_blocker(mesh_dir: &Path, slug: &str) -> Option<String> {
+    if mesh_dir.join(slug).is_dir() {
+        return None;
+    }
+    let segs: Vec<&str> = slug.split('/').filter(|s| !s.is_empty()).collect();
+    let mut cur = mesh_dir.to_path_buf();
+    let mut acc: Vec<&str> = Vec::new();
+    for seg in segs.iter().take(segs.len().saturating_sub(1)) {
+        cur = cur.join(seg);
+        acc.push(seg);
+        if cur.is_file() {
+            return Some(acc.join("/"));
+        }
+    }
+    None
+}
+
+/// Parsed view of a tracked mesh file: the distinct wiki-page anchors (RELPATH
+/// ends `.md`) it carries, as `(path, start, end)` triples.
+fn parse_mesh_wiki_anchors(text: &str) -> Vec<(String, u32, u32)> {
+    let mut out: Vec<(String, u32, u32)> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            // Blank line ends the anchor block; the rest is `why` prose.
+            break;
+        }
+        // `RELPATH#L<start>-L<end> sha256:<hex>` or whole-file
+        // `RELPATH sha256:<hex>`.
+        let first = line.split_whitespace().next().unwrap_or("");
+        let (relpath, range) = match first.split_once("#L") {
+            Some((p, r)) => (p, Some(r)),
+            None => (first, None),
+        };
+        if !relpath.ends_with(".md") {
+            continue;
+        }
+        let (start, end) = match range {
+            None => (0u32, 0u32),
+            Some(r) => match r.split_once("-L") {
+                Some((s, e)) => match (s.parse::<u32>(), e.parse::<u32>()) {
+                    (Ok(s), Ok(e)) => (s, e),
+                    _ => continue,
+                },
+                None => continue,
+            },
+        };
+        let triple = (relpath.to_string(), start, end);
+        if !out.contains(&triple) {
+            out.push(triple);
+        }
+    }
+    out
+}
+
+/// A rename of a blocker mesh that frees a slug path for a new draft.
+#[derive(Debug, Clone)]
+pub(crate) struct PlannedRename {
+    /// Mesh-dir-relative old name of the blocker (e.g. `wiki/arch/scaff`).
+    pub(crate) from: String,
+    /// Mesh-dir-relative new name (e.g. `wiki/arch/scaff/index`).
+    pub(crate) to: String,
+    /// Slug of the new draft whose path the rename frees.
+    pub(crate) for_slug: String,
+    /// Wiki page that motivated `for_slug` (for the advisory).
+    pub(crate) page: String,
+}
+
+/// Derive the leaf segment for a blocker rename target `B/<leaf>` from the
+/// blocker's single distinct wiki-page anchor, reusing the exact noun the
+/// scaffold pipeline already derived for that page section (looked up in
+/// `section_noun` keyed by `(page, start, end)`).
+///
+/// Returns the chosen mesh-dir-relative target `B/<leaf>`. Falls back to
+/// `B/index` (then `B/index-2`, … capped at 99) when the leaf is empty, equals
+/// `B`'s last segment, or `B/<leaf>` would itself collide.
+fn derive_rename_target(
+    mesh_dir: &Path,
+    blocker: &str,
+    wiki_anchors: &[(String, u32, u32)],
+    section_noun: &std::collections::HashMap<(String, u32, u32), String>,
+) -> String {
+    let blocker_last = blocker.rsplit('/').next().unwrap_or(blocker);
+
+    let leaf: Option<String> = if wiki_anchors.len() == 1 {
+        let key = &wiki_anchors[0];
+        section_noun
+            .get(key)
+            .map(|n| draft::kebab(n))
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+
+    if let Some(leaf) = leaf
+        && leaf != blocker_last
+    {
+        let cand = format!("{blocker}/{leaf}");
+        if !mesh_dir.join(&cand).is_file()
+            && !mesh_fs_prefix_collision(mesh_dir, &cand)
+        {
+            return cand;
+        }
+    }
+
+    // Numeric `index` fallback.
+    let base = format!("{blocker}/index");
+    if !mesh_dir.join(&base).is_file() && !mesh_fs_prefix_collision(mesh_dir, &base)
+    {
+        return base;
+    }
+    for n in 2..=99 {
+        let cand = format!("{blocker}/index-{n}");
+        if !mesh_dir.join(&cand).is_file() && !mesh_fs_prefix_collision(mesh_dir, &cand)
+        {
+            return cand;
+        }
+    }
+    base
+}
+
+/// Plan a blocker rename for `slug` whose creation is blocked by a strict
+/// ancestor mesh FILE. Reads and parses the blocker; returns the planned
+/// rename, or `None` to signal fail-open (fall back to drop-with-advisory):
+/// the collision is not an ancestor-file case, the blocker is unreadable, or
+/// derivation otherwise cannot proceed.
+fn plan_blocker_rename(
+    mesh_dir: &Path,
+    slug: &str,
+    page: &str,
+    section_noun: &std::collections::HashMap<(String, u32, u32), String>,
+) -> Option<PlannedRename> {
+    let blocker = ancestor_file_blocker(mesh_dir, slug)?;
+    let text = fs::read_to_string(mesh_dir.join(&blocker)).ok()?;
+    let wiki_anchors = parse_mesh_wiki_anchors(&text);
+    let target = derive_rename_target(mesh_dir, &blocker, &wiki_anchors, section_noun);
+    Some(PlannedRename {
+        from: blocker,
+        to: target,
+        for_slug: slug.to_string(),
+        page: page.to_string(),
+    })
+}
+
+/// Run one `git mesh move <old> <new>` with cwd `repo_root`. `true` iff the
+/// subprocess spawned and exited zero.
+fn git_mesh_move(repo_root: &Path, old: &str, new: &str) -> bool {
+    matches!(
+        Command::new("git")
+            .args(["mesh", "move", old, new])
+            .current_dir(repo_root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output(),
+        Ok(o) if o.status.success()
+    )
+}
+
+/// Execute a planned blocker rename.
+///
+/// The rename target `<B>/<leaf>` is always a strict DESCENDANT of the blocker
+/// `<B>`, and `git mesh move` cannot turn the existing file `<B>` directly
+/// into the directory `<B>/…` in one step. So the move is performed in two
+/// hops through a fresh, collision-free temporary mesh name that is *not*
+/// under `<B>`: `B → tmp`, then `tmp → B/target`. If the second hop fails the
+/// first is rolled back (`tmp → B`) so the blocker is left exactly as found.
+///
+/// Returns `true` only when the blocker ends up at `plan.to`. Any spawn /
+/// non-zero exit yields `false` (caller fails open to drop-with-advisory) with
+/// the blocker restored to its original name.
+fn run_blocker_rename(repo_root: &Path, mesh_dir: &Path, plan: &PlannedRename) -> bool {
+    // A unique temp name at the mesh root, never under `plan.from`.
+    let flat: String = plan
+        .from
+        .chars()
+        .map(|c| if c == '/' { '-' } else { c })
+        .collect();
+    let mut tmp = format!("wiki-scaffold-tmp-{flat}");
+    let mut n = 2;
+    while mesh_dir.join(&tmp).exists() || mesh_fs_prefix_collision(mesh_dir, &tmp) {
+        tmp = format!("wiki-scaffold-tmp-{flat}-{n}");
+        n += 1;
+        if n > 99 {
+            return false;
+        }
+    }
+
+    if !git_mesh_move(repo_root, &plan.from, &tmp) {
+        return false;
+    }
+    if !git_mesh_move(repo_root, &tmp, &plan.to) {
+        // Roll back so the blocker is byte-identical at its original name.
+        let _ = git_mesh_move(repo_root, &tmp, &plan.from);
+        return false;
+    }
+    true
 }
 
 /// Resolve slug collisions by progressively prepending semantic qualifiers
@@ -818,6 +1271,13 @@ fn mesh_exists(repo_root: &Path, slug: &str) -> bool {
 /// Duplicate candidate slugs (caused by [`draft::build_slug_with_qualifiers`]
 /// dropping a reserved qualifier) are skipped so the search makes monotonic
 /// progress instead of looping on the same string.
+/// True if `cand` would collide path-wise with any already-assigned slug
+/// (exact equality or a strict segment-wise prefix relationship), since two
+/// such slugs cannot coexist as nested mesh files.
+fn assigned_conflict(assigned: &std::collections::HashSet<String>, cand: &str) -> bool {
+    assigned.iter().any(|a| slug_paths_conflict(a, cand))
+}
+
 pub(crate) fn resolve_slug_collisions(
     drafts: &mut [MeshDraft],
     page_titles: &std::collections::HashMap<String, Option<String>>,
@@ -870,21 +1330,21 @@ pub(crate) fn resolve_slug_collisions(
                 continue;
             }
             last_unique = Some(slug.clone());
-            if !assigned.contains(&slug) && !mesh_exists(&slug) {
+            if !assigned_conflict(&assigned, &slug) && !mesh_exists(&slug) {
                 resolved = Some(slug);
                 break;
             }
         }
         let final_slug = resolved.unwrap_or_else(|| {
             let base = last_unique.unwrap_or_else(|| d.slug.clone());
-            let mut n: u32 = 2;
-            loop {
-                let cand = format!("{base}-{n}");
-                if !assigned.contains(&cand) && !mesh_exists(&cand) {
-                    break cand;
-                }
-                n += 1;
-            }
+            // Cap iterations: if `base` has a pre-existing ANCESTOR file every
+            // `base-N` still prefix-collides forever. When exhausted, return
+            // `base` unchanged (still-colliding) — the pre-apply retain pass
+            // drops it with a SlugPathCollision advisory.
+            (2..=99)
+                .map(|n| format!("{base}-{n}"))
+                .find(|cand| !assigned_conflict(&assigned, cand) && !mesh_exists(cand))
+                .unwrap_or(base)
         });
         assigned.insert(final_slug.clone());
         d.slug = final_slug;
@@ -1099,6 +1559,220 @@ fn locate_existing_suffix(rel_path: &str, repo_root: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── slug path-collision helpers ───────────────────────────────────────────
+
+    #[test]
+    fn slug_paths_conflict_prefix_positive() {
+        assert!(slug_paths_conflict(
+            "wiki/architecture/wiki-scaffold",
+            "wiki/architecture/wiki-scaffold/default-glob"
+        ));
+        assert!(slug_paths_conflict(
+            "wiki/architecture/wiki-scaffold/default-glob",
+            "wiki/architecture/wiki-scaffold"
+        ));
+    }
+
+    #[test]
+    fn slug_paths_conflict_equal() {
+        assert!(slug_paths_conflict("wiki/scaffold", "wiki/scaffold"));
+    }
+
+    #[test]
+    fn slug_paths_conflict_sibling_negative() {
+        assert!(!slug_paths_conflict("wiki/scaffold", "wiki/scaffold-2"));
+        assert!(!slug_paths_conflict("wiki/scaffold-2", "wiki/scaffold"));
+        assert!(!slug_paths_conflict("wiki/foo", "wiki/bar"));
+    }
+
+    #[test]
+    fn mesh_fs_prefix_collision_ancestor_file_true() {
+        let tmp = tempfile::tempdir().unwrap();
+        let md = tmp.path();
+        std::fs::create_dir_all(md.join("wiki/architecture")).unwrap();
+        std::fs::write(md.join("wiki/architecture/wiki-scaffold"), "x").unwrap();
+        assert!(mesh_fs_prefix_collision(
+            md,
+            "wiki/architecture/wiki-scaffold/default-glob"
+        ));
+        assert_eq!(
+            mesh_fs_collision_path(md, "wiki/architecture/wiki-scaffold/default-glob"),
+            "wiki/architecture/wiki-scaffold"
+        );
+    }
+
+    #[test]
+    fn mesh_fs_prefix_collision_slug_as_dir_true() {
+        let tmp = tempfile::tempdir().unwrap();
+        let md = tmp.path();
+        std::fs::create_dir_all(md.join("wiki/scaffold/child")).unwrap();
+        assert!(mesh_fs_prefix_collision(md, "wiki/scaffold"));
+        assert_eq!(mesh_fs_collision_path(md, "wiki/scaffold"), "wiki/scaffold");
+    }
+
+    #[test]
+    fn mesh_fs_prefix_collision_clean_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        let md = tmp.path();
+        std::fs::create_dir_all(md.join("wiki")).unwrap();
+        std::fs::write(md.join("wiki/other"), "x").unwrap();
+        assert!(!mesh_fs_prefix_collision(md, "wiki/scaffold/default-glob"));
+    }
+
+    // ── blocker-rename helpers ────────────────────────────────────────────────
+
+    #[test]
+    fn ancestor_file_blocker_finds_strict_ancestor_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let md = tmp.path();
+        std::fs::create_dir_all(md.join("wiki/arch")).unwrap();
+        std::fs::write(md.join("wiki/arch/scaff"), "x").unwrap();
+        assert_eq!(
+            ancestor_file_blocker(md, "wiki/arch/scaff/helper"),
+            Some("wiki/arch/scaff".to_string())
+        );
+    }
+
+    #[test]
+    fn ancestor_file_blocker_none_for_dir_collision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let md = tmp.path();
+        std::fs::create_dir_all(md.join("wiki/scaffold/child")).unwrap();
+        // `wiki/scaffold` exists only as a directory — not an ancestor file.
+        assert_eq!(ancestor_file_blocker(md, "wiki/scaffold"), None);
+    }
+
+    #[test]
+    fn parse_mesh_wiki_anchors_collects_only_md_anchors_before_blank() {
+        let text = "wiki/arch/page.md#L5-L12 sha256:abc\n\
+                     src/lib.rs#L1-L3 sha256:def\n\
+                     \n\
+                     why prose here\n\
+                     wiki/ignored.md#L1-L1 sha256:zzz\n";
+        let anchors = parse_mesh_wiki_anchors(text);
+        assert_eq!(anchors, vec![("wiki/arch/page.md".to_string(), 5, 12)]);
+    }
+
+    #[test]
+    fn parse_mesh_wiki_anchors_handles_whole_file_md_anchor() {
+        let text = "wiki/whole.md sha256:abc\n\nwhy\n";
+        assert_eq!(
+            parse_mesh_wiki_anchors(text),
+            vec![("wiki/whole.md".to_string(), 0, 0)]
+        );
+    }
+
+    #[test]
+    fn derive_rename_target_reuses_section_noun() {
+        let tmp = tempfile::tempdir().unwrap();
+        let md = tmp.path();
+        let mut nouns = std::collections::HashMap::new();
+        nouns.insert(("wiki/arch/page.md".to_string(), 5, 12), "helper".to_string());
+        let target = derive_rename_target(
+            md,
+            "wiki/arch/scaff",
+            &[("wiki/arch/page.md".to_string(), 5, 12)],
+            &nouns,
+        );
+        assert_eq!(target, "wiki/arch/scaff/helper");
+    }
+
+    #[test]
+    fn derive_rename_target_index_when_no_unique_anchor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let md = tmp.path();
+        let nouns = std::collections::HashMap::new();
+        assert_eq!(
+            derive_rename_target(md, "wiki/b", &[], &nouns),
+            "wiki/b/index"
+        );
+    }
+
+    #[test]
+    fn derive_rename_target_index_when_two_distinct_anchors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let md = tmp.path();
+        let nouns = std::collections::HashMap::new();
+        let target = derive_rename_target(
+            md,
+            "wiki/b",
+            &[
+                ("wiki/a.md".to_string(), 1, 2),
+                ("wiki/c.md".to_string(), 3, 4),
+            ],
+            &nouns,
+        );
+        assert_eq!(target, "wiki/b/index");
+    }
+
+    #[test]
+    fn derive_rename_target_numeric_index_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let md = tmp.path();
+        std::fs::create_dir_all(md.join("wiki/b")).unwrap();
+        std::fs::write(md.join("wiki/b/index"), "x").unwrap();
+        let nouns = std::collections::HashMap::new();
+        assert_eq!(
+            derive_rename_target(md, "wiki/b", &[], &nouns),
+            "wiki/b/index-2"
+        );
+    }
+
+    #[test]
+    fn derive_rename_target_falls_back_when_leaf_equals_blocker_last() {
+        let tmp = tempfile::tempdir().unwrap();
+        let md = tmp.path();
+        let mut nouns = std::collections::HashMap::new();
+        nouns.insert(("p.md".to_string(), 1, 1), "scaff".to_string());
+        // Leaf would equal blocker's last segment `scaff` → use `index`.
+        let target = derive_rename_target(
+            md,
+            "wiki/scaff",
+            &[("p.md".to_string(), 1, 1)],
+            &nouns,
+        );
+        assert_eq!(target, "wiki/scaff/index");
+    }
+
+    #[test]
+    fn plan_blocker_rename_ok_for_ancestor_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let md = tmp.path();
+        std::fs::create_dir_all(md.join("wiki/arch")).unwrap();
+        std::fs::write(
+            md.join("wiki/arch/scaff"),
+            "src/lib.rs#L1-L1 sha256:abc\n\nwhy\n",
+        )
+        .unwrap();
+        let nouns = std::collections::HashMap::new();
+        let plan =
+            plan_blocker_rename(md, "wiki/arch/scaff/helper", "p.md", &nouns).unwrap();
+        assert_eq!(plan.from, "wiki/arch/scaff");
+        assert_eq!(plan.to, "wiki/arch/scaff/index");
+        assert_eq!(plan.for_slug, "wiki/arch/scaff/helper");
+    }
+
+    #[test]
+    fn plan_blocker_rename_none_for_dir_at_slug_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let md = tmp.path();
+        std::fs::create_dir_all(md.join("wiki/scaffold/child")).unwrap();
+        let nouns = std::collections::HashMap::new();
+        // `wiki/scaffold` is a directory, not an ancestor file → fail open.
+        assert!(plan_blocker_rename(md, "wiki/scaffold", "p.md", &nouns).is_none());
+    }
+
+    #[test]
+    fn plan_blocker_rename_none_for_unreadable_blocker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let md = tmp.path();
+        std::fs::create_dir_all(md.join("wiki")).unwrap();
+        // Non-UTF8 payload → `read_to_string` fails → fail open.
+        std::fs::write(md.join("wiki/b"), [0xff, 0xfe, 0x00]).unwrap();
+        let nouns = std::collections::HashMap::new();
+        assert!(plan_blocker_rename(md, "wiki/b/leaf", "p.md", &nouns).is_none());
+    }
 
     #[test]
     fn parse_frontmatter_extracts_title_and_summary() {
@@ -1428,7 +2102,7 @@ mod tests {
         let make = |page: &str, anchor_path: &str| {
             let slug = super::super::draft::build_slug(
                 "wiki",
-                page.split('/').last().unwrap().trim_end_matches(".md"),
+                page.split('/').next_back().unwrap().trim_end_matches(".md"),
             );
             super::super::draft::MeshDraft {
                 page_path: page.to_string(),

@@ -81,15 +81,26 @@ fn kind_title_case(kind: &str) -> String {
         .join(" ")
 }
 
-/// Render one diagnostic in the human-readable hook format.
+/// Render one diagnostic block in the human-readable hook format, without any
+/// trailing separator. The `---` separator is inserted only *between* blocks by
+/// [`render_diagnostics`], never after the last one.
 fn format_diagnostic(kind: &str, file: &str, line: usize, message: &str) -> String {
     let mut out = format!("Error: {}\n", kind_title_case(kind));
     if !file.is_empty() {
         out.push_str(&format!("- {file}:{line}\n"));
     }
     out.push_str(&format!("- {message}\n"));
-    out.push_str("\n---\n\n");
     out
+}
+
+/// Render a list of diagnostics, joining blocks with a `\n---\n` separator so it
+/// appears only between errors. Returns an empty string when there are none.
+fn render_diagnostics(diagnostics: &[CheckDiagnostic]) -> String {
+    diagnostics
+        .iter()
+        .map(|d| format_diagnostic(&d.kind, &d.file, d.line, &d.message))
+        .collect::<Vec<_>>()
+        .join("\n---\n\n")
 }
 
 // ── Public entry points ───────────────────────────────────────────────────────
@@ -229,12 +240,7 @@ pub fn run(
                 .unwrap()
             );
         } else {
-            for d in &post_diagnostics {
-                print!(
-                    "{}",
-                    format_diagnostic(&d.kind, &d.file, d.line, &d.message)
-                );
-            }
+            print!("{}", render_diagnostics(&post_diagnostics));
         }
 
         if !post_diagnostics.is_empty() && !no_exit_code {
@@ -249,12 +255,7 @@ pub fn run(
             serde_json::to_string_pretty(&serde_json::json!({ "errors": diagnostics })).unwrap()
         );
     } else {
-        for d in &diagnostics {
-            print!(
-                "{}",
-                format_diagnostic(&d.kind, &d.file, d.line, &d.message)
-            );
-        }
+        print!("{}", render_diagnostics(&diagnostics));
     }
 
     if !diagnostics.is_empty() && !no_exit_code {
@@ -517,6 +518,41 @@ mod tests {
 
     /// Serialize tests that read or write PATH for `git-mesh` resolution.
     static PATH_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn diag(kind: &str, line: usize) -> CheckDiagnostic {
+        CheckDiagnostic {
+            kind: kind.into(),
+            file: "a.md".into(),
+            line,
+            message: "boom".into(),
+        }
+    }
+
+    #[test]
+    fn render_diagnostics_has_no_trailing_separator() {
+        let rendered = render_diagnostics(&[diag("mesh_uncovered", 1), diag("broken_link", 2)]);
+        assert!(
+            !rendered.ends_with("---\n\n") && !rendered.trim_end().ends_with("---"),
+            "separator must not appear after the last error: {rendered:?}"
+        );
+        assert_eq!(
+            rendered.matches("\n---\n").count(),
+            1,
+            "separator must appear exactly once, between the two errors: {rendered:?}"
+        );
+        assert!(rendered.starts_with("Error: Mesh Uncovered\n"));
+    }
+
+    #[test]
+    fn render_diagnostics_single_has_no_separator() {
+        let rendered = render_diagnostics(&[diag("broken_link", 9)]);
+        assert!(!rendered.contains("---"), "single error must have no separator: {rendered:?}");
+    }
+
+    #[test]
+    fn render_diagnostics_empty_is_empty() {
+        assert_eq!(render_diagnostics(&[]), "");
+    }
 
     struct TestRepo {
         dir: TempDir,

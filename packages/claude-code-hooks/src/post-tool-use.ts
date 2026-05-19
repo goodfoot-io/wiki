@@ -68,7 +68,7 @@ export default postToolUseHook(
     trackWikiFile(input.session_id, filePath);
 
     try {
-      const result = spawnSync('wiki', ['check', filePath], {
+      const result = spawnSync('wiki', ['check', '--fix', '--no-mesh', filePath], {
         cwd: input.cwd,
         encoding: 'utf8',
         timeout: 25000,
@@ -82,31 +82,7 @@ export default postToolUseHook(
 
       if (result.status === 0) return null;
 
-      let output = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
-      if (!output) return null;
-
-      if (output.includes('mesh_uncovered')) {
-        const filtered = output
-          .split('\n')
-          .filter((line) => !line.includes('mesh_uncovered'))
-          .join('\n')
-          .trim();
-        try {
-          const scaffoldResult = spawnSync('wiki', ['scaffold', filePath], {
-            cwd: input.cwd,
-            encoding: 'utf8',
-            timeout: 25000,
-            env: { ...process.env }
-          });
-          const scaffoldOutput =
-            scaffoldResult.status === 0 && scaffoldResult.stdout ? scaffoldResult.stdout.trim() : '';
-          output = [filtered, scaffoldOutput].filter(Boolean).join('\n\n');
-        } catch {
-          logger.warn('wiki scaffold unavailable; using check output as-is');
-          output = filtered;
-        }
-      }
-
+      const output = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
       if (!output) return null;
 
       logger.info('wiki check failed', { file: filePath, status: result.status });

@@ -42,7 +42,18 @@ wiki --source index    check      # staged content (use in pre-commit hooks)
 wiki --source head     check      # latest commit (use in CI)
 ```
 
-`--source` reads from a different snapshot of the repo without touching the working tree. The `index` source is what the pre-commit hook in `git-hook-setup.md` uses.
+`--source` reads from a different snapshot of the repo without touching the working tree. The pre-commit hook in `git-hook-setup.md` uses `--source=worktree` for its `--fix` phase (you can only rewrite files read from the worktree).
+
+## Scaffold flags
+
+```bash
+wiki scaffold --dry-run           # preview created meshes + planned renames; no mutation
+wiki scaffold --format json       # structured drafts; non-mutating
+wiki scaffold --print-applied     # apply mode: stdout = one repo-relative path per
+                                  # created/renamed mesh; advisories → stderr
+```
+
+`--print-applied` is the pre-commit integration point: it lets the hook stage **exactly** the meshes this run created or renamed (`git add` each printed path) instead of a blanket `git add .mesh/`. Conflicts with `--dry-run`. When a new slug path-collides with a pre-existing ancestor mesh, scaffold renames the blocker to `<blocker>/<derived-leaf>` (or `<blocker>/index`), prints the blocker's new path for staging, and notes the rename on stderr (requires git-mesh ≥ 1.0.83).
 
 ## Setup and integration
 

@@ -26,11 +26,10 @@ are independently runnable, and `bash -n`-clean. Auto-fixing sub-scripts
 
 | Sub-script | Event | Purpose | Blocking? |
 |---|---|---|---|
-| `pre-commit.wiki.sh` | pre-commit | `wiki check --fix` on staged `.md`; re-stage fixes | No |
+| `pre-commit.wiki.sh` | pre-commit | Phase 1: `wiki check --fix` on `.md`, re-stage fixes. Phase 2: `wiki scaffold --print-applied`, stage created/renamed meshes | Phase 2: **Yes** |
 | `pre-commit.biome.sh` | pre-commit | `biome check --fix` on staged TS/JS; re-stage fixes | No |
 | `pre-commit.plugin-version.sh` | pre-commit | Bump changed plugins' versions + sync marketplace.json; re-stage | No |
 | `pre-commit.version-consistency.sh` | pre-commit | Gate: marketplace.json versions must match plugin.json | **Yes** |
-| `post-commit.wiki-mesh.sh` | post-commit | Surface fragment links lacking git mesh coverage | No |
 
 `merge-json-version` is a custom git **merge driver** (configured via
 gitattributes/config), not a hook event — it is not part of the dispatcher

@@ -86,7 +86,7 @@ wiki scaffold               # create the meshes (anchors only); then commit
 git commit
 ```
 
-`wiki scaffold` walks the corpus, creates a `git mesh` for every uncovered fragment link (anchors only, no why), and exits non-zero if any mesh creation fails. The pre-commit hook runs `wiki scaffold` automatically and stages the resulting `.mesh/` files into the commit; use `--dry-run` to preview what it will do before committing.
+`wiki scaffold` walks the corpus, creates a `git mesh` for every uncovered fragment link (anchors only, no why), and exits non-zero only on a real failure (git-mesh unavailable, or a genuine `git mesh add` failure). The pre-commit hook runs `wiki scaffold --print-applied` automatically and stages exactly the meshes it creates or renames into the commit; use `--dry-run` to preview what it will do before committing.
 
 ## Authoring workflow
 

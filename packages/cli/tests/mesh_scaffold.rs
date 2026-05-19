@@ -29,6 +29,46 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
     }
 }
 
+/// `git mesh add` rejects a slug whose ancestor mesh was renamed away within
+/// the SAME uncommitted working tree: its prefix-collision guard reads the
+/// committed HEAD tree, not the index or worktree (verified empirically
+/// against git-mesh 1.0.81). The blocker-rename apply path therefore cannot
+/// free the slug for an in-run `git mesh add` until the rename is committed —
+/// which `wiki scaffold` deliberately never does. Apply-mode integration
+/// tests for the rename remedy skip on such a git-mesh, exactly like the
+/// `git-mesh not installed` skip; the rename derivation, fail-open, and
+/// dry-run paths remain fully covered by unit + dry-run tests.
+fn git_mesh_add_sees_uncommitted_rename() -> bool {
+    let tmp = match tempfile::tempdir() {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let root = tmp.path();
+    if std::fs::create_dir_all(root.join("src")).is_err() {
+        return false;
+    }
+    let _ = std::fs::write(root.join("src/x"), "a\nb\nc\n");
+    let run = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    if !run(&["init", "-q", "-b", "main"]) {
+        return false;
+    }
+    if !run(&["mesh", "add", "wiki/b", "src/x#L1-L1"]) {
+        return false;
+    }
+    let _ = run(&["-c", "user.email=t", "-c", "user.name=t", "add", "-A"]);
+    let _ = run(&["-c", "user.email=t", "-c", "user.name=t", "commit", "-q", "-m", "i"]);
+    let _ = run(&["mesh", "move", "wiki/b", "wiki/tmp"]);
+    let _ = run(&["mesh", "move", "wiki/tmp", "wiki/b/index"]);
+    run(&["mesh", "add", "wiki/b/leaf", "src/x#L1-L1"])
+}
+
 fn git(workdir: &Path, args: &[&str]) {
     let status = Command::new("git")
         .args(args)
@@ -1295,6 +1335,79 @@ fn mesh_scaffold_default_applies_meshes() {
     );
 }
 
+/// `wiki scaffold --print-applied` prints exactly the bare repo-relative
+/// `.mesh/<slug>` paths (one per line) to stdout, and routes advisories to
+/// stderr instead of stdout, so a hook can `xargs git add` stdout directly.
+#[test]
+fn mesh_scaffold_print_applied_emits_bare_paths_and_advisory_on_stderr() {
+    if Command::new("git-mesh").arg("--version").output().is_err() {
+        eprintln!("skipping: git-mesh not installed");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "// lib\n// line2\n// line3\n").unwrap();
+    // One valid link (becomes a mesh) plus one link to a missing path
+    // (produces a dropped-mesh advisory) so we can assert advisory routing.
+    std::fs::write(
+        root.join("wiki/page.md"),
+        "---\ntitle: Page\nsummary: A page.\n---\n\n\
+         See [lib](../src/lib.rs#L1-L3) for details.\n\n\
+         ## Other\n\nSee [gone](../src/gone.rs#L1-L2) here.\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "--print-applied", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("run wiki scaffold --print-applied");
+    assert!(
+        output.status.success(),
+        "scaffold --print-applied failed: stderr=\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Every stdout line must be a bare `.mesh/<slug>` path that exists on disk.
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert!(
+        !lines.is_empty(),
+        "expected at least one applied mesh path on stdout; stdout=\n{stdout}\nstderr=\n{stderr}"
+    );
+    for line in &lines {
+        assert!(
+            line.starts_with(".mesh/"),
+            "stdout line is not a bare .mesh/ path: {line:?}\nfull stdout=\n{stdout}"
+        );
+        assert!(
+            root.join(line).is_file(),
+            "stdout-listed mesh path does not exist on disk: {line}"
+        );
+    }
+
+    // Advisory text (the dropped missing-path mesh) must be on stderr, never
+    // stdout — stdout is an exact stage list.
+    assert!(
+        !stdout.contains("src/gone.rs") && !stdout.contains("git mesh"),
+        "advisory/command text leaked into stdout:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("src/gone.rs"),
+        "expected dropped-path advisory on stderr; stderr=\n{stderr}"
+    );
+}
+
 /// Running `wiki scaffold` twice on an unchanged tree must produce exit 0 both
 /// times and not duplicate anchors (git-mesh idempotency).
 #[test]
@@ -1876,5 +1989,204 @@ fn mesh_scaffold_missing_path_check_respects_source_mode() {
     assert!(
         !head_pages.is_empty(),
         "head mode must emit the surviving mesh under pages:\n{head_stdout}"
+    );
+}
+
+/// A pre-existing mesh file whose name is a strict ANCESTOR of a slug the
+/// scaffolded page would generate (e.g. `.mesh/wiki/arch/scaff` blocking
+/// `wiki/arch/scaff/<noun>`) must NOT brick `wiki scaffold`: the blocker is
+/// RENAMED out of the way (`wiki/arch/scaff` -> `wiki/arch/scaff/index` here,
+/// since the blocker carries no wiki-page anchor), its content preserved
+/// byte-equivalent, the previously-colliding draft IS then created, an
+/// unrelated non-colliding page still applies, and the run exits 0.
+#[test]
+fn mesh_scaffold_renames_blocker_and_keeps_others() {
+    if Command::new("git-mesh").arg("--version").output().is_err() {
+        eprintln!("skipping: git-mesh not installed");
+        return;
+    }
+    if !git_mesh_add_sees_uncommitted_rename() {
+        eprintln!(
+            "skipping: this git-mesh's add collision check is HEAD-based — \
+             an uncommitted in-run rename cannot free the slug (see \
+             git_mesh_add_sees_uncommitted_rename)"
+        );
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki/arch/scaff")).unwrap();
+    std::fs::create_dir_all(root.join("wiki/other")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "// lib\n// line2\n// line3\n").unwrap();
+
+    // Colliding page: subdir `arch/scaff` → slug `wiki/arch/scaff/<noun>`.
+    std::fs::write(
+        root.join("wiki/arch/scaff/page.md"),
+        "---\ntitle: Scaff Page\nsummary: Colliding page.\n---\n\n\
+         ## Helper\n\nSee [lib](../../../src/lib.rs#L1-L3) here.\n",
+    )
+    .unwrap();
+    // Non-colliding page: subdir `other` → slug `wiki/other/<noun>`.
+    std::fs::write(
+        root.join("wiki/other/page.md"),
+        "---\ntitle: Other Page\nsummary: Clean page.\n---\n\n\
+         ## Widget\n\nSee [lib](../../src/lib.rs#L1-L3) here.\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+
+    // Pre-create the prefix mesh via real `git mesh add` so the stored file at
+    // `.mesh/wiki/arch/scaff` is a valid mesh (the scaffold coverage index
+    // parses every existing mesh). It is a strict ancestor of any
+    // `wiki/arch/scaff/<noun>` slug, so that slug can never become a file.
+    let mesh_status = Command::new("git")
+        .args(["mesh", "add", "wiki/arch/scaff", "src/lib.rs#L1-L1"])
+        .current_dir(root)
+        .status()
+        .expect("git mesh add available");
+    assert!(mesh_status.success(), "pre-create blocker mesh failed");
+    let blocker = root.join(".mesh/wiki/arch/scaff");
+    assert!(blocker.is_file(), "blocker mesh file must exist");
+    let blocker_before = std::fs::read_to_string(&blocker).unwrap();
+
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("run wiki scaffold");
+
+    assert!(
+        output.status.success(),
+        "scaffold must exit 0 despite the slug-path collision; stderr=\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The slug resolver prepends the page title ("Scaff Page") because the
+    // base slug's ancestor `wiki/arch/scaff` is occupied, yielding
+    // `wiki/arch/scaff/scaff-page/helper`. The blocker carries no wiki-page
+    // anchor, so the rename leaf falls back to `index`.
+    assert!(
+        combined.contains(
+            "Renamed mesh `wiki/arch/scaff` -> `wiki/arch/scaff/index` to free path for `wiki/arch/scaff/scaff-page/helper`"
+        ),
+        "expected the blocker-rename advisory; got:\n{combined}"
+    );
+
+    // The old name must no longer resolve.
+    assert!(
+        !blocker.is_file(),
+        "blocker old name `wiki/arch/scaff` must no longer be a file after rename"
+    );
+
+    // The blocker's content must be preserved byte-equivalent at its new path.
+    let renamed = root.join(".mesh/wiki/arch/scaff/index");
+    assert!(
+        renamed.is_file(),
+        ".mesh/wiki/arch/scaff/index must exist (the renamed blocker)"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&renamed).unwrap(),
+        blocker_before,
+        "renamed blocker content diverged from the original"
+    );
+
+    // The previously-colliding new draft must now have been created.
+    let new_mesh = root.join(".mesh/wiki/arch/scaff/scaff-page/helper");
+    assert!(
+        new_mesh.is_file(),
+        ".mesh/wiki/arch/scaff/scaff-page/helper must exist — the freed slug should apply"
+    );
+
+    // The non-colliding page's mesh must still have been applied.
+    let other_dir = root.join(".mesh/wiki/other");
+    assert!(
+        other_dir.exists(),
+        ".mesh/wiki/other must exist — the non-colliding mesh should still apply"
+    );
+    let applied = std::fs::read_dir(&other_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| e.file_type().unwrap().is_file());
+    assert!(
+        applied,
+        "expected an applied mesh file under .mesh/wiki/other/"
+    );
+}
+
+/// `wiki scaffold --dry-run` must report the planned blocker rename and mutate
+/// nothing on disk.
+#[test]
+fn mesh_scaffold_dry_run_reports_planned_rename_without_mutating() {
+    if Command::new("git-mesh").arg("--version").output().is_err() {
+        eprintln!("skipping: git-mesh not installed");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki/arch/scaff")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "// lib\n// line2\n// line3\n").unwrap();
+    std::fs::write(
+        root.join("wiki/arch/scaff/page.md"),
+        "---\ntitle: Scaff Page\nsummary: Colliding page.\n---\n\n\
+         ## Helper\n\nSee [lib](../../../src/lib.rs#L1-L3) here.\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    let mesh_status = Command::new("git")
+        .args(["mesh", "add", "wiki/arch/scaff", "src/lib.rs#L1-L1"])
+        .current_dir(root)
+        .status()
+        .expect("git mesh add available");
+    assert!(mesh_status.success(), "pre-create blocker mesh failed");
+    let blocker = root.join(".mesh/wiki/arch/scaff");
+    let blocker_before = std::fs::read_to_string(&blocker).unwrap();
+
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "--dry-run", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("run wiki scaffold --dry-run");
+    assert!(
+        output.status.success(),
+        "dry-run must exit 0; stderr=\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(
+            "Would rename mesh `wiki/arch/scaff` -> `wiki/arch/scaff/index` to free path for `wiki/arch/scaff/scaff-page/helper`."
+        ),
+        "expected the 'Would rename' advisory; got:\n{stdout}"
+    );
+
+    // Nothing on disk changed.
+    assert!(blocker.is_file(), "dry-run must not move the blocker");
+    assert_eq!(
+        std::fs::read_to_string(&blocker).unwrap(),
+        blocker_before,
+        "dry-run mutated the blocker"
+    );
+    assert!(
+        !root.join(".mesh/wiki/arch/scaff/index").exists(),
+        "dry-run must not create the rename target"
     );
 }

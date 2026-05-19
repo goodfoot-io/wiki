@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::draft::MeshDraft;
-use super::scaffold::{DropReason, DroppedMesh, ParseError};
+use super::scaffold::{DropReason, DroppedMesh, ParseError, PlannedRename};
 
 /// Render `meshes` (already grouped per-page in declaration order) and the
 /// per-page titles (frontmatter `title` keyed by `page_path`, `None` when
@@ -141,11 +141,50 @@ pub(crate) fn render_advisories(
                     d.slug, anchor, detail, d.page
                 );
             }
+            DropReason::SlugPathCollision { existing } => {
+                let _ = writeln!(
+                    out,
+                    "Skipped mesh `{}` — slug path collides with existing mesh `{}` (page `{}`).",
+                    d.slug, existing, d.page
+                );
+            }
         }
     }
     if !dropped_meshes.is_empty() {
         out.push('\n');
     }
+}
+
+/// Render the planned/performed blocker-rename advisory lines.
+///
+/// `dry_run` selects the phrasing:
+/// - `true`  → "Would rename mesh `B` -> `B/target` to free path for `S`."
+/// - `false` → "Renamed mesh `B` -> `B/target` to free path for `S` (page `P`)."
+pub(crate) fn render_rename_advisories(
+    out: &mut String,
+    renames: &[PlannedRename],
+    dry_run: bool,
+) {
+    use std::fmt::Write as _;
+    if renames.is_empty() {
+        return;
+    }
+    for r in renames {
+        if dry_run {
+            let _ = writeln!(
+                out,
+                "Would rename mesh `{}` -> `{}` to free path for `{}`.",
+                r.from, r.to, r.for_slug
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "Renamed mesh `{}` -> `{}` to free path for `{}` (page `{}`).",
+                r.from, r.to, r.for_slug, r.page
+            );
+        }
+    }
+    out.push('\n');
 }
 
 fn render_mesh_block(out: &mut String, m: &MeshDraft) {
