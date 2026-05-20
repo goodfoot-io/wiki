@@ -15,6 +15,7 @@ import MarkdownIt = require('markdown-it');
 
 import hljs from 'highlight.js';
 import markdownItFrontMatter from 'markdown-it-front-matter';
+import { formatLogError, getWikiLogger } from '../utils/logger.js';
 
 // ---------------------------------------------------------------------------
 // Slug helpers (mirrored from VSCode markdown-language-features/src/slugify.ts)
@@ -138,7 +139,9 @@ md.options.highlight = (code, lang) => {
     try {
       return hljs.highlight(code, { language: lang, ignoreIllegals: true }).value;
     } catch (err) {
-      console.warn('[wiki-extension] highlight.js failed for language', lang, '— falling back to auto-detection:', err);
+      getWikiLogger()
+        .getChildLogger({ label: 'Render' })
+        .warn('highlight.js failed for language %s, falling back to auto-detection: %s', lang, formatLogError(err));
     }
   }
   return hljs.highlightAuto(code).value;

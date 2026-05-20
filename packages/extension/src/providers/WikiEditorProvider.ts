@@ -12,8 +12,11 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { render } from '../rendering/MarkdownRenderer.js';
 import { extractFirstHeading, hasWikiFrontmatter, parseFrontmatter, readFrontmatter } from '../utils/frontmatter.js';
+import { formatLogError, getWikiLogger } from '../utils/logger.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
 import type { HostMessage, WebviewMessage } from '../webviews/wiki/types.js';
+
+const editorLog = () => getWikiLogger().getChildLogger({ label: 'Editor' });
 
 /**
  * Resolve a webview link's path component to an absolute filesystem path.
@@ -162,7 +165,7 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
               await vscode.window.showTextDocument(fileUri, { viewColumn, preview: false });
             }
           } catch (err) {
-            console.error('[wiki-extension] Failed to open file URI:', message.uri, err);
+            editorLog().error('Failed to open file URI %s: %s', message.uri, formatLogError(err));
           }
           break;
         }
@@ -184,7 +187,7 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
 
         default: {
           const _exhaustive: never = message;
-          console.warn('[wiki-extension] Unhandled webview message:', _exhaustive);
+          editorLog().warn('Unhandled webview message: %j', _exhaustive);
         }
       }
     });
@@ -293,7 +296,7 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
       text = await this._readDocumentText(uri);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      console.error('[wiki-extension] Failed to read wiki file:', err);
+      editorLog().error('Failed to read wiki file: %s', formatLogError(err));
       this._postMessage(webview, { type: 'showError', message: `Failed to load wiki page: ${message}` });
       return;
     }
@@ -327,7 +330,7 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     webview.postMessage(message).then(
       () => {},
       (err: unknown) => {
-        console.error('[wiki-extension] Failed to post message to webview:', err);
+        editorLog().error('Failed to post message to webview: %s', formatLogError(err));
       }
     );
   }

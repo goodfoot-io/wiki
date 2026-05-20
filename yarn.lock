@@ -718,6 +718,19 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@goodfoot/vscode-logging@workspace:*, @goodfoot/vscode-logging@workspace:packages/vscode-logging":
+  version: 0.0.0-use.local
+  resolution: "@goodfoot/vscode-logging@workspace:packages/vscode-logging"
+  dependencies:
+    "@biomejs/biome": "npm:^2.3.13"
+    "@types/node": "npm:24.x"
+    "@types/vscode": "npm:^1.100.0"
+    "@typescript/native-preview": "npm:^7.0.0-dev"
+    typescript: "npm:^5.9.3"
+    vitest: "npm:^3.0.0"
+  languageName: unknown
+  linkType: soft
+
 "@goodfoot/wiki-claude-code-hooks@workspace:packages/claude-code-hooks":
   version: 0.0.0-use.local
   resolution: "@goodfoot/wiki-claude-code-hooks@workspace:packages/claude-code-hooks"
@@ -7391,6 +7404,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "wiki-extension@workspace:packages/extension"
   dependencies:
+    "@goodfoot/vscode-logging": "workspace:*"
     "@goodfoot/wiki": "workspace:*"
     "@types/highlight.js": "npm:^10.1.0"
     "@types/markdown-it": "npm:^14.1.2"

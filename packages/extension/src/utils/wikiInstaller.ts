@@ -9,6 +9,7 @@
 
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { formatLogError, getWikiLogger } from './logger.js';
 import {
   getWikiBinaryErrorMessage,
   type InstallManagedWikiBinaryResult,
@@ -51,37 +52,66 @@ export class WikiBinaryManager {
   }
 
   private async ensureReady(): Promise<WikiBinaryReadyResult> {
+    const log = getWikiLogger().getChildLogger({ label: 'Installer' });
+    const startedAt = Date.now();
     const version = this.extensionVersion();
     const releaseBaseUrl = this.releaseBaseUrl();
     const storageRoot = this.context.globalStorageUri.fsPath;
-
-    const managed = await resolveManagedWikiBinary({ storageRoot, version, releaseBaseUrl });
-    if (managed != null) {
-      this.configureTerminalPath(path.dirname(managed.path));
-      return { handle: managed, installed: false };
-    }
-
-    if (this.shouldUsePathFallback()) {
-      const pathBinary = await resolveWikiBinaryOnPath();
-      if (pathBinary != null) {
-        return { handle: pathBinary, installed: false };
-      }
-    }
-
-    const target = resolveWikiPlatform();
-    if (target == null) {
-      throw new WikiBinaryError(`wiki is not available for ${process.platform}-${process.arch} in this release.`);
-    }
-
-    const installed = await installManagedWikiBinary({
-      storageRoot,
+    log.info(
+      'ensureReady start: version=%s platform=%s-%s storage=%s releaseBaseUrl=%s',
       version,
-      releaseBaseUrl,
-      platform: target.platform,
-      arch: target.arch
-    });
-    this.configureTerminalPath(path.dirname(installed.handle.path));
-    return installed;
+      process.platform,
+      process.arch,
+      storageRoot,
+      releaseBaseUrl
+    );
+
+    try {
+      const managedStart = Date.now();
+      const managed = await resolveManagedWikiBinary({ storageRoot, version, releaseBaseUrl });
+      log.debug('resolveManagedWikiBinary took %dms -> %s', Date.now() - managedStart, managed ? managed.path : 'miss');
+      if (managed != null) {
+        this.configureTerminalPath(path.dirname(managed.path));
+        log.info('Using cached managed binary at %s (total %dms)', managed.path, Date.now() - startedAt);
+        return { handle: managed, installed: false };
+      }
+
+      if (this.shouldUsePathFallback()) {
+        log.debug('PATH fallback enabled, probing for `wiki` on PATH');
+        const pathBinary = await resolveWikiBinaryOnPath();
+        if (pathBinary != null) {
+          log.info('Using wiki binary from PATH at %s (total %dms)', pathBinary.path, Date.now() - startedAt);
+          return { handle: pathBinary, installed: false };
+        }
+        log.debug('No wiki binary found on PATH');
+      }
+
+      const target = resolveWikiPlatform();
+      if (target == null) {
+        throw new WikiBinaryError(`wiki is not available for ${process.platform}-${process.arch} in this release.`);
+      }
+
+      log.info('Installing managed wiki CLI %s for %s-%s…', version, target.platform, target.arch);
+      const installStart = Date.now();
+      const installed = await installManagedWikiBinary({
+        storageRoot,
+        version,
+        releaseBaseUrl,
+        platform: target.platform,
+        arch: target.arch
+      });
+      this.configureTerminalPath(path.dirname(installed.handle.path));
+      log.info(
+        'Installed wiki CLI at %s in %dms (total %dms)',
+        installed.handle.path,
+        Date.now() - installStart,
+        Date.now() - startedAt
+      );
+      return installed;
+    } catch (error) {
+      log.error('ensureReady failed after %dms: %s', Date.now() - startedAt, formatLogError(error));
+      throw error;
+    }
   }
 
   private extensionVersion(): string {

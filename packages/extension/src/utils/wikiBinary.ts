@@ -12,6 +12,7 @@ import { createHash } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import { access, chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
+import { getWikiLogger } from './logger.js';
 import {
   getManagedBinaryPaths,
   getWikiChecksumsAssetName,
@@ -264,22 +265,45 @@ export function runWikiCommand(
   signal?: AbortSignal,
   cwd?: string
 ): Promise<WikiCommandResult> {
+  const log = getWikiLogger().getChildLogger({ label: 'Spawn' });
+  const startedAt = Date.now();
+  log.debug('spawn %s %s (cwd=%s)', binaryPath, args.join(' '), cwd ?? '<inherit>');
   return new Promise((resolve, reject) => {
     const child = spawn(binaryPath, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd });
     let stdout = '';
     let stderr = '';
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
 
     child.stdout.on('data', (chunk: Buffer) => {
+      stdoutBytes += chunk.length;
       stdout += chunk.toString('utf-8');
     });
     child.stderr.on('data', (chunk: Buffer) => {
+      stderrBytes += chunk.length;
       stderr += chunk.toString('utf-8');
     });
     child.on('error', (error) => {
+      log.error(
+        'spawn error after %dms: %s (cmd=%s %s)',
+        Date.now() - startedAt,
+        error.message,
+        binaryPath,
+        args.join(' ')
+      );
       reject(error);
     });
     child.on('close', (code) => {
-      resolve({ stdout, stderr, exitCode: code ?? 1 });
+      const duration = Date.now() - startedAt;
+      const exitCode = code ?? 1;
+      if (exitCode === 0) {
+        log.debug('exit 0 in %dms (stdout=%dB stderr=%dB) cmd=%s', duration, stdoutBytes, stderrBytes, args.join(' '));
+      } else if (signal?.aborted === true) {
+        log.debug('aborted after %dms (cmd=%s)', duration, args.join(' '));
+      } else {
+        log.warn('exit %d in %dms cmd=%s stderr=%s', exitCode, duration, args.join(' '), stderr.trim().slice(0, 500));
+      }
+      resolve({ stdout, stderr, exitCode });
     });
 
     if (signal != null) {
@@ -329,8 +353,8 @@ async function findExecutableOnPath(
         try {
           await access(candidate, fsConstants.F_OK);
           return candidate;
-        } catch {
-          // Continue searching.
+        } catch (err) {
+          getWikiLogger().trace('PATH probe miss %s: %s', candidate, (err as Error).message);
         }
       }
       continue;
@@ -340,8 +364,8 @@ async function findExecutableOnPath(
     try {
       await access(candidate, fsConstants.X_OK);
       return candidate;
-    } catch {
-      // Continue searching.
+    } catch (err) {
+      getWikiLogger().trace('PATH probe miss %s: %s', candidate, (err as Error).message);
     }
   }
 

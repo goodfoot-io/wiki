@@ -9,9 +9,13 @@
  */
 
 import * as vscode from 'vscode';
-import { getSourceArgs } from '../utils/sourceMode.js';
+import { formatLogError, getWikiLogger } from '../utils/logger.js';
 import { runWikiCommand } from '../utils/wikiBinary.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
+
+function qpLog() {
+  return getWikiLogger().getChildLogger({ label: 'QuickPick' });
+}
 
 /** Item returned by `wiki list --format json`. */
 interface WikiListItem {
@@ -56,17 +60,11 @@ function workspaceRoot(): string | undefined {
 }
 
 async function loadAllPages(binaryPath: string): Promise<WikiQuickPickItem[]> {
-  const sourceArgs = getSourceArgs();
   try {
-    const result = await runWikiCommand(
-      binaryPath,
-      [...sourceArgs, 'list', '--format', 'json'],
-      undefined,
-      workspaceRoot()
-    );
+    const result = await runWikiCommand(binaryPath, ['list', '--format', 'json'], undefined, workspaceRoot());
     if (result.exitCode !== 0) {
       const message = result.stderr.trim() || `wiki list exited with code ${result.exitCode}`;
-      console.warn('[wiki-extension] wiki list failed:', message);
+      qpLog().warn('wiki list failed: %s', message);
       void vscode.window.showErrorMessage(`Wiki: ${message}`);
       return [];
     }
@@ -74,25 +72,19 @@ async function loadAllPages(binaryPath: string): Promise<WikiQuickPickItem[]> {
     return items.map(toListQuickPickItem);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error('[wiki-extension] Failed to load wiki pages:', err);
+    qpLog().error('Failed to load wiki pages: %s', formatLogError(err));
     void vscode.window.showErrorMessage(`Wiki: ${message}`);
     return [];
   }
 }
 
 async function searchPages(binaryPath: string, query: string, signal: AbortSignal): Promise<WikiQuickPickItem[]> {
-  const sourceArgs = getSourceArgs();
   try {
-    const result = await runWikiCommand(
-      binaryPath,
-      [...sourceArgs, query, '--format', 'json'],
-      signal,
-      workspaceRoot()
-    );
+    const result = await runWikiCommand(binaryPath, [query, '--format', 'json'], signal, workspaceRoot());
     if (signal.aborted) return [];
     if (result.exitCode !== 0) {
       const message = result.stderr.trim() || `wiki search exited with code ${result.exitCode}`;
-      console.warn('[wiki-extension] wiki search failed:', message);
+      qpLog().warn('wiki search failed: %s', message);
       void vscode.window.showErrorMessage(`Wiki: ${message}`);
       return [];
     }
@@ -101,7 +93,7 @@ async function searchPages(binaryPath: string, query: string, signal: AbortSigna
   } catch (err) {
     if (signal.aborted) return [];
     const message = err instanceof Error ? err.message : String(err);
-    console.error('[wiki-extension] Failed to search wiki pages:', err);
+    qpLog().error('Failed to search wiki "%s": %s', query, formatLogError(err));
     void vscode.window.showErrorMessage(`Wiki: ${message}`);
     return [];
   }
@@ -118,15 +110,21 @@ async function openWikiFile(file: string): Promise<void> {
  * @param binaryManager - Service that resolves or installs the wiki CLI.
  */
 export async function wikiQuickPick(binaryManager: WikiBinaryManager): Promise<void> {
+  const log = qpLog();
+  const invokedAt = Date.now();
+  log.info('wikiQuickPick invoked');
   let binaryPath: string;
   try {
+    const readyStart = Date.now();
     binaryPath = (
       await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title: 'Preparing wiki CLI…' },
         () => binaryManager.ready()
       )
     ).path;
+    log.debug('binaryManager.ready resolved in %dms -> %s', Date.now() - readyStart, binaryPath);
   } catch (error) {
+    log.error('binaryManager.ready failed: %s', formatLogError(error));
     void vscode.window.showErrorMessage(`Wiki: ${binaryManager.formatFailure(error)}`);
     return;
   }
@@ -136,7 +134,14 @@ export async function wikiQuickPick(binaryManager: WikiBinaryManager): Promise<v
   qp.matchOnDetail = true;
   qp.busy = true;
 
+  const listStart = Date.now();
   const initialItems = await loadAllPages(binaryPath);
+  log.info(
+    'Initial list loaded: %d items in %dms (total since invoke %dms)',
+    initialItems.length,
+    Date.now() - listStart,
+    Date.now() - invokedAt
+  );
   qp.items = initialItems;
   qp.busy = false;
 

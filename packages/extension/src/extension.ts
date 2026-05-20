@@ -11,6 +11,7 @@ import * as vscode from 'vscode';
 import { wikiQuickPick } from './commands/wikiQuickPick.js';
 import { WikiEditorProvider } from './providers/WikiEditorProvider.js';
 import { WikiLanguageFeatures } from './providers/WikiLanguageFeatures.js';
+import { formatLogError, getWikiLogger, registerWikiLogger } from './utils/logger.js';
 import { WikiBinaryManager, wasManagedInstall } from './utils/wikiInstaller.js';
 
 /**
@@ -20,6 +21,10 @@ import { WikiBinaryManager, wasManagedInstall } from './utils/wikiInstaller.js';
  * @param context - The VS Code extension context providing subscriptions and URIs.
  */
 export function activate(context: vscode.ExtensionContext): void {
+  registerWikiLogger(context);
+  const log = getWikiLogger();
+  log.info('Activating wiki extension v%s', context.extension.packageJSON.version);
+
   const binaryManager = new WikiBinaryManager(context);
 
   // ---------------------------------------------------------------------------
@@ -66,7 +71,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     })
     .catch((error) => {
-      console.error('[wiki-extension] Failed to prepare managed wiki CLI:', error);
+      log.error('Failed to prepare managed wiki CLI: %s', formatLogError(error));
     });
 
   context.subscriptions.push(
