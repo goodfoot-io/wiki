@@ -61,7 +61,12 @@ function workspaceRoot(): string | undefined {
 
 async function loadAllPages(binaryPath: string): Promise<WikiQuickPickItem[]> {
   try {
-    const result = await runWikiCommand(binaryPath, ['list', '--format', 'json'], undefined, workspaceRoot());
+    const result = await runWikiCommand(
+      binaryPath,
+      ['list', '--limit', '10', '--format', 'json'],
+      undefined,
+      workspaceRoot()
+    );
     if (result.exitCode !== 0) {
       const message = result.stderr.trim() || `wiki list exited with code ${result.exitCode}`;
       qpLog().warn('wiki list failed: %s', message);
