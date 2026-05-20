@@ -44,7 +44,6 @@ Perf scope events measure execution time and record success/error status. They a
 | packages/wiki/src/index.rs:843 | `index.resolve_page` | Time to look up a page by title or path | `input` (search term), `input_kind` ("path" or "lookup") |
 | packages/wiki/src/index.rs:937 | `index.search` | Time to execute full-text search query | `query` (FTS query string), `limit` (max results), `min_score` (relevance threshold), `broad` (broad search mode) |
 | packages/wiki/src/index.rs:1041 | `index.list_pages` | Time to list all or tagged pages | `tag` (filter tag, or null for all) |
-| packages/wiki/src/index.rs:1098 | `index.backlinks` | Time to retrieve pages that link to a document | `document_id` (target document ID) |
 | packages/wiki/src/index.rs:1149 | `index.extract_pages` | Time to retrieve multiple pages by title | `title_count` (number of titles) |
 
 ### File Discovery
@@ -138,27 +137,6 @@ Perf scope events measure execution time and record success/error status. They a
 | 29 | `"**{title}** — `{file}`"` | Formatted entry with file location |
 | 54 | Metadata string | Joined metadata fields (tags, etc.) |
 | 56 | Summary with separators | Formatted summary output |
-
-### commands/refs.rs
-
-| Line | Message | Purpose |
-|------|---------|---------|
-| 28 | `"[]"` | Empty JSON array (no references) |
-| 34 | JSON references array | Structured JSON output |
-| 38 | Blank line | Spacing in formatted output |
-| 40 | Formatted reference result | Human-readable reference entry |
-
-### commands/backlinks.rs
-
-| Line | Message | Purpose |
-|------|---------|---------|
-| 22 | `"error: {message}"` | Error message |
-| 30 | "Page not found" error with suggestions | Error when page doesn't exist |
-| 47 | JSON output | Structured JSON backlinks data |
-| 49 | `"**{title}** — `{file}`"` | Formatted backlink entry |
-| 51 | `"_(no backlinks)_"` | Notice when no backlinks found |
-| 53 | Blank line | Spacing |
-| 55 | Formatted backlink text | Human-readable backlink with context |
 
 ### commands/check.rs
 

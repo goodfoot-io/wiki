@@ -10,8 +10,6 @@ The day-to-day commands (`wiki [query]`, `wiki check`, `wiki scaffold`) are docu
 
 ```bash
 wiki summary "Authorization"      # print a page's summary line
-wiki refs   "Authorization"       # every link referenced by the page (forward refs)
-wiki links  "Authorization"       # every page that links to the target  (back refs)
 wiki list                         # all pages with title, aliases, tags, path
 ```
 

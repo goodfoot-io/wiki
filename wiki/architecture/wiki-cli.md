@@ -23,7 +23,6 @@ The [hook command](/packages/cli/src/commands/hook_check.rs#L16-L63) integrates 
 
 Several commands support navigating and searching the wiki from the command line:
 
-- **Incoming Links**: The [links command](/packages/cli/src/commands/links.rs) finds all wiki pages that reference a given target, whether that target resolves as a wiki page, a workspace file, or both.
 - **Search**: The [search command](/packages/cli/src/commands/search.rs) is the primary entrypoint for finding wiki content. It performs a weighted search that ranks exact title matches, repo-relative path matches, and full-text matches (BM25) in a single unified flow.
 - **Suggest**: The suggest command (used internally by the hook) finds the best matches for a query with a minimum score threshold, prioritizing titles and aliases.
 - **Summary**: The [summary command](/packages/cli/src/commands/summary.rs#L130-L130) outputs a page's frontmatter-defined summary along with a repo-relative path to its source file.

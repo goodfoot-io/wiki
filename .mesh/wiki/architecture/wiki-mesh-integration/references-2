@@ -1,3 +1,4 @@
 wiki/architecture/wiki-mesh-integration.md#L107-L109 sha256:059dad67b6749fffd1f064f330ef2e5d68256f706c64acc66181064d5467695a
 packages/cli/src/commands/mod.rs#L141-L183 sha256:e86bd1ddababcdb4baf1411985ce03b16d51d3c71f87b66dc29ee2caad8936f9
+packages/cli/src/commands/mod.rs#L139-L181 sha256:e86bd1ddababcdb4baf1411985ce03b16d51d3c71f87b66dc29ee2caad8936f9
 

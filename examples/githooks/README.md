@@ -71,11 +71,10 @@ export LOG_DIR=".wiki/logs"
 
 1. Tracks which commits have been scanned via a state file
 2. Finds source files (`.rs`, `.ts`) changed since the last scan
-3. Checks each file for wiki fragment link coverage using `wiki refs`
-4. Applies an inclusion gate (must synthesize across boundaries, not just document a single file)
-5. Creates an isolated git worktree for the AI agent to work in
-6. Agent creates or expands wiki pages with proper fragment links
-7. Verifies with `wiki check` before merging changes back
+3. Applies an inclusion gate (must synthesize across boundaries, not just document a single file)
+4. Creates an isolated git worktree for the AI agent to work in
+5. Agent creates or expands wiki pages with proper fragment links
+6. Verifies with `wiki check` before merging changes back
 
 ### Maintenance (post-commit, post-merge)
 

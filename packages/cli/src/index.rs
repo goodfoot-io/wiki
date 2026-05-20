@@ -11,14 +11,13 @@ use sha2::{Digest, Sha256};
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 use turso::{Builder, Connection, Row, Rows, params, params_from_iter};
 
-use crate::commands::{looks_like_path, normalize_repo_relative_path, resolve_link_path};
+use crate::commands::looks_like_path;
 use crate::frontmatter::parse_frontmatter;
 use crate::git::{
     changed_paths_between, git_acceleration_state, has_staged_changes, has_tracked_files,
     has_unstaged_changes, head_sha, index_revision_signal, index_tracked_paths, read_head_blob,
     read_index_blob, repo_inventory, untracked_paths, working_tree_changed_paths,
 };
-use crate::parser::{LinkKind, parse_fragment_links};
 use crate::perf;
 
 const SCHEMA_VERSION: &str = "5";
@@ -170,16 +169,9 @@ struct PendingDocument {
     aliases_text: String,
     tags_text: String,
     keywords_text: String,
-    incoming_links: Vec<PendingIncomingLink>,
     mtime_ns: i64,
     size_bytes: i64,
     content_hash: String,
-}
-
-#[derive(Debug, Clone)]
-struct PendingIncomingLink {
-    target_path: String,
-    source_line: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -285,11 +277,6 @@ impl WikiIndex {
     pub fn list_pages(&self, tag: Option<&str>) -> Result<Vec<PageListEntry>> {
         self.runtime
             .block_on(list_pages_async(&self.conn, &self.repo_root, tag))
-    }
-
-    pub fn links(&self, input: &str) -> Result<Vec<SearchResult>> {
-        self.runtime
-            .block_on(links_async(&self.conn, &self.repo_root, input))
     }
 }
 
@@ -544,12 +531,6 @@ async fn recreate_schema(conn: &Connection) -> Result<()> {
             FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
         );
 
-        CREATE TABLE IF NOT EXISTS incoming_links (
-            source_file TEXT NOT NULL,
-            source_line INTEGER NOT NULL,
-            target_path TEXT NOT NULL
-        );
-
         CREATE TABLE IF NOT EXISTS keywords (
             document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
             keyword     TEXT    NOT NULL,
@@ -561,8 +542,6 @@ async fn recreate_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_lookup_keys_document_id ON lookup_keys(document_id);
         CREATE INDEX IF NOT EXISTS idx_tags_document_id ON tags(document_id);
         CREATE INDEX IF NOT EXISTS idx_tags_tag_key ON tags(tag_key);
-        CREATE INDEX IF NOT EXISTS idx_incoming_links_target ON incoming_links(target_path);
-        CREATE INDEX IF NOT EXISTS idx_incoming_links_source_file ON incoming_links(source_file);
         CREATE INDEX IF NOT EXISTS idx_documents_fts ON documents USING fts ({fts_col_list})
         WITH (weights = '{fts_weights}');
         "
@@ -703,7 +682,6 @@ async fn sync_core_index_inner(
                 aliases_text: String::new(),
                 tags_text: String::new(),
                 keywords_text: String::new(),
-                incoming_links: Vec::new(),
                 mtime_ns,
                 size_bytes,
                 content_hash,
@@ -720,19 +698,6 @@ async fn sync_core_index_inner(
             continue;
         };
         let body = markdown_body(&content);
-        let incoming_links = parse_fragment_links(&content)
-            .into_iter()
-            .filter(|link| link.kind != LinkKind::External)
-            .map(|link| {
-                let resolved_path = resolve_link_path(&link.path, path, repo_root)
-                    .to_string_lossy()
-                    .into_owned();
-                PendingIncomingLink {
-                    target_path: resolved_path,
-                    source_line: link.source_line,
-                }
-            })
-            .collect::<Vec<_>>();
 
         changed_or_new.insert(path_rel.clone());
         pending_documents.push(PendingDocument {
@@ -749,7 +714,6 @@ async fn sync_core_index_inner(
             keywords: frontmatter.keywords,
             body,
             content,
-            incoming_links,
             mtime_ns,
             size_bytes,
             content_hash,
@@ -799,13 +763,6 @@ async fn sync_core_index_inner(
         .await
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to remove stale index entry for {stale_path}"))?;
-        tx.execute(
-            "DELETE FROM incoming_links WHERE source_file = ?1",
-            params![stale_path.clone()],
-        )
-        .await
-        .into_diagnostic()
-        .wrap_err_with(|| format!("failed to remove stale incoming link rows for {stale_path}"))?;
     }
 
     for pending in pending_documents {
@@ -935,34 +892,7 @@ async fn sync_core_index_inner(
             .wrap_err("failed to insert keyword row")?;
         }
 
-        // Reset any prior incoming-link rows for this source file before
-        // re-inserting; rows are keyed on `source_file` rather than the
-        // document FK now, so the per-document DELETE above does not cover them.
-        tx.execute(
-            "DELETE FROM incoming_links WHERE source_file = ?1",
-            params![pending.path_rel.clone()],
-        )
-        .await
-        .into_diagnostic()
-        .wrap_err("failed to clear prior incoming link rows for source file")?;
-
         let _ = document_id;
-        for incoming_link in pending.incoming_links {
-            tx.execute(
-                "
-                INSERT INTO incoming_links (source_file, source_line, target_path)
-                VALUES (?1, ?2, ?3)
-                ",
-                params![
-                    pending.path_rel.clone(),
-                    i64::try_from(incoming_link.source_line).into_diagnostic()?,
-                    incoming_link.target_path,
-                ],
-            )
-            .await
-            .into_diagnostic()
-            .wrap_err("failed to insert incoming link row")?;
-        }
     }
 
     perf::scope_async_result("index.commit_transaction", json!({}), async {
@@ -1780,101 +1710,6 @@ async fn list_pages_async(
     .await
 }
 
-async fn links_async(
-    conn: &Connection,
-    repo_root: &Path,
-    input: &str,
-) -> Result<Vec<SearchResult>> {
-    perf::scope_async_result(
-        "index.links",
-        json!({
-            "input": input,
-        }),
-        async {
-            // Resolve the input to a single target path:
-            //   - path-shaped input → the repo-relative path it points to
-            //   - title/alias input → the resolved page's `path_abs`
-            // Incoming links are keyed on `target_path` (a path string), so a
-            // single equality predicate suffices.
-            let target_path = if looks_like_path(input) {
-                let normalized = normalize_repo_relative_path(input, repo_root);
-                if normalized.is_empty() {
-                    return Ok(Vec::new());
-                }
-                normalized
-            } else {
-                let Some(page) = resolve_page_async(conn, repo_root, input).await? else {
-                    return Ok(Vec::new());
-                };
-                load_path_rel(conn, page.document_id).await?
-            };
-
-            let mut rows = conn
-                .query(
-                    "
-                    SELECT d.title, d.path_abs, d.summary, d.source_raw, il.source_line
-                    FROM incoming_links il
-                    JOIN documents d ON d.path_rel = il.source_file
-                    WHERE il.target_path = ?1
-                    ORDER BY d.title ASC, il.source_line ASC
-                    ",
-                    params![target_path.clone()],
-                )
-                .await
-                .into_diagnostic()
-                .wrap_err("failed to load incoming links from wiki index")?;
-
-            let mut results = Vec::<SearchResult>::new();
-            let mut seen_titles = HashMap::<String, usize>::new();
-            while let Some(row) = next_row(&mut rows).await? {
-                let title = row_string(&row, 0)?;
-                let file = row_string(&row, 1)?;
-                let summary = row_string(&row, 2)?;
-                let source_raw = row_string(&row, 3)?;
-                let source_line = usize::try_from(row_i64(&row, 4)?).into_diagnostic()?;
-                let snippet = line_snippet(&source_raw, source_line);
-
-                if let Some(&index) = seen_titles.get(&title) {
-                    if let Some(snippet) = snippet
-                        && !results[index]
-                            .snippets
-                            .iter()
-                            .any(|existing| existing == &snippet)
-                        && results[index].snippets.len() < 3
-                    {
-                        results[index].snippets.push(snippet);
-                    }
-                    continue;
-                }
-
-                let index = results.len();
-                seen_titles.insert(title.clone(), index);
-                results.push(SearchResult {
-                    title,
-                    file,
-                    summary,
-                    alias: None,
-                    snippets: snippet.into_iter().collect(),
-                });
-            }
-
-            perf::log_event(
-                "index.links_result",
-                0.0,
-                "ok",
-                json!({
-                    "input": input,
-                    "target_path": target_path,
-                    "count": results.len(),
-                }),
-            );
-
-            Ok(results)
-        },
-    )
-    .await
-}
-
 async fn load_aliases(conn: &Connection, document_id: i64) -> Result<Vec<String>> {
     let mut rows = conn
         .query(
@@ -1889,23 +1724,6 @@ async fn load_aliases(conn: &Connection, document_id: i64) -> Result<Vec<String>
         aliases.push(row_string(&row, 0)?);
     }
     Ok(aliases)
-}
-
-async fn load_path_rel(conn: &Connection, document_id: i64) -> Result<String> {
-    let mut rows = conn
-        .query(
-            "SELECT path_rel FROM documents WHERE id = ?1 LIMIT 1",
-            params![document_id],
-        )
-        .await
-        .into_diagnostic()
-        .wrap_err("failed to load path_rel for resolved page")?;
-    match next_row(&mut rows).await? {
-        Some(row) => row_string(&row, 0),
-        None => Err(miette!(
-            "resolved page document_id {document_id} disappeared from index"
-        )),
-    }
 }
 
 async fn load_tags(conn: &Connection, document_id: i64) -> Result<Vec<String>> {
@@ -2097,18 +1915,6 @@ fn matched_snippets(source: &str, tokens: &[String]) -> Vec<Snippet> {
         })
         .take(3)
         .collect()
-}
-
-fn line_snippet(source: &str, line_number: usize) -> Option<Snippet> {
-    let lines: Vec<&str> = source.lines().collect();
-    let index = line_number.saturating_sub(1);
-    if index >= lines.len() || lines[index].trim().is_empty() {
-        return None;
-    }
-    Some(Snippet {
-        line: line_number,
-        text: snippet_context(&lines, index, 1),
-    })
 }
 
 fn token_match_score(title: &str, summary: &str, source: &str, tokens: &[String]) -> f64 {

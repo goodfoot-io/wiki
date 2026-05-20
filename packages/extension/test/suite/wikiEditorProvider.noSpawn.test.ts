@@ -3,9 +3,9 @@
  * subprocess spawn, and derives the tab title from in-process frontmatter.
  *
  * ## What this test covers
- * `_renderPage()` previously spawned `wiki summary` (for the tab title) and
- * `wiki refs` (dead output) on every page open and live-reload. Both spawns
- * are removed; the title now comes from `parseFrontmatter(text).title`.
+ * `_renderPage()` previously spawned `wiki summary` on every page open and
+ * live-reload to derive the tab title. That spawn is removed; the title now
+ * comes from `parseFrontmatter(text).title`.
  *
  * The test drives the real `WikiEditorProvider` against a real
  * `vscode.WebviewPanel` and a real on-disk wiki fixture. It patches
@@ -13,7 +13,7 @@
  * (wikiBinary.ts:268) — to record every spawned argument vector. After
  * resolving the custom editor it triggers a live-reload by editing the
  * open document (the `onDidChangeTextDocument` path that calls
- * `_renderPage` directly), then asserts (a) no `summary`/`refs` wiki
+ * `_renderPage` directly), then asserts (a) no `summary` wiki
  * subcommand was ever spawned and (b) `webviewPanel.title` equals the
  * fixture frontmatter `title`.
  *

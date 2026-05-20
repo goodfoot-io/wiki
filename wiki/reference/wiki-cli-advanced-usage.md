@@ -19,18 +19,6 @@ wiki list
 wiki list --tag api
 ```
 
-## Finding Incoming Links
-
-[`wiki links`](/packages/cli/src/commands/links.rs#L115-L150) shows which pages link to a given target. It accepts page titles, aliases, and file paths, and path-like inputs can return both wiki-page links and fragment-link references in one result set.
-
-```bash
-wiki links "My Page"
-wiki links wiki/my-page.md
-wiki links packages/cli/src/index.rs
-```
-
-This is useful to understand what documentation exists for a page or file before changing, renaming, or deleting it.
-
 ## Keeping Fragment Links Pinned
 
 Run `wiki check --fix` to automatically pin unpinned fragment links:
@@ -44,12 +32,11 @@ wiki check --fix
 
 ## Stdin and Path Input
 
-[`wiki`](/packages/cli/src/commands/search.rs#L61-L90), [`wiki summary`](/packages/cli/src/commands/summary.rs#L130-L158), and [`wiki links`](/packages/cli/src/commands/links.rs#L115-L150) each accept a file path in addition to a page title or alias:
+[`wiki`](/packages/cli/src/commands/search.rs#L61-L90) and [`wiki summary`](/packages/cli/src/commands/summary.rs#L130-L158) each accept a file path in addition to a page title or alias:
 
 ```bash
 # Path argument
 wiki summary wiki/my-page.md
-wiki links wiki/my-page.md
 wiki wiki/my-page.md
 
 # Single line from stdin — reads when the argument is omitted
@@ -82,10 +69,9 @@ Every command accepts [`--format json`](/packages/cli/src/main.rs#L48-L50) for s
 ```bash
 wiki check --format json
 wiki list --format json
-wiki links --format json "My Page"
 ```
 
-The JSON schema mirrors the human-readable output: `check` emits a `diagnostics` array, and `list` and `links` each emit page-result arrays.
+The JSON schema mirrors the human-readable output: `check` emits a `diagnostics` array and `list` emits a page-result array.
 
 ### Command-by-Command Output
 
@@ -169,39 +155,6 @@ JSON output:
   }
 ]
 ```
-
-#### `wiki links [target]`
-
-Text output:
-
-```text
-# Reference Page
-## wiki/reference.md
-References the target file.
-
-Matched snippets:
-- L5: Read [the file](wiki/target.md) directly.
-```
-
-JSON output:
-
-```json
-[
-  {
-    "title": "Reference Page",
-    "file": "/repo/wiki/reference.md",
-    "summary": "References the target file.",
-    "snippets": [
-      {
-        "line": 5,
-        "text": "Read [the file](wiki/target.md) directly."
-      }
-    ]
-  }
-]
-```
-
-If no matches are found, text output is empty and JSON output is `[]`.
 
 #### `wiki extract`
 

@@ -122,18 +122,6 @@ enum Commands {
         fix_dry_run: bool,
     },
 
-    /// Find wiki pages that link to the given target.
-    ///
-    /// Resolves wiki-page targets by title, alias, or file path, and resolves
-    /// file targets by repo-relative path. Path-like inputs may match both and
-    /// return a unified search-style result set with snippets. Reads from stdin
-    /// when the argument is omitted.
-    Links {
-        /// Page title, alias, or file path; reads from stdin if omitted
-        #[arg(value_name = "target")]
-        target: Option<String>,
-    },
-
     /// Run `wiki check` on the written/edited file path from a PostToolUse
     /// event and emit a systemMessage when validation errors remain.
     ///
@@ -164,15 +152,6 @@ enum Commands {
     /// summary to stdout. Reads from stdin when the argument is omitted. With
     /// --format json, emits { title, file, summary }.
     Summary {
-        /// Page title, alias, or file path; reads from stdin if omitted
-        #[arg(value_name = "title|path")]
-        title: Option<String>,
-    },
-
-    /// Print metadata for all fragment-linked pages referenced by a wiki page.
-    ///
-    /// Reads from stdin when the argument is omitted.
-    Refs {
         /// Page title, alias, or file path; reads from stdin if omitted
         #[arg(value_name = "title|path")]
         title: Option<String>,
@@ -363,14 +342,6 @@ fn run(
                 fix_dry_run,
             )
         }
-        Some(Commands::Links { target }) => {
-            let inputs = resolve_inputs(target, read_stdin_lines)?;
-            run_for_each(
-                inputs,
-                |input| commands::links::run(input, json, &repo_root, source),
-                false,
-            )
-        }
         Some(Commands::Hook) => {
             let lines = read_stdin_lines();
             let input = lines.join("\n");
@@ -390,14 +361,6 @@ fn run(
             run_for_each(
                 inputs,
                 |input| commands::summary::run(input, json, &repo_root, source),
-                false,
-            )
-        }
-        Some(Commands::Refs { title }) => {
-            let inputs = resolve_inputs(title, read_stdin_lines)?;
-            run_for_each(
-                inputs,
-                |input| commands::refs::run(input, json, &repo_root, source),
                 false,
             )
         }
@@ -461,11 +424,9 @@ fn run(
 fn command_name(command: Option<&Commands>, query: Option<&str>) -> &'static str {
     match command {
         Some(Commands::Check { .. }) => "check",
-        Some(Commands::Links { .. }) => "links",
         Some(Commands::Hook) => "hook",
         Some(Commands::List { .. }) => "list",
         Some(Commands::Summary { .. }) => "summary",
-        Some(Commands::Refs { .. }) => "refs",
         Some(Commands::Install { .. }) => "install",
         Some(Commands::Scaffold { .. }) => "scaffold",
         None if query.is_some() => "search",

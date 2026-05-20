@@ -29,8 +29,7 @@ wiki "Example Article"            # default: ranked title + summary lookup
 wiki print "Authorization"
 wiki print "Authorization#token-refresh"   # fragment link to a heading
 
-# Enumerate wikilinks, find stale or broken references
-wiki links path/to/article.md
+# Find stale or broken references
 wiki check
 wiki stale
 
@@ -97,7 +96,7 @@ Install **Wiki Viewer** from the [VS Code Marketplace](https://marketplace.visua
 
 ### Features
 
-- Rendered Markdown webview with wikilink navigation, backlinks, and fragment support
+- Rendered Markdown webview with wikilink navigation and fragment support
 - Ranked wiki search (`Shift+Cmd+L` / `wiki.search`)
 - Seamless switch between rendered and source views (`wiki.openInEditor`)
 - Syntax-highlighted code blocks, morphdom-powered incremental updates

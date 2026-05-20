@@ -77,16 +77,6 @@ git add .mesh/
 
 `.mesh/` files are ordinary tracked files. Stage them alongside your content changes and commit everything together — the pre-commit hook handles this automatically when committing via `git commit`, but running `git mesh add` manually requires staging by hand.
 
-### 3.6 Check Cross-References
-
-Run:
-
-```bash
-wiki links "Updated Page Title"
-```
-
-Read each page that links **to** the updated page. If the updated page's behavior is now described differently, check whether the linking page's prose still holds. Update and re-anchor any that need it.
-
 ---
 
 ## 4. Cover New Fragment Links
