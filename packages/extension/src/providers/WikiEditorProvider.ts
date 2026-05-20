@@ -13,6 +13,7 @@ import * as vscode from 'vscode';
 import { render } from '../rendering/MarkdownRenderer.js';
 import { extractFirstHeading, hasWikiFrontmatter, parseFrontmatter, readFrontmatter } from '../utils/frontmatter.js';
 import { formatLogError, getWikiLogger } from '../utils/logger.js';
+import { recordWikiView } from '../utils/recentlyViewed.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
 import type { HostMessage, WebviewMessage } from '../webviews/wiki/types.js';
 
@@ -95,6 +96,8 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
       await vscode.window.showTextDocument(document.uri, { preview: false });
       return;
     }
+
+    void recordWikiView(this._context, document.uri.fsPath);
 
     webviewPanel.iconPath = new vscode.ThemeIcon('library');
 

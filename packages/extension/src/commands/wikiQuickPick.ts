@@ -10,6 +10,7 @@
 
 import * as vscode from 'vscode';
 import { formatLogError, getWikiLogger } from '../utils/logger.js';
+import { loadValidatedRecentlyViewed } from '../utils/recentlyViewed.js';
 import { runWikiCommand } from '../utils/wikiBinary.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
 
@@ -113,8 +114,9 @@ async function openWikiFile(file: string): Promise<void> {
  * Show a QuickPick that lets the user browse and search wiki pages.
  *
  * @param binaryManager - Service that resolves or installs the wiki CLI.
+ * @param context       - Extension context, used to read and update the per-workspace recently-viewed list.
  */
-export async function wikiQuickPick(binaryManager: WikiBinaryManager): Promise<void> {
+export async function wikiQuickPick(binaryManager: WikiBinaryManager, context: vscode.ExtensionContext): Promise<void> {
   const log = qpLog();
   const invokedAt = Date.now();
   log.info('wikiQuickPick invoked');
@@ -139,12 +141,19 @@ export async function wikiQuickPick(binaryManager: WikiBinaryManager): Promise<v
   qp.matchOnDetail = true;
   qp.busy = true;
 
-  const listStart = Date.now();
-  const initialItems = await loadAllPages(binaryPath);
+  const loadStart = Date.now();
+  const [recentItems, listItems] = await Promise.all([loadValidatedRecentlyViewed(context), loadAllPages(binaryPath)]);
+  const recentPaths = new Set(recentItems.map((item) => item.file));
+  const initialItems: WikiQuickPickItem[] = [
+    ...recentItems,
+    ...listItems.filter((item) => !recentPaths.has(item.file))
+  ];
   log.info(
-    'Initial list loaded: %d items in %dms (total since invoke %dms)',
+    'Initial list loaded: %d recent + %d list (%d total) in %dms (total since invoke %dms)',
+    recentItems.length,
+    listItems.length,
     initialItems.length,
-    Date.now() - listStart,
+    Date.now() - loadStart,
     Date.now() - invokedAt
   );
   qp.items = initialItems;
