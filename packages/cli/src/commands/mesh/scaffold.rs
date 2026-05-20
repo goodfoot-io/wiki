@@ -495,7 +495,14 @@ pub fn run(
     if all_inputs.is_empty() || consolidated.is_empty() {
         let mut out = render::render_empty_markdown(&parse_errors, &dropped_meshes);
         render::render_rename_advisories(&mut out, &planned_renames, dry_run);
-        print!("{out}");
+        // `--print-applied` contracts stdout to be exactly the list of
+        // repo-relative applied mesh paths. With nothing applied, stdout must
+        // be empty; the human-readable advisory belongs on stderr.
+        if print_applied {
+            eprint!("{out}");
+        } else {
+            print!("{out}");
+        }
         return Ok(0);
     }
 

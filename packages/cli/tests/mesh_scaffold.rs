@@ -1408,6 +1408,65 @@ fn mesh_scaffold_print_applied_emits_bare_paths_and_advisory_on_stderr() {
     );
 }
 
+/// `wiki scaffold --print-applied` on a tree with no fragment links must emit
+/// an empty stdout (every stdout line must be a `.mesh/<slug>` path), with any
+/// "nothing to apply" advisory routed to stderr. Regression for the case where
+/// `# wiki scaffold` and the human-readable advisory leaked onto stdout and
+/// broke downstream consumers that read stdout as a list of paths.
+#[test]
+fn mesh_scaffold_print_applied_empty_when_no_fragment_links() {
+    if Command::new("git-mesh").arg("--version").output().is_err() {
+        eprintln!("skipping: git-mesh not installed");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    // A valid wiki page with frontmatter but no fragment links — nothing to
+    // scaffold.
+    std::fs::write(
+        root.join("wiki/index.md"),
+        "---\ntitle: index\nsummary: index page.\n---\n\n# index\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "--print-applied", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("run wiki scaffold --print-applied");
+    assert!(
+        output.status.success(),
+        "scaffold --print-applied failed: stderr=\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Contract: every non-empty stdout line is a repo-relative path. With no
+    // fragment links, there should be no applied paths at all.
+    for line in stdout.lines().filter(|l| !l.is_empty()) {
+        assert!(
+            line.starts_with(".mesh/"),
+            "non-path line leaked to stdout: {line:?}\nfull stdout=\n{stdout}"
+        );
+    }
+    assert!(
+        !stdout.contains("# wiki scaffold"),
+        "markdown header `# wiki scaffold` leaked to stdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("No internal fragment links"),
+        "human-readable advisory leaked to stdout:\n{stdout}"
+    );
+}
+
 /// Running `wiki scaffold` twice on an unchanged tree must produce exit 0 both
 /// times and not duplicate anchors (git-mesh idempotency).
 #[test]
