@@ -147,6 +147,14 @@ enum Commands {
         /// Filter pages by tag
         #[arg(long = "tag", value_name = "tag")]
         tag: Option<String>,
+
+        /// Return at most N entries from the title-ordered listing. Default: no limit.
+        #[arg(long = "limit", value_name = "N", value_parser = clap::value_parser!(u64))]
+        limit: Option<u64>,
+
+        /// Skip the first N entries of the title-ordered listing. Default: 0.
+        #[arg(long = "offset", value_name = "N", value_parser = clap::value_parser!(u64))]
+        offset: Option<u64>,
     },
 
     /// Print the summary of a wiki page.
@@ -368,9 +376,15 @@ fn run(
             let input = lines.join("\n");
             commands::hook_check::run(&input, &repo_root, source)
         }
-        Some(Commands::List { tag }) => {
-            commands::list::run(&[], tag.as_deref(), json, &repo_root, source)
-        }
+        Some(Commands::List { tag, limit, offset }) => commands::list::run(
+            &[],
+            tag.as_deref(),
+            limit,
+            offset,
+            json,
+            &repo_root,
+            source,
+        ),
         Some(Commands::Summary { title }) => {
             let inputs = resolve_inputs(title, read_stdin_lines)?;
             run_for_each(

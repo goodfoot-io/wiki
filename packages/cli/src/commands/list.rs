@@ -17,16 +17,20 @@ pub struct PageEntry {
 pub fn run(
     _globs: &[String],
     tag: Option<&str>,
+    limit: Option<u64>,
+    offset: Option<u64>,
     json: bool,
     repo_root: &Path,
     source: DocSource,
 ) -> Result<i32> {
     let index = WikiIndex::prepare_for_source(repo_root, source)?;
-    let entries = index
+    let all = index
         .list_pages(tag)?
         .into_iter()
         .map(page_entry)
         .collect::<Vec<_>>();
+
+    let entries = paginate(all, offset, limit);
 
     if json {
         println!("{}", serde_json::to_string_pretty(&entries).unwrap());
@@ -64,6 +68,17 @@ pub fn run(
     }
 
     Ok(0)
+}
+
+fn paginate(entries: Vec<PageEntry>, offset: Option<u64>, limit: Option<u64>) -> Vec<PageEntry> {
+    let total = entries.len();
+    let skip = offset.unwrap_or(0).min(total as u64) as usize;
+    let remaining = total - skip;
+    let take = match limit {
+        Some(n) => (n as usize).min(remaining),
+        None => remaining,
+    };
+    entries.into_iter().skip(skip).take(take).collect()
 }
 
 fn page_entry(entry: PageListEntry) -> PageEntry {
