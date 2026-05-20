@@ -137,6 +137,7 @@ pub struct ResolvedPage {
     pub document_id: i64,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PageListEntry {
     pub title: String,
@@ -274,6 +275,7 @@ impl WikiIndex {
         ))
     }
 
+    #[cfg(test)]
     pub fn list_pages(&self, tag: Option<&str>) -> Result<Vec<PageListEntry>> {
         self.runtime
             .block_on(list_pages_async(&self.conn, &self.repo_root, tag))
@@ -1648,6 +1650,7 @@ fn escape_like_pattern(token: &str) -> String {
         .replace('_', "\\_")
 }
 
+#[cfg(test)]
 async fn list_pages_async(
     conn: &Connection,
     repo_root: &Path,
@@ -1710,6 +1713,7 @@ async fn list_pages_async(
     .await
 }
 
+#[cfg(test)]
 async fn load_aliases(conn: &Connection, document_id: i64) -> Result<Vec<String>> {
     let mut rows = conn
         .query(
@@ -1726,6 +1730,7 @@ async fn load_aliases(conn: &Connection, document_id: i64) -> Result<Vec<String>
     Ok(aliases)
 }
 
+#[cfg(test)]
 async fn load_tags(conn: &Connection, document_id: i64) -> Result<Vec<String>> {
     let mut rows = conn
         .query(
