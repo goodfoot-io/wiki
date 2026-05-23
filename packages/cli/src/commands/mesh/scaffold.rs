@@ -403,33 +403,70 @@ pub fn run(
         }
     });
 
-    // Gitignored anchor targets (build artifacts) can never resolve in
-    // git-mesh and `git mesh add` now refuses them outright, so drop any draft
-    // anchoring one — with an advisory, exit 0 — before reaching `git mesh
-    // add`. An untracked-but-not-ignored target is NOT dropped: it resolves
-    // once committed. Index/Head sources already exclude ignored paths via
-    // `source_paths`, so this matters for the WorkingTree default; we still
-    // consult it in all modes so the advisory names the gitignore cause.
+    // A gitignored fragment-link target (a generated build artifact) is exempt
+    // from mesh coverage exactly as `wiki check` treats it: git-mesh refuses to
+    // anchor a path git never sees, so demanding coverage would be
+    // unsatisfiable. Strip ONLY the gitignored anchors from each draft (with a
+    // per-anchor advisory), keeping the section's co-cited *tracked* anchors
+    // covered; drop a draft entirely only when no code anchor remains. An
+    // untracked-but-not-ignored target is NOT stripped — it resolves once
+    // committed. Index/Head sources already exclude ignored paths via
+    // `source_paths`; we still consult `git check-ignore` in all modes so the
+    // advisory can name the gitignore cause.
+    //
+    // `extends_existing` drafts have already had their leading page-section
+    // anchor removed by `apply_section_extension`, so for them every entry is a
+    // code anchor (`code_start == 0`); new-mesh drafts keep the page section
+    // anchor at index 0 (`code_start == 1`).
+    fn code_anchor_start(draft: &super::draft::MeshDraft) -> usize {
+        usize::from(draft.extends_existing.is_none())
+    }
     let candidate_anchor_paths: Vec<String> = consolidated
         .iter()
-        .flat_map(|d| d.structured_anchors.iter().skip(1))
+        .flat_map(|d| d.structured_anchors.iter().skip(code_anchor_start(d)))
         .map(|a| a.path.clone())
         .collect();
     let ignored_anchor_paths = crate::git::ignored_paths(repo_root, &candidate_anchor_paths)?;
 
-    consolidated.retain(|draft| {
-        // Check every non-wiki anchor (skip the first anchor which is the page section).
-        for anchor in draft.structured_anchors.iter().skip(1) {
-            if ignored_anchor_paths.contains(&anchor.path) {
+    consolidated.retain_mut(|draft| {
+        let code_start = code_anchor_start(draft);
+        // Preserve the page-section prefix (none for extension drafts), then
+        // copy across every code anchor that is not gitignored.
+        let mut kept_anchors = draft.anchors[..code_start].to_vec();
+        let mut kept_struct = draft.structured_anchors[..code_start].to_vec();
+        let mut stripped = false;
+        for (a_str, a) in draft
+            .anchors
+            .iter()
+            .skip(code_start)
+            .zip(draft.structured_anchors.iter().skip(code_start))
+        {
+            if ignored_anchor_paths.contains(&a.path) {
                 dropped_meshes.push(DroppedMesh {
                     slug: draft.slug.clone(),
                     reason: DropReason::IgnoredPath {
-                        path: anchor.path.clone(),
+                        path: a.path.clone(),
                     },
                     page: draft.page_path.clone(),
                 });
-                return false;
+                stripped = true;
+            } else {
+                kept_anchors.push(a_str.clone());
+                kept_struct.push(a.clone());
             }
+        }
+        if stripped {
+            draft.anchors = kept_anchors;
+            draft.structured_anchors = kept_struct;
+        }
+        // Drop the draft only when stripping left it with no code anchor.
+        draft.structured_anchors.len() > code_start
+    });
+
+    consolidated.retain(|draft| {
+        let code_start = code_anchor_start(draft);
+        // Check every code anchor (skip the page section anchor on new drafts).
+        for anchor in draft.structured_anchors.iter().skip(code_start) {
             let missing = match &source_paths {
                 None => {
                     let abs = repo_root.join(&anchor.path);

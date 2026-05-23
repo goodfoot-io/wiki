@@ -2323,6 +2323,138 @@ fn mesh_scaffold_skips_gitignored_anchor_target() {
     );
 }
 
+/// Per-anchor exemption (new-mesh case): a section that co-cites a tracked file
+/// AND a gitignored file must still get a mesh covering the *tracked* anchor —
+/// only the gitignored anchor is stripped. Regression for v0.5.74, where the
+/// whole mesh was dropped and the tracked file was left uncovered.
+#[test]
+fn mesh_scaffold_keeps_tracked_anchor_when_co_cited_with_gitignored() {
+    if Command::new("git-mesh").arg("--version").output().is_err() {
+        eprintln!("skipping: git-mesh not installed");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/real.ts"), "export const A = 1;\nexport const B = 2;\n").unwrap();
+    std::fs::write(root.join("src/gen.ts"), "export const G = 1;\nexport const H = 2;\n").unwrap();
+    std::fs::write(root.join(".gitignore"), "src/gen.ts\n").unwrap();
+    std::fs::write(
+        root.join("wiki/page.md"),
+        "---\ntitle: Page\nsummary: A page.\n---\n\n# Page\n\n\
+         Cites [real](../src/real.ts#L1-L2) and [gen](../src/gen.ts#L1-L2).\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "--print-applied", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("run wiki scaffold");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "scaffold must exit 0; stderr=\n{stderr}");
+    // A mesh was applied (the tracked anchor needs coverage).
+    let applied: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(applied.len(), 1, "expected exactly one applied mesh; stdout=\n{stdout}");
+
+    // That mesh anchors the tracked file but NOT the gitignored one.
+    let body = std::fs::read_to_string(root.join(applied[0])).expect("read applied mesh");
+    assert!(
+        body.contains("src/real.ts"),
+        "applied mesh must anchor the tracked file:\n{body}"
+    );
+    assert!(
+        !body.contains("src/gen.ts"),
+        "applied mesh must NOT anchor the gitignored file:\n{body}"
+    );
+    // Advisory names the stripped anchor on stderr.
+    assert!(
+        stderr.contains("src/gen.ts"),
+        "expected stripped-anchor advisory on stderr; stderr=\n{stderr}"
+    );
+}
+
+/// Per-anchor exemption (extend-existing case): adding a gitignored citation to
+/// a section whose mesh already exists must NOT attempt `git mesh add` with the
+/// gitignored path (git-mesh refuses it). scaffold strips the anchor and exits
+/// 0. Regression for v0.5.74, where the extend draft slipped past the per-mesh
+/// drop and aborted the fail-closed hook with a non-zero exit.
+#[test]
+fn mesh_scaffold_extend_existing_skips_gitignored_anchor() {
+    if Command::new("git-mesh").arg("--version").output().is_err() {
+        eprintln!("skipping: git-mesh not installed");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/real.ts"), "export const A = 1;\nexport const B = 2;\n").unwrap();
+    std::fs::write(root.join("src/gen.ts"), "export const G = 1;\nexport const H = 2;\n").unwrap();
+    std::fs::write(root.join(".gitignore"), "src/gen.ts\n").unwrap();
+    // v1: cite only the tracked file.
+    std::fs::write(
+        root.join("wiki/page.md"),
+        "---\ntitle: Page\nsummary: A page.\n---\n\n# Page\n\n\
+         Cites [real](../src/real.ts#L1-L2).\n",
+    )
+    .unwrap();
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "v1"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    // Scaffold the initial mesh and commit it.
+    let first = Command::new(bin)
+        .args(["scaffold", "--print-applied", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("first scaffold");
+    assert!(first.status.success());
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "mesh"]);
+
+    // v2: add the gitignored citation on the same section line.
+    std::fs::write(
+        root.join("wiki/page.md"),
+        "---\ntitle: Page\nsummary: A page.\n---\n\n# Page\n\n\
+         Cites [real](../src/real.ts#L1-L2) and [gen](../src/gen.ts#L1-L2).\n",
+    )
+    .unwrap();
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "v2"]);
+
+    let output = Command::new(bin)
+        .args(["scaffold", "--print-applied", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("extend scaffold");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "extend scaffold must exit 0, not fail on a gitignored anchor; stderr=\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("anchor precheck failed"),
+        "scaffold must not attempt `git mesh add` on the gitignored path; stderr=\n{stderr}"
+    );
+    assert!(
+        stderr.contains("src/gen.ts"),
+        "expected stripped-anchor advisory on stderr; stderr=\n{stderr}"
+    );
+}
+
 /// Collect every regular file under `dir`, recursively, as owned paths.
 fn walkdir(dir: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
