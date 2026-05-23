@@ -110,10 +110,12 @@ fn mesh_scaffold_byte_equal_with_expected_md() {
         ],
     );
 
+    // The fixture includes a wiki page under `src/`, so scaffold runs from the
+    // repo root to select the whole corpus (selection follows the CWD).
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
         .args(["scaffold", "--dry-run", "**/*.md"])
-        .current_dir(tmp.path().join("wiki"))
+        .current_dir(tmp.path())
         .output()
         .expect("run wiki binary");
     assert!(
@@ -884,10 +886,13 @@ fn mesh_scaffold_handles_file_outside_wiki_dir() {
         ],
     );
 
+    // A wiki page outside `wiki/` is reached by running from an ancestor of
+    // its directory; selection follows the working directory, so the glob is
+    // resolved from the repo root here.
     let bin = env!("CARGO_BIN_EXE_wiki");
     let output = Command::new(bin)
-        .args(["scaffold", "--dry-run", "../floats/notes.md"])
-        .current_dir(root.join("wiki"))
+        .args(["scaffold", "--dry-run", "floats/notes.md"])
+        .current_dir(root)
         .output()
         .expect("run wiki scaffold");
 

@@ -225,8 +225,18 @@ pub fn find_page_by_path(
 /// `source` controls which tree is used to seed the candidate list when globs
 /// are empty. For `Index` and `Head`, candidate paths are taken from
 /// `source.list_paths()` so files absent from the worktree are still included.
+/// Discover the wiki `*.md` files to operate on.
+///
+/// File **selection** is scoped to `scan_root` (the current working directory):
+/// a bare invocation discovers only the subtree beneath it, and explicit globs
+/// resolve relative to it. `repo_root` (the git top-level) is used only for
+/// path **resolution** — the returned paths are absolute under `repo_root` so
+/// that downstream `strip_prefix(repo_root)` yields git-root-relative paths
+/// regardless of where the caller stood. `scan_root` is always a descendant of
+/// (or equal to) `repo_root`.
 pub fn discover_files(
     globs: &[String],
+    scan_root: &Path,
     repo_root: &Path,
     source: DocSource,
 ) -> Result<Vec<PathBuf>> {
@@ -236,26 +246,34 @@ pub fn discover_files(
             "globs": globs,
         }),
         || {
+            let prefix = scan_prefix(scan_root, repo_root);
+            // Reconstruct the walk base under `repo_root` so that walked paths
+            // share its exact prefix and strip cleanly downstream.
+            let walk_root = match &prefix {
+                Some(p) => repo_root.join(p),
+                None => repo_root.to_path_buf(),
+            };
+
             let mut files = match source {
                 DocSource::Index | DocSource::Head => {
                     if globs.is_empty() {
-                        discover_default_files(repo_root, source)?
+                        discover_default_files(repo_root, &walk_root, prefix.as_deref(), source)?
                     } else {
                         // For non-worktree sources we must never read the
                         // worktree filesystem to satisfy a glob.  Filter the
                         // source's own path list instead so the candidate set
                         // is internally consistent with `--source`.
-                        discover_files_by_glob_in_source(globs, repo_root, source)?
+                        discover_files_by_glob_in_source(globs, repo_root, prefix.as_deref(), source)?
                     }
                 }
                 DocSource::WorkingTree => {
                     let initial = if globs.is_empty() {
-                        discover_default_files(repo_root, source)?
+                        discover_default_files(repo_root, &walk_root, prefix.as_deref(), source)?
                     } else {
                         Vec::new()
                     };
                     if initial.is_empty() || !globs.is_empty() {
-                        discover_files_by_walk(globs, repo_root)?
+                        discover_files_by_walk(globs, &walk_root)?
                     } else {
                         initial
                     }
@@ -283,17 +301,79 @@ pub fn discover_files(
     )
 }
 
-fn discover_default_files(repo_root: &Path, source: DocSource) -> Result<Vec<PathBuf>> {
+/// The path of `scan_root` relative to `repo_root`, or `None` when they are the
+/// same directory (the whole repo is in scope). Falls back to a canonicalized
+/// comparison so symlinked roots still resolve, and to `None` when `scan_root`
+/// is not under `repo_root` (selection then spans the whole repo).
+fn scan_prefix(scan_root: &Path, repo_root: &Path) -> Option<PathBuf> {
+    let non_empty = |rel: &Path| (!rel.as_os_str().is_empty()).then(|| rel.to_path_buf());
+    if let Ok(rel) = scan_root.strip_prefix(repo_root) {
+        return non_empty(rel);
+    }
+    if let (Ok(cs), Ok(cr)) = (
+        std::fs::canonicalize(scan_root),
+        std::fs::canonicalize(repo_root),
+    ) && let Ok(rel) = cs.strip_prefix(&cr)
+    {
+        return non_empty(rel);
+    }
+    None
+}
+
+/// Whether a repo-relative path lies within the selection `prefix`. A `None`
+/// prefix means the whole repo is in scope.
+fn path_under_prefix(path_rel: &str, prefix: Option<&Path>) -> bool {
+    match prefix {
+        None => true,
+        Some(pre) => Path::new(path_rel).starts_with(pre),
+    }
+}
+
+/// Convert a user-supplied (CWD-relative) glob into a repo-root-relative glob
+/// string for matching against a `DocSource`'s repo-relative path list.
+///
+/// Filesystem-absolute globs are stripped to repo-relative; `/`-prefixed globs
+/// are already repo-relative; plain relative globs are anchored under the
+/// selection `prefix` so they match only the current subtree.
+fn glob_to_repo_relative(glob: &str, prefix: Option<&Path>, repo_root: &Path) -> String {
+    let path = Path::new(glob);
+    if path.is_absolute() {
+        return path
+            .strip_prefix(repo_root)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| glob.to_string());
+    }
+    if let Some(rest) = glob.strip_prefix('/') {
+        return rest.to_string();
+    }
+    let trimmed = glob.trim_start_matches("./");
+    match prefix {
+        Some(pre) => pre.join(trimmed).to_string_lossy().into_owned(),
+        None => trimmed.to_string(),
+    }
+}
+
+fn discover_default_files(
+    repo_root: &Path,
+    walk_root: &Path,
+    prefix: Option<&Path>,
+    source: DocSource,
+) -> Result<Vec<PathBuf>> {
     // For non-worktree sources, seed from the source's own path list so that
     // files absent from the worktree (deleted locally but present in HEAD or
-    // the index) are still included in the candidate set.
+    // the index) are still included in the candidate set. Selection is scoped
+    // to `prefix` (the current working directory) by filtering the repo-
+    // relative path list.
     match source {
         DocSource::Index | DocSource::Head => {
             let all_paths = source.list_paths(repo_root)?;
             let files: Vec<PathBuf> = all_paths
                 .into_iter()
                 .filter(|p| {
-                    if !p.ends_with(".md") || is_fixture_path(p) {
+                    if !p.ends_with(".md")
+                        || is_fixture_path(p)
+                        || !path_under_prefix(p, prefix)
+                    {
                         return false;
                     }
                     match source.read(repo_root, p) {
@@ -312,12 +392,15 @@ fn discover_default_files(repo_root: &Path, source: DocSource) -> Result<Vec<Pat
 
     let inventory = match repo_inventory(repo_root) {
         Ok(inventory) => inventory,
-        Err(_) => return discover_files_by_walk(&[], repo_root),
+        Err(_) => return discover_files_by_walk(&[], walk_root),
     };
 
     let mut files = Vec::new();
     for path_rel in inventory {
-        if !path_rel.ends_with(".md") || is_fixture_path(&path_rel) {
+        if !path_rel.ends_with(".md")
+            || is_fixture_path(&path_rel)
+            || !path_under_prefix(&path_rel, prefix)
+        {
             continue;
         }
         let path = repo_root.join(&path_rel);
@@ -348,11 +431,12 @@ fn is_fixture_path(path_rel: &str) -> bool {
 fn discover_files_by_glob_in_source(
     globs: &[String],
     repo_root: &Path,
+    prefix: Option<&Path>,
     source: DocSource,
 ) -> Result<Vec<PathBuf>> {
     let mut glob_builder = globset::GlobSetBuilder::new();
     for glob in globs {
-        let normalized = normalize_repo_relative_path(glob, repo_root);
+        let normalized = glob_to_repo_relative(glob, prefix, repo_root);
         let glob = globset::Glob::new(&normalized)
             .into_diagnostic()
             .wrap_err_with(|| format!("invalid glob pattern: {normalized}"))?;
@@ -377,17 +461,19 @@ fn discover_files_by_glob_in_source(
     Ok(files)
 }
 
-fn discover_files_by_walk(globs: &[String], repo_root: &Path) -> Result<Vec<PathBuf>> {
+fn discover_files_by_walk(globs: &[String], base_dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files: Vec<PathBuf> = Vec::new();
 
     let candidates = if globs.is_empty() {
-        discover_files_by_parallel_walk(repo_root, &["**/*.md".to_string()])?
+        discover_files_by_parallel_walk(base_dir, &["**/*.md".to_string()])?
     } else {
+        // Globs are CWD-relative; the walk matches them against paths relative
+        // to `base_dir`, so normalize against the same base.
         let normalized_globs = globs
             .iter()
-            .map(|glob| normalize_repo_relative_path(glob, repo_root))
+            .map(|glob| normalize_repo_relative_path(glob, base_dir))
             .collect::<Vec<_>>();
-        discover_files_by_parallel_walk(repo_root, &normalized_globs)?
+        discover_files_by_parallel_walk(base_dir, &normalized_globs)?
     };
 
     for path in candidates {
@@ -681,7 +767,7 @@ mod tests {
     fn test_discover_no_md_files_exits_with_no_pages() {
         let repo = TestRepo::new();
         // No .md files at all
-        let err = discover_files(&[], repo.path(), DocSource::WorkingTree).unwrap_err();
+        let err = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("no wiki pages found"), "got: {msg}");
     }
@@ -691,7 +777,7 @@ mod tests {
         let repo = TestRepo::new();
         repo.create_file("wiki/.gitkeep", "");
         repo.create_file("wiki/plain.md", "# no frontmatter\n");
-        let err = discover_files(&[], repo.path(), DocSource::WorkingTree).unwrap_err();
+        let err = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("no wiki pages found"), "got: {msg}");
     }
@@ -700,7 +786,7 @@ mod tests {
     fn test_discover_finds_md_files_with_frontmatter() {
         let repo = TestRepo::new();
         repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
-        let files = discover_files(&[], repo.path(), DocSource::WorkingTree).expect("discover");
+        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).expect("discover");
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("page.md"));
     }
@@ -714,7 +800,7 @@ mod tests {
             "---\ntitle: Docs\nsummary: Component docs.\n---\n",
         );
         repo.create_file("src/component/ordinary.md", "# ordinary\n");
-        let files = discover_files(&[], repo.path(), DocSource::WorkingTree).expect("discover");
+        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).expect("discover");
         assert_eq!(files.len(), 2);
         let paths: Vec<_> = files
             .into_iter()
@@ -730,7 +816,7 @@ mod tests {
         let repo = TestRepo::new();
         repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
         let globs = vec!["wiki/nonexistent/**/*.md".to_string()];
-        let err = discover_files(&globs, repo.path(), DocSource::WorkingTree).unwrap_err();
+        let err = discover_files(&globs, repo.path(), repo.path(), DocSource::WorkingTree).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("no wiki pages found"), "got: {msg}");
     }
@@ -740,7 +826,7 @@ mod tests {
         let repo = TestRepo::new();
         repo.create_file("docs/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
         let globs = vec!["docs/**/*.md".to_string()];
-        let files = discover_files(&globs, repo.path(), DocSource::WorkingTree)
+        let files = discover_files(&globs, repo.path(), repo.path(), DocSource::WorkingTree)
             .expect("explicit glob should succeed");
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("page.md"));
@@ -751,7 +837,7 @@ mod tests {
         let repo = TestRepo::new();
         repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
         let globs = vec!["./wiki/page.md".to_string()];
-        let files = discover_files(&globs, repo.path(), DocSource::WorkingTree).expect("discover");
+        let files = discover_files(&globs, repo.path(), repo.path(), DocSource::WorkingTree).expect("discover");
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("wiki/page.md"));
     }
@@ -767,7 +853,7 @@ mod tests {
         );
         // Gitignore the directory — discover_files must not return files from it.
         repo.create_file(".gitignore", "ignored-dir/\n");
-        let files = discover_files(&[], repo.path(), DocSource::WorkingTree).expect("discover");
+        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).expect("discover");
         let paths: Vec<_> = files
             .iter()
             .map(|p| p.to_string_lossy().to_string())
@@ -794,7 +880,7 @@ mod tests {
         );
         // Gitignore the worktrees directory (as this repo does in production).
         repo.create_file(".gitignore", ".worktrees\n");
-        let files = discover_files(&[], repo.path(), DocSource::WorkingTree).expect("discover");
+        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).expect("discover");
         let paths: Vec<_> = files
             .iter()
             .map(|p| p.to_string_lossy().to_string())
@@ -830,8 +916,9 @@ mod tests {
         repo.create_file(".gitignore", "ignored-dir/\n");
         repo.git(&["add", "-A"]);
 
-        let inventory_files = discover_default_files(repo.path(), DocSource::WorkingTree)
-            .expect("inventory discover");
+        let inventory_files =
+            discover_default_files(repo.path(), repo.path(), None, DocSource::WorkingTree)
+                .expect("inventory discover");
         let walk_files = discover_files_by_walk(&[], repo.path()).expect("walk discover");
 
         assert_eq!(inventory_files, walk_files);

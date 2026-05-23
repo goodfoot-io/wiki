@@ -81,7 +81,7 @@ fn hook_check_skips_non_wiki_md_file() {
 
     let binary = env!("CARGO_BIN_EXE_wiki");
     let mut child = Command::new(binary)
-        .args(["--root", "wiki", "hook"])
+        .args(["hook"])
         .current_dir(repo.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

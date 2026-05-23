@@ -15,7 +15,7 @@ use std::process;
 use std::time::Instant;
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
-use miette::Result;
+use miette::{IntoDiagnostic, Result, WrapErr};
 
 #[derive(Debug, Clone, ValueEnum)]
 enum Format {
@@ -36,7 +36,7 @@ enum SourceArg {
     version = crate::version::VERSION,
     before_help = concat!("wiki ", env!("WIKI_VERSION"), "\n"),
     about = "wiki - Read and maintain wiki pages",
-    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, links, list, summary, refs, hook, install) are reserved and cannot be used as page titles.\n\nUse `--root <path>` to point at a wiki root other than the current working directory.",
+    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, links, list, summary, refs, hook, install) are reserved and cannot be used as page titles.\n\nFile selection follows the current working directory; links, anchors, and mesh coverage resolve against the git repository root.",
     disable_help_subcommand = true,
     disable_version_flag = true,
 )]
@@ -52,10 +52,6 @@ struct Cli {
     /// Emit per-event timings to stderr (also enabled by `WIKI_PERF=1`).
     #[arg(long = "perf", action = ArgAction::SetTrue, global = true)]
     perf: bool,
-
-    /// Wiki root directory. Defaults to the current working directory.
-    #[arg(long = "root", value_name = "PATH", global = true)]
-    root: Option<PathBuf>,
 
     /// Document source: working tree (default), git index, or HEAD commit.
     #[arg(
@@ -280,15 +276,7 @@ fn main() {
         SourceArg::Head => index::DocSource::Head,
     };
 
-    let result = run(
-        cli.command,
-        cli.query,
-        cli.limit,
-        cli.offset,
-        cli.root,
-        json,
-        source,
-    );
+    let result = run(cli.command, cli.query, cli.limit, cli.offset, json, source);
 
     match result {
         Ok(code) => process::exit(code),
@@ -308,11 +296,13 @@ fn run(
     query: Option<String>,
     limit: i64,
     offset: usize,
-    _root: Option<PathBuf>,
     json: bool,
     source: index::DocSource,
 ) -> Result<i32> {
     let repo_root = git::repo_root()?;
+    let scan_root = std::env::current_dir()
+        .into_diagnostic()
+        .wrap_err("failed to read current working directory")?;
 
     let command_name = command_name(command.as_ref(), query.as_deref());
     perf::init(&repo_root, command_name, json);
@@ -334,6 +324,7 @@ fn run(
             commands::check::run(
                 &globs,
                 json,
+                &scan_root,
                 &repo_root,
                 no_exit_code,
                 no_mesh,
@@ -387,6 +378,7 @@ fn run(
             &globs,
             json,
             dry_run,
+            &scan_root,
             &repo_root,
             source,
             print_applied,
@@ -467,11 +459,5 @@ mod tests {
         let cli = Cli::try_parse_from(["wiki", "summary"]).expect("parse");
         assert!(matches!(cli.command, Some(Commands::Summary { .. })));
         assert!(cli.query.is_none());
-    }
-
-    #[test]
-    fn parses_root_flag() {
-        let cli = Cli::try_parse_from(["wiki", "--root", "/tmp/wiki", "query"]).expect("parse");
-        assert_eq!(cli.root.as_deref(), Some(std::path::Path::new("/tmp/wiki")));
     }
 }

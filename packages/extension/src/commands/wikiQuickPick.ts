@@ -2,8 +2,8 @@
  * QuickPick command that lets the user search and open wiki pages.
  *
  * An empty query lists all pages via `wiki list`; a non-empty query runs
- * `wiki <query>` (search). All queries are scoped to the single wiki root
- * configured via the CLI's `--root` flag.
+ * `wiki <query>` (search). Queries are scoped to the working directory the
+ * CLI is spawned in.
  *
  * @summary QuickPick command that lets the user search and open wiki pages.
  */

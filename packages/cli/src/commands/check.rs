@@ -112,6 +112,7 @@ fn render_diagnostics(diagnostics: &[CheckDiagnostic]) -> String {
 pub fn run(
     globs: &[String],
     json: bool,
+    scan_root: &Path,
     repo_root: &Path,
     no_exit_code: bool,
     no_mesh: bool,
@@ -119,7 +120,9 @@ pub fn run(
     fix: bool,
     fix_dry_run: bool,
 ) -> Result<i32> {
-    let files = match discover_files(globs, repo_root, source) {
+    // Files to check are selected from `scan_root` (the current working
+    // directory); globs resolve relative to it.
+    let files = match discover_files(globs, scan_root, repo_root, source) {
         Ok(f) => f,
         Err(e) => {
             if json {
@@ -142,10 +145,12 @@ pub fn run(
         }
     };
 
-    let index_files = if globs.is_empty() {
-        files.clone()
-    } else {
-        let raw = discover_files(&[], repo_root, source)?;
+    // The resolution/collision corpus is the entire wiki, scanned from the
+    // repo root, so a subtree check resolves titles and detects collisions
+    // against every page — making a subdirectory run equivalent to the same
+    // pages selected by glob from the repo root.
+    let index_files = {
+        let raw = discover_files(&[], repo_root, repo_root, source)?;
         filter_files_for_source(raw, repo_root, source)?
     };
 
@@ -277,12 +282,14 @@ pub fn collect_with_source(
     repo_root: &Path,
     source: DocSource,
 ) -> Result<Vec<CheckDiagnostic>> {
-    let files = discover_files(globs, repo_root, source)?;
+    // This entry point (hook/tests) scans from the repo root rather than a
+    // narrower working directory.
+    let files = discover_files(globs, repo_root, repo_root, source)?;
     let files = filter_files_for_source(files, repo_root, source)?;
     let index_files = if globs.is_empty() {
         files.clone()
     } else {
-        let raw = discover_files(&[], repo_root, source)?;
+        let raw = discover_files(&[], repo_root, repo_root, source)?;
         filter_files_for_source(raw, repo_root, source)?
     };
     collect_for_files(&files, &index_files, repo_root, false, source)
@@ -649,6 +656,7 @@ mod tests {
             &[],
             false,
             repo.path(),
+            repo.path(),
             false,
             false,
             crate::index::DocSource::WorkingTree,
@@ -671,6 +679,7 @@ mod tests {
             &[],
             false,
             repo.path(),
+            repo.path(),
             false,
             false,
             crate::index::DocSource::WorkingTree,
@@ -692,6 +701,7 @@ mod tests {
         let code = run(
             &[],
             false,
+            repo.path(),
             repo.path(),
             false,
             false,
@@ -795,6 +805,7 @@ mod tests {
             &[],
             false,
             repo.path(),
+            repo.path(),
             false,
             false,
             crate::index::DocSource::WorkingTree,
@@ -849,6 +860,7 @@ mod tests {
             &[],
             false,
             repo.path(),
+            repo.path(),
             false,
             false,
             crate::index::DocSource::WorkingTree,
@@ -886,6 +898,7 @@ mod tests {
         let code = run(
             &[],
             false,
+            repo.path(),
             repo.path(),
             false,
             false,
@@ -947,6 +960,7 @@ mod tests {
         let code = run(
             &[],
             false,
+            repo.path(),
             repo.path(),
             false,
             false,
@@ -1042,6 +1056,7 @@ mod tests {
             &[],
             false,
             repo.path(),
+            repo.path(),
             false,
             true, // no_mesh
             crate::index::DocSource::WorkingTree,
@@ -1105,6 +1120,7 @@ mod tests {
             &[],
             false,
             repo.path(),
+            repo.path(),
             false,
             true,
             crate::index::DocSource::WorkingTree,
@@ -1145,6 +1161,7 @@ mod tests {
         let _code = run(
             &[],
             false,
+            repo.path(),
             repo.path(),
             true, // no_exit_code — mesh stays at old coords, drift expected
             false,
@@ -1191,6 +1208,7 @@ mod tests {
         let code = run(
             &[],
             false,
+            repo.path(),
             repo.path(),
             false,
             false,
@@ -1281,6 +1299,7 @@ mod tests {
             &[],
             false,
             repo.path(),
+            repo.path(),
             true, // no_exit_code — mesh still drifted, but that's expected
             false,
             crate::index::DocSource::WorkingTree,
@@ -1316,6 +1335,7 @@ mod tests {
         let code = run(
             &[],
             false,
+            repo.path(),
             repo.path(),
             false,
             true,
@@ -1357,6 +1377,7 @@ mod tests {
             &[],
             false,
             repo.path(),
+            repo.path(),
             false,
             true,
             crate::index::DocSource::WorkingTree,
@@ -1396,6 +1417,7 @@ mod tests {
         let code = run(
             &[],
             false,
+            repo.path(),
             repo.path(),
             false,
             true,
@@ -1438,6 +1460,7 @@ mod tests {
         let code = run(
             &[],
             false,
+            repo.path(),
             repo.path(),
             false,
             true,
@@ -1482,6 +1505,7 @@ mod tests {
         let code = run(
             &[],
             false,
+            repo.path(),
             repo.path(),
             false,
             true,
@@ -1578,6 +1602,7 @@ mod tests {
             &[],
             false,
             repo.path(),
+            repo.path(),
             false,
             true,
             crate::index::DocSource::WorkingTree,
@@ -1593,6 +1618,7 @@ mod tests {
         run(
             &[],
             false,
+            repo.path(),
             repo.path(),
             false,
             true,
@@ -1636,6 +1662,7 @@ mod tests {
         let _code = run(
             &[],
             false,
+            repo.path(),
             repo.path(),
             false,
             true,

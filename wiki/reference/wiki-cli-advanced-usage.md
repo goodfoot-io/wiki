@@ -56,7 +56,7 @@ When multiple inputs are provided via stdin, the exit code reflects the worst re
 
 ## Targeting Specific Files
 
-All commands accept explicit glob patterns instead of scanning [`WIKI_DIR`](/packages/cli/src/main.rs#L118-L120):
+All commands accept explicit glob patterns instead of scanning [`WIKI_DIR`](/packages/cli/src/main.rs#L114-L116):
 
 ```bash
 wiki check wiki/some-section/**/*.md

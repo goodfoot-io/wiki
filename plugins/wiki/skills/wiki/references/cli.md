@@ -23,12 +23,14 @@ wiki -l 10 -o 10 "auth"           # next page
 ## Validation flags
 
 ```bash
-wiki check --root wiki            # scope validation to the wiki/ directory
+cd wiki && wiki check             # scope validation to the wiki/ directory (selection follows CWD)
 wiki check --no-mesh              # skip mesh coverage (when git mesh runs separately)
 wiki check --no-exit-code         # report-only; exits 0 even with errors
 wiki check --format json          # structured diagnostics
-wiki check path/to/page.md        # validate specific globs only
+wiki check path/to/page.md        # validate specific globs only (resolved from CWD)
 ```
+
+File selection follows the current working directory: bare `wiki check` validates every `*.md` page beneath the CWD, and explicit globs resolve from the CWD. Link, anchor, `git check-ignore`, and git-mesh resolution stay anchored at the git repository root, so a subdirectory check produces the same diagnostics as an equivalent repo-relative glob run from the repo root.
 
 `--format json` is supported on most subcommands and is the right choice for any script consuming wiki output.
 
@@ -70,7 +72,6 @@ wiki hook                         # PostToolUse hook entrypoint (reads event JSO
 | `--perf` | Emit per-event timings to stderr (also: `WIKI_PERF=1`). |
 | `--format json` | Structured output (subcommand-dependent). |
 | `--source <s>` | `worktree` (default) / `index` / `head`. |
-| `--root <dir>` | Root directory to scan for wiki pages. |
 | `-l <N>` / `-o <N>` | Search result limit / offset. |
 
 ## Reserved titles

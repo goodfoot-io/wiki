@@ -15,7 +15,7 @@ wiki "auth policy"          # ranked search; the default subcommand
 
 ## What counts as a wiki page
 
-A file is a wiki page if it has `title` and `summary` frontmatter. All `*.md` files under the `--root` directory are candidates; those without the required frontmatter are flagged by `wiki check`.
+A file is a wiki page if it has `title` and `summary` frontmatter. All `*.md` files under the current working directory are candidates; those without the required frontmatter are flagged by `wiki check`.
 
 ## Frontmatter
 
@@ -59,8 +59,8 @@ Path resolution follows standard markdown: a bare path (`images/foo.png`) or `./
 ## Validate: `wiki check`
 
 ```bash
-wiki check --root wiki       # links + frontmatter + mesh coverage, scoped to wiki/
-wiki check                   # same, from within the wiki directory
+cd wiki && wiki check        # links + frontmatter + mesh coverage, scoped to wiki/
+wiki check                   # checks every *.md page under the current directory
 ```
 
 Diagnostics fall into three buckets:
@@ -90,11 +90,11 @@ git commit
 
 ## Authoring workflow
 
-1. Place the page under the wiki root directory (e.g. `wiki/`).
+1. Place the page under the directory you check from (e.g. `wiki/`).
 2. Write `title` + `summary`; add `aliases` for other names readers will use.
 3. Cross-link with relative markdown links. Run `wiki "..."` first to pick the canonical title.
 4. Cite source code with **line-ranged** fragment links.
-5. `wiki check --root wiki`. For `mesh_uncovered`: `wiki scaffold --dry-run` (preview) → `git commit` (pre-commit creates and stages meshes automatically).
+5. `cd wiki && wiki check`. For `mesh_uncovered`: `wiki scaffold --dry-run` (preview) → `git commit` (pre-commit creates and stages meshes automatically).
 
 ## References
 

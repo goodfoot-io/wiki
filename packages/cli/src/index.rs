@@ -917,7 +917,9 @@ async fn sync_core_index_inner(
 }
 
 fn discover_index_files(repo_root: &Path) -> Result<Vec<PathBuf>> {
-    match crate::commands::discover_files(&[], repo_root, DocSource::WorkingTree) {
+    // The index covers the whole wiki, not the current subtree: scan from the
+    // repo root.
+    match crate::commands::discover_files(&[], repo_root, repo_root, DocSource::WorkingTree) {
         Ok(files) => Ok(files),
         Err(e) => {
             if e.to_string().contains("no wiki pages found") {

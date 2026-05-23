@@ -233,8 +233,10 @@ fn image_reference_to_missing_file_emits_broken_link() {
     );
     repo.commit("init");
 
+    // Run from the repo root so the float lives under the selection scope;
+    // file selection follows the working directory.
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_wiki"));
-    cmd.current_dir(repo.dir.path().join("wiki"))
+    cmd.current_dir(repo.dir.path())
         .env("WIKI_BACKGROUND_FTS", "0")
         .args(["check", "--no-mesh", "--format", "json"]);
     let out = cmd.output().expect("run wiki check");

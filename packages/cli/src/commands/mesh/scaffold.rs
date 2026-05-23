@@ -206,11 +206,14 @@ pub fn run(
     globs: &[String],
     json: bool,
     dry_run: bool,
+    scan_root: &Path,
     repo_root: &Path,
     source: crate::index::DocSource,
     print_applied: bool,
 ) -> Result<i32> {
-    let files = match discover_files(globs, repo_root, source) {
+    // Selection follows the current working directory; mesh anchors and paths
+    // still resolve against `repo_root`.
+    let files = match discover_files(globs, scan_root, repo_root, source) {
         Ok(v) => v
             .into_iter()
             .filter(|f| {
