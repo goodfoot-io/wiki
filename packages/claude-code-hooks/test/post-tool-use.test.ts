@@ -19,12 +19,12 @@ describe('post-tool-use', () => {
       expect(typeof matcher).toBe('string');
       expect(matcher).toContain('Edit');
       expect(matcher).toContain('Write');
-      expect(matcher).toContain('MultiEdit');
       expect(matcher).toContain('NotebookEdit');
+      expect(matcher).not.toContain('MultiEdit');
     });
 
-    it('has a 30-second timeout', () => {
-      expect(hook.timeout).toBe(30000);
+    it('has a 60-second timeout', () => {
+      expect(hook.timeout).toBe(60000);
     });
   });
 
@@ -57,23 +57,6 @@ describe('post-tool-use', () => {
           file_path: '/test/file.md',
           old_string: 'old',
           new_string: 'new'
-        }
-      };
-
-      const result = await hook(input, { logger });
-      expect(result).toBeNull();
-    });
-
-    it('returns null for MultiEdit on non-wiki files', async () => {
-      const input: PostToolUseInput = {
-        session_id: 'test',
-        transcript_path: '/test/transcript.jsonl',
-        hook_event_name: 'PostToolUse',
-        cwd: '/home/node/wiki',
-        tool_name: 'MultiEdit',
-        tool_input: {
-          file_path: '/test/file.ts',
-          edits: [{ old_string: 'old', new_string: 'new' }]
         }
       };
 
