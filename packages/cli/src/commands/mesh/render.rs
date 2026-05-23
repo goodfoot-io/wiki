@@ -134,6 +134,14 @@ pub(crate) fn render_advisories(
                     d.slug, path, d.page
                 );
             }
+            DropReason::IgnoredPath { path } => {
+                let _ = writeln!(
+                    out,
+                    "Skipped mesh `{}` — references gitignored path `{}` (page `{}`); \
+                     git-mesh cannot anchor a path git never sees.",
+                    d.slug, path, d.page
+                );
+            }
             DropReason::InvalidAnchor { anchor, detail } => {
                 let _ = writeln!(
                     out,

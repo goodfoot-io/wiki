@@ -1,5 +1,7 @@
+use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use gix::bstr::{BStr, ByteSlice};
 use miette::{IntoDiagnostic, Result, WrapErr, miette};
@@ -297,6 +299,79 @@ pub fn untracked_paths(repo: &Path) -> Result<Vec<String>> {
     paths.sort();
     paths.dedup();
     Ok(paths)
+}
+
+/// Return the subset of `candidates` (repo-relative paths) that git treats as
+/// **ignored** — matched by any gitignore source (`.gitignore`,
+/// `.git/info/exclude`, `core.excludesFile`). Resolution is delegated to
+/// `git check-ignore --stdin` so nested ignore files, negations, and config
+/// excludes are honoured exactly as git itself would.
+///
+/// `git check-ignore` exits 0 when one or more paths are ignored and **1 when
+/// none are** — the latter is a normal "nothing ignored" result, not a failure,
+/// so it is mapped to an empty set. Any other exit (e.g. 128) is a genuine
+/// error and is propagated.
+///
+/// A path being ignored is distinct from it being untracked: an
+/// untracked-but-not-ignored file is a legitimate anchor target that resolves
+/// once committed, whereas an ignored path (a build artifact) is never
+/// committed and can never resolve. Only the latter is reported here.
+pub fn ignored_paths(repo: &Path, candidates: &[String]) -> Result<HashSet<String>> {
+    if candidates.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let mut child = Command::new("git")
+        .current_dir(repo)
+        .args(["check-ignore", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .into_diagnostic()
+        .wrap_err("failed to spawn `git check-ignore --stdin`")?;
+
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| miette!("failed to open stdin for `git check-ignore`"))?;
+        for path in candidates {
+            writeln!(stdin, "{path}")
+                .into_diagnostic()
+                .wrap_err("failed to write path to `git check-ignore` stdin")?;
+        }
+        // `stdin` drops here, closing the pipe so check-ignore can finish.
+    }
+
+    let output = child
+        .wait_with_output()
+        .into_diagnostic()
+        .wrap_err("failed to collect output from `git check-ignore`")?;
+
+    // Exit 0 = some paths ignored; exit 1 = none ignored (normal). Anything
+    // else is a real failure.
+    match output.status.code() {
+        Some(0) | Some(1) => {}
+        other => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            return Err(miette!(
+                "git check-ignore failed (exit {:?}): {}",
+                other,
+                stderr
+            ));
+        }
+    }
+
+    let stdout = String::from_utf8(output.stdout)
+        .into_diagnostic()
+        .wrap_err("git check-ignore output is not valid UTF-8")?;
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
 }
 
 fn parse_line_paths(out: &str) -> Vec<String> {
@@ -1026,6 +1101,59 @@ mod tests {
         assert_ne!(
             sig_a, sig_b,
             "checksum-based index signal must change when staged content changes"
+        );
+    }
+
+    #[test]
+    fn ignored_paths_reports_only_gitignored_candidates() {
+        let repo = TestRepo::new();
+        repo.create_file(".gitignore", "generated.ts\n");
+        repo.create_file("generated.ts", "artifact\n");
+        repo.create_file("src/real.ts", "real\n");
+        // Untracked-but-not-ignored: present on disk, no .gitignore match.
+        repo.create_file("src/new.ts", "new\n");
+        repo.commit("init");
+
+        let candidates = vec![
+            "generated.ts".to_owned(),
+            "src/real.ts".to_owned(),
+            "src/new.ts".to_owned(),
+        ];
+        let ignored = ignored_paths(repo.path(), &candidates).expect("ignored_paths");
+
+        assert!(ignored.contains("generated.ts"), "gitignored path must be reported");
+        assert!(
+            !ignored.contains("src/real.ts"),
+            "tracked path must not be reported as ignored"
+        );
+        assert!(
+            !ignored.contains("src/new.ts"),
+            "untracked-but-not-ignored path must not be reported as ignored"
+        );
+    }
+
+    #[test]
+    fn ignored_paths_empty_when_none_ignored() {
+        let repo = TestRepo::new();
+        repo.create_file("a.ts", "a\n");
+        repo.commit("init");
+
+        // No .gitignore at all → check-ignore exits 1, which must map to an
+        // empty set rather than an error.
+        let ignored =
+            ignored_paths(repo.path(), &["a.ts".to_owned()]).expect("ignored_paths must not error");
+        assert!(ignored.is_empty());
+    }
+
+    #[test]
+    fn ignored_paths_empty_input_returns_empty() {
+        let repo = TestRepo::new();
+        repo.create_file("a.ts", "a\n");
+        repo.commit("init");
+        assert!(
+            ignored_paths(repo.path(), &[])
+                .expect("ignored_paths")
+                .is_empty()
         );
     }
 

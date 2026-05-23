@@ -2249,3 +2249,92 @@ fn mesh_scaffold_dry_run_reports_planned_rename_without_mutating() {
         "dry-run must not create the rename target"
     );
 }
+
+/// Regression for the wiki/git-mesh deadlock: a line-ranged fragment link into
+/// a gitignored (generated) file must NOT be anchored by `wiki scaffold`. Such
+/// an anchor can never resolve in git-mesh (it tracks content through git and
+/// `git mesh add` refuses a gitignored path), so scaffold drops it with an
+/// advisory and exits 0, creating no mesh that anchors the gitignored path.
+#[test]
+fn mesh_scaffold_skips_gitignored_anchor_target() {
+    if Command::new("git-mesh").arg("--version").output().is_err() {
+        eprintln!("skipping: git-mesh not installed");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    // A generated build artifact: present on disk, but gitignored.
+    std::fs::write(
+        root.join("src/generated.ts"),
+        "// l1\n// l2\n// l3\n// l4\n// l5\n",
+    )
+    .unwrap();
+    std::fs::write(root.join(".gitignore"), "src/generated.ts\n").unwrap();
+    std::fs::write(
+        root.join("wiki/page.md"),
+        "---\ntitle: Page\nsummary: A page.\n---\n\n\
+         Tokens validate against [keys](../src/generated.ts#L1-L5).\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let output = Command::new(bin)
+        .args(["scaffold", "--print-applied", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("run wiki scaffold --print-applied");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Must NOT fail closed.
+    assert!(
+        output.status.success(),
+        "scaffold must exit 0 on a gitignored citation; stderr=\n{stderr}"
+    );
+    // No applied mesh — the page's only fragment link targets a gitignored path.
+    assert!(
+        stdout.lines().all(|l| l.is_empty()),
+        "scaffold must not apply any mesh for a gitignored-only page; stdout=\n{stdout}"
+    );
+    // No mesh on disk anchors the gitignored path.
+    let mesh_dir = root.join(".mesh");
+    if mesh_dir.exists() {
+        for entry in walkdir(&mesh_dir) {
+            let body = std::fs::read_to_string(&entry).unwrap_or_default();
+            assert!(
+                !body.contains("src/generated.ts"),
+                "a mesh anchors the gitignored path: {}\n{body}",
+                entry.display()
+            );
+        }
+    }
+    // Advisory naming the gitignored path is routed to stderr.
+    assert!(
+        stderr.contains("src/generated.ts"),
+        "expected gitignored-path advisory on stderr; stderr=\n{stderr}"
+    );
+}
+
+/// Collect every regular file under `dir`, recursively, as owned paths.
+fn walkdir(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(walkdir(&path));
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    out
+}

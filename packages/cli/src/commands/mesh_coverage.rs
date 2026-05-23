@@ -104,6 +104,18 @@ pub(super) fn collect_mesh_diagnostics(
         Some(idx) => idx,
     };
 
+    // Candidate `mesh_uncovered` diagnostics, deferred until after the
+    // gitignore filter is applied below.
+    struct Pending {
+        file: String,
+        line: usize,
+        link_path: String,
+        target: String,
+        start: u32,
+        end: u32,
+    }
+    let mut pending: Vec<Pending> = Vec::new();
+
     for wiki_path in files {
         let content = match std::fs::read_to_string(wiki_path) {
             Ok(c) => c,
@@ -132,17 +144,41 @@ pub(super) fn collect_mesh_diagnostics(
             }
 
             if !index.is_covered(&target, start, end, &wiki_rel) {
-                out.push(CheckDiagnostic {
-                    kind: "mesh_uncovered".into(),
+                pending.push(Pending {
                     file: wiki_path.display().to_string(),
                     line: link.source_line,
-                    message: format!(
-                        "fragment link `{}#L{start}-L{end}` has no covering mesh",
-                        link.path
-                    ),
+                    link_path: link.path.clone(),
+                    target: target.to_string_lossy().replace('\\', "/"),
+                    start,
+                    end,
                 });
             }
         }
+    }
+
+    // A fragment link into a gitignored path (a generated build artifact) is
+    // exempt from the mesh-coverage contract: git-mesh resolves content through
+    // git and cannot anchor a path git never sees, so demanding coverage would
+    // be unsatisfiable and `wiki check` would fail closed forever. Mirrors the
+    // existing exemptions for external links and links without a line range.
+    // Untracked-but-not-ignored targets are NOT exempt — they resolve once
+    // committed, so a missing mesh for them is a real, fixable finding.
+    let candidate_targets: Vec<String> = pending.iter().map(|p| p.target.clone()).collect();
+    let ignored = crate::git::ignored_paths(repo_root, &candidate_targets)?;
+
+    for p in pending {
+        if ignored.contains(&p.target) {
+            continue;
+        }
+        out.push(CheckDiagnostic {
+            kind: "mesh_uncovered".into(),
+            file: p.file,
+            line: p.line,
+            message: format!(
+                "fragment link `{}#L{}-L{}` has no covering mesh",
+                p.link_path, p.start, p.end
+            ),
+        });
     }
 
     Ok(out)

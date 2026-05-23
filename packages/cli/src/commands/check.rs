@@ -919,6 +919,73 @@ mod tests {
         );
     }
 
+    /// A fragment link into a gitignored (generated) file is exempt from the
+    /// mesh-coverage contract: git-mesh cannot anchor a path git never sees, so
+    /// demanding coverage would fail closed forever. `wiki check` must not emit
+    /// `mesh_uncovered` for it and must exit 0.
+    #[test]
+    fn mesh_skips_gitignored_target() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file("src/generated.rs", "fn a() {}\n");
+        repo.create_file(".gitignore", "src/generated.rs\n");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [code](/src/generated.rs#L1-L1)."),
+        );
+        repo.commit("add files");
+
+        let diagnostics = collect(&[], repo.path()).expect("collect");
+        let mesh_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.kind == "mesh_uncovered")
+            .collect();
+        assert!(
+            mesh_diags.is_empty(),
+            "gitignored target must not produce mesh_uncovered: {diagnostics:?}"
+        );
+        let code = run(
+            &[],
+            false,
+            repo.path(),
+            false,
+            false,
+            crate::index::DocSource::WorkingTree,
+            false,
+            false,
+        )
+        .expect("run");
+        assert_eq!(code, 0, "gitignored citation must not fail closed");
+    }
+
+    /// Contrast with the exemption above: an untracked-but-NOT-ignored target
+    /// still requires coverage — it resolves once committed, so a missing mesh
+    /// is a real, fixable finding.
+    #[test]
+    fn mesh_uncovered_for_untracked_not_ignored_target() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file("wiki/page.md", &make_wiki_page("Page", "No links."));
+        repo.commit("baseline");
+        // Present on disk, never committed, not gitignored.
+        repo.create_file("src/new.rs", "fn a() {}\n");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [code](/src/new.rs#L1-L1)."),
+        );
+
+        let diagnostics = collect(&[], repo.path()).expect("collect");
+        let mesh_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.kind == "mesh_uncovered")
+            .collect();
+        assert_eq!(
+            mesh_diags.len(),
+            1,
+            "untracked-not-ignored target must still require coverage: {diagnostics:?}"
+        );
+    }
+
     /// `--source=index` must validate staged content; broken anchor staged but
     /// worktree clean → must report from index.
     #[test]

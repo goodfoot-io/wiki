@@ -69,6 +69,14 @@ pub(crate) struct ParseError {
 pub(crate) enum DropReason {
     /// An anchor's code target file is absent in the active source.
     MissingPath { path: String },
+    /// An anchor's code target is gitignored — a build artifact that is never
+    /// committed. `git mesh add` refuses such a path (it resolves content
+    /// through git and cannot track a path git never sees), so anchoring it
+    /// would either fail the add or produce a permanently-`deleted` anchor.
+    /// Skipped with an advisory rather than escalated. Distinct from
+    /// untracked-but-not-ignored targets, which resolve once committed and are
+    /// left to anchor normally.
+    IgnoredPath { path: String },
     /// An anchor is statically invalid for git-mesh: line range exceeds the
     /// target file's line count, start > end, or start < 1.
     InvalidAnchor { anchor: String, detail: String },
@@ -92,6 +100,7 @@ pub(crate) struct DroppedMesh {
 #[serde(rename_all = "snake_case")]
 enum DroppedMeshCategory {
     MissingPath,
+    IgnoredPath,
     InvalidAnchor,
     SlugPathCollision,
 }
@@ -394,9 +403,33 @@ pub fn run(
         }
     });
 
+    // Gitignored anchor targets (build artifacts) can never resolve in
+    // git-mesh and `git mesh add` now refuses them outright, so drop any draft
+    // anchoring one — with an advisory, exit 0 — before reaching `git mesh
+    // add`. An untracked-but-not-ignored target is NOT dropped: it resolves
+    // once committed. Index/Head sources already exclude ignored paths via
+    // `source_paths`, so this matters for the WorkingTree default; we still
+    // consult it in all modes so the advisory names the gitignore cause.
+    let candidate_anchor_paths: Vec<String> = consolidated
+        .iter()
+        .flat_map(|d| d.structured_anchors.iter().skip(1))
+        .map(|a| a.path.clone())
+        .collect();
+    let ignored_anchor_paths = crate::git::ignored_paths(repo_root, &candidate_anchor_paths)?;
+
     consolidated.retain(|draft| {
         // Check every non-wiki anchor (skip the first anchor which is the page section).
         for anchor in draft.structured_anchors.iter().skip(1) {
+            if ignored_anchor_paths.contains(&anchor.path) {
+                dropped_meshes.push(DroppedMesh {
+                    slug: draft.slug.clone(),
+                    reason: DropReason::IgnoredPath {
+                        path: anchor.path.clone(),
+                    },
+                    page: draft.page_path.clone(),
+                });
+                return false;
+            }
             let missing = match &source_paths {
                 None => {
                     let abs = repo_root.join(&anchor.path);
@@ -457,6 +490,13 @@ pub fn run(
                     category: DroppedMeshCategory::MissingPath,
                     anchor: path.clone(),
                     detail: String::new(),
+                    page: d.page.clone(),
+                },
+                DropReason::IgnoredPath { path } => DroppedMeshJson {
+                    slug: d.slug.clone(),
+                    category: DroppedMeshCategory::IgnoredPath,
+                    anchor: path.clone(),
+                    detail: "anchor target is gitignored".to_string(),
                     page: d.page.clone(),
                 },
                 DropReason::InvalidAnchor { anchor, detail } => DroppedMeshJson {
