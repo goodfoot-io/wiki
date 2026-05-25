@@ -1,8 +1,8 @@
-import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { type SpawnSyncReturns, spawnSync } from 'node:child_process';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
-import { getFilePath, postToolUseHook, postToolUseOutput } from '@goodfoot/claude-code-hooks';
+import { getFilePath, type Logger, postToolUseHook, postToolUseOutput } from '@goodfoot/claude-code-hooks';
 
 /**
  * Returns true if the file is a wiki member, determined exclusively by YAML
@@ -57,6 +57,130 @@ function trackWikiFile(sessionId: string, filePath: string): void {
   }
 }
 
+const WIKI_EXECUTABLE = process.platform === 'win32' ? 'wiki.exe' : 'wiki';
+
+/** Compare dotted numeric versions (e.g. `0.5.74`); returns a<b => negative. */
+function compareSemver(a: string, b: string): number {
+  const pa = a.split('.').map((n) => Number.parseInt(n, 10));
+  const pb = b.split('.').map((n) => Number.parseInt(n, 10));
+  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+    const da = pa[i] ?? 0;
+    const db = pb[i] ?? 0;
+    if (Number.isNaN(da) || Number.isNaN(db)) return a.localeCompare(b);
+    if (da !== db) return da - db;
+  }
+  return 0;
+}
+
+/** Candidate VS Code `globalStorage` roots across editions and platforms. */
+function vscodeGlobalStorageRoots(): string[] {
+  const home = homedir();
+  const roots = [
+    join(home, '.vscode-server', 'data', 'User', 'globalStorage'),
+    join(home, '.vscode-server-insiders', 'data', 'User', 'globalStorage'),
+    join(home, '.config', 'Code', 'User', 'globalStorage'),
+    join(home, '.config', 'Code - Insiders', 'User', 'globalStorage'),
+    join(home, 'Library', 'Application Support', 'Code', 'User', 'globalStorage'),
+    join(home, 'Library', 'Application Support', 'Code - Insiders', 'User', 'globalStorage')
+  ];
+  const appData = process.env.APPDATA;
+  if (appData) {
+    roots.push(join(appData, 'Code', 'User', 'globalStorage'));
+    roots.push(join(appData, 'Code - Insiders', 'User', 'globalStorage'));
+  }
+  return roots;
+}
+
+/**
+ * Locate the `wiki` binary the VS Code extension installs under its
+ * `globalStorage` (`<root>/goodfoot.wiki-extension/bin/<version>/<target>/wiki`).
+ * The extension only injects this onto the *integrated terminal* PATH, so a
+ * hook subprocess never inherits it — we must find it on disk. Newest version
+ * wins. Returns null when no managed binary is present.
+ */
+function findManagedWikiBinary(): string | null {
+  for (const root of vscodeGlobalStorageRoots()) {
+    const binRoot = join(root, 'goodfoot.wiki-extension', 'bin');
+    if (!existsSync(binRoot)) continue;
+
+    let versions: string[];
+    try {
+      versions = readdirSync(binRoot);
+    } catch {
+      continue;
+    }
+    versions.sort((a, b) => compareSemver(b, a)); // newest first
+
+    for (const version of versions) {
+      const versionDir = join(binRoot, version);
+      let targets: string[];
+      try {
+        targets = readdirSync(versionDir);
+      } catch {
+        continue;
+      }
+      for (const target of targets) {
+        const candidate = join(versionDir, target, WIKI_EXECUTABLE);
+        if (existsSync(candidate)) return candidate;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolve an absolute path to the `wiki` binary, tolerant of the fact that a
+ * Claude Code hook subprocess does not inherit the extension-augmented terminal
+ * PATH. Resolution order: `WIKI_BIN` override, then PATH, then the extension's
+ * managed binary. Falls back to the bare name so the caller's spawn surfaces a
+ * clear ENOENT when nothing is found.
+ */
+export function resolveWikiBinary(logger: Logger): string {
+  const override = process.env.WIKI_BIN;
+  if (override && existsSync(override)) return override;
+
+  const whichCmd = process.platform === 'win32' ? 'where' : 'which';
+  const onPath = spawnSync(whichCmd, [WIKI_EXECUTABLE], { encoding: 'utf8' });
+  if (onPath.status === 0 && onPath.stdout) {
+    const first = onPath.stdout
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean)[0];
+    if (first && existsSync(first)) return first;
+  }
+
+  const managed = findManagedWikiBinary();
+  if (managed) {
+    logger.info('resolved wiki binary from VS Code globalStorage', { path: managed });
+    return managed;
+  }
+
+  return WIKI_EXECUTABLE;
+}
+
+/** True when a spawn failed because the binary itself could not be launched. */
+function isLaunchFailure(result: SpawnSyncReturns<string>): boolean {
+  return result.error != null;
+}
+
+/**
+ * Fail-closed surfacing: when the `wiki` binary cannot be launched, the page's
+ * links and mesh coverage went unvalidated. The hook fires after the write, so
+ * it cannot block — but it must make the gap loud rather than passing silently.
+ */
+function wikiUnavailableOutput(filePath: string, wikiBin: string, detail: string) {
+  const message =
+    `wiki validation was SKIPPED — the \`wiki\` binary could not be launched (${detail}).\n` +
+    `Resolved binary: ${wikiBin}\n` +
+    `Fragment links and git-mesh coverage for ${filePath} were NOT validated.\n` +
+    'Install the wiki CLI on PATH, or set WIKI_BIN to its absolute path, then re-save the file.';
+  const block = `<wiki>\n${message}\n</wiki>`;
+  return postToolUseOutput({
+    systemMessage: block,
+    hookSpecificOutput: { additionalContext: block }
+  });
+}
+
 export default postToolUseHook({ matcher: 'Edit|Write|NotebookEdit', timeout: 60000 }, (input, { logger }) => {
   const filePath = getFilePath(input);
   if (!filePath) return null;
@@ -65,6 +189,8 @@ export default postToolUseHook({ matcher: 'Edit|Write|NotebookEdit', timeout: 60
 
   trackWikiFile(input.session_id, filePath);
 
+  const wikiBin = resolveWikiBinary(logger);
+
   // Sections accumulated across both phases, surfaced to the agent together.
   const sections: string[] = [];
 
@@ -72,17 +198,19 @@ export default postToolUseHook({ matcher: 'Edit|Write|NotebookEdit', timeout: 60
   // --fix rewrites in place; a non-zero exit means residual, unfixable wiki
   // conditions the agent must resolve by hand.
   try {
-    const result = spawnSync('wiki', ['check', '--fix', '--no-mesh', filePath], {
+    const result = spawnSync(wikiBin, ['check', '--fix', '--no-mesh', filePath], {
       cwd: input.cwd,
       encoding: 'utf8',
       timeout: 25000,
       env: { ...process.env }
     });
 
-    if (result.error) {
-      // `wiki` itself is missing or failed to launch — nothing else will work.
-      logger.warn('wiki check execution error', { error: result.error.message });
-      return null;
+    if (isLaunchFailure(result)) {
+      // The binary is missing or failed to launch. Nothing else will work, and
+      // the page is now unvalidated — surface it instead of failing open.
+      const detail = result.error?.message ?? 'spawn failed';
+      logger.warn('wiki check execution error', { error: detail, wikiBin });
+      return wikiUnavailableOutput(filePath, wikiBin, detail);
     }
 
     if (result.status !== 0) {
@@ -92,9 +220,10 @@ export default postToolUseHook({ matcher: 'Edit|Write|NotebookEdit', timeout: 60
         sections.push(output);
       }
     }
-  } catch {
-    logger.warn('wiki command unavailable; skipping wiki check');
-    return null;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    logger.warn('wiki check threw', { error: detail, wikiBin });
+    return wikiUnavailableOutput(filePath, wikiBin, detail);
   }
 
   // ── Phase 2: create git-mesh coverage for the page's fragment links.
@@ -103,15 +232,19 @@ export default postToolUseHook({ matcher: 'Edit|Write|NotebookEdit', timeout: 60
   // is a hard failure (git-mesh missing, or a `git mesh add` failure) and is
   // surfaced to the agent so mesh coverage gaps never pass silently.
   try {
-    const result = spawnSync('wiki', ['scaffold', '--print-applied', filePath], {
+    const result = spawnSync(wikiBin, ['scaffold', '--print-applied', filePath], {
       cwd: input.cwd,
       encoding: 'utf8',
       timeout: 25000,
       env: { ...process.env }
     });
 
-    if (result.error) {
-      logger.warn('wiki scaffold execution error', { error: result.error.message });
+    if (isLaunchFailure(result)) {
+      const detail = result.error?.message ?? 'spawn failed';
+      logger.warn('wiki scaffold execution error', { error: detail, wikiBin });
+      sections.push(
+        `mesh scaffold was skipped — could not launch \`wiki\` (${detail}); fragment links may lack coverage.`
+      );
     } else {
       const applied = (result.stdout ?? '').trim();
       const advisories = (result.stderr ?? '').trim();
@@ -127,8 +260,10 @@ export default postToolUseHook({ matcher: 'Edit|Write|NotebookEdit', timeout: 60
         }
       }
     }
-  } catch {
-    logger.warn('wiki scaffold unavailable; skipping mesh coverage');
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    logger.warn('wiki scaffold threw', { error: detail, wikiBin });
+    sections.push(`mesh scaffold was skipped — \`wiki\` threw (${detail}); fragment links may lack coverage.`);
   }
 
   if (sections.length === 0) return null;

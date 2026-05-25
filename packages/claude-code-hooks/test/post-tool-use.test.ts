@@ -1,6 +1,6 @@
 import { Logger, type PostToolUseInput } from '@goodfoot/claude-code-hooks';
-import { describe, expect, it } from 'vitest';
-import hook from '../src/post-tool-use.js';
+import { afterEach, describe, expect, it } from 'vitest';
+import hook, { resolveWikiBinary } from '../src/post-tool-use.js';
 
 const logger = new Logger();
 
@@ -98,6 +98,26 @@ describe('post-tool-use', () => {
 
       const result = await hook(input, { logger });
       expect(result).toBeNull();
+    });
+  });
+
+  describe('binary resolution', () => {
+    const originalWikiBin = process.env.WIKI_BIN;
+    afterEach(() => {
+      if (originalWikiBin === undefined) delete process.env.WIKI_BIN;
+      else process.env.WIKI_BIN = originalWikiBin;
+    });
+
+    it('honors WIKI_BIN when it points at an existing file', () => {
+      // process.execPath (the node binary) is guaranteed to exist.
+      process.env.WIKI_BIN = process.execPath;
+      expect(resolveWikiBinary(logger)).toBe(process.execPath);
+    });
+
+    it('ignores WIKI_BIN when the path does not exist', () => {
+      process.env.WIKI_BIN = '/definitely/not/a/real/wiki/binary';
+      // Falls through to PATH/managed/bare-name resolution — never the bogus path.
+      expect(resolveWikiBinary(logger)).not.toBe('/definitely/not/a/real/wiki/binary');
     });
   });
 
