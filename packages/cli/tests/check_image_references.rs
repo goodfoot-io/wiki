@@ -238,7 +238,7 @@ fn image_reference_to_missing_file_emits_broken_link() {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_wiki"));
     cmd.current_dir(repo.dir.path())
         .env("WIKI_BACKGROUND_FTS", "0")
-        .args(["check", "--no-mesh", "--format", "json"]);
+        .args(["check", "--format", "json"]);
     let out = cmd.output().expect("run wiki check");
     let stdout = String::from_utf8_lossy(&out.stdout);
 

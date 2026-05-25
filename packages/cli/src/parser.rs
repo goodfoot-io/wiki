@@ -391,7 +391,10 @@ mod tests {
         let links = parse_fragment_links(content);
         assert_eq!(links.len(), 1);
         let l = &links[0];
-        assert_eq!(&content[l.href_byte_start..l.href_byte_end], l.original_href);
+        assert_eq!(
+            &content[l.href_byte_start..l.href_byte_end],
+            l.original_href
+        );
     }
 
     #[test]

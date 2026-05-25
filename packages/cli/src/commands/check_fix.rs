@@ -11,7 +11,7 @@ use crate::commands::mesh_coverage::build_mesh_index;
 use crate::frontmatter::parse_frontmatter;
 use crate::headings::{extract_headings, github_slug, resolve_heading};
 use crate::index::DocSource;
-use crate::parser::{parse_fragment_links, LinkKind};
+use crate::parser::{LinkKind, parse_fragment_links};
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -80,10 +80,15 @@ pub struct SkippedFix {
 }
 
 /// The result of a fix pass: what was applied and what was skipped.
+///
+/// `mesh` carries the outcome of Fix #4 (mesh coverage creation), which runs
+/// after the link/anchor patches are materialized to disk. `check` owns its
+/// output (applied/planned paths, advisories, failures).
 #[derive(Debug)]
 pub struct FixPlan {
     pub fixes: Vec<Fix>,
     pub skipped: Vec<SkippedFix>,
+    pub(crate) mesh: super::mesh::scaffold::MeshCoverageOutcome,
 }
 
 // ── Rename map ────────────────────────────────────────────────────────────────
@@ -285,10 +290,7 @@ fn git_log_follow_renames(repo_root: &Path, old_path: &Path) -> Result<Vec<Strin
 /// content is not used for path rewriting. The staged-mesh layer is deferred to
 /// Fix #2.
 #[allow(dead_code)]
-pub fn read_at_baseline(
-    path: &Path,
-    repo_root: &Path,
-) -> Result<Option<(String, &'static str)>> {
+pub fn read_at_baseline(path: &Path, repo_root: &Path) -> Result<Option<(String, &'static str)>> {
     let path_rel = path
         .strip_prefix(repo_root)
         .map(|p| p.to_string_lossy().into_owned())
@@ -312,7 +314,14 @@ pub fn read_at_baseline(
     // HEAD history via git log --follow
     let output = Command::new("git")
         .current_dir(repo_root)
-        .args(["log", "--diff-filter=R", "--follow", "--format=%H", "--", &path_rel])
+        .args([
+            "log",
+            "--diff-filter=R",
+            "--follow",
+            "--format=%H",
+            "--",
+            &path_rel,
+        ])
         .output()
         .map_err(|e| miette::miette!("git log failed: {e}"))?;
 
@@ -461,7 +470,8 @@ pub fn heading_positions(content: &str) -> Vec<(crate::headings::Heading, Headin
     }
 
     // Compute depth for each heading by re-scanning the content.
-    let mut depth_by_line: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut depth_by_line: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::new();
     for line in content.lines().enumerate().map(|(i, l)| (i + 1, l)) {
         let (line_num, text) = line;
         if text.starts_with('#') {
@@ -478,7 +488,8 @@ pub fn heading_positions(content: &str) -> Vec<(crate::headings::Heading, Headin
     let mut depth_stack: Vec<Option<String>> = vec![None; 7]; // index 1..=6
 
     // sibling_count[(depth, parent_slug)] = count so far
-    let mut sibling_counts: std::collections::HashMap<(usize, String), usize> = std::collections::HashMap::new();
+    let mut sibling_counts: std::collections::HashMap<(usize, String), usize> =
+        std::collections::HashMap::new();
 
     let mut result = Vec::with_capacity(headings.len());
     for h in &headings {
@@ -535,7 +546,9 @@ fn read_head_blob(repo_root: &Path, rel_path: &str) -> Result<Option<String>> {
         .args(["show", &format!("HEAD:{rel_path}")])
         .output()
         .map_err(|e| miette::miette!("git show failed: {e}"))?;
-    if output.status.success() && let Ok(s) = String::from_utf8(output.stdout) {
+    if output.status.success()
+        && let Ok(s) = String::from_utf8(output.stdout)
+    {
         return Ok(Some(s));
     }
     Ok(None)
@@ -869,6 +882,7 @@ fn parse_stale_json(stdout: &str) -> Result<Vec<MeshMovePlan>> {
 pub fn run_fix_pass(
     files: &[PathBuf],
     repo_root: &Path,
+    source: DocSource,
     dry_run: bool,
 ) -> Result<FixPlan> {
     let mut rename_map = RenameMap::build(repo_root)?;
@@ -909,10 +923,7 @@ pub fn run_fix_pass(
 
             // Skip bare-path links — they are already flagged with a repo-relative hint.
             let first = Path::new(&link.path).components().next();
-            let is_explicit = matches!(
-                first,
-                Some(Component::CurDir) | Some(Component::ParentDir)
-            );
+            let is_explicit = matches!(first, Some(Component::CurDir) | Some(Component::ParentDir));
             let is_bare = !link.path.starts_with('/') && !is_explicit;
             if is_bare {
                 skipped.push(SkippedFix {
@@ -942,8 +953,12 @@ pub fn run_fix_pass(
                         continue;
                     }
 
-                    let fragment = link.original_href.find('#').map(|i| &link.original_href[i + 1..]);
-                    let new_href = rewrite_href(&link.original_href, fragment, &new_rel, file, repo_root);
+                    let fragment = link
+                        .original_href
+                        .find('#')
+                        .map(|i| &link.original_href[i + 1..]);
+                    let new_href =
+                        rewrite_href(&link.original_href, fragment, &new_rel, file, repo_root);
 
                     fixes.push(Fix {
                         file: file_rel.clone(),
@@ -1232,8 +1247,7 @@ pub fn run_fix_pass(
             // as MOVED. Only attempt to rewrite links whose (target, start, end)
             // triple matches a MOVED plan — even if the range is still technically
             // within bounds (the mesh has shifted to a new position).
-            let Some(&(new_start, new_end)) =
-                eligible.get(&(resolved.clone(), old_start, old_end))
+            let Some(&(new_start, new_end)) = eligible.get(&(resolved.clone(), old_start, old_end))
             else {
                 continue;
             };
@@ -1377,9 +1391,7 @@ pub fn run_fix_pass(
             // `file_patches` for the *source* file. We detect that no fix was
             // applied by the anchor still not resolving.)
 
-            let target_rel = resolved
-                .to_string_lossy()
-                .into_owned();
+            let target_rel = resolved.to_string_lossy().into_owned();
 
             // Walk layers (HEAD, then HEAD history via `git log --follow`,
             // capped at HEADING_HISTORY_DEPTH_CAP commits) to find the most
@@ -1487,7 +1499,21 @@ pub fn run_fix_pass(
         }
     }
 
-    Ok(FixPlan { fixes, skipped })
+    // ── Fix #4: mesh coverage ─────────────────────────────────────────────────
+    //
+    // Runs AFTER the link/anchor patches are written to disk so mesh anchors
+    // reflect the corrected line ranges, and BEFORE `check::run`'s post-recheck
+    // (which rebuilds the mesh index fresh, so a created mesh shows as covered
+    // and a failed/dropped one resurfaces as a residual `mesh_uncovered`).
+    // Best-effort: a single mesh that cannot be created is recorded as a
+    // failure, never aborting the pass. In `dry_run` it previews only.
+    let mesh = super::mesh::scaffold::create_mesh_coverage(files, repo_root, source, dry_run)?;
+
+    Ok(FixPlan {
+        fixes,
+        skipped,
+        mesh,
+    })
 }
 
 /// Run `git-mesh list --porcelain` and find the current anchor coordinates for
@@ -1648,6 +1674,7 @@ mod tests {
         let plan = run_fix_pass(
             &[source.clone(), target.clone()],
             repo.path(),
+            crate::index::DocSource::WorkingTree,
             /* dry_run */ true,
         )
         .expect("fix pass");
@@ -1711,13 +1738,16 @@ mod tests {
         let plan = run_fix_pass(
             &[source.clone(), target.clone()],
             repo.path(),
+            crate::index::DocSource::WorkingTree,
             /* dry_run */ true,
         )
         .expect("fix pass");
 
         assert!(
-            plan.skipped.iter().any(|s| matches!(s.kind, FixKind::HeadingRename)
-                && s.reason == "heading not found in any layer"),
+            plan.skipped
+                .iter()
+                .any(|s| matches!(s.kind, FixKind::HeadingRename)
+                    && s.reason == "heading not found in any layer"),
             "expected SkippedFix(HeadingRename, 'heading not found in any layer'); \
              got fixes={:?} skipped={:?}",
             plan.fixes,

@@ -59,8 +59,10 @@ impl TestRepo {
         );
     }
 
-    /// Run `wiki check --no-mesh --format json` from `cwd_rel` (relative to the
-    /// repo root; empty string = repo root) with the given extra args.
+    /// Run `wiki check --format json` from `cwd_rel` (relative to the repo
+    /// root; empty string = repo root) with the given extra args. The fixtures
+    /// use only markdown-to-markdown links with no line ranges, so the always-on
+    /// mesh-coverage pass contributes no diagnostics here.
     fn check_json(&self, cwd_rel: &str, extra: &[&str]) -> Output {
         let cwd = if cwd_rel.is_empty() {
             self.dir.path().to_path_buf()
@@ -69,7 +71,7 @@ impl TestRepo {
         };
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_wiki"));
         cmd.current_dir(&cwd).env("WIKI_BACKGROUND_FTS", "0");
-        cmd.args(["check", "--no-mesh", "--format", "json"]);
+        cmd.args(["check", "--format", "json"]);
         cmd.args(extra);
         cmd.output().expect("run wiki check")
     }
@@ -144,7 +146,8 @@ fn subtree_check_equals_repo_root_glob() {
     let from_root_glob = repo.check_json("", &["wiki/**/*.md"]);
 
     assert_eq!(
-        from_subdir.stdout, from_root_glob.stdout,
+        from_subdir.stdout,
+        from_root_glob.stdout,
         "subtree check and repo-root glob must produce identical diagnostics.\n\
          from wiki/:\n{}\nfrom root (glob):\n{}",
         String::from_utf8_lossy(&from_subdir.stdout),

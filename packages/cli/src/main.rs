@@ -99,7 +99,8 @@ enum Commands {
     /// Always verifies that every fragment link with a line range is
     /// covered by a `git mesh` that anchors both the wiki file and the
     /// link target. `git mesh` must be installed; missing the binary
-    /// fails the check.
+    /// fails the check. With `--fix`, also creates that mesh coverage
+    /// best-effort (the "Fix #4" pass).
     Check {
         /// Glob patterns to match wiki pages (default: `**/*.md` under the current directory)
         #[arg(value_name = "glob")]
@@ -107,15 +108,21 @@ enum Commands {
         /// Exit 0 even when validation errors are found (report-only mode)
         #[arg(long = "no-exit-code")]
         no_exit_code: bool,
-        /// Skip the git mesh coverage check (useful when `git mesh check` runs separately)
-        #[arg(long = "no-mesh")]
-        no_mesh: bool,
         /// Rewrite drifted links and anchors in place (requires --source=worktree).
         #[arg(long = "fix")]
         fix: bool,
         /// Print what would be rewritten without modifying any files (requires --fix).
         #[arg(long = "fix-dry-run", requires = "fix")]
         fix_dry_run: bool,
+        /// Print only the repo-relative path of each created or extended mesh to
+        /// stdout (one per line); route the fix/skip summary, advisories, and
+        /// diagnostics to stderr. Lets callers stage exactly what this run touched.
+        #[arg(
+            long = "print-applied",
+            requires = "fix",
+            conflicts_with = "fix_dry_run"
+        )]
+        print_applied: bool,
     },
 
     /// Run `wiki check` on the written/edited file path from a PostToolUse
@@ -178,24 +185,6 @@ enum Commands {
         /// Git ref (branch, tag, or SHA) to install from.
         #[arg(long = "ref", value_name = "REF", default_value = "main")]
         git_ref: String,
-    },
-
-    /// Create git meshes covering fragment links in the given files or globs.
-    /// Use `--dry-run` to preview the plan without mutating `.mesh/`.
-    Scaffold {
-        /// Wiki page files or glob patterns (required)
-        #[arg(value_name = "glob", num_args = 1..)]
-        globs: Vec<String>,
-
-        /// Preview the scaffold plan without creating any meshes.
-        #[arg(long = "dry-run")]
-        dry_run: bool,
-
-        /// In apply mode, print only the repo-relative path of each created or
-        /// extended mesh to stdout (one per line); route advisories to stderr.
-        /// Lets callers stage exactly what this run touched.
-        #[arg(long = "print-applied", conflicts_with = "dry_run")]
-        print_applied: bool,
     },
 }
 
@@ -313,9 +302,9 @@ fn run(
         Some(Commands::Check {
             globs,
             no_exit_code,
-            no_mesh,
             fix,
             fix_dry_run,
+            print_applied,
         }) => {
             if fix && !matches!(source, index::DocSource::WorkingTree) {
                 eprintln!("error: --fix requires --source=worktree");
@@ -327,10 +316,10 @@ fn run(
                 &scan_root,
                 &repo_root,
                 no_exit_code,
-                no_mesh,
                 source,
                 fix,
                 fix_dry_run,
+                print_applied,
             )
         }
         Some(Commands::Hook) => {
@@ -338,15 +327,9 @@ fn run(
             let input = lines.join("\n");
             commands::hook_check::run(&input, &repo_root, source)
         }
-        Some(Commands::List { tag, limit, offset }) => commands::list::run(
-            &[],
-            tag.as_deref(),
-            limit,
-            offset,
-            json,
-            &repo_root,
-            source,
-        ),
+        Some(Commands::List { tag, limit, offset }) => {
+            commands::list::run(&[], tag.as_deref(), limit, offset, json, &repo_root, source)
+        }
         Some(Commands::Summary { title }) => {
             let inputs = resolve_inputs(title, read_stdin_lines)?;
             run_for_each(
@@ -369,19 +352,6 @@ fn run(
             dry_run,
             codex_home.as_deref(),
             &git_ref,
-        ),
-        Some(Commands::Scaffold {
-            globs,
-            dry_run,
-            print_applied,
-        }) => commands::mesh::scaffold::run(
-            &globs,
-            json,
-            dry_run,
-            &scan_root,
-            &repo_root,
-            source,
-            print_applied,
         ),
         None => match query.as_deref() {
             Some(query) => commands::search::run(query, limit, offset, json, &repo_root, source),
@@ -420,7 +390,6 @@ fn command_name(command: Option<&Commands>, query: Option<&str>) -> &'static str
         Some(Commands::List { .. }) => "list",
         Some(Commands::Summary { .. }) => "summary",
         Some(Commands::Install { .. }) => "install",
-        Some(Commands::Scaffold { .. }) => "scaffold",
         None if query.is_some() => "search",
         None => "help",
     }

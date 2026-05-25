@@ -115,10 +115,10 @@ pub fn run(
     scan_root: &Path,
     repo_root: &Path,
     no_exit_code: bool,
-    no_mesh: bool,
     source: DocSource,
     fix: bool,
     fix_dry_run: bool,
+    print_applied: bool,
 ) -> Result<i32> {
     // Files to check are selected from `scan_root` (the current working
     // directory); globs resolve relative to it.
@@ -154,7 +154,7 @@ pub fn run(
         filter_files_for_source(raw, repo_root, source)?
     };
 
-    let diagnostics = match collect_for_files(&files, &index_files, repo_root, no_mesh, source) {
+    let diagnostics = match collect_for_files(&files, &index_files, repo_root, source) {
         Ok(d) => d,
         Err(e) => {
             if json {
@@ -168,7 +168,7 @@ pub fn run(
 
     // ── Fix pass ──────────────────────────────────────────────────────────────
     if fix {
-        let plan = match check_fix::run_fix_pass(&files, repo_root, fix_dry_run) {
+        let plan = match check_fix::run_fix_pass(&files, repo_root, source, fix_dry_run) {
             Ok(p) => p,
             Err(e) => {
                 if json {
@@ -181,24 +181,42 @@ pub fn run(
         };
 
         if fix_dry_run {
+            // `--print-applied` conflicts with `--fix-dry-run`, so stdout is
+            // the human/JSON preview here. Mesh creation that *would* run is
+            // previewed alongside the link fixes.
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "fixes": plan.fixes,
                         "skipped": plan.skipped,
+                        "plannedMeshes": plan.mesh.planned,
                         "errors": diagnostics,
                     }))
                     .unwrap()
                 );
-            } else if plan.fixes.is_empty() && plan.skipped.is_empty() {
+            } else if plan.fixes.is_empty()
+                && plan.skipped.is_empty()
+                && plan.mesh.planned.is_empty()
+            {
                 println!("no fixes to apply");
             } else {
                 for f in &plan.fixes {
-                    println!("fix: {} line {}: {} -> {}", f.file, f.line, f.old_href, f.new_href);
+                    println!(
+                        "fix: {} line {}: {} -> {}",
+                        f.file, f.line, f.old_href, f.new_href
+                    );
                 }
                 for s in &plan.skipped {
                     println!("skip: {} line {}: {}", s.file, s.line, s.reason);
+                }
+                for m in &plan.mesh.planned {
+                    println!("create mesh: {m}");
+                }
+                // Mesh advisories (parse errors, dropped meshes, "Would rename"
+                // lines) are part of the preview.
+                if !plan.mesh.advisories.is_empty() {
+                    print!("{}", plan.mesh.advisories);
                 }
             }
             if !diagnostics.is_empty() && !no_exit_code {
@@ -207,32 +225,73 @@ pub fn run(
             return Ok(0);
         }
 
-        // Emit human-readable fix/skip summary before re-checking.
-        if !json {
-            for f in &plan.fixes {
-                println!(
-                    "fixed: {}:{}  broken_link  {} → {}  ({})",
-                    f.file, f.line, f.old_href, f.new_href, f.reason
-                );
-            }
-            for s in &plan.skipped {
-                println!("skipped: {}:{}  broken_link  reason: {}", s.file, s.line, s.reason);
+        // Under `--print-applied`, stdout is EXACTLY the repo-relative paths of
+        // created/renamed meshes (one per line). The fix/skip summary, mesh
+        // advisories/failures, and post-fix diagnostics all go to stderr so the
+        // caller can consume stdout as an exact stage list. Without the flag,
+        // the summary and post-fix diagnostics keep their stdout home and mesh
+        // advisories print to stdout too; failures still go to stderr.
+        if print_applied {
+            for m in &plan.mesh.applied {
+                println!("{m}");
             }
         }
 
-        // Non-dry-run: re-collect and emit post-fix diagnostics.
-        let post_diagnostics =
-            match collect_for_files(&files, &index_files, repo_root, no_mesh, source) {
-                Ok(d) => d,
-                Err(e) => {
-                    if json {
-                        eprintln!("{}", serde_json::json!({"error": e.to_string()}));
-                    } else {
-                        eprintln!("error: {e}");
-                    }
-                    return Ok(2);
+        // Human-readable fix/skip summary.
+        if !json {
+            for f in &plan.fixes {
+                let line = format!(
+                    "fixed: {}:{}  broken_link  {} → {}  ({})",
+                    f.file, f.line, f.old_href, f.new_href, f.reason
+                );
+                if print_applied {
+                    eprintln!("{line}");
+                } else {
+                    println!("{line}");
                 }
-            };
+            }
+            for s in &plan.skipped {
+                let line = format!(
+                    "skipped: {}:{}  broken_link  reason: {}",
+                    s.file, s.line, s.reason
+                );
+                if print_applied {
+                    eprintln!("{line}");
+                } else {
+                    println!("{line}");
+                }
+            }
+            // Mesh advisories (parse errors, dropped meshes, renames).
+            if !plan.mesh.advisories.is_empty() {
+                if print_applied {
+                    eprint!("{}", plan.mesh.advisories);
+                } else {
+                    print!("{}", plan.mesh.advisories);
+                }
+            }
+        }
+        // Mesh-creation failures always go to stderr — git-mesh already printed
+        // each reason; name the slug that could not be created.
+        for failure in &plan.mesh.failures {
+            eprintln!(
+                "wiki check --fix: could not create mesh `{}` (see git-mesh output above)",
+                failure.slug
+            );
+        }
+
+        // Non-dry-run: re-collect and emit post-fix diagnostics. A mesh that
+        // failed/dropped resurfaces here as a residual `mesh_uncovered`.
+        let post_diagnostics = match collect_for_files(&files, &index_files, repo_root, source) {
+            Ok(d) => d,
+            Err(e) => {
+                if json {
+                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
+                } else {
+                    eprintln!("error: {e}");
+                }
+                return Ok(2);
+            }
+        };
 
         if json {
             println!(
@@ -240,12 +299,18 @@ pub fn run(
                 serde_json::to_string_pretty(&serde_json::json!({
                     "fixes": plan.fixes,
                     "skipped": plan.skipped,
+                    "appliedMeshes": plan.mesh.applied,
                     "errors": post_diagnostics,
                 }))
                 .unwrap()
             );
         } else {
-            print!("{}", render_diagnostics(&post_diagnostics));
+            let rendered = render_diagnostics(&post_diagnostics);
+            if print_applied {
+                eprint!("{rendered}");
+            } else {
+                print!("{rendered}");
+            }
         }
 
         if !post_diagnostics.is_empty() && !no_exit_code {
@@ -292,7 +357,7 @@ pub fn collect_with_source(
         let raw = discover_files(&[], repo_root, repo_root, source)?;
         filter_files_for_source(raw, repo_root, source)?
     };
-    collect_for_files(&files, &index_files, repo_root, false, source)
+    collect_for_files(&files, &index_files, repo_root, source)
 }
 
 /// Extract the anchor portion (after `#`) from a markdown link href, if present.
@@ -309,7 +374,6 @@ fn collect_for_files(
     files: &[PathBuf],
     index_files: &[PathBuf],
     repo_root: &Path,
-    no_mesh: bool,
     source: DocSource,
 ) -> Result<Vec<CheckDiagnostic>> {
     let mut diagnostics: Vec<CheckDiagnostic> = Vec::new();
@@ -505,7 +569,7 @@ fn collect_for_files(
     let _ = resolve_ref(repo_root, "HEAD");
 
     // ── Mesh coverage pass ────────────────────────────────────────────────────
-    if !no_mesh && matches!(source, DocSource::WorkingTree) {
+    if matches!(source, DocSource::WorkingTree) {
         let mesh_diags = mesh_coverage::collect_mesh_diagnostics(files, repo_root)?;
         diagnostics.extend(mesh_diags);
     }
@@ -553,7 +617,10 @@ mod tests {
     #[test]
     fn render_diagnostics_single_has_no_separator() {
         let rendered = render_diagnostics(&[diag("broken_link", 9)]);
-        assert!(!rendered.contains("---"), "single error must have no separator: {rendered:?}");
+        assert!(
+            !rendered.contains("---"),
+            "single error must have no separator: {rendered:?}"
+        );
     }
 
     #[test]
@@ -658,8 +725,8 @@ mod tests {
             repo.path(),
             repo.path(),
             false,
-            false,
             crate::index::DocSource::WorkingTree,
+            false,
             false,
             false,
         )
@@ -681,8 +748,8 @@ mod tests {
             repo.path(),
             repo.path(),
             false,
-            false,
             crate::index::DocSource::WorkingTree,
+            false,
             false,
             false,
         )
@@ -704,8 +771,8 @@ mod tests {
             repo.path(),
             repo.path(),
             false,
-            false,
             crate::index::DocSource::WorkingTree,
+            false,
             false,
             false,
         )
@@ -807,8 +874,8 @@ mod tests {
             repo.path(),
             repo.path(),
             false,
-            false,
             crate::index::DocSource::WorkingTree,
+            false,
             false,
             false,
         )
@@ -862,8 +929,8 @@ mod tests {
             repo.path(),
             repo.path(),
             false,
-            false,
             crate::index::DocSource::WorkingTree,
+            false,
             false,
             false,
         )
@@ -901,8 +968,8 @@ mod tests {
             repo.path(),
             repo.path(),
             false,
-            false,
             crate::index::DocSource::WorkingTree,
+            false,
             false,
             false,
         )
@@ -963,8 +1030,8 @@ mod tests {
             repo.path(),
             repo.path(),
             false,
-            false,
             crate::index::DocSource::WorkingTree,
+            false,
             false,
             false,
         )
@@ -1058,15 +1125,14 @@ mod tests {
             repo.path(),
             repo.path(),
             false,
-            true, // no_mesh
             crate::index::DocSource::WorkingTree,
             true,  // fix
             false, // fix_dry_run
+            false, // print_applied
         )
         .expect("run");
 
-        let content = std::fs::read_to_string(repo.path().join("wiki/page.md"))
-            .expect("read page");
+        let content = std::fs::read_to_string(repo.path().join("wiki/page.md")).expect("read page");
         assert!(
             content.contains("/src/new.rs"),
             "expected link rewritten to new path, got:\n{content}"
@@ -1122,9 +1188,9 @@ mod tests {
             repo.path(),
             repo.path(),
             false,
-            true,
             crate::index::DocSource::WorkingTree,
             true,
+            false,
             false,
         )
         .expect("run");
@@ -1164,15 +1230,14 @@ mod tests {
             repo.path(),
             repo.path(),
             true, // no_exit_code — mesh stays at old coords, drift expected
-            false,
             crate::index::DocSource::WorkingTree,
             true,
+            false,
             false,
         )
         .expect("run");
 
-        let content = std::fs::read_to_string(repo.path().join("wiki/page.md"))
-            .expect("read page");
+        let content = std::fs::read_to_string(repo.path().join("wiki/page.md")).expect("read page");
         assert!(
             content.contains("#L2-L2"),
             "expected anchor updated to L2-L2, got:\n{content}"
@@ -1195,7 +1260,12 @@ mod tests {
         repo.commit("baseline with mesh");
 
         // Mesh covers the wiki page and L2-L3 of code.rs.
-        repo.git_mesh(&["add", "fix2-changed-mesh", "wiki/page.md", "src/code.rs#L2-L3"]);
+        repo.git_mesh(&[
+            "add",
+            "fix2-changed-mesh",
+            "wiki/page.md",
+            "src/code.rs#L2-L3",
+        ]);
         repo.git_mesh(&["why", "fix2-changed-mesh", "-m", "Test mesh."]);
         repo.commit("commit mesh");
 
@@ -1211,16 +1281,15 @@ mod tests {
             repo.path(),
             repo.path(),
             false,
-            false,
             crate::index::DocSource::WorkingTree,
             true,
+            false,
             false,
         )
         .expect("run");
 
         // Fix #2 should NOT have rewritten the link because the content changed.
-        let content = std::fs::read_to_string(repo.path().join("wiki/page.md"))
-            .expect("read page");
+        let content = std::fs::read_to_string(repo.path().join("wiki/page.md")).expect("read page");
         assert!(
             content.contains("#L2-L3"),
             "expected anchor NOT rewritten (content changed), got:\n{content}"
@@ -1254,7 +1323,13 @@ mod tests {
 
         // Dry-run via run_fix_pass so we can inspect the plan directly.
         let files = vec![repo.path().join("wiki/page.md")];
-        let plan = check_fix::run_fix_pass(&files, repo.path(), true).expect("run_fix_pass");
+        let plan = check_fix::run_fix_pass(
+            &files,
+            repo.path(),
+            crate::index::DocSource::WorkingTree,
+            true,
+        )
+        .expect("run_fix_pass");
         let mesh_fix = plan
             .fixes
             .iter()
@@ -1264,8 +1339,7 @@ mod tests {
         assert_eq!(mesh_fix.new_href, "/src/code.rs#L2-L2");
 
         // Dry-run must not have mutated the file on disk.
-        let content = std::fs::read_to_string(repo.path().join("wiki/page.md"))
-            .expect("read page");
+        let content = std::fs::read_to_string(repo.path().join("wiki/page.md")).expect("read page");
         assert!(
             content.contains("#L1-L1"),
             "expected dry-run NOT to mutate page, got:\n{content}"
@@ -1287,7 +1361,12 @@ mod tests {
         );
         repo.commit("baseline with mesh");
 
-        repo.git_mesh(&["add", "fix2-staged-mesh", "wiki/page.md", "src/code.rs#L1-L1"]);
+        repo.git_mesh(&[
+            "add",
+            "fix2-staged-mesh",
+            "wiki/page.md",
+            "src/code.rs#L1-L1",
+        ]);
         repo.git_mesh(&["why", "fix2-staged-mesh", "-m", "Test mesh."]);
         repo.commit("commit mesh");
 
@@ -1301,15 +1380,14 @@ mod tests {
             repo.path(),
             repo.path(),
             true, // no_exit_code — mesh still drifted, but that's expected
-            false,
             crate::index::DocSource::WorkingTree,
             true,
+            false,
             false,
         )
         .expect("run");
 
-        let content = std::fs::read_to_string(repo.path().join("wiki/page.md"))
-            .expect("read page");
+        let content = std::fs::read_to_string(repo.path().join("wiki/page.md")).expect("read page");
         assert!(
             content.contains("#L2-L2"),
             "expected wiki link rewritten to L2-L2 for staged shift, got:\n{content}"
@@ -1338,15 +1416,15 @@ mod tests {
             repo.path(),
             repo.path(),
             false,
-            true,
             crate::index::DocSource::WorkingTree,
             true,
+            false,
             false,
         )
         .expect("run");
 
-        let content = std::fs::read_to_string(repo.path().join("wiki/source.md"))
-            .expect("read source");
+        let content =
+            std::fs::read_to_string(repo.path().join("wiki/source.md")).expect("read source");
         assert!(
             content.contains("target.md#overview"),
             "expected anchor rewritten to canonical slug `overview`, got:\n{content}"
@@ -1379,15 +1457,15 @@ mod tests {
             repo.path(),
             repo.path(),
             false,
-            true,
             crate::index::DocSource::WorkingTree,
             true,
+            false,
             false,
         )
         .expect("run");
 
-        let content = std::fs::read_to_string(repo.path().join("wiki/source.md"))
-            .expect("read source");
+        let content =
+            std::fs::read_to_string(repo.path().join("wiki/source.md")).expect("read source");
         assert!(
             content.contains("target.md#introduction"),
             "expected anchor unchanged (skip), got:\n{content}"
@@ -1420,15 +1498,15 @@ mod tests {
             repo.path(),
             repo.path(),
             false,
-            true,
             crate::index::DocSource::WorkingTree,
             true,
+            false,
             false,
         )
         .expect("run");
 
-        let content = std::fs::read_to_string(repo.path().join("wiki/source.md"))
-            .expect("read source");
+        let content =
+            std::fs::read_to_string(repo.path().join("wiki/source.md")).expect("read source");
         // First H1 is "Auth & Authorization"; github_slug gives "auth--authorization"
         // (the ampersand drops, leaving the two surrounding spaces as hyphens).
         assert!(
@@ -1463,15 +1541,15 @@ mod tests {
             repo.path(),
             repo.path(),
             false,
-            true,
             crate::index::DocSource::WorkingTree,
             true,
+            false,
             false,
         )
         .expect("run");
 
-        let content = std::fs::read_to_string(repo.path().join("wiki/source.md"))
-            .expect("read source");
+        let content =
+            std::fs::read_to_string(repo.path().join("wiki/source.md")).expect("read source");
         assert!(
             content.contains("target.md#body"),
             "expected anchor rewritten to first-heading slug `body`, got:\n{content}"
@@ -1508,15 +1586,15 @@ mod tests {
             repo.path(),
             repo.path(),
             false,
-            true,
             crate::index::DocSource::WorkingTree,
             true,
+            false,
             false,
         )
         .expect("run");
 
-        let content = std::fs::read_to_string(repo.path().join("wiki/source.md"))
-            .expect("read source");
+        let content =
+            std::fs::read_to_string(repo.path().join("wiki/source.md")).expect("read source");
         assert!(
             content.contains("#new-heading"),
             "expected anchor updated to new-heading, got:\n{content}"
@@ -1604,9 +1682,9 @@ mod tests {
             repo.path(),
             repo.path(),
             false,
-            true,
             crate::index::DocSource::WorkingTree,
             true,
+            false,
             false,
         )
         .expect("first fix pass");
@@ -1621,9 +1699,9 @@ mod tests {
             repo.path(),
             repo.path(),
             false,
-            true,
             crate::index::DocSource::WorkingTree,
             true,
+            false,
             false,
         )
         .expect("second fix pass");
@@ -1665,9 +1743,9 @@ mod tests {
             repo.path(),
             repo.path(),
             false,
-            true,
             crate::index::DocSource::Index,
             true,
+            false,
             false,
         )
         .expect("run");

@@ -1,105 +1,9 @@
-//! Markdown rendering for the build-then-render pipeline.
+//! Advisory rendering for the mesh-coverage engine.
 //!
-//! Consumes deduplicated `MeshDraft`s and emits a review-ready markdown
-//! document described by `tests/fixtures/mesh-scaffold/expected.md`.
+//! Renders the human-readable advisory block (parse errors, dropped meshes)
+//! and blocker-rename lines that `wiki check --fix` routes to stderr.
 
-use std::collections::{HashMap, HashSet};
-
-use super::draft::MeshDraft;
 use super::scaffold::{DropReason, DroppedMesh, ParseError, PlannedRename};
-
-/// Render `meshes` (already grouped per-page in declaration order) and the
-/// per-page titles (frontmatter `title` keyed by `page_path`, `None` when
-/// absent) into a markdown document. Pages whose paths appear in
-/// `parse_error_paths` are excluded so `parseErrors` and `pages` are disjoint.
-pub(crate) fn render_markdown(
-    meshes: &[MeshDraft],
-    page_titles: &HashMap<String, Option<String>>,
-    parse_errors: &[ParseError],
-    parse_error_paths: &HashSet<String>,
-    dropped_meshes: &[DroppedMesh],
-) -> String {
-    let mut out = String::new();
-
-    // Filter meshes to exclude parse-error pages before computing counts.
-    let filtered: Vec<&MeshDraft> = meshes
-        .iter()
-        .filter(|m| !parse_error_paths.contains(&m.page_path))
-        .collect();
-
-    let has_advisories = !parse_errors.is_empty() || !dropped_meshes.is_empty();
-
-    // Prepend advisory block when non-empty.
-    if has_advisories {
-        render_advisories(&mut out, parse_errors, dropped_meshes, !filtered.is_empty());
-        // Separator only when other content follows.
-        if !filtered.is_empty() {
-            use std::fmt::Write as _;
-            let _ = writeln!(out, "---");
-            out.push('\n');
-        }
-    }
-
-    // Group by page in first-occurrence order.
-    let mut by_page: Vec<(String, Vec<&MeshDraft>)> = Vec::new();
-    for m in filtered {
-        if let Some(entry) = by_page.iter_mut().find(|(k, _)| *k == m.page_path) {
-            entry.1.push(m);
-        } else {
-            by_page.push((m.page_path.clone(), vec![m]));
-        }
-    }
-
-    let page_count = by_page.len();
-    for (page_idx, (page, page_meshes)) in by_page.iter().enumerate() {
-        let title = page_titles.get(page).and_then(|t| t.as_deref());
-        let header = match title {
-            Some(t) if !t.is_empty() => format!("# {t} • {page}"),
-            _ => format!("# {page}"),
-        };
-        let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{header}\n"));
-        out.push('\n');
-        for m in page_meshes.iter() {
-            render_mesh_block(&mut out, m);
-        }
-        // Insert `---` separator between consecutive pages; suppress terminal one.
-        if page_idx + 1 < page_count {
-            use std::fmt::Write as _;
-            let _ = writeln!(out, "---");
-            out.push('\n');
-        }
-    }
-
-    out
-}
-
-/// Render the empty-corpus success markdown.
-pub(crate) fn render_empty_markdown(
-    parse_errors: &[ParseError],
-    dropped_meshes: &[DroppedMesh],
-) -> String {
-    let mut out = String::new();
-
-    if !parse_errors.is_empty() || !dropped_meshes.is_empty() {
-        // When every file fails to parse there is no corpus to report.
-        // Emit only the advisory block — no separator, no success line.
-        render_advisories(&mut out, parse_errors, dropped_meshes, false);
-        return out;
-    }
-
-    use std::fmt::Write as _;
-    let _ = writeln!(out, "# wiki scaffold");
-    out.push('\n');
-    // Precondition: `scaffold::run` reached this branch because `all_inputs`
-    // was empty after the link-collection loop — i.e. no internal fragment
-    // link with a parsed line range was discovered. No coverage probe runs
-    // before this branch, so the message must not claim coverage.
-    let _ = writeln!(
-        out,
-        "No internal fragment links with line ranges were found in the discovered wiki pages."
-    );
-    out
-}
 
 /// Render the advisory block (parse errors and dropped meshes).
 ///
@@ -168,11 +72,7 @@ pub(crate) fn render_advisories(
 /// `dry_run` selects the phrasing:
 /// - `true`  → "Would rename mesh `B` -> `B/target` to free path for `S`."
 /// - `false` → "Renamed mesh `B` -> `B/target` to free path for `S` (page `P`)."
-pub(crate) fn render_rename_advisories(
-    out: &mut String,
-    renames: &[PlannedRename],
-    dry_run: bool,
-) {
+pub(crate) fn render_rename_advisories(out: &mut String, renames: &[PlannedRename], dry_run: bool) {
     use std::fmt::Write as _;
     if renames.is_empty() {
         return;
@@ -195,56 +95,12 @@ pub(crate) fn render_rename_advisories(
     out.push('\n');
 }
 
-fn render_mesh_block(out: &mut String, m: &MeshDraft) {
-    use std::fmt::Write as _;
-
-    // heading_chain was already trimmed once in trim_chains_in_place.
-    if !m.heading_chain.is_empty() {
-        let chain_str = m.heading_chain.join(" → ");
-        let _ = writeln!(out, "## {chain_str}");
-        out.push('\n');
-    }
-
-    let _ = writeln!(out, "```bash");
-    let _ = writeln!(out, "git mesh add {} \\", m.slug);
-    let last = m.anchors.len().saturating_sub(1);
-    for (i, a) in m.anchors.iter().enumerate() {
-        if i == last {
-            let _ = writeln!(out, "  {a}");
-        } else {
-            let _ = writeln!(out, "  {a} \\");
-        }
-    }
-    let _ = writeln!(out, "```");
-    out.push('\n');
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
-    use super::super::draft::MeshDraft;
-    use super::super::scaffold::ParseErrorKind;
+    use super::super::scaffold::{DropReason, ParseErrorKind};
     use super::*;
-
-    fn make_draft(
-        page_path: &str,
-        slug: &str,
-        heading_chain: Vec<&str>,
-        anchors: Vec<&str>,
-    ) -> MeshDraft {
-        MeshDraft {
-            page_path: page_path.to_string(),
-            slug: slug.to_string(),
-            anchors: anchors.iter().map(|s| s.to_string()).collect(),
-            structured_anchors: Vec::new(),
-            heading_chain: heading_chain.iter().map(|s| s.to_string()).collect(),
-            consolidated_count: 1,
-            noun: String::new(),
-            page_subdir: String::new(),
-            extends_existing: None,
-        }
-    }
 
     fn make_error(path: &str, kind: ParseErrorKind) -> ParseError {
         ParseError {
@@ -253,174 +109,63 @@ mod tests {
         }
     }
 
-    // ── per-page separator placement ──────────────────────────────────────────
-
-    #[test]
-    fn per_page_separator_between_pages_not_terminal() {
-        let d1 = make_draft(
-            "wiki/page1.md",
-            "wiki/foo",
-            vec![],
-            vec!["wiki/page1.md#L1-L5", "src/a.rs#L1-L5"],
-        );
-        let d2 = make_draft(
-            "wiki/page2.md",
-            "wiki/bar",
-            vec![],
-            vec!["wiki/page2.md#L1-L5", "src/b.rs#L1-L5"],
-        );
-        let mut titles = HashMap::new();
-        titles.insert("wiki/page1.md".to_string(), Some("Page 1".to_string()));
-        titles.insert("wiki/page2.md".to_string(), Some("Page 2".to_string()));
-        let out = render_markdown(&[d1, d2], &titles, &[], &HashSet::new(), &[]);
-
-        assert!(
-            out.contains("\n---\n"),
-            "interior separator missing:\n{out}"
-        );
-        assert!(
-            !out.trim_end().ends_with("---"),
-            "terminal --- must be absent:\n{out}"
-        );
+    fn make_dropped(slug: &str, reason: DropReason, page: &str) -> DroppedMesh {
+        DroppedMesh {
+            slug: slug.to_string(),
+            reason,
+            page: page.to_string(),
+        }
     }
 
-    #[test]
-    fn single_page_no_separator() {
-        let d = make_draft(
-            "wiki/page1.md",
-            "wiki/foo",
-            vec![],
-            vec!["wiki/page1.md#L1-L5", "src/a.rs#L1-L5"],
-        );
-        let titles = HashMap::new();
-        let out = render_markdown(&[d], &titles, &[], &HashSet::new(), &[]);
-        assert!(
-            !out.contains("\n---\n"),
-            "no separator for single page:\n{out}"
-        );
-    }
+    // ── advisory block ─────────────────────────────────────────────────────────
 
     #[test]
-    fn empty_chain_omits_heading_line() {
-        let d = make_draft(
-            "wiki/page.md",
-            "wiki/foo",
-            vec![],
-            vec!["wiki/page.md#L1-L5", "src/a.rs#L1-L5"],
-        );
-        let titles = HashMap::new();
-        let out = render_markdown(&[d], &titles, &[], &HashSet::new(), &[]);
-        assert!(
-            !out.contains("## "),
-            "## line must be absent for empty chain:\n{out}"
-        );
-        // No blockquote — section_opening removed from output entirely.
-        assert!(!out.contains("> "), "blockquote must be absent:\n{out}");
-    }
-
-    #[test]
-    fn page_section_anchor_renders_first_in_block() {
-        let d = make_draft(
-            "wiki/page.md",
-            "wiki/foo",
-            vec!["Section"],
-            vec!["wiki/page.md#L10-L20", "src/a.rs#L1-L5", "src/b.rs#L1-L5"],
-        );
-        let titles = HashMap::new();
-        let out = render_markdown(&[d], &titles, &[], &HashSet::new(), &[]);
-        let add_idx = out.find("git mesh add wiki/foo").expect("add line present");
-        let page_idx = out[add_idx..]
-            .find("wiki/page.md#L10-L20")
-            .expect("page anchor present");
-        let target_idx = out[add_idx..]
-            .find("src/a.rs#L1-L5")
-            .expect("target present");
-        assert!(
-            page_idx < target_idx,
-            "page anchor must precede targets:\n{out}"
-        );
-    }
-
-    // ── parse-error block integration ─────────────────────────────────────────
-
-    #[test]
-    fn render_empty_markdown_zero_errors_no_block() {
-        let out = render_empty_markdown(&[], &[]);
-        assert!(
-            !out.contains("Unable to generate"),
-            "no parse-error block expected with zero errors"
-        );
-        assert!(out.contains("# wiki scaffold"));
-    }
-
-    // Regression: the empty-corpus success branch fires whenever `all_inputs`
-    // is empty in `scaffold::run` — i.e. when no internal fragment link with a
-    // parsed line range was discovered. No coverage probe runs before it, so
-    // the message must not claim coverage filtering decided the outcome.
-    #[test]
-    fn render_empty_markdown_does_not_claim_coverage() {
-        let out = render_empty_markdown(&[], &[]);
-        assert!(
-            !out.contains("covered by a mesh"),
-            "empty-corpus message must not claim mesh coverage — no coverage \
-             check runs before this branch:\n{out}"
-        );
-        assert!(
-            !out.contains("No uncovered fragment links"),
-            "empty-corpus message must not frame the result as a coverage \
-             outcome:\n{out}"
-        );
-    }
-
-    #[test]
-    fn render_empty_markdown_with_errors_block_alone() {
+    fn render_advisories_uses_advisory_header_when_content_follows() {
+        let mut out = String::new();
         let errors = vec![make_error("wiki/bad.md", ParseErrorKind::EmptyTitle)];
-        let out = render_empty_markdown(&errors, &[]);
-        // No scaffold follows → hard-stop header.
-        assert!(out.starts_with("Unable to generate scaffolding due to parsing errors:\n"));
-        assert!(out.contains("wiki/bad.md (frontmatter present but `title:` is empty)"));
-        assert!(!out.contains("\n---\n"), "separator must be absent");
-        assert!(
-            !out.contains("# wiki scaffold"),
-            "success header must be absent"
-        );
-    }
-
-    #[test]
-    fn render_parse_error_advisory_header_when_meshes_follow() {
-        let d = make_draft(
-            "wiki/page.md",
-            "wiki/foo",
-            vec![],
-            vec!["wiki/page.md#L1-L5", "src/a.rs#L1-L5"],
-        );
-        let errors = vec![make_error("wiki/bad.md", ParseErrorKind::EmptyTitle)];
-        let titles = HashMap::new();
-        let out = render_markdown(&[d], &titles, &errors, &HashSet::new(), &[]);
-        // Advisory header when scaffold follows.
+        render_advisories(&mut out, &errors, &[], true);
         assert!(
             out.starts_with("Some wiki pages could not be parsed and were skipped:\n"),
             "expected advisory header, got:\n{out}"
         );
-        assert!(
-            out.contains("\n---\n"),
-            "separator must follow parse-error block when meshes present:\n{out}"
-        );
+        assert!(out.contains("wiki/bad.md (frontmatter present but `title:` is empty)"));
     }
 
     #[test]
-    fn render_parse_error_hard_stop_header_when_no_meshes() {
+    fn render_advisories_uses_hard_stop_header_when_nothing_follows() {
+        let mut out = String::new();
         let errors = vec![make_error("wiki/bad.md", ParseErrorKind::EmptyTitle)];
-        let out = render_empty_markdown(&errors, &[]);
-        // Hard-stop header when no scaffold follows.
+        render_advisories(&mut out, &errors, &[], false);
         assert!(
             out.starts_with("Unable to generate scaffolding due to parsing errors:\n"),
             "expected hard-stop header, got:\n{out}"
         );
+    }
+
+    #[test]
+    fn render_advisories_names_dropped_missing_path() {
+        let mut out = String::new();
+        let dropped = vec![make_dropped(
+            "wiki/foo",
+            DropReason::MissingPath {
+                path: "src/missing.rs".to_string(),
+            },
+            "wiki/page.md",
+        )];
+        render_advisories(&mut out, &[], &dropped, true);
         assert!(
-            !out.contains("\n---\n"),
-            "separator must be absent when no meshes:\n{out}"
+            out.contains("Skipped mesh `wiki/foo`")
+                && out.contains("src/missing.rs")
+                && out.contains("wiki/page.md"),
+            "missing-path advisory must name slug, path, page:\n{out}"
         );
+    }
+
+    #[test]
+    fn render_advisories_empty_when_no_errors_or_drops() {
+        let mut out = String::new();
+        render_advisories(&mut out, &[], &[], true);
+        assert!(out.is_empty(), "expected empty advisory block, got:\n{out}");
     }
 
     #[test]
@@ -442,32 +187,29 @@ mod tests {
         );
     }
 
-    // ── parse-error page excluded from pages output ───────────────────────────
+    // ── rename advisories ────────────────────────────────────────────────────
 
     #[test]
-    fn parse_error_page_excluded_from_render() {
-        // Draft whose page_path is in the parse_error_paths set.
-        let bad = make_draft(
-            "wiki/bad.md",
-            "wiki/bad-slug",
-            vec![],
-            vec!["wiki/bad.md#L1-L5", "src/a.rs#L1-L5"],
-        );
-        let good = make_draft(
-            "wiki/good.md",
-            "wiki/good-slug",
-            vec![],
-            vec!["wiki/good.md#L1-L5", "src/b.rs#L1-L5"],
-        );
-        let errors = vec![make_error("wiki/bad.md", ParseErrorKind::EmptyTitle)];
-        let mut parse_error_paths = HashSet::new();
-        parse_error_paths.insert("wiki/bad.md".to_string());
-        let titles = HashMap::new();
-        let out = render_markdown(&[bad, good], &titles, &errors, &parse_error_paths, &[]);
+    fn render_rename_advisories_phrasing_follows_dry_run() {
+        let renames = vec![PlannedRename {
+            from: "wiki/arch/scaff".to_string(),
+            to: "wiki/arch/scaff/index".to_string(),
+            for_slug: "wiki/arch/scaff/helper".to_string(),
+            page: "wiki/arch/scaff/page.md".to_string(),
+        }];
+
+        let mut dry = String::new();
+        render_rename_advisories(&mut dry, &renames, true);
         assert!(
-            !out.contains("bad-slug"),
-            "parse-error page must not appear in pages:\n{out}"
+            dry.contains("Would rename mesh `wiki/arch/scaff` -> `wiki/arch/scaff/index`"),
+            "dry-run phrasing missing:\n{dry}"
         );
-        assert!(out.contains("good-slug"), "good page must appear:\n{out}");
+
+        let mut applied = String::new();
+        render_rename_advisories(&mut applied, &renames, false);
+        assert!(
+            applied.contains("Renamed mesh `wiki/arch/scaff` -> `wiki/arch/scaff/index`"),
+            "applied phrasing missing:\n{applied}"
+        );
     }
 }

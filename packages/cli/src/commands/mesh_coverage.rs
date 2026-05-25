@@ -189,8 +189,8 @@ pub(super) fn collect_mesh_diagnostics(
 ///
 /// Returns `Ok(None)` when the `git-mesh` binary is not on PATH so callers can
 /// decide how to react (e.g. `wiki check` surfaces a `mesh_unavailable`
-/// diagnostic; `wiki scaffold` fails closed). Returns `Err` for any other
-/// runtime failure.
+/// diagnostic; the `--fix` mesh-coverage pass no-ops). Returns `Err` for any
+/// other runtime failure.
 pub(crate) fn build_mesh_index(
     repo_root: &Path,
     files: &[PathBuf],

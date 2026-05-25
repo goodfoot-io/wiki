@@ -263,7 +263,12 @@ pub fn discover_files(
                         // worktree filesystem to satisfy a glob.  Filter the
                         // source's own path list instead so the candidate set
                         // is internally consistent with `--source`.
-                        discover_files_by_glob_in_source(globs, repo_root, prefix.as_deref(), source)?
+                        discover_files_by_glob_in_source(
+                            globs,
+                            repo_root,
+                            prefix.as_deref(),
+                            source,
+                        )?
                     }
                 }
                 DocSource::WorkingTree => {
@@ -370,10 +375,7 @@ fn discover_default_files(
             let files: Vec<PathBuf> = all_paths
                 .into_iter()
                 .filter(|p| {
-                    if !p.ends_with(".md")
-                        || is_fixture_path(p)
-                        || !path_under_prefix(p, prefix)
-                    {
+                    if !p.ends_with(".md") || is_fixture_path(p) || !path_under_prefix(p, prefix) {
                         return false;
                     }
                     match source.read(repo_root, p) {
@@ -767,7 +769,8 @@ mod tests {
     fn test_discover_no_md_files_exits_with_no_pages() {
         let repo = TestRepo::new();
         // No .md files at all
-        let err = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).unwrap_err();
+        let err =
+            discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("no wiki pages found"), "got: {msg}");
     }
@@ -777,7 +780,8 @@ mod tests {
         let repo = TestRepo::new();
         repo.create_file("wiki/.gitkeep", "");
         repo.create_file("wiki/plain.md", "# no frontmatter\n");
-        let err = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).unwrap_err();
+        let err =
+            discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("no wiki pages found"), "got: {msg}");
     }
@@ -786,7 +790,8 @@ mod tests {
     fn test_discover_finds_md_files_with_frontmatter() {
         let repo = TestRepo::new();
         repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
-        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).expect("discover");
+        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree)
+            .expect("discover");
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("page.md"));
     }
@@ -800,7 +805,8 @@ mod tests {
             "---\ntitle: Docs\nsummary: Component docs.\n---\n",
         );
         repo.create_file("src/component/ordinary.md", "# ordinary\n");
-        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).expect("discover");
+        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree)
+            .expect("discover");
         assert_eq!(files.len(), 2);
         let paths: Vec<_> = files
             .into_iter()
@@ -816,7 +822,8 @@ mod tests {
         let repo = TestRepo::new();
         repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
         let globs = vec!["wiki/nonexistent/**/*.md".to_string()];
-        let err = discover_files(&globs, repo.path(), repo.path(), DocSource::WorkingTree).unwrap_err();
+        let err =
+            discover_files(&globs, repo.path(), repo.path(), DocSource::WorkingTree).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("no wiki pages found"), "got: {msg}");
     }
@@ -837,7 +844,8 @@ mod tests {
         let repo = TestRepo::new();
         repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
         let globs = vec!["./wiki/page.md".to_string()];
-        let files = discover_files(&globs, repo.path(), repo.path(), DocSource::WorkingTree).expect("discover");
+        let files = discover_files(&globs, repo.path(), repo.path(), DocSource::WorkingTree)
+            .expect("discover");
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("wiki/page.md"));
     }
@@ -853,7 +861,8 @@ mod tests {
         );
         // Gitignore the directory — discover_files must not return files from it.
         repo.create_file(".gitignore", "ignored-dir/\n");
-        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).expect("discover");
+        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree)
+            .expect("discover");
         let paths: Vec<_> = files
             .iter()
             .map(|p| p.to_string_lossy().to_string())
@@ -880,7 +889,8 @@ mod tests {
         );
         // Gitignore the worktrees directory (as this repo does in production).
         repo.create_file(".gitignore", ".worktrees\n");
-        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).expect("discover");
+        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree)
+            .expect("discover");
         let paths: Vec<_> = files
             .iter()
             .map(|p| p.to_string_lossy().to_string())

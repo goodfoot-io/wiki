@@ -1,19 +1,19 @@
-//! `wiki scaffold` end-to-end pipeline.
+//! Mesh-coverage engine.
 //!
 //! Discover wiki files, parse their fragment links, and create git meshes
-//! covering those links via `git mesh add`. Use `--dry-run` to preview the
-//! plan as markdown without mutating `.mesh/`. Use `--format json` for a
-//! structured non-mutating output.
+//! covering those links via `git mesh add`. Driven by `wiki check --fix`
+//! (the "Fix #4" slot): the pipeline produces consolidated mesh drafts and
+//! applies them best-effort. Output is owned by `check`; this module only
+//! returns a [`MeshCoverageOutcome`].
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use miette::{IntoDiagnostic, Result};
+use miette::Result;
 use regex::Regex;
-use serde::Serialize;
 
-use crate::commands::{discover_files, resolve_link_path};
+use crate::commands::resolve_link_path;
 use crate::index::DocSource;
 use crate::parser::{LinkKind, parse_fragment_links};
 
@@ -58,7 +58,7 @@ pub(crate) struct ParseError {
     pub(crate) kind: ParseErrorKind,
 }
 
-// ── JSON output types ─────────────────────────────────────────────────────────
+// ── Drop reasons ──────────────────────────────────────────────────────────────
 
 /// Why a draft was dropped pre-apply.
 ///
@@ -95,95 +95,6 @@ pub(crate) struct DroppedMesh {
     pub(crate) page: String,
 }
 
-/// Machine-stable dropped-mesh category tags.
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
-enum DroppedMeshCategory {
-    MissingPath,
-    IgnoredPath,
-    InvalidAnchor,
-    SlugPathCollision,
-}
-
-/// JSON representation of a dropped mesh.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DroppedMeshJson {
-    slug: String,
-    category: DroppedMeshCategory,
-    /// The missing path (missing-path drops) or the offending anchor
-    /// (invalid-anchor drops).
-    anchor: String,
-    /// Human-readable reason; for missing paths this is empty.
-    detail: String,
-    page: String,
-}
-
-/// Top-level JSON output for `wiki scaffold --format json`.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ScaffoldOutput {
-    schema_version: u32,
-    parse_errors: Vec<ParseErrorJson>,
-    dropped_meshes: Vec<DroppedMeshJson>,
-    pages: Vec<PageJson>,
-}
-
-/// JSON representation of a parse error.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ParseErrorJson {
-    path: String,
-    category: ParseErrorCategory,
-    message: String,
-}
-
-/// Machine-stable parse-error category tags.
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
-enum ParseErrorCategory {
-    EmptyTitle,
-    Unreadable,
-    MalformedFrontmatter,
-}
-
-/// JSON representation of a per-page section.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PageJson {
-    path: String,
-    title: String,
-    meshes: Vec<MeshJson>,
-}
-
-/// JSON representation of one mesh entry.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MeshJson {
-    slug: String,
-    heading_chain: Vec<String>,
-    anchors: Vec<AnchorJson>,
-}
-
-/// JSON representation of a structured anchor.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AnchorJson {
-    path: String,
-    start_line: u32,
-    end_line: u32,
-}
-
-impl ParseErrorCategory {
-    fn from_kind(kind: &ParseErrorKind) -> Self {
-        match kind {
-            ParseErrorKind::EmptyTitle => ParseErrorCategory::EmptyTitle,
-            ParseErrorKind::Unreadable(_) => ParseErrorCategory::Unreadable,
-            ParseErrorKind::Malformed => ParseErrorCategory::MalformedFrontmatter,
-        }
-    }
-}
-
 impl ParseErrorKind {
     pub(crate) fn reason(&self) -> String {
         match self {
@@ -201,46 +112,65 @@ use super::draft::{self, MeshDraft};
 use super::group;
 use super::render;
 
-/// Run the `wiki scaffold` subcommand.
-pub fn run(
-    globs: &[String],
-    json: bool,
-    dry_run: bool,
-    scan_root: &Path,
+/// A mesh draft that `git mesh add` failed to apply. The failure reason was
+/// already printed by git-mesh to the inherited stderr; we only carry the slug
+/// so the caller can name what could not be created.
+#[derive(Debug, Clone)]
+pub(crate) struct MeshFailure {
+    pub(crate) slug: String,
+}
+
+/// The result of a mesh-coverage pass.
+///
+/// `check` owns all output: it prints `applied`/`planned` paths under
+/// `--print-applied`, and routes `advisories` (parse errors, dropped meshes,
+/// performed/planned renames) and per-draft `failures` to stderr.
+#[derive(Debug, Default)]
+pub(crate) struct MeshCoverageOutcome {
+    /// Repo-relative `.mesh/<slug>` paths created or extended this run.
+    pub(crate) applied: Vec<String>,
+    /// Drafts `git mesh add` could not apply (best-effort: the rest still ran).
+    pub(crate) failures: Vec<MeshFailure>,
+    /// Rendered advisory block (parse errors + dropped meshes + renames).
+    pub(crate) advisories: String,
+    /// Repo-relative `.mesh/<slug>` paths that WOULD be created (dry-run preview).
+    pub(crate) planned: Vec<String>,
+}
+
+/// Build mesh coverage for `files` and apply it best-effort.
+///
+/// Runs the full discovery → group → collision → gitignore/missing/invalid-anchor
+/// pipeline (byte-identical mesh set to the former `scaffold` command), then:
+/// - `dry_run = true`: mutates nothing; `planned` lists the meshes that would
+///   be created (and renamed-blocker NEW paths).
+/// - `dry_run = false`: applies every draft via `git mesh add`, accumulating
+///   per-draft failures and continuing past them.
+///
+/// When `git-mesh` is unavailable the outcome is empty (no-op): the
+/// `mesh_unavailable` diagnostic from the check pass owns that signal.
+pub(crate) fn create_mesh_coverage(
+    files: &[PathBuf],
     repo_root: &Path,
     source: crate::index::DocSource,
-    print_applied: bool,
-) -> Result<i32> {
-    // Selection follows the current working directory; mesh anchors and paths
-    // still resolve against `repo_root`.
-    let files = match discover_files(globs, scan_root, repo_root, source) {
-        Ok(v) => v
-            .into_iter()
-            .filter(|f| {
-                let s = f.to_string_lossy();
-                !s.contains("/tests/fixtures/") && !s.contains("\\tests\\fixtures\\")
-            })
-            .collect::<Vec<_>>(),
-        Err(e) => {
-            if e.to_string().contains("no wiki pages found") {
-                Vec::new()
-            } else {
-                return Err(e);
-            }
-        }
-    };
+    dry_run: bool,
+) -> Result<MeshCoverageOutcome> {
+    // Re-apply the `/tests/fixtures/` exclusion so the produced mesh set is
+    // byte-identical to the former `scaffold` command.
+    let files: Vec<PathBuf> = files
+        .iter()
+        .filter(|f| {
+            let s = f.to_string_lossy();
+            !s.contains("/tests/fixtures/") && !s.contains("\\tests\\fixtures\\")
+        })
+        .cloned()
+        .collect();
 
     // Coverage index: filter out fragment links already covered by a mesh in
-    // the repo. Fail closed when `git-mesh` is unavailable — emitting unfiltered
-    // `git mesh add` blocks would silently regenerate meshes that already exist.
+    // the repo. When `git-mesh` is unavailable, no-op — the check pass already
+    // emits a `mesh_unavailable` diagnostic that drives the exit code.
     let mesh_index = match crate::commands::mesh_coverage::build_mesh_index(repo_root, &files) {
         Ok(Some(idx)) => idx,
-        Ok(None) => {
-            eprintln!(
-                "wiki scaffold: mesh_unavailable — `git-mesh` is not on PATH, refusing to scaffold without coverage data. Install git-mesh and retry; see https://github.com/goodfoot-io/git-mesh."
-            );
-            return Ok(1);
-        }
+        Ok(None) => return Ok(MeshCoverageOutcome::default()),
         Err(e) => return Err(e),
     };
 
@@ -303,10 +233,6 @@ pub fn run(
         page_subdirs.insert(rel, subdir);
     }
 
-    // Collect parse-error paths for exclusion from pages output.
-    let parse_error_paths: std::collections::HashSet<String> =
-        parse_errors.iter().map(|e| e.path.clone()).collect();
-
     // ── Unified build/group pipeline (both modes) ─────────────────────────
     // Trim heading chains once here so both renderers consume pre-trimmed data.
     let mut consolidated = build_meshes(&all_inputs, repo_root, &page_subdirs);
@@ -324,9 +250,8 @@ pub fn run(
     // and any meshes that already live in the repo. Extension drafts opt out:
     // they reuse the existing mesh's slug verbatim and skip the probe entirely.
     let mesh_dir = resolve_mesh_dir(repo_root);
-    let probe = |slug: &str| {
-        mesh_exists(repo_root, slug) || mesh_fs_prefix_collision(&mesh_dir, slug)
-    };
+    let probe =
+        |slug: &str| mesh_exists(repo_root, slug) || mesh_fs_prefix_collision(&mesh_dir, slug);
     resolve_slug_collisions(&mut consolidated, &page_titles, &probe);
 
     // Drop meshes whose non-wiki anchors reference paths that don't exist in
@@ -355,32 +280,21 @@ pub fn run(
     // drop-with-advisory path (exit 0) — never fail-closed, never panic.
     //
     // Extension drafts reuse an existing slug verbatim, so they are exempt.
-    let section_noun: std::collections::HashMap<(String, u32, u32), String> =
-        consolidated
-            .iter()
-            .filter_map(|d| {
-                d.structured_anchors.first().map(|a| {
-                    (
-                        (a.path.clone(), a.start_line, a.end_line),
-                        d.noun.clone(),
-                    )
-                })
-            })
-            .collect();
+    let section_noun: std::collections::HashMap<(String, u32, u32), String> = consolidated
+        .iter()
+        .filter_map(|d| {
+            d.structured_anchors
+                .first()
+                .map(|a| ((a.path.clone(), a.start_line, a.end_line), d.noun.clone()))
+        })
+        .collect();
     let mut planned_renames: Vec<PlannedRename> = Vec::new();
     consolidated.retain(|draft| {
-        if draft.extends_existing.is_some()
-            || !mesh_fs_prefix_collision(&mesh_dir, &draft.slug)
-        {
+        if draft.extends_existing.is_some() || !mesh_fs_prefix_collision(&mesh_dir, &draft.slug) {
             return true;
         }
         // Try the rename-the-blocker remedy for the ancestor-file case.
-        match plan_blocker_rename(
-            &mesh_dir,
-            &draft.slug,
-            &draft.page_path,
-            &section_noun,
-        ) {
+        match plan_blocker_rename(&mesh_dir, &draft.slug, &draft.page_path, &section_noun) {
             Some(plan) if dry_run => {
                 // Preview only — never mutate. Keep the draft.
                 planned_renames.push(plan);
@@ -491,11 +405,9 @@ pub fn run(
             // against the target file before it ever reaches `git mesh add`.
             // An over-range / inverted / zero-start anchor is a drifted wiki
             // link (a fixable wiki condition), NOT a hard build failure: drop
-            // it with a named advisory and let scaffold exit 0 so the
-            // fail-closed pre-commit hook does not lock the whole repository.
-            if let Some(detail) =
-                invalid_anchor_detail(repo_root, anchor, source, &source_paths)
-            {
+            // it with a named advisory so the link resurfaces as a residual
+            // `mesh_uncovered` on the post-fix recheck rather than aborting.
+            if let Some(detail) = invalid_anchor_detail(repo_root, anchor, source, &source_paths) {
                 dropped_meshes.push(DroppedMesh {
                     slug: draft.slug.clone(),
                     reason: DropReason::InvalidAnchor {
@@ -513,160 +425,98 @@ pub fn run(
         true
     });
 
-    if json {
-        let parse_errors_json: Vec<ParseErrorJson> = parse_errors
-            .iter()
-            .map(|e| ParseErrorJson {
-                path: e.path.clone(),
-                category: ParseErrorCategory::from_kind(&e.kind),
-                message: e.kind.reason(),
-            })
-            .collect();
-        let dropped_meshes_json: Vec<DroppedMeshJson> = dropped_meshes
-            .iter()
-            .map(|d| match &d.reason {
-                DropReason::MissingPath { path } => DroppedMeshJson {
-                    slug: d.slug.clone(),
-                    category: DroppedMeshCategory::MissingPath,
-                    anchor: path.clone(),
-                    detail: String::new(),
-                    page: d.page.clone(),
-                },
-                DropReason::IgnoredPath { path } => DroppedMeshJson {
-                    slug: d.slug.clone(),
-                    category: DroppedMeshCategory::IgnoredPath,
-                    anchor: path.clone(),
-                    detail: "anchor target is gitignored".to_string(),
-                    page: d.page.clone(),
-                },
-                DropReason::InvalidAnchor { anchor, detail } => DroppedMeshJson {
-                    slug: d.slug.clone(),
-                    category: DroppedMeshCategory::InvalidAnchor,
-                    anchor: anchor.clone(),
-                    detail: detail.clone(),
-                    page: d.page.clone(),
-                },
-                DropReason::SlugPathCollision { existing } => DroppedMeshJson {
-                    slug: d.slug.clone(),
-                    category: DroppedMeshCategory::SlugPathCollision,
-                    anchor: existing.clone(),
-                    detail: format!(
-                        "slug path collides with existing mesh `{existing}`"
-                    ),
-                    page: d.page.clone(),
-                },
-            })
-            .collect();
-        let pages = build_pages_json(&consolidated, &page_titles, &parse_error_paths);
-        let output = ScaffoldOutput {
-            schema_version: 1,
-            parse_errors: parse_errors_json,
-            dropped_meshes: dropped_meshes_json,
-            pages,
-        };
-        let s = serde_json::to_string_pretty(&output).into_diagnostic()?;
-        println!("{s}");
-        return Ok(0);
+    // Advisory block: parse errors + dropped meshes + performed/planned renames.
+    // The rename phrasing follows `dry_run` (planned vs performed).
+    let mut advisories = String::new();
+    if !parse_errors.is_empty() || !dropped_meshes.is_empty() {
+        render::render_advisories(&mut advisories, &parse_errors, &dropped_meshes, true);
     }
+    render::render_rename_advisories(&mut advisories, &planned_renames, dry_run);
 
-    // ── Dry-run / apply mode ──────────────────────────────────────────────
+    // Repo-relative path of a mesh-dir-relative name (`.mesh/<slug>`,
+    // forward slashes).
+    let rel_mesh_path = |name: &str| -> String {
+        match mesh_dir.strip_prefix(repo_root) {
+            Ok(d) => {
+                let d = d.to_string_lossy().replace('\\', "/");
+                if d.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{d}/{name}")
+                }
+            }
+            Err(_) => mesh_dir.join(name).to_string_lossy().replace('\\', "/"),
+        }
+    };
+
     // Empty when there were no internal fragment links at all OR when every
     // section already has its links anchored by an existing mesh.
     if all_inputs.is_empty() || consolidated.is_empty() {
-        let mut out = render::render_empty_markdown(&parse_errors, &dropped_meshes);
-        render::render_rename_advisories(&mut out, &planned_renames, dry_run);
-        // `--print-applied` contracts stdout to be exactly the list of
-        // repo-relative applied mesh paths. With nothing applied, stdout must
-        // be empty; the human-readable advisory belongs on stderr.
-        if print_applied {
-            eprint!("{out}");
-        } else {
-            print!("{out}");
-        }
-        return Ok(0);
+        return Ok(MeshCoverageOutcome {
+            applied: Vec::new(),
+            failures: Vec::new(),
+            advisories,
+            planned: Vec::new(),
+        });
     }
 
     if dry_run {
-        // The planned-rename block is part of the non-mutating preview; it
-        // precedes the mesh plan like other advisories.
-        let mut rename_block = String::new();
-        render::render_rename_advisories(&mut rename_block, &planned_renames, true);
-        let rendered = render::render_markdown(
-            &consolidated,
-            &page_titles,
-            &parse_errors,
-            &parse_error_paths,
-            &dropped_meshes,
-        );
-        print!("{rename_block}{rendered}");
-        return Ok(0);
-    }
-
-    // Default: apply each draft via `git mesh add`.
-    // Print advisories (parse errors, dropped meshes, performed renames)
-    // before applying so the caller can see what changed, even when not in
-    // dry-run mode.
-    if !parse_errors.is_empty()
-        || !dropped_meshes.is_empty()
-        || !planned_renames.is_empty()
-    {
-        let mut advisory = String::new();
-        render::render_advisories(&mut advisory, &parse_errors, &dropped_meshes, true);
-        render::render_rename_advisories(&mut advisory, &planned_renames, false);
-        if print_applied {
-            // Advisories must not pollute stdout when the caller is consuming
-            // stdout as an exact stage list.
-            eprint!("{advisory}");
-        } else {
-            print!("{advisory}");
-        }
-    }
-
-    // When `print_applied`, every mesh file this run touched must be emitted
-    // on stdout so the pre-commit hook stages it — including each renamed
-    // blocker's NEW path.
-    if print_applied {
+        // Preview only — never mutate. `planned` lists every mesh that would be
+        // created (renamed-blocker NEW paths first, then each draft's slug).
+        let mut planned: Vec<String> = Vec::new();
         for r in &planned_renames {
-            let rel = match mesh_dir.strip_prefix(repo_root) {
-                Ok(d) => {
-                    let d = d.to_string_lossy().replace('\\', "/");
-                    if d.is_empty() {
-                        r.to.clone()
-                    } else {
-                        format!("{d}/{}", r.to)
-                    }
-                }
-                Err(_) => mesh_dir.join(&r.to).to_string_lossy().replace('\\', "/"),
-            };
-            println!("{rel}");
+            planned.push(rel_mesh_path(&r.to));
         }
+        for draft in &consolidated {
+            let slug = draft
+                .extends_existing
+                .as_deref()
+                .unwrap_or(draft.slug.as_str());
+            planned.push(rel_mesh_path(slug));
+        }
+        return Ok(MeshCoverageOutcome {
+            applied: Vec::new(),
+            failures: Vec::new(),
+            advisories,
+            planned,
+        });
     }
 
-    apply_drafts(&consolidated, repo_root, &mesh_dir, print_applied)
+    // Apply mode. Renamed-blocker NEW paths were already freed on disk by
+    // `run_blocker_rename` above; record them as applied so the caller stages
+    // them.
+    let mut applied: Vec<String> = planned_renames
+        .iter()
+        .map(|r| rel_mesh_path(&r.to))
+        .collect();
+    let (draft_applied, failures) = apply_drafts(&consolidated, repo_root, &mesh_dir);
+    applied.extend(draft_applied);
+
+    Ok(MeshCoverageOutcome {
+        applied,
+        failures,
+        advisories,
+        planned: Vec::new(),
+    })
 }
 
 /// Apply each `MeshDraft` by invoking `git mesh add <slug> <anchors…>`.
 ///
 /// Extension drafts (`extends_existing.is_some()`) re-use the existing slug;
-/// git-mesh 1.0.80 appends anchors idempotently.
+/// git-mesh appends anchors idempotently.
 ///
-/// Fail-closed: stops on the first non-zero exit and returns `Ok(1)`.
-/// On failure, reports the slugs already applied in this run so the partial
-/// mutation is disclosed rather than silent.
-///
-/// When `print_applied` is set, each successfully applied mesh's repo-relative
-/// path (`.mesh/<slug>`, forward slashes) is printed to stdout, one per line.
-/// This is an additional fail-closed guard: if the deterministic mesh file is
-/// absent on disk after a successful `git mesh add`, that is treated as a hard
-/// failure (error to stderr, returns `Ok(1)`) rather than silently emitting an
-/// incomplete stage list to the caller.
+/// Best-effort: every draft is attempted. A non-zero `git mesh add`, or a mesh
+/// file that is unexpectedly absent after a reported success, is recorded as a
+/// per-draft [`MeshFailure`] (git-mesh already printed its reason to the
+/// inherited stderr) and the loop continues. Returns the repo-relative
+/// `.mesh/<slug>` paths that were created and the failures.
 fn apply_drafts(
     drafts: &[MeshDraft],
     repo_root: &Path,
     mesh_dir: &Path,
-    print_applied: bool,
-) -> Result<i32> {
+) -> (Vec<String>, Vec<MeshFailure>) {
     let mut applied: Vec<String> = Vec::new();
+    let mut failures: Vec<MeshFailure> = Vec::new();
 
     for draft in drafts {
         let slug = draft
@@ -687,107 +537,43 @@ fn apply_drafts(
             .current_dir(repo_root)
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
-            .status()
-            .into_diagnostic()?;
+            .status();
 
-        if !status.success() {
-            // git-mesh already printed its reason to the inherited stderr; the
-            // partial-mutation disclosure is emitted on its own line so it
-            // never runs together with that reason.
-            if applied.is_empty() {
-                eprintln!("wiki scaffold: `git mesh add {slug}` failed");
-            } else {
-                let already = applied.join(", ");
-                eprintln!(
-                    "wiki scaffold: `git mesh add {slug}` failed\n\
-                     already created this run: {already}; aborted at {slug}"
-                );
-            }
-            return Ok(1);
-        }
-
-        if print_applied {
-            let mesh_path = mesh_dir.join(slug);
-            let rel = match mesh_dir.strip_prefix(repo_root) {
-                Ok(d) => {
-                    let d = d.to_string_lossy().replace('\\', "/");
-                    if d.is_empty() {
-                        slug.to_string()
-                    } else {
-                        format!("{d}/{slug}")
-                    }
-                }
-                Err(_) => mesh_path.to_string_lossy().replace('\\', "/"),
-            };
-            if !mesh_path.is_file() {
-                eprintln!(
-                    "wiki scaffold: `git mesh add {slug}` reported success but expected mesh file {rel} is absent — refusing to emit an incomplete stage list"
-                );
-                return Ok(1);
-            }
-            println!("{rel}");
-        }
-
-        applied.push(slug.to_string());
-    }
-    Ok(0)
-}
-
-/// Build the JSON page list from consolidated drafts, excluding pages whose
-/// paths appear in `parse_error_paths` (schema must be disjoint).
-fn build_pages_json(
-    drafts: &[MeshDraft],
-    page_titles: &std::collections::HashMap<String, Option<String>>,
-    parse_error_paths: &std::collections::HashSet<String>,
-) -> Vec<PageJson> {
-    // Group by page in first-occurrence order.
-    let mut page_order: Vec<String> = Vec::new();
-    let mut by_page: std::collections::HashMap<String, Vec<&MeshDraft>> =
-        std::collections::HashMap::new();
-    for d in drafts {
-        if parse_error_paths.contains(&d.page_path) {
+        let succeeded = matches!(&status, Ok(s) if s.success());
+        if !succeeded {
+            // git-mesh already printed its reason to the inherited stderr.
+            failures.push(MeshFailure {
+                slug: slug.to_string(),
+            });
             continue;
         }
-        if !by_page.contains_key(&d.page_path) {
-            page_order.push(d.page_path.clone());
-        }
-        by_page.entry(d.page_path.clone()).or_default().push(d);
-    }
 
-    page_order
-        .into_iter()
-        .map(|page_path| {
-            let title = page_titles
-                .get(&page_path)
-                .and_then(|t| t.clone())
-                .unwrap_or_default();
-            let page_drafts = by_page.get(&page_path).expect("tracked");
-            let meshes = page_drafts
-                .iter()
-                .map(|d| {
-                    // heading_chain was already trimmed once in trim_chains_in_place.
-                    MeshJson {
-                        slug: d.slug.clone(),
-                        heading_chain: d.heading_chain.clone(),
-                        anchors: d
-                            .structured_anchors
-                            .iter()
-                            .map(|a| AnchorJson {
-                                path: a.path.clone(),
-                                start_line: a.start_line,
-                                end_line: a.end_line,
-                            })
-                            .collect(),
-                    }
-                })
-                .collect();
-            PageJson {
-                path: page_path,
-                title,
-                meshes,
+        let mesh_path = mesh_dir.join(slug);
+        let rel = match mesh_dir.strip_prefix(repo_root) {
+            Ok(d) => {
+                let d = d.to_string_lossy().replace('\\', "/");
+                if d.is_empty() {
+                    slug.to_string()
+                } else {
+                    format!("{d}/{slug}")
+                }
             }
-        })
-        .collect()
+            Err(_) => mesh_path.to_string_lossy().replace('\\', "/"),
+        };
+        if !mesh_path.is_file() {
+            // Reported success but the deterministic mesh file is absent — treat
+            // as a per-draft failure rather than emitting an incomplete path.
+            eprintln!(
+                "wiki check --fix: `git mesh add {slug}` reported success but expected mesh file {rel} is absent"
+            );
+            failures.push(MeshFailure {
+                slug: slug.to_string(),
+            });
+            continue;
+        }
+        applied.push(rel);
+    }
+    (applied, failures)
 }
 
 /// Walk consolidated drafts in place and rewrite each one whose wiki section
@@ -1083,8 +869,7 @@ fn slug_paths_conflict(a: &str, b: &str) -> bool {
         return true;
     }
     let starts_with_segs = |long: &str, short: &str| {
-        long.starts_with(short)
-            && long.as_bytes().get(short.len()) == Some(&b'/')
+        long.starts_with(short) && long.as_bytes().get(short.len()) == Some(&b'/')
     };
     starts_with_segs(a, b) || starts_with_segs(b, a)
 }
@@ -1237,23 +1022,19 @@ fn derive_rename_target(
         && leaf != blocker_last
     {
         let cand = format!("{blocker}/{leaf}");
-        if !mesh_dir.join(&cand).is_file()
-            && !mesh_fs_prefix_collision(mesh_dir, &cand)
-        {
+        if !mesh_dir.join(&cand).is_file() && !mesh_fs_prefix_collision(mesh_dir, &cand) {
             return cand;
         }
     }
 
     // Numeric `index` fallback.
     let base = format!("{blocker}/index");
-    if !mesh_dir.join(&base).is_file() && !mesh_fs_prefix_collision(mesh_dir, &base)
-    {
+    if !mesh_dir.join(&base).is_file() && !mesh_fs_prefix_collision(mesh_dir, &base) {
         return base;
     }
     for n in 2..=99 {
         let cand = format!("{blocker}/index-{n}");
-        if !mesh_dir.join(&cand).is_file() && !mesh_fs_prefix_collision(mesh_dir, &cand)
-        {
+        if !mesh_dir.join(&cand).is_file() && !mesh_fs_prefix_collision(mesh_dir, &cand) {
             return cand;
         }
     }
@@ -1601,9 +1382,7 @@ fn invalid_anchor_detail(
     };
     let line_count = count_lines(&content);
     if u64::from(end) > line_count {
-        return Some(format!(
-            "end exceeds file line count {line_count}"
-        ));
+        return Some(format!("end exceeds file line count {line_count}"));
     }
     None
 }
@@ -1755,7 +1534,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let md = tmp.path();
         let mut nouns = std::collections::HashMap::new();
-        nouns.insert(("wiki/arch/page.md".to_string(), 5, 12), "helper".to_string());
+        nouns.insert(
+            ("wiki/arch/page.md".to_string(), 5, 12),
+            "helper".to_string(),
+        );
         let target = derive_rename_target(
             md,
             "wiki/arch/scaff",
@@ -1813,12 +1595,7 @@ mod tests {
         let mut nouns = std::collections::HashMap::new();
         nouns.insert(("p.md".to_string(), 1, 1), "scaff".to_string());
         // Leaf would equal blocker's last segment `scaff` → use `index`.
-        let target = derive_rename_target(
-            md,
-            "wiki/scaff",
-            &[("p.md".to_string(), 1, 1)],
-            &nouns,
-        );
+        let target = derive_rename_target(md, "wiki/scaff", &[("p.md".to_string(), 1, 1)], &nouns);
         assert_eq!(target, "wiki/scaff/index");
     }
 
@@ -1833,8 +1610,7 @@ mod tests {
         )
         .unwrap();
         let nouns = std::collections::HashMap::new();
-        let plan =
-            plan_blocker_rename(md, "wiki/arch/scaff/helper", "p.md", &nouns).unwrap();
+        let plan = plan_blocker_rename(md, "wiki/arch/scaff/helper", "p.md", &nouns).unwrap();
         assert_eq!(plan.from, "wiki/arch/scaff");
         assert_eq!(plan.to, "wiki/arch/scaff/index");
         assert_eq!(plan.for_slug, "wiki/arch/scaff/helper");
@@ -2265,8 +2041,7 @@ mod tests {
             start_line: 1,
             end_line: 999,
         };
-        let detail =
-            invalid_anchor_detail(repo_root, &anchor, DocSource::WorkingTree, &None);
+        let detail = invalid_anchor_detail(repo_root, &anchor, DocSource::WorkingTree, &None);
         assert_eq!(
             detail,
             Some("end exceeds file line count 2".to_string()),

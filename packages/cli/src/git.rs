@@ -1121,7 +1121,10 @@ mod tests {
         ];
         let ignored = ignored_paths(repo.path(), &candidates).expect("ignored_paths");
 
-        assert!(ignored.contains("generated.ts"), "gitignored path must be reported");
+        assert!(
+            ignored.contains("generated.ts"),
+            "gitignored path must be reported"
+        );
         assert!(
             !ignored.contains("src/real.ts"),
             "tracked path must not be reported as ignored"
