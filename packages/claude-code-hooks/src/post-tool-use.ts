@@ -191,14 +191,13 @@ export default postToolUseHook({ matcher: 'Edit|Write|NotebookEdit', timeout: 60
 
   const wikiBin = resolveWikiBinary(logger);
 
-  // Sections accumulated across both phases, surfaced to the agent together.
-  const sections: string[] = [];
-
-  // ── Phase 1: auto-fix links/anchors/frontmatter (no mesh — phase 2 owns it).
+  // ── Single invocation: auto-fix links/anchors/frontmatter + mesh coverage.
   // --fix rewrites in place; a non-zero exit means residual, unfixable wiki
   // conditions the agent must resolve by hand.
+  const sections: string[] = [];
+
   try {
-    const result = spawnSync(wikiBin, ['check', '--fix', '--no-mesh', filePath], {
+    const result = spawnSync(wikiBin, ['check', '--fix', filePath], {
       cwd: input.cwd,
       encoding: 'utf8',
       timeout: 25000,
@@ -206,8 +205,8 @@ export default postToolUseHook({ matcher: 'Edit|Write|NotebookEdit', timeout: 60
     });
 
     if (isLaunchFailure(result)) {
-      // The binary is missing or failed to launch. Nothing else will work, and
-      // the page is now unvalidated — surface it instead of failing open.
+      // The binary is missing or failed to launch. The page is now unvalidated —
+      // surface it instead of failing open.
       const detail = result.error?.message ?? 'spawn failed';
       logger.warn('wiki check execution error', { error: detail, wikiBin });
       return wikiUnavailableOutput(filePath, wikiBin, detail);
@@ -224,46 +223,6 @@ export default postToolUseHook({ matcher: 'Edit|Write|NotebookEdit', timeout: 60
     const detail = err instanceof Error ? err.message : String(err);
     logger.warn('wiki check threw', { error: detail, wikiBin });
     return wikiUnavailableOutput(filePath, wikiBin, detail);
-  }
-
-  // ── Phase 2: create git-mesh coverage for the page's fragment links.
-  // --print-applied routes created/extended mesh paths to stdout and
-  // advisories (dropped meshes, missing targets) to stderr. A non-zero exit
-  // is a hard failure (git-mesh missing, or a `git mesh add` failure) and is
-  // surfaced to the agent so mesh coverage gaps never pass silently.
-  try {
-    const result = spawnSync(wikiBin, ['scaffold', '--print-applied', filePath], {
-      cwd: input.cwd,
-      encoding: 'utf8',
-      timeout: 25000,
-      env: { ...process.env }
-    });
-
-    if (isLaunchFailure(result)) {
-      const detail = result.error?.message ?? 'spawn failed';
-      logger.warn('wiki scaffold execution error', { error: detail, wikiBin });
-      sections.push(
-        `mesh scaffold was skipped — could not launch \`wiki\` (${detail}); fragment links may lack coverage.`
-      );
-    } else {
-      const applied = (result.stdout ?? '').trim();
-      const advisories = (result.stderr ?? '').trim();
-
-      if (result.status !== 0) {
-        logger.info('wiki scaffold failed', { file: filePath, status: result.status });
-        const detail = [advisories, applied].filter(Boolean).join('\n').trim();
-        sections.push(`mesh scaffold failed (exit ${result.status}); fragment links may lack coverage:\n${detail}`);
-      } else {
-        if (applied) logger.info('wiki scaffold created meshes', { file: filePath, applied });
-        if (advisories) {
-          sections.push(`mesh scaffold advisories (links left uncovered):\n${advisories}`);
-        }
-      }
-    }
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    logger.warn('wiki scaffold threw', { error: detail, wikiBin });
-    sections.push(`mesh scaffold was skipped — \`wiki\` threw (${detail}); fragment links may lack coverage.`);
   }
 
   if (sections.length === 0) return null;
