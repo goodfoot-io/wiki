@@ -715,7 +715,9 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<Vec<MeshMovePlan>> {
         .args(["stale", "--format=json"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        // Inherit stderr so git-mesh's diagnostics and GIT_MESH_PERF=1 timing
+        // lines reach our stderr rather than being captured and discarded.
+        .stderr(Stdio::inherit());
 
     let child = match cmd.spawn() {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
@@ -730,11 +732,11 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<Vec<MeshMovePlan>> {
     // exit 1 means drift was found — that's fine; we want to read the output.
     // Only bail on other exit codes if stderr looks like a hard error.
     if !output.status.success() && output.status.code() != Some(1) {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        // git-mesh's stderr is inherited, so its diagnostics are already on the
+        // terminal; we only add the exit status for context.
         return Err(miette::miette!(
-            "git-mesh stale exited with status {}: {}",
-            output.status,
-            stderr.trim()
+            "git-mesh stale exited with status {}",
+            output.status
         ));
     }
 

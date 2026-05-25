@@ -247,7 +247,10 @@ fn run_git_mesh_ls_all(
         .args(["list", "--porcelain", "--batch"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        // Inherit stderr so git-mesh's own diagnostics — and its
+        // GIT_MESH_PERF=1 timing lines — flow straight to our stderr instead
+        // of being buffered and dropped on the success path.
+        .stderr(Stdio::inherit());
 
     let mut child = match cmd.spawn() {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -275,11 +278,11 @@ fn run_git_mesh_ls_all(
         .map_err(|e| miette::miette!("git mesh list failed: {e}"))?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        // git-mesh's own stderr is inherited, so its diagnostics are already
+        // on the terminal; we only add the exit status for context.
         return Err(miette::miette!(
-            "git mesh list exited with status {}: {}",
-            output.status,
-            stderr.trim()
+            "git mesh list exited with status {}",
+            output.status
         ));
     }
     let stdout = String::from_utf8_lossy(&output.stdout);

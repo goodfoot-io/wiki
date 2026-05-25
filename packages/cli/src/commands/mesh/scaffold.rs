@@ -677,28 +677,26 @@ fn apply_drafts(
             args.push(a.as_str());
         }
 
-        let output = Command::new("git")
+        // Inherit stderr so git-mesh's failure reason — and GIT_MESH_PERF=1
+        // timing lines — print directly rather than being buffered here.
+        let status = Command::new("git")
             .args(&args)
             .current_dir(repo_root)
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()
+            .stderr(Stdio::inherit())
+            .status()
             .into_diagnostic()?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        if !status.success() {
+            // git-mesh already printed its reason to the inherited stderr; the
+            // partial-mutation disclosure is emitted on its own line so it
+            // never runs together with that reason.
             if applied.is_empty() {
-                eprintln!(
-                    "wiki scaffold: `git mesh add {slug}` failed: {stderr}"
-                );
+                eprintln!("wiki scaffold: `git mesh add {slug}` failed");
             } else {
                 let already = applied.join(", ");
-                // git-mesh stderr has no trailing newline; emit an explicit
-                // newline so the failure reason and the partial-mutation
-                // disclosure never run together on one line.
-                let stderr = stderr.trim_end();
                 eprintln!(
-                    "wiki scaffold: `git mesh add {slug}` failed: {stderr}\n\
+                    "wiki scaffold: `git mesh add {slug}` failed\n\
                      already created this run: {already}; aborted at {slug}"
                 );
             }
@@ -1290,9 +1288,11 @@ fn git_mesh_move(repo_root: &Path, old: &str, new: &str) -> bool {
             .args(["mesh", "move", old, new])
             .current_dir(repo_root)
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output(),
-        Ok(o) if o.status.success()
+            // Inherit stderr so git-mesh diagnostics and GIT_MESH_PERF=1 timing
+            // lines surface instead of being captured and discarded.
+            .stderr(Stdio::inherit())
+            .status(),
+        Ok(s) if s.success()
     )
 }
 
