@@ -101,7 +101,7 @@ enum Commands {
     /// link target. `git mesh` must be installed; missing the binary
     /// fails the check.
     Check {
-        /// Glob patterns to match wiki pages (default: $WIKI_ROOT/**/*.md)
+        /// Glob patterns to match wiki pages (default: `**/*.md` under the current directory)
         #[arg(value_name = "glob")]
         globs: Vec<String>,
         /// Exit 0 even when validation errors are found (report-only mode)
