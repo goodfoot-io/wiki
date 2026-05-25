@@ -1,6 +1,6 @@
 ---
 title: Adding Mesh Coverage
-summary: Workflow for establishing baseline git mesh coverage across uncovered wiki pages — scaffolding, rewriting whys to be idiomatic, consolidating anchors, and pitfalls to avoid.
+summary: Workflow for establishing baseline git mesh coverage across uncovered wiki pages — creating meshes with wiki check --fix, rewriting whys to be idiomatic, consolidating anchors, and pitfalls to avoid.
 tags:
   - wiki
   - git-mesh
@@ -19,13 +19,13 @@ wiki check
 
 Each [`mesh_uncovered`](/packages/cli/src/commands/mesh_coverage.rs#L76-L85) finding names the wiki file, the fragment link, and the line range that lacks a covering mesh. Skim the list before scripting anything: it tells you which subsystems will dominate the work, and it reveals duplicates (the same anchor appearing in two sections of the same page).
 
-## 2. Scaffold per page
+## 2. Create mesh coverage per page
 
 ```bash
-wiki scaffold wiki/architecture/wiki-cli.md
+wiki check --fix wiki/architecture/wiki-cli.md
 ```
 
-The output is a [markdown document](/packages/cli/src/commands/mesh/render.rs#L15-L71) — one section per fragment link, each ending in a fenced bash block of [`git mesh add`](/packages/cli/src/commands/mesh/render.rs#L128-L138) and `git mesh why` commands, plus a trailing "Commit Changes After Review" block that lists every `git mesh commit` line. The whole document is **a starting point, not a finished artifact**. The scaffold derives:
+`wiki check --fix` creates meshes for every uncovered fragment link on the targeted page and prints advisories for skipped links (missing targets). The created meshes are **a starting point, not a finished artifact**. The fix pass derives:
 
 - **Mesh names** from the page title slug and the link label.
 - **Whys** from the prose sentence that contains the link, with markdown stripped.
@@ -36,7 +36,7 @@ Both are routinely wrong in ways the handbook calls out:
 - Diff-style restatements ("the X wiki section describes Y in Z") that name the *coupling* rather than the *subsystem*.
 - Generic slugs (`wiki/cli/command-1`, `wiki/files`) that won't survive a rename of either side.
 
-Treat scaffold output the way you would treat machine-generated commit messages: useful priors, not finished prose.
+Treat auto-created meshes the way you would treat machine-generated commit messages: useful priors, not finished prose.
 
 ## 3. Rewrite the why as a definition
 
@@ -44,7 +44,7 @@ The handbook's rule is one sentence:
 
 > Write the why as a definition: name the subsystem, flow, or concern the anchors collectively form, and say plainly what it does across them.
 
-**Read the wiki section first; write the why from the page's framing — not from the link's surrounding sentence and not from the scaffold's draft.** The wiki page already chose a heading and an opening paragraph that name the subsystem; that framing is almost always closer to a good why than either the scaffold's auto-extraction or the inline sentence containing the fragment link. Open the file, locate the heading the link sits under, read the first sentence after it, and write the definition from there.
+**Read the wiki section first; write the why from the page's framing — not from the link's surrounding sentence and not from the auto-generated draft.** The wiki page already chose a heading and an opening paragraph that name the subsystem; that framing is almost always closer to a good why than either the scaffold's auto-extraction or the inline sentence containing the fragment link. Open the file, locate the heading the link sits under, read the first sentence after it, and write the definition from there.
 
 Concrete techniques that produced idiomatic whys on this pass:
 
@@ -64,10 +64,10 @@ Worked examples from this baseline pass:
 
 ## 4. Consolidate anchors that share a relationship
 
-The scaffold emits one mesh per uncovered link. The handbook says **one relationship per mesh** — not one anchor per mesh. When two or more anchors form a single subsystem, fold them into a single `git mesh add` call:
+The fix pass creates one mesh per uncovered link. The handbook says **one relationship per mesh** — not one anchor per mesh. When two or more anchors form a single subsystem, fold them into a single `git mesh add` call:
 
 ```bash
-# Two scaffold lines about incremental WikiIndex sync — one subsystem, one mesh
+# Two auto-created meshes about incremental WikiIndex sync — one subsystem, one mesh
 git mesh add wiki/perf/incremental-indexing \
   wiki/guides/wiki-performance-optimization.md \
   packages/cli/src/index.rs#L945-L945 \
@@ -75,13 +75,13 @@ git mesh add wiki/perf/incremental-indexing \
 git mesh why wiki/perf/incremental-indexing -m "Incremental WikiIndex sync that detects changes by probing Git state (HEAD SHA, wiki dir, working-tree status) so only added, modified, or deleted pages are re-parsed."
 ```
 
-Same applies when one scaffolded relationship appears twice on the same page (e.g. once in a "what to update" section and again in an "update order" checklist) — collapse to one mesh per unique anchor.
+Same applies when one auto-created relationship appears twice on the same page (e.g. once in a "what to update" section and again in an "update order" checklist) — collapse to one mesh per unique anchor.
 
-Conversely, if the scaffold produced one mesh whose anchors actually serve two reasons-to-change-together, split it.
+Conversely, if `--fix` produced one mesh whose anchors actually serve two reasons-to-change-together, split it.
 
 ## 5. Rename to a relationship slug
 
-Avoid scaffold defaults like `wiki/cli/command-1` or `wiki/files`. Pick a kebab-case noun phrase that survives a rewrite of either side and a category prefix that locates it in the repo's vocabulary (`wiki/perf/`, `wiki/touchpoints/`, `wiki/mesh-usage/`, `wiki/resolution/`). The slug should describe the *thing the anchors form together*, not either anchor individually.
+Avoid auto-generated defaults like `wiki/cli/command-1` or `wiki/files`. Pick a kebab-case noun phrase that survives a rewrite of either side and a category prefix that locates it in the repo's vocabulary (`wiki/perf/`, `wiki/touchpoints/`, `wiki/mesh-usage/`, `wiki/resolution/`). The slug should describe the *thing the anchors form together*, not either anchor individually.
 
 ## 6. Commit each mesh
 
@@ -101,9 +101,9 @@ Expect zero `mesh_uncovered` findings on real wiki pages. Test fixtures that int
 
 ## Things worth knowing before you start
 
-- **The scaffold's whys are diff-shaped, not subsystem-shaped.** Plan to rewrite every one. Skimming and approving as-is produces meshes that read like commit messages and rot the same way.
+- **Auto-generated whys are diff-shaped, not subsystem-shaped.** Plan to rewrite every one. Skimming and approving as-is produces meshes that read like commit messages and rot the same way.
 - **Duplicate anchors on the same page are a signal, not an error.** Both findings should be one mesh; the page itself is structured to point at the same code from two angles (e.g. "what" + "update order").
-- **Multiple anchors can belong to one mesh.** Resist the scaffold's one-mesh-per-anchor framing whenever the relationship is single.
+- **Multiple anchors can belong to one mesh.** Resist the one-mesh-per-anchor framing whenever the relationship is single.
 - **Whole-file anchors are the recommended default for prose meshes.** This baseline pass kept line-range anchors because the wiki pages already used them and the targets are stable, but expect editorial drift on prose to push some of them toward whole-file form. See `responding-to-drift.md` in the git-mesh handbook.
 - **`git mesh add` resolves anchors against HEAD at commit time.** A newly authored wiki page must be committed before its meshes can commit. Stage the file and create a normal commit first; mesh commits will then succeed.
 - **Mesh commits and source commits are independent.** You can establish baseline coverage as a standalone exercise — no source change is required, no source commit is produced.

@@ -2,7 +2,7 @@
 
 **When to use this:** reaching past the day-to-day commands in `SKILL.md` — inspecting back-references, paginating search, validating specific files, machine-reading diagnostics, or wiring `wiki` into another tool.
 
-The day-to-day commands (`wiki [query]`, `wiki check`, `wiki scaffold`) are documented in `SKILL.md`; this file covers everything else. `wiki scaffold` creates git meshes (anchors only, no why) for every uncovered fragment link; `--dry-run` previews the plan without mutating anything; `--format json` emits structured drafts and is non-mutating.
+The day-to-day commands (`wiki [query]`, `wiki check`) are documented in `SKILL.md`; this file covers everything else. `wiki check --fix` repairs drifted links, anchors, and frontmatter in place, and also creates git meshes (anchors only, no why) for every uncovered fragment link. `--fix-dry-run` previews the plan without mutating anything; `--format json` emits structured diagnostics and is non-mutating.
 
 ---
 
@@ -24,7 +24,6 @@ wiki -l 10 -o 10 "auth"           # next page
 
 ```bash
 cd wiki && wiki check             # scope validation to the wiki/ directory (selection follows CWD)
-wiki check --no-mesh              # skip mesh coverage (when git mesh runs separately)
 wiki check --no-exit-code         # report-only; exits 0 even with errors
 wiki check --format json          # structured diagnostics
 wiki check path/to/page.md        # validate specific globs only (resolved from CWD)
@@ -44,16 +43,18 @@ wiki --source head     check      # latest commit (use in CI)
 
 `--source` reads from a different snapshot of the repo without touching the working tree. The pre-commit hook in `git-hook-setup.md` uses `--source=worktree` for its `--fix` phase (you can only rewrite files read from the worktree).
 
-## Scaffold flags
+## Fix flags — mesh coverage and link repair
 
 ```bash
-wiki scaffold --dry-run           # preview created meshes + planned renames; no mutation
-wiki scaffold --format json       # structured drafts; non-mutating
-wiki scaffold --print-applied     # apply mode: stdout = one repo-relative path per
-                                  # created/renamed mesh; advisories → stderr
+wiki check --fix                  # repair drifted links/anchors/frontmatter AND create
+                                  # git meshes for uncovered fragment links; requires
+                                  # --source=worktree (rewrites files on disk)
+wiki check --fix --fix-dry-run    # preview created meshes + planned renames; no mutation
+wiki check --fix --print-applied  # stdout = one repo-relative path per created/renamed
+                                  # mesh; advisories → stderr
 ```
 
-`--print-applied` is the pre-commit integration point: it lets the hook stage **exactly** the meshes this run created or renamed (`git add` each printed path) instead of a blanket `git add .mesh/`. Conflicts with `--dry-run`. When a new slug path-collides with a pre-existing ancestor mesh, scaffold renames the blocker to `<blocker>/<derived-leaf>` (or `<blocker>/index`), prints the blocker's new path for staging, and notes the rename on stderr (requires git-mesh ≥ 1.0.83).
+`--print-applied` is the pre-commit integration point: it lets the hook stage **exactly** the meshes this run created or renamed (`git add` each printed path) instead of a blanket `git add .mesh/`. Conflicts with `--fix-dry-run`. When a new slug path-collides with a pre-existing ancestor mesh, `--fix` renames the blocker to `<blocker>/<derived-leaf>` (or `<blocker>/index`), prints the blocker's new path for staging, and notes the rename on stderr (requires git-mesh ≥ 1.0.83).
 
 ## Setup and integration
 

@@ -1,6 +1,6 @@
 ---
 name: wiki
-description: This skill should be used when the user asks to "search the wiki", "write a wiki page", "fix a wiki check failure", "resolve mesh_uncovered", "scaffold meshes", or mentions wiki frontmatter, fragment links, `wiki check`, `wiki scaffold`, or wiki/git-mesh integration.
+description: This skill should be used when the user asks to "search the wiki", "write a wiki page", "fix a wiki check failure", "resolve mesh_uncovered", "create mesh coverage", or mentions wiki frontmatter, fragment links, `wiki check`, `wiki check --fix`, or wiki/git-mesh integration.
 ---
 
 # Wiki
@@ -81,12 +81,12 @@ A mesh that only anchors one side does not cover the link. Links without a line 
 ### Fix `mesh_uncovered`
 
 ```bash
-wiki scaffold --dry-run     # preview which meshes will be created (no changes)
-wiki scaffold               # create the meshes (anchors only); then commit
-git commit
+wiki check --fix --fix-dry-run  # preview which meshes will be created (no changes)
+git commit                       # pre-commit hook runs wiki check --fix, creates and
+                                 # stages meshes automatically
 ```
 
-`wiki scaffold` walks the corpus, creates a `git mesh` for every uncovered fragment link (anchors only, no why), and exits non-zero only on a real failure (git-mesh unavailable, or a genuine `git mesh add` failure). The pre-commit hook runs `wiki scaffold --print-applied` automatically and stages exactly the meshes it creates or renames into the commit; use `--dry-run` to preview what it will do before committing.
+`wiki check --fix` walks the corpus and creates a `git mesh` for every uncovered fragment link (anchors only, no why) as part of its fix pass. The pre-commit hook runs `wiki check --fix --print-applied` automatically and stages exactly the meshes it creates or renames into the commit; use `--fix-dry-run` to preview what it will do before committing.
 
 ## Authoring workflow
 
@@ -94,10 +94,10 @@ git commit
 2. Write `title` + `summary`; add `aliases` for other names readers will use.
 3. Cross-link with relative markdown links. Run `wiki "..."` first to pick the canonical title.
 4. Cite source code with **line-ranged** fragment links.
-5. `cd wiki && wiki check`. For `mesh_uncovered`: `wiki scaffold --dry-run` (preview) → `git commit` (pre-commit creates and stages meshes automatically).
+5. `cd wiki && wiki check`. For `mesh_uncovered`: `wiki check --fix --fix-dry-run` (preview) → `git commit` (pre-commit hook runs `wiki check --fix` and stages meshes automatically).
 
 ## References
 
-- **`references/cli.md`** — full CLI surface (less-common subcommands and flags: `summary`, `links`, `refs`, `list`, `extract`, `hook`, `install`; `--no-mesh`, `--no-exit-code`, `--format json`, `--source`, `-l/-o`). **Use when** reaching past the day-to-day commands above.
-- **`references/maintenance.md`** — keeping a wiki current with `git mesh`: `git mesh stale` → re-anchor → `wiki check` → `wiki scaffold`, and writing a durable `why`. **Use when** anchors have drifted, when meshes go stale, or when curating wiki health.
-- **`references/git-hook-setup.md`** — two-phase git hooks: `pre-commit` auto-fixes drifted links/frontmatter, re-stages them, then creates and stages missing mesh coverage (fail-closed). **Use when** wiring wiki validation into a repo for the first time, or debugging why files were re-staged or meshes were auto-created.
+- **`references/cli.md`** — full CLI surface (less-common subcommands and flags: `summary`, `links`, `refs`, `list`, `extract`, `hook`, `install`; `--fix`, `--fix-dry-run`, `--print-applied`, `--no-exit-code`, `--format json`, `--source`, `-l/-o`). **Use when** reaching past the day-to-day commands above.
+- **`references/maintenance.md`** — keeping a wiki current with `git mesh`: `git mesh stale` → re-anchor → `wiki check` → `wiki check --fix`, and writing a durable `why`. **Use when** anchors have drifted, when meshes go stale, or when curating wiki health.
+- **`references/git-hook-setup.md`** — single-invocation git hook: `pre-commit` runs `wiki check --fix --print-applied` to auto-fix drifted links/frontmatter and create mesh coverage in one pass, then re-stages all touched paths. **Use when** wiring wiki validation into a repo for the first time, or debugging why files were re-staged or meshes were auto-created.

@@ -84,11 +84,10 @@ git add .mesh/
 After all prose edits:
 
 ```bash
-wiki scaffold --dry-run     # preview which meshes will be created (no changes)
-wiki scaffold               # create meshes (anchors only); exits non-zero on any failure
+wiki check --fix --fix-dry-run  # preview which meshes will be created (no changes)
 ```
 
-`wiki scaffold` walks the corpus and creates a `git mesh` for every uncovered fragment link — anchors only, no why. It will also surface a `Skipped mesh \`<slug>\` — references missing path \`<path>\`.` advisory for any link whose target no longer exists on disk; fix the wiki link (or remove it if the target is intentionally gone) and rerun. When a new mesh's slug path-collides with a pre-existing ancestor mesh, scaffold renames the blocker to `<blocker>/<derived-leaf>` (or `<blocker>/index`) so both can coexist and notes the rename (requires git-mesh ≥ 1.0.83). After creating meshes, commit so the pre-commit hook stages them:
+`wiki check --fix` walks the corpus and creates a `git mesh` for every uncovered fragment link — anchors only, no why. It will also surface a `Skipped mesh \`<slug>\` — references missing path \`<path>\`.` advisory for any link whose target no longer exists on disk; fix the wiki link (or remove it if the target is intentionally gone) and rerun. When a new mesh's slug path-collides with a pre-existing ancestor mesh, `--fix` renames the blocker to `<blocker>/<derived-leaf>` (or `<blocker>/index`) so both can coexist and notes the rename (requires git-mesh ≥ 1.0.83). The pre-commit hook runs `wiki check --fix` automatically and stages the created meshes into the commit:
 
 ```bash
 git commit -m "wiki: ..."
@@ -145,4 +144,4 @@ Report:
 - **Pages updated** — pages where prose changed; one line per page describing what changed and why
 - **Re-pinned only** — pages where only line ranges were adjusted (no prose changes needed)
 - **Flagged (uncertain)** — entries where the diff was ambiguous; describe the judgment call made
-- **New meshes created** — meshes created by `wiki scaffold` (anchors only) for previously uncovered fragment links; note any where you subsequently added a `git mesh why`
+- **New meshes created** — meshes created by `wiki check --fix` (anchors only) for previously uncovered fragment links; note any where you subsequently added a `git mesh why`

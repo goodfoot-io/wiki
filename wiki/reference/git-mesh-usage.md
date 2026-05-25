@@ -43,9 +43,9 @@ The line range token (`start-end`) is parsed for format validation only; range f
 
 **Where:** [`render.rs`](/packages/cli/src/commands/mesh/render.rs#L137-L146)
 
-**Invoked by:** [`wiki scaffold`](/packages/cli/src/commands/mesh/scaffold.rs#L159-L200) — emits markdown output, does **not** shell out to `git-mesh`.
+**Invoked by:** [`wiki check --fix`](/packages/cli/src/commands/mesh/scaffold.rs#L159-L200) — creates meshes directly, does **not** shell out to `git-mesh`.
 
-**Purpose:** Scaffold command for adding anchors (wiki file + code file/range) to a named mesh subsystem.
+**Purpose:** Command used by `wiki check --fix` for adding anchors (wiki file + code file/range) to a named mesh subsystem.
 
 ---
 
@@ -53,9 +53,9 @@ The line range token (`start-end`) is parsed for format validation only; range f
 
 **Where:** [`render.rs`](/packages/cli/src/commands/mesh/render.rs#L147-L147)
 
-**Invoked by:** [`wiki scaffold`](/packages/cli/src/commands/mesh/scaffold.rs#L159-L200) — emits markdown output, does **not** shell out to `git-mesh`.
+**Invoked by:** [`wiki check --fix`](/packages/cli/src/commands/mesh/scaffold.rs#L159-L200) — creates meshes directly, does **not** shell out to `git-mesh`.
 
-**Purpose:** Scaffold command for setting the human-readable description of a mesh subsystem.
+**Purpose:** Command used by `wiki check --fix` for setting the human-readable description of a mesh subsystem.
 
 ---
 
@@ -83,7 +83,7 @@ Displays full detail for a named mesh (all anchors + why text). The underlying i
 
 ### `git-mesh mv <old> <new>`
 
-Renames a mesh subsystem. (No `rename` alias exists.) Would let `wiki scaffold --fix` auto-repair mesh slugs when wiki article titles change.
+Renames a mesh subsystem. (No `rename` alias exists.) Would let `wiki check --fix` auto-repair mesh slugs when wiki article titles change.
 
 ### `git-mesh rm <name> <anchor>...`
 
