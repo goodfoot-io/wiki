@@ -13,25 +13,94 @@ case "$LEVEL" in
     ;;
 esac
 
-# Pass the path and level through the environment, never string-interpolated
+# Base the bump on the MAXIMUM product version across every manifest, not just
+# packages/cli. The pre-commit.plugin-version.sh hook auto-bumps each changed
+# plugin's plugins/*/.claude-plugin/plugin.json (and its marketplace.json
+# plugins[] entry) on every commit that touches plugin files, so the plugin
+# version routinely runs ahead of the CLI source-of-truth. Bumping only from
+# the CLI version would then move the release version *backwards* relative to
+# the plugin and republish an already-used number. Taking the max guarantees
+# the new version is ahead of everything already shipped.
+#
+# Excluded on purpose: marketplace.json's metadata.version is the catalog's own
+# version track (currently 1.0.x), independent of the wiki product version
+# (0.5.x) that release.sh tags as wiki-v<version>. Folding it into the max would
+# drag the product onto the catalog's track.
+#
+# Paths and the level pass through the environment, never string-interpolated
 # into the JS source: on Windows a path like `C:\Users\johnw` would have its
 # backslashes consumed as JS escape sequences and silently corrupt the path.
-NEW_VERSION=$(BUMP_SOURCE="$SOURCE" BUMP_LEVEL="$LEVEL" node -e '
+NEW_VERSION=$(REPO_ROOT="$REPO_ROOT" BUMP_LEVEL="$LEVEL" node -e '
   const fs = require("fs");
-  const source = process.env.BUMP_SOURCE;
+  const path = require("path");
+  const root = process.env.REPO_ROOT;
   const level = process.env.BUMP_LEVEL;
-  const raw = fs.readFileSync(source, "utf8");
-  const pkg = JSON.parse(raw);
-  const [maj, min, pat] = pkg.version.split(".").map(Number);
+
+  const versions = [];
+  const addJsonVersion = (p) => {
+    try {
+      const v = JSON.parse(fs.readFileSync(p, "utf8")).version;
+      if (typeof v === "string") versions.push(v);
+    } catch { /* missing or unparseable manifest contributes no version */ }
+  };
+
+  // CLI (source of truth) + extension
+  addJsonVersion(path.join(root, "packages/cli/package.json"));
+  addJsonVersion(path.join(root, "packages/extension/package.json"));
+
+  // npm platform packages
+  const npmDir = path.join(root, "npm");
+  if (fs.existsSync(npmDir)) {
+    for (const d of fs.readdirSync(npmDir)) {
+      addJsonVersion(path.join(npmDir, d, "package.json"));
+    }
+  }
+
+  // Plugin manifests — the surface the auto-bump hook moves ahead of the CLI.
+  const pluginsDir = path.join(root, "plugins");
+  if (fs.existsSync(pluginsDir)) {
+    for (const d of fs.readdirSync(pluginsDir)) {
+      addJsonVersion(path.join(pluginsDir, d, ".claude-plugin/plugin.json"));
+    }
+  }
+
+  // marketplace.json per-plugin entry versions (NOT metadata.version — see above).
+  try {
+    const market = JSON.parse(fs.readFileSync(path.join(root, ".claude-plugin/marketplace.json"), "utf8"));
+    for (const p of (market.plugins || [])) {
+      if (p && typeof p.version === "string") versions.push(p.version);
+    }
+  } catch { /* no marketplace manifest */ }
+
+  const isSemver = (v) => /^\d+\.\d+\.\d+$/.test(v);
+  const valid = versions.filter(isSemver);
+  if (valid.length === 0) {
+    console.error("bump: no valid semver versions found across manifests");
+    process.exit(1);
+  }
+
+  const parse = (v) => v.split(".").map(Number);
+  valid.sort((a, b) => {
+    const [a1, a2, a3] = parse(a);
+    const [b1, b2, b3] = parse(b);
+    return a1 - b1 || a2 - b2 || a3 - b3;
+  });
+  const [maj, min, pat] = parse(valid[valid.length - 1]);
   const next = level === "major" ? [maj + 1, 0, 0]
              : level === "minor" ? [maj, min + 1, 0]
              : [maj, min, pat + 1];
-  const newVersion = next.join(".");
-  const updated = raw.replace(/"version": "[^"]+"/, JSON.stringify("version") + ": " + JSON.stringify(newVersion));
-  fs.writeFileSync(source, updated);
-  console.log(newVersion);
+  console.log(next.join("."));
 ')
 
-echo "Bumped packages/cli to $NEW_VERSION"
+# Write the computed version into the source of truth; sync-versions.sh fans it
+# out to every other manifest.
+P="$SOURCE" V="$NEW_VERSION" node -e '
+  const fs = require("fs");
+  const raw = fs.readFileSync(process.env.P, "utf8");
+  const updated = raw.replace(/"version": "[^"]+"/, JSON.stringify("version") + ": " + JSON.stringify(process.env.V));
+  fs.writeFileSync(process.env.P, updated);
+'
+
+echo "Bumped to $NEW_VERSION (max product version across manifests + $LEVEL)"
 echo ""
 bash "$REPO_ROOT/scripts/sync-versions.sh"
