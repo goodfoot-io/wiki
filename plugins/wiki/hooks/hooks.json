@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node $CLAUDE_PLUGIN_ROOT/hooks/bin/post-tool-use.92770bcc.mjs",
+            "command": "node $CLAUDE_PLUGIN_ROOT/hooks/bin/post-tool-use.0bad1347.mjs",
             "timeout": 60000
           }
         ],
@@ -15,8 +15,8 @@
   },
   "__generated": {
     "files": [
-      "post-tool-use.92770bcc.mjs"
+      "post-tool-use.0bad1347.mjs"
     ],
-    "timestamp": "2026-05-25T22:46:11.605Z"
+    "timestamp": "2026-05-26T14:46:08.864Z"
   }
 }
