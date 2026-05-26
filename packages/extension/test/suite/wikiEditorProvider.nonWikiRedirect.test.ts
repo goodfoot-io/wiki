@@ -3,42 +3,52 @@
  * disposed" (card main-52).
  *
  * ## What this test covers
- * `wiki.viewer` is registered as the default custom editor for every markdown
- * file (the package.json `customEditors` selector matches all `.md` files). A
- * plain markdown file with no wiki frontmatter is therefore routed into
- * [WikiEditorProvider.resolveCustomTextEditor](../../src/providers/WikiEditorProvider.ts),
- * which is expected to fall back to VS Code's built-in text editor.
+ * `wiki.viewer` is the default custom editor for every markdown file (the
+ * package.json `customEditors` selector matches all `.md` files), so a plain
+ * markdown file with no wiki frontmatter is also routed into
+ * [WikiEditorProvider.resolveCustomTextEditor](../../src/providers/WikiEditorProvider.ts).
  *
- * The current fallback disposes the supplied `webviewPanel` synchronously
- * *inside* `resolveCustomTextEditor` and then calls `showTextDocument`. Doing
- * so mid-resolution leaves a zombie custom-editor tab (its overlay webview is
- * already disposed) instead of a clean text editor, and corrupts the custom
- * editor lifecycle so subsequent webview opens fail with
- * "OverlayWebview has been disposed".
+ * The unfixed fallback disposes the supplied `webviewPanel` *synchronously,
+ * inside* `resolveCustomTextEditor`, before the method returns, and then calls
+ * `showTextDocument`. Disposing a custom-editor panel mid-resolution is the
+ * lifecycle violation behind the user-visible modal: on VS Code 1.121 it
+ * surfaces "Unable to open '<file>.md' — OverlayWebview has been disposed" when
+ * VS Code later tries to lay out the overlay it expected the provider to leave
+ * alive. (On the 1.101 test runtime VS Code tolerates it, so the symptom is
+ * version-dependent — but the contract violation is not.)
  *
- * This test opens a non-wiki `.md` file the way the user does — through
- * `vscode.open`, which honors the default editor association — and asserts the
- * file ends up in a plain text editor (`TabInputText`). On the unfixed code the
- * file is stranded in a `wiki.viewer` custom tab, so the assertion fails.
+ * This test asserts the contract directly and deterministically: for a non-wiki
+ * document, `resolveCustomTextEditor` must NOT dispose its panel during
+ * resolution, and the fallback must still land the file in the built-in text
+ * editor. On the unfixed code the panel is already disposed the instant
+ * resolution returns, so the first assertion fails.
  *
- * @summary Non-wiki markdown must fall back to the text editor, not a zombie webview.
+ * @summary Non-wiki markdown fallback must not dispose its panel mid-resolution.
  * @module test/suite/wikiEditorProvider.nonWikiRedirect.test
  */
 
 import * as assert from 'node:assert';
 import * as vscode from 'vscode';
+import { WikiEditorProvider } from '../../src/providers/WikiEditorProvider.js';
+import { WikiBinaryManager } from '../../src/utils/wikiInstaller.js';
 
-async function waitForTab(
-  predicate: (tab: vscode.Tab | undefined) => boolean,
-  message: string,
-  timeoutMs = 5000
-): Promise<vscode.Tab> {
+function makeContext(extensionUri: vscode.Uri): vscode.ExtensionContext {
+  const store = new Map<string, unknown>();
+  const workspaceState: vscode.Memento = {
+    keys: () => [...store.keys()],
+    get: <T>(key: string, defaultValue?: T): T | undefined => (store.has(key) ? (store.get(key) as T) : defaultValue),
+    update: (key: string, value: unknown) => {
+      store.set(key, value);
+      return Promise.resolve();
+    }
+  };
+  return { extensionUri, workspaceState } as unknown as vscode.ExtensionContext;
+}
+
+async function waitFor(predicate: () => boolean, message: string, timeoutMs = 5000): Promise<void> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    const activeTab = vscode.window.tabGroups.activeTabGroup.activeTab;
-    if (predicate(activeTab)) {
-      return activeTab as vscode.Tab;
-    }
+    if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new assert.AssertionError({ message });
@@ -49,7 +59,9 @@ describe('WikiEditorProvider — non-wiki markdown fallback', () => {
     await vscode.commands.executeCommand('workbench.action.closeAllEditors');
   });
 
-  it('opens a frontmatter-less .md in the built-in text editor, not the wiki webview', async () => {
+  it('does not dispose its panel during resolution, then falls back to the text editor', async function () {
+    this.timeout(30000);
+
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     assert.ok(workspaceFolder, 'Expected test workspace folder');
 
@@ -62,25 +74,51 @@ describe('WikiEditorProvider — non-wiki markdown fallback', () => {
     const plainFile = vscode.Uri.joinPath(workspaceFolder.uri, 'plain-readme.md');
     await vscode.workspace.fs.writeFile(plainFile, Buffer.from('# Plain Readme\n\nNo frontmatter here.\n'));
 
-    await vscode.commands.executeCommand('vscode.open', plainFile);
+    const context = makeContext(ext.extensionUri);
+    const provider = new WikiEditorProvider(ext.extensionUri, new WikiBinaryManager(context), context);
 
-    const tab = await waitForTab(
-      (t) => t?.input instanceof vscode.TabInputText || t?.input instanceof vscode.TabInputCustom,
-      'Expected a tab to open for the plain markdown file'
-    );
+    const document = await vscode.workspace.openTextDocument(plainFile);
+    const panel = vscode.window.createWebviewPanel('wiki.viewer.test', 'initial', vscode.ViewColumn.One, {
+      enableScripts: true
+    });
 
-    if (tab.input instanceof vscode.TabInputCustom) {
-      assert.fail(
-        `Plain markdown opened in custom editor "${tab.input.viewType}" instead of the built-in ` +
-          'text editor — the dispose-and-redirect fallback stranded the file in a wiki.viewer tab.'
+    let disposedDuringResolve = false;
+    let disposed = false;
+    panel.onDidDispose(() => {
+      disposed = true;
+    });
+
+    try {
+      const tokenSource = new vscode.CancellationTokenSource();
+      const resolvePromise = provider.resolveCustomTextEditor(document, panel, tokenSource.token);
+      await resolvePromise;
+      // Snapshot disposal state at the instant resolution completes: a custom
+      // editor must not dispose its own panel before resolveCustomTextEditor
+      // returns. The unfixed code disposes synchronously, so `disposed` is
+      // already true here.
+      disposedDuringResolve = disposed;
+
+      assert.strictEqual(
+        disposedDuringResolve,
+        false,
+        'resolveCustomTextEditor disposed its webview panel during resolution — this is the ' +
+          'lifecycle violation that surfaces "OverlayWebview has been disposed". The fallback ' +
+          'must defer the dispose until after resolution returns.'
       );
-    }
 
-    assert.ok(tab.input instanceof vscode.TabInputText, 'Expected the plain markdown file to open as a text editor');
-    assert.strictEqual(
-      (tab.input as vscode.TabInputText).uri.fsPath,
-      plainFile.fsPath,
-      'Expected the text editor to show the plain markdown file'
-    );
+      // The fallback must still happen: the plain file ends up in the built-in
+      // text editor, and the redundant custom panel is eventually disposed.
+      await waitFor(() => {
+        const active = vscode.window.tabGroups.activeTabGroup.activeTab;
+        return (
+          active?.input instanceof vscode.TabInputText &&
+          (active.input as vscode.TabInputText).uri.fsPath === plainFile.fsPath
+        );
+      }, 'Plain markdown never reached the built-in text editor — the fallback did not reopen it.');
+
+      await waitFor(() => disposed, 'Expected the redundant custom panel to be disposed after the text editor opened.');
+    } finally {
+      if (!disposed) panel.dispose();
+    }
   });
 });
