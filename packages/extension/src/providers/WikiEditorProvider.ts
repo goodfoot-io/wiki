@@ -92,8 +92,20 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     _token: vscode.CancellationToken
   ): Promise<void> {
     if (!(await this.isWikiFile(document.uri))) {
-      webviewPanel.dispose();
-      await vscode.window.showTextDocument(document.uri, { preview: false });
+      // The wiki viewer is the default editor for every `.md` file, so VS Code
+      // routes plain (non-wiki) markdown here too. Fall back to the built-in
+      // text editor — but defer the reopen and dispose to a later tick.
+      // Disposing this panel synchronously inside resolveCustomTextEditor
+      // corrupts VS Code's overlay-webview lifecycle (surfacing "OverlayWebview
+      // has been disposed" on the user's editor) because VS Code still expects
+      // the panel it handed us to be live when resolution returns.
+      const targetColumn = webviewPanel.viewColumn;
+      setTimeout(() => {
+        void vscode.window.showTextDocument(document.uri, { viewColumn: targetColumn, preview: false }).then(
+          () => webviewPanel.dispose(),
+          () => webviewPanel.dispose()
+        );
+      }, 0);
       return;
     }
 
