@@ -127,6 +127,7 @@ pub fn scope_result<T, E>(
     result
 }
 
+#[allow(dead_code)]
 pub async fn scope_async_result<T, E, F>(name: &str, meta: Value, future: F) -> Result<T, E>
 where
     F: std::future::Future<Output = Result<T, E>>,

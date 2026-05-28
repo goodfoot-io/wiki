@@ -23,6 +23,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 zip = { version = "2", default-features = false, features = ["deflate"] }
 toml_edit = "0.22"
 fs4 = { version = "0.13", features = ["sync"] }
+anyhow = "1"
 indexmap = { version = "2", features = ["serde"] }
 
 # `git-mesh` is installed by npm as `git-mesh.cmd`/`git-mesh.ps1` shims on

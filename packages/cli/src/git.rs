@@ -1,3 +1,9 @@
+//! Pre-existing legacy helpers left over from the deleted Turso-era `index.rs`.
+//! They remain part of the lib surface (used by integration tests) but are
+//! unused inside the bin crate. Suppress bin-crate dead_code without
+//! affecting the lib build.
+#![allow(dead_code)]
+
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};

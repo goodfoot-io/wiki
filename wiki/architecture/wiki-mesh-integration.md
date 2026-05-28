@@ -54,7 +54,7 @@ Generated whys require author review — sentences that started with a backtick 
 
 ### Default glob behavior
 
-Omitting globs walks all `.md` files and treats those whose frontmatter has both a non-empty `title` and `summary` as wiki pages. `$WIKI_DIR` defaults to `wiki`. This matches the default discovery behavior used by all other wiki commands (see [discover_files](/packages/cli/src/commands/mod.rs#L139-L181)).
+Omitting globs walks all `.md` files and treats those whose frontmatter has both a non-empty `title` and `summary` as wiki pages. `$WIKI_DIR` defaults to `wiki`. This matches the default discovery behavior used by all other wiki commands (see [discover_files](/packages/cli/src/commands/mod.rs#L140-L182)).
 
 ### Missing-path filtering
 
@@ -93,4 +93,4 @@ wiki check
 
 ## References
 
-- [discover_files](/packages/cli/src/commands/mod.rs#L139-L181)
+- [discover_files](/packages/cli/src/commands/mod.rs#L140-L182)

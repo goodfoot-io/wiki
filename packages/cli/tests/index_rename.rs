@@ -9,7 +9,6 @@ mod common;
 use wiki::index::WikiIndex;
 
 #[test]
-#[ignore = "tdd-bootstrap"]
 fn rename_preserves_blob_and_skips_retokenization() {
     let repo = common::FixtureRepo::new();
 

@@ -12,7 +12,6 @@ mod common;
 use wiki::index::{WikiIndex, SEARCH_LIMIT};
 
 #[test]
-#[ignore = "tdd-bootstrap"]
 fn only_full_wiki_pages_appear_in_results() {
     let repo = common::FixtureRepo::new();
 

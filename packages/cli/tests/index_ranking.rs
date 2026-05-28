@@ -27,7 +27,6 @@ const EXPECTED_ORDER: &[&str] = &[
 ];
 
 #[test]
-#[ignore = "tdd-bootstrap"]
 fn ranking_matches_bm25_weight_tuple() {
     let repo = common::FixtureRepo::new();
 

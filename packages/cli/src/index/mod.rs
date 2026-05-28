@@ -55,6 +55,7 @@ fn find_dot_git(start: &Path) -> Option<PathBuf> {
 /// Hard cap on the number of results `wiki "<query>"` will print.
 pub const SEARCH_LIMIT: i64 = 3;
 
+#[allow(dead_code)]
 const SUGGESTION_LIMIT: i64 = 3;
 
 /// Selects which git snapshot `WikiIndex` reads from.
@@ -145,7 +146,7 @@ pub struct ResolvedPage {
 ///
 /// Strict ordering for the merge pipeline is `Tree → Index → Worktree`;
 /// later sources override earlier sources for the same `path_rel`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Source {
     Tree,
     Index,
@@ -161,6 +162,7 @@ pub struct BlobOid(pub String);
 
 /// Result of a refresh attempt: did we walk, was the lock contended, did
 /// the CAS lose?
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshOutcome {
     /// Triple-stat gate matched; no refresh required.
@@ -179,6 +181,7 @@ pub enum RefreshOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostileFs {
     No,
+    #[allow(dead_code)]
     Yes,
 }
 
@@ -188,14 +191,18 @@ pub enum HostileFs {
 /// Turso connection. The new version owns a rusqlite connection and the
 /// repo root used to resolve relative paths during result rendering.
 pub struct WikiIndex {
-    _repo_root: PathBuf,
+    repo_root: PathBuf,
+    dot_git: PathBuf,
     _source: DocSource,
-    _conn: Connection,
+    repo: gix::Repository,
+    conn: Connection,
+    last_stats: IndexStats,
 }
 
 impl WikiIndex {
     /// Convenience constructor used by tests that default to the working
     /// tree.
+    #[allow(dead_code)]
     pub fn prepare(repo_root: &Path) -> Result<Self> {
         Self::prepare_for_source(repo_root, DocSource::WorkingTree)
     }
@@ -218,11 +225,35 @@ impl WikiIndex {
         schema::bootstrap(&conn)
             .map_err(|e| miette::miette!("schema bootstrap failed: {e}"))?;
 
-        Ok(WikiIndex {
-            _repo_root: repo_root.to_path_buf(),
+        let repo = gix::open(repo_root)
+            .map_err(|e| miette::miette!("gix::open({}) failed: {e}", repo_root.display()))?;
+
+        let mut index = WikiIndex {
+            repo_root: repo_root.to_path_buf(),
+            dot_git: dot_git.clone(),
             _source: source,
-            _conn: conn,
-        })
+            repo,
+            conn,
+            last_stats: IndexStats::default(),
+        };
+        index.eager_refresh()?;
+        Ok(index)
+    }
+
+    fn eager_refresh(&mut self) -> Result<()> {
+        let outcome = passes::refresh(
+            &self.repo,
+            &self.repo_root,
+            &self.dot_git,
+            &mut self.conn,
+            HostileFs::No,
+        )
+        .map_err(|e| miette::miette!("refresh failed: {e}"))?;
+        self.last_stats = IndexStats {
+            pass3_full_rescans: outcome.pass3_full_rescans,
+            fts_retokenizations: outcome.fts_retokenizations,
+        };
+        Ok(())
     }
 
     /// Resolve a single page by title or alias.
@@ -233,11 +264,13 @@ impl WikiIndex {
     /// BM25-weighted search, paginated, returning `(rows, total)`.
     pub fn search_weighted(
         &self,
-        _query: &str,
-        _limit: i64,
-        _offset: usize,
+        query: &str,
+        limit: i64,
+        offset: usize,
     ) -> Result<(Vec<SearchResult>, usize)> {
-        unimplemented!("Phase 1 skeleton: WikiIndex::search_weighted")
+        let limit_usize = if limit < 0 { 0 } else { limit as usize };
+        search::search_weighted(&self.conn, query, limit_usize, offset)
+            .map_err(|e| miette::miette!("search_weighted: {e}"))
     }
 
     /// Up to [`SUGGESTION_LIMIT`] BM25 suggestions for a missed lookup.
@@ -250,6 +283,7 @@ impl WikiIndex {
     ///
     /// Phase 3 wires this into `fs_class.rs` detection; until then, bodies
     /// stay `unimplemented!()`.
+    #[allow(dead_code)]
     pub fn prepare_with_fs_class(
         repo_root: &Path,
         source: DocSource,
@@ -259,13 +293,65 @@ impl WikiIndex {
         Self::prepare_for_source(repo_root, source)
     }
 
+    /// Dump every `paths` row joined to its blob title, sorted by `path_rel`.
+    /// Test-only diagnostic used by `tests/index_parity.rs`.
+    pub fn debug_dump_paths(&self) -> Result<Vec<(String, Source, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT p.path_rel, p.source, b.title
+                 FROM paths p JOIN blobs b ON b.oid = p.oid
+                 ORDER BY p.path_rel ASC",
+            )
+            .map_err(|e| miette::miette!("debug_dump_paths prepare: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                let path: String = row.get(0)?;
+                let source: i64 = row.get(1)?;
+                let title: String = row.get(2)?;
+                let s = match source {
+                    0 => Source::Tree,
+                    1 => Source::Index,
+                    2 => Source::Worktree,
+                    _ => Source::Worktree,
+                };
+                Ok((path, s, title))
+            })
+            .map_err(|e| miette::miette!("debug_dump_paths query: {e}"))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| miette::miette!("debug_dump_paths collect: {e}"))
+    }
+
+    /// Count `blobs` and `paths` rows for a given OID.
+    /// Test-only diagnostic used by `tests/index_promotion.rs`.
+    pub fn debug_blob_path_counts(&self, oid: &str) -> Result<(usize, usize)> {
+        let blob_count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM blobs WHERE oid = ?1",
+                [oid],
+                |r| r.get(0),
+            )
+            .map_err(|e| miette::miette!("blob_count: {e}"))?;
+        let path_count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM paths WHERE oid = ?1",
+                [oid],
+                |r| r.get(0),
+            )
+            .map_err(|e| miette::miette!("path_count: {e}"))?;
+        Ok((blob_count as usize, path_count as usize))
+    }
+
     /// Return diagnostic counters accumulated during the last refresh.
     ///
     /// Exposed for `index_hostile_fs` (asserts `pass3_full_rescans > 0`) and
     /// `index_rename` (asserts `fts_retokenizations == 0`).  Phase 3 fills in
     /// real bookkeeping; until then the body is `unimplemented!()`.
+    #[allow(dead_code)]
     pub fn stats(&self) -> IndexStats {
-        unimplemented!("Phase 1 skeleton: WikiIndex::stats")
+        self.last_stats
     }
 }
 
