@@ -6,7 +6,7 @@ build = "build.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-gix = { version = "0.81", default-features = false, features = ["revision", "status", "sha1"] }
+gix = { version = "=0.84", default-features = false, features = ["revision", "sha1", "attributes", "index", "status"] }
 globset = "0.4"
 ignore = "0.4"
 serde = { version = "1", features = ["derive"] }
@@ -16,10 +16,9 @@ regex = "1"
 miette = { version = "7", features = ["fancy"] }
 thiserror = "2"
 tempfile = "3"
-turso = "0.5"
-turso_core = { version = "0.5", features = ["fts"] }
+rusqlite = { version = "0.32", features = ["bundled", "blob"] }
+walkdir = "2"
 sha2 = "0.10"
-tokio = { version = "1", features = ["rt"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 toml_edit = "0.22"
