@@ -178,11 +178,14 @@ pub fn refresh(
         .ok()
         .map(|id| id.to_hex().to_string())
         .unwrap_or_default();
+    // Normalize unborn HEAD to the 40-zero sentinel so it matches what
+    // `freshness::read_head_oid` returns on the same condition. Otherwise the
+    // fast triple gate misses on every invocation against an unborn repo.
     let new_head_oid = repo
         .head_id()
         .ok()
         .map(|id| id.to_hex().to_string())
-        .unwrap_or_default();
+        .unwrap_or_else(|| "0".repeat(40));
     let new_index_checksum: Vec<u8> = match gix::index::File::at(
         dot_git.join("index"),
         gix::hash::Kind::Sha1,
