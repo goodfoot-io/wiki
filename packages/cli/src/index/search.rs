@@ -158,7 +158,10 @@ pub fn search_weighted(
                 let snippets = if snip.is_empty() {
                     Vec::new()
                 } else {
-                    vec![Snippet { line: 0, text: snip }]
+                    vec![Snippet {
+                        line: 0,
+                        text: snip,
+                    }]
                 };
                 out.push(SearchResult {
                     title,
@@ -293,4 +296,3 @@ pub fn resolve_page(
 
     Ok(None)
 }
-

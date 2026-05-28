@@ -91,8 +91,7 @@ fn read_blob_bytes(
         }
         Source::Worktree => {
             let abs = repo_root.join(path_rel);
-            std::fs::read(&abs)
-                .map_err(|e| anyhow::anyhow!("read worktree {}: {e}", abs.display()))
+            std::fs::read(&abs).map_err(|e| anyhow::anyhow!("read worktree {}: {e}", abs.display()))
         }
     }
 }
@@ -109,8 +108,8 @@ pub fn refresh(
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
     // Read prior state (head_tree_oid + index_checksum + generation).
-    let (prior_head_tree, prior_index_checksum, prior_generation): (String, Vec<u8>, i64) =
-        tx.query_row(
+    let (prior_head_tree, prior_index_checksum, prior_generation): (String, Vec<u8>, i64) = tx
+        .query_row(
             "SELECT head_tree_oid, index_checksum, generation FROM state WHERE id = 1",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(3 - 1)?)),
@@ -220,7 +219,12 @@ pub fn refresh(
         "UPDATE state SET head_oid = ?1, head_tree_oid = ?2, index_checksum = ?3,
                           generation = generation + 1
          WHERE id = 1 AND generation = ?4",
-        params![new_head_oid, new_head_tree, new_index_checksum, prior_generation],
+        params![
+            new_head_oid,
+            new_head_tree,
+            new_index_checksum,
+            prior_generation
+        ],
     )?;
 
     if updated == 0 {
@@ -318,11 +322,7 @@ fn apply_add(
     Ok(())
 }
 
-fn apply_remove(
-    tx: &rusqlite::Transaction,
-    path_rel: &Path,
-    source: Source,
-) -> Result<()> {
+fn apply_remove(tx: &rusqlite::Transaction, path_rel: &Path, source: Source) -> Result<()> {
     let path_str = path_rel.to_string_lossy().to_string();
     let prev: Option<String> = tx
         .query_row(
@@ -378,11 +378,7 @@ fn blob_exists(tx: &rusqlite::Transaction, oid: &BlobOid) -> Result<bool> {
     Ok(n > 0)
 }
 
-fn insert_blob(
-    tx: &rusqlite::Transaction,
-    oid: &BlobOid,
-    fields: &WikiBlobFields,
-) -> Result<()> {
+fn insert_blob(tx: &rusqlite::Transaction, oid: &BlobOid, fields: &WikiBlobFields) -> Result<()> {
     tx.execute(
         "INSERT INTO blobs (oid, refcount, title, summary, body, aliases_text, tags_text, keywords_text)
          VALUES (?1, 0, ?2, ?3, ?4, ?5, ?6, ?7)",

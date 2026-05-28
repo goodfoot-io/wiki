@@ -191,6 +191,7 @@ pub fn run(
                         "fixes": plan.fixes,
                         "skipped": plan.skipped,
                         "plannedMeshes": plan.mesh.planned,
+                        "plannedDeletions": plan.mesh.planned_deletions,
                         "errors": diagnostics,
                     }))
                     .unwrap()
@@ -198,6 +199,7 @@ pub fn run(
             } else if plan.fixes.is_empty()
                 && plan.skipped.is_empty()
                 && plan.mesh.planned.is_empty()
+                && plan.mesh.planned_deletions.is_empty()
             {
                 println!("no fixes to apply");
             } else {
@@ -212,6 +214,9 @@ pub fn run(
                 }
                 for m in &plan.mesh.planned {
                     println!("create mesh: {m}");
+                }
+                for m in &plan.mesh.planned_deletions {
+                    println!("delete mesh: {m}");
                 }
                 // Mesh advisories (parse errors, dropped meshes, "Would rename"
                 // lines) are part of the preview.
@@ -233,6 +238,9 @@ pub fn run(
         // advisories print to stdout too; failures still go to stderr.
         if print_applied {
             for m in &plan.mesh.applied {
+                println!("{m}");
+            }
+            for m in &plan.mesh.deleted {
                 println!("{m}");
             }
         }
@@ -300,6 +308,7 @@ pub fn run(
                     "fixes": plan.fixes,
                     "skipped": plan.skipped,
                     "appliedMeshes": plan.mesh.applied,
+                    "deletedMeshes": plan.mesh.deleted,
                     "errors": post_diagnostics,
                 }))
                 .unwrap()

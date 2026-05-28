@@ -135,6 +135,10 @@ pub(crate) struct MeshCoverageOutcome {
     pub(crate) advisories: String,
     /// Repo-relative `.mesh/<slug>` paths that WOULD be created (dry-run preview).
     pub(crate) planned: Vec<String>,
+    /// Repo-relative `.mesh/<slug>` paths deleted this run (scaffold-orphan cleanup).
+    pub(crate) deleted: Vec<String>,
+    /// Repo-relative `.mesh/<slug>` paths that WOULD be deleted (dry-run preview).
+    pub(crate) planned_deletions: Vec<String>,
 }
 
 /// Build mesh coverage for `files` and apply it best-effort.
@@ -457,6 +461,8 @@ pub(crate) fn create_mesh_coverage(
             failures: Vec::new(),
             advisories,
             planned: Vec::new(),
+            deleted: Vec::new(),
+            planned_deletions: Vec::new(),
         });
     }
 
@@ -479,6 +485,8 @@ pub(crate) fn create_mesh_coverage(
             failures: Vec::new(),
             advisories,
             planned,
+            deleted: Vec::new(),
+            planned_deletions: Vec::new(),
         });
     }
 
@@ -497,6 +505,188 @@ pub(crate) fn create_mesh_coverage(
         failures,
         advisories,
         planned: Vec::new(),
+        deleted: Vec::new(),
+        planned_deletions: Vec::new(),
+    })
+}
+
+/// Build the repo-relative path string for a mesh given its mesh-dir-relative
+/// `name` (e.g. `wiki/scaffold`).
+///
+/// Returns `<mesh_dir_rel>/<name>` when `mesh_dir` is inside `repo_root`, or
+/// the absolute stringified path as a fallback.
+fn mesh_rel_path(repo_root: &Path, mesh_dir: &Path, name: &str) -> String {
+    match mesh_dir.strip_prefix(repo_root) {
+        Ok(d) => {
+            let d = d.to_string_lossy().replace('\\', "/");
+            if d.is_empty() {
+                name.to_string()
+            } else {
+                format!("{d}/{name}")
+            }
+        }
+        Err(_) => mesh_dir.join(name).to_string_lossy().replace('\\', "/"),
+    }
+}
+
+/// True iff `text` contains a non-empty line after the first blank line.
+///
+/// A scaffold mesh has anchor lines, a blank line, then EOF — no prose. A
+/// curated mesh has the `why` sentence after the blank line. This discriminator
+/// distinguishes them without needing to parse the anchor block.
+fn mesh_has_why(text: &str) -> bool {
+    let mut past_blank = false;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            past_blank = true;
+        } else if past_blank {
+            return true;
+        }
+    }
+    false
+}
+
+/// Outcome of the orphan-mesh cleanup stage.
+pub(crate) struct MeshCleanupResult {
+    pub(crate) deleted: Vec<String>,
+    pub(crate) planned_deletions: Vec<String>,
+    pub(crate) advisories: String,
+}
+
+/// Delete (or preview deletion of) scaffold meshes whose sole wiki page has
+/// been removed from disk.
+///
+/// Eligibility criteria (ALL must hold):
+/// 1. At least one `.md` anchor (wiki-derived mesh).
+/// 2. No `why` prose (`!mesh_has_why`).
+/// 3. Exactly one distinct `.md` path among anchors.
+/// 4. That path's file is absent on disk.
+///
+/// Ineligible-but-orphaned meshes (criteria 1+4 but NOT 2 or 3) produce an
+/// advisory. Meshes that are fully covered (no missing page) or have no `.md`
+/// anchor are left silently.
+///
+/// Best-effort: a failed `git mesh delete` is recorded and reported, never
+/// aborting the pass.
+pub(crate) fn cleanup_orphaned_meshes(
+    repo_root: &Path,
+    dry_run: bool,
+) -> Result<MeshCleanupResult> {
+    let mesh_dir = resolve_mesh_dir(repo_root);
+    let mut deleted: Vec<String> = Vec::new();
+    let mut planned_deletions: Vec<String> = Vec::new();
+    let mut advisories = String::new();
+
+    if !mesh_dir.is_dir() {
+        return Ok(MeshCleanupResult {
+            deleted,
+            planned_deletions,
+            advisories,
+        });
+    }
+
+    // Walk every regular file under mesh_dir.
+    let mut stack: Vec<std::path::PathBuf> = vec![mesh_dir.clone()];
+    while let Some(dir) = stack.pop() {
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                let text = match std::fs::read_to_string(&path) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                let anchors = parse_mesh_wiki_anchors(&text);
+                if anchors.is_empty() {
+                    // No .md anchors — hand-authored, leave silently.
+                    continue;
+                }
+
+                // Collect distinct .md paths.
+                let mut distinct_paths: Vec<String> = Vec::new();
+                for (p, _, _) in &anchors {
+                    if !distinct_paths.contains(p) {
+                        distinct_paths.push(p.clone());
+                    }
+                }
+
+                // Check which distinct paths are missing on disk.
+                let missing: Vec<&String> = distinct_paths
+                    .iter()
+                    .filter(|p| !repo_root.join(p.as_str()).exists())
+                    .collect();
+
+                if missing.is_empty() {
+                    // All pages present — leave silently.
+                    continue;
+                }
+
+                // Mesh-dir-relative name for this mesh file.
+                let mesh_name = match path.strip_prefix(&mesh_dir) {
+                    Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+                    Err(_) => continue,
+                };
+                let rel_path = mesh_rel_path(repo_root, &mesh_dir, &mesh_name);
+
+                if mesh_has_why(&text) {
+                    // Curated why — advisory only.
+                    for m in &missing {
+                        advisories.push_str(&format!(
+                            "Advisory: mesh `{rel_path}` anchors deleted page `{m}` but has curated why prose — leaving unchanged\n"
+                        ));
+                    }
+                    continue;
+                }
+
+                if distinct_paths.len() > 1 {
+                    // Multi-page mesh — advisory only.
+                    for m in &missing {
+                        advisories.push_str(&format!(
+                            "Advisory: mesh `{rel_path}` anchors deleted page `{m}` alongside other pages — leaving unchanged\n"
+                        ));
+                    }
+                    continue;
+                }
+
+                // Eligible: single wiki page, scaffold-style, page gone.
+                if dry_run {
+                    planned_deletions.push(rel_path);
+                } else {
+                    let status = Command::new("git")
+                        .args(["mesh", "delete", &mesh_name])
+                        .current_dir(repo_root)
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::inherit())
+                        .status();
+
+                    match status {
+                        Ok(s) if s.success() => {
+                            deleted.push(rel_path);
+                        }
+                        Ok(s) if s.code() == Some(1) => {
+                            // Already missing — treat as success.
+                            deleted.push(rel_path);
+                        }
+                        _ => {
+                            eprintln!(
+                                "wiki check --fix: `git mesh delete {mesh_name}` failed — skipping"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(MeshCleanupResult {
+        deleted,
+        planned_deletions,
+        advisories,
     })
 }
 
@@ -548,19 +738,8 @@ fn apply_drafts(
             continue;
         }
 
-        let mesh_path = mesh_dir.join(slug);
-        let rel = match mesh_dir.strip_prefix(repo_root) {
-            Ok(d) => {
-                let d = d.to_string_lossy().replace('\\', "/");
-                if d.is_empty() {
-                    slug.to_string()
-                } else {
-                    format!("{d}/{slug}")
-                }
-            }
-            Err(_) => mesh_path.to_string_lossy().replace('\\', "/"),
-        };
-        if !mesh_path.is_file() {
+        let rel = mesh_rel_path(repo_root, mesh_dir, slug);
+        if !mesh_dir.join(slug).is_file() {
             // Reported success but the deterministic mesh file is absent — treat
             // as a per-draft failure rather than emitting an incomplete path.
             eprintln!(
@@ -2090,5 +2269,140 @@ mod tests {
         assert_eq!(count_lines("a\n"), 1);
         assert_eq!(count_lines("a\nb"), 2);
         assert_eq!(count_lines("a\nb\n"), 2);
+    }
+
+    // ── mesh_has_why ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn mesh_has_why_false_for_scaffold_shape() {
+        // Anchor lines, one blank line, EOF — no prose.
+        let text = "wiki/page.md#L1-L5 sha256:abc\n\n";
+        assert!(!mesh_has_why(text));
+    }
+
+    #[test]
+    fn mesh_has_why_false_for_no_blank() {
+        // No blank line at all — definitely no why.
+        let text = "wiki/page.md#L1-L5 sha256:abc\n";
+        assert!(!mesh_has_why(text));
+    }
+
+    #[test]
+    fn mesh_has_why_true_for_curated_shape() {
+        // Anchor lines, blank line, then why sentence.
+        let text = "wiki/page.md#L1-L5 sha256:abc\n\nFlow that carries a charge from browser.\n";
+        assert!(mesh_has_why(text));
+    }
+
+    // ── cleanup_orphaned_meshes classification ────────────────────────────────
+
+    #[test]
+    fn cleanup_eligible_when_single_page_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let mesh_dir = root.join(".mesh");
+        std::fs::create_dir_all(&mesh_dir).unwrap();
+
+        // Scaffold mesh: anchor only, no why, single .md page, page absent.
+        std::fs::write(
+            mesh_dir.join("wiki-page"),
+            "wiki/page.md#L1-L5 sha256:abc\n\n",
+        )
+        .unwrap();
+
+        // Page does NOT exist on disk — eligible for deletion.
+        let result = cleanup_orphaned_meshes(root, true).unwrap();
+        assert_eq!(result.planned_deletions, vec![".mesh/wiki-page"]);
+        assert!(result.advisories.is_empty());
+    }
+
+    #[test]
+    fn cleanup_advisory_when_has_why() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let mesh_dir = root.join(".mesh");
+        std::fs::create_dir_all(&mesh_dir).unwrap();
+
+        // Curated mesh — has why after blank line.
+        std::fs::write(
+            mesh_dir.join("wiki-curated"),
+            "wiki/page.md#L1-L5 sha256:abc\n\nCurated reason here.\n",
+        )
+        .unwrap();
+
+        // Page does NOT exist — but ineligible due to why.
+        let result = cleanup_orphaned_meshes(root, true).unwrap();
+        assert!(result.planned_deletions.is_empty());
+        assert!(
+            result.advisories.contains("curated why prose"),
+            "expected curated-why advisory; got: {}",
+            result.advisories
+        );
+    }
+
+    #[test]
+    fn cleanup_advisory_when_multi_page_one_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let mesh_dir = root.join(".mesh");
+        std::fs::create_dir_all(&mesh_dir).unwrap();
+
+        // Multi-page mesh: two distinct .md paths, one gone.
+        std::fs::write(
+            mesh_dir.join("shared"),
+            "wiki/a.md#L1-L3 sha256:abc\nwiki/b.md#L2-L4 sha256:def\n\n",
+        )
+        .unwrap();
+        // wiki/a.md is absent; wiki/b.md present.
+        std::fs::create_dir_all(root.join("wiki")).unwrap();
+        std::fs::write(root.join("wiki/b.md"), "present\n").unwrap();
+
+        let result = cleanup_orphaned_meshes(root, true).unwrap();
+        assert!(result.planned_deletions.is_empty());
+        assert!(
+            result.advisories.contains("other pages"),
+            "expected multi-page advisory; got: {}",
+            result.advisories
+        );
+    }
+
+    #[test]
+    fn cleanup_leave_when_page_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let mesh_dir = root.join(".mesh");
+        std::fs::create_dir_all(&mesh_dir).unwrap();
+
+        // Scaffold mesh — page IS present on disk.
+        std::fs::create_dir_all(root.join("wiki")).unwrap();
+        std::fs::write(root.join("wiki/page.md"), "# Present\n").unwrap();
+        std::fs::write(
+            mesh_dir.join("wiki-page"),
+            "wiki/page.md#L1-L3 sha256:abc\n\n",
+        )
+        .unwrap();
+
+        let result = cleanup_orphaned_meshes(root, true).unwrap();
+        assert!(result.planned_deletions.is_empty());
+        assert!(result.advisories.is_empty());
+    }
+
+    #[test]
+    fn cleanup_leave_silently_when_no_md_anchor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let mesh_dir = root.join(".mesh");
+        std::fs::create_dir_all(&mesh_dir).unwrap();
+
+        // Hand-authored mesh with only non-.md anchors.
+        std::fs::write(
+            mesh_dir.join("hand-authored"),
+            "src/lib.rs#L1-L5 sha256:abc\n\n",
+        )
+        .unwrap();
+
+        let result = cleanup_orphaned_meshes(root, true).unwrap();
+        assert!(result.planned_deletions.is_empty());
+        assert!(result.advisories.is_empty());
     }
 }

@@ -9,7 +9,7 @@
 
 mod common;
 
-use wiki::index::{WikiIndex, SEARCH_LIMIT};
+use wiki::index::{SEARCH_LIMIT, WikiIndex};
 
 #[test]
 fn only_full_wiki_pages_appear_in_results() {

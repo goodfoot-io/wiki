@@ -92,8 +92,10 @@ impl DocSource {
                 match std::fs::read_to_string(&abs) {
                     Ok(s) => Ok(Some(s)),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                    Err(e) => Err(miette::miette!(e)
-                        .wrap_err(format!("failed to read {}", abs.display()))),
+                    Err(e) => {
+                        Err(miette::miette!(e)
+                            .wrap_err(format!("failed to read {}", abs.display())))
+                    }
                 }
             }
             DocSource::Index => crate::git::read_index_blob(repo_root, path_rel),
@@ -223,7 +225,10 @@ impl WikiIndex {
     ) -> Result<Self> {
         // Locate the .git directory by walking up from repo_root.
         let dot_git = find_dot_git(repo_root).ok_or_else(|| {
-            miette::miette!("could not find .git directory under {}", repo_root.display())
+            miette::miette!(
+                "could not find .git directory under {}",
+                repo_root.display()
+            )
         })?;
 
         let db_path = dot_git.join("wiki-index.sqlite");
@@ -233,8 +238,7 @@ impl WikiIndex {
         )
         .map_err(|e| miette::miette!("failed to open wiki index at {}: {e}", db_path.display()))?;
 
-        schema::bootstrap(&conn)
-            .map_err(|e| miette::miette!("schema bootstrap failed: {e}"))?;
+        schema::bootstrap(&conn).map_err(|e| miette::miette!("schema bootstrap failed: {e}"))?;
 
         let fs_class = forced_fs_class.unwrap_or_else(|| fs_class::detect(&dot_git));
 
@@ -304,8 +308,9 @@ impl WikiIndex {
         offset: usize,
     ) -> Result<(Vec<SearchResult>, usize)> {
         let limit_usize = if limit < 0 { 0 } else { limit as usize };
-        let (mut rows, total) = search::search_weighted(&self.conn, self.source, query, limit_usize, offset)
-            .map_err(|e| miette::miette!("search_weighted: {e}"))?;
+        let (mut rows, total) =
+            search::search_weighted(&self.conn, self.source, query, limit_usize, offset)
+                .map_err(|e| miette::miette!("search_weighted: {e}"))?;
         // Render `file` as an absolute path so `format_search_result` can
         // `strip_prefix(repo_root)` to produce repo-relative output.
         for r in &mut rows {
@@ -319,14 +324,9 @@ impl WikiIndex {
 
     /// Up to [`SUGGESTION_LIMIT`] BM25 suggestions for a missed lookup.
     pub fn suggest(&self, query: &str) -> Result<Vec<SearchResult>> {
-        let (rows, _total) = search::search_weighted(
-            &self.conn,
-            self.source,
-            query,
-            SUGGESTION_LIMIT as usize,
-            0,
-        )
-        .map_err(|e| miette::miette!("suggest: {e}"))?;
+        let (rows, _total) =
+            search::search_weighted(&self.conn, self.source, query, SUGGESTION_LIMIT as usize, 0)
+                .map_err(|e| miette::miette!("suggest: {e}"))?;
         Ok(rows)
     }
 
@@ -380,19 +380,15 @@ impl WikiIndex {
     pub fn debug_blob_path_counts(&self, oid: &str) -> Result<(usize, usize)> {
         let blob_count: i64 = self
             .conn
-            .query_row(
-                "SELECT COUNT(*) FROM blobs WHERE oid = ?1",
-                [oid],
-                |r| r.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM blobs WHERE oid = ?1", [oid], |r| {
+                r.get(0)
+            })
             .map_err(|e| miette::miette!("blob_count: {e}"))?;
         let path_count: i64 = self
             .conn
-            .query_row(
-                "SELECT COUNT(*) FROM paths WHERE oid = ?1",
-                [oid],
-                |r| r.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM paths WHERE oid = ?1", [oid], |r| {
+                r.get(0)
+            })
             .map_err(|e| miette::miette!("path_count: {e}"))?;
         Ok((blob_count as usize, path_count as usize))
     }

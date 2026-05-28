@@ -21,13 +21,13 @@ fn parity_fixture_three_pass_snapshot() {
     // parity fixture commits .gitignore *after* staging staged.md, so both
     // files appear in HEAD. untracked.md and ignored.md have no git history.
     let expected: Vec<(&str, Source, &str)> = vec![
-        ("committed.md", Source::Tree,     "Committed Page"),
-        ("committed.md", Source::Index,    "Committed Page"),
+        ("committed.md", Source::Tree, "Committed Page"),
+        ("committed.md", Source::Index, "Committed Page"),
         ("committed.md", Source::Worktree, "Committed Page"),
-        ("ignored.md",   Source::Worktree, "Ignored Page"),
-        ("staged.md",    Source::Tree,     "Staged Page"),
-        ("staged.md",    Source::Index,    "Staged Page"),
-        ("staged.md",    Source::Worktree, "Staged Page"),
+        ("ignored.md", Source::Worktree, "Ignored Page"),
+        ("staged.md", Source::Tree, "Staged Page"),
+        ("staged.md", Source::Index, "Staged Page"),
+        ("staged.md", Source::Worktree, "Staged Page"),
         ("untracked.md", Source::Worktree, "Untracked Page"),
     ];
 

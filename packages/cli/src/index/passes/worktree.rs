@@ -51,8 +51,7 @@ pub fn pass_worktree(
     // paths (for dirty dirs) without re-querying per file.
     let mut paths_by_parent: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
     {
-        let mut stmt = tx
-            .prepare("SELECT path_rel, parent_dir FROM paths WHERE source = ?1")?;
+        let mut stmt = tx.prepare("SELECT path_rel, parent_dir FROM paths WHERE source = ?1")?;
         let rows = stmt.query_map(params![source_id(Source::Worktree)], |row| {
             let p: String = row.get(0)?;
             let d: String = row.get(1)?;
@@ -129,10 +128,8 @@ pub fn pass_worktree(
             // descend into (including the repo root, rel == "").
             let dir_mtime_ns = dir_mtime_ns(path);
             let prior = prior_dir_mtimes.get(&rel).copied();
-            let is_clean = !is_hostile
-                && dir_mtime_ns.is_some()
-                && prior.is_some()
-                && prior == dir_mtime_ns;
+            let is_clean =
+                !is_hostile && dir_mtime_ns.is_some() && prior.is_some() && prior == dir_mtime_ns;
 
             if is_clean {
                 // Carry forward this directory's known Worktree paths so
@@ -185,7 +182,9 @@ pub fn pass_worktree(
             deltas.push(PassDelta {
                 path: rel,
                 source: Source::Worktree,
-                action: DeltaAction::Add { oid: BlobOid(oid.0) },
+                action: DeltaAction::Add {
+                    oid: BlobOid(oid.0),
+                },
             });
         }
     }
@@ -194,7 +193,9 @@ pub fn pass_worktree(
     // (or in a vanished/dirty dir that didn't re-observe them).
     let mut stmt = tx.prepare("SELECT path_rel FROM paths WHERE source = ?1")?;
     let rows: Vec<String> = stmt
-        .query_map(params![source_id(Source::Worktree)], |r| r.get::<_, String>(0))?
+        .query_map(params![source_id(Source::Worktree)], |r| {
+            r.get::<_, String>(0)
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
     for row in rows {

@@ -1,3 +1,4 @@
 wiki/architecture/wiki-mesh-integration.md#L28-L36 sha256:06344ab693bccb90c66cba494fecaa7f5acfe5196224c6ba06cefc745158c5bc
 packages/cli/src/commands/mesh/scaffold.rs#L159-L166 sha256:4de0a8ffe3d9e84daff17d695c7f067ea596c74773aff1dadda330e1b9bb1303
+packages/cli/src/commands/mesh/scaffold.rs#L163-L170 sha256:4de0a8ffe3d9e84daff17d695c7f067ea596c74773aff1dadda330e1b9bb1303
 

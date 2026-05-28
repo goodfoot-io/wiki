@@ -33,7 +33,7 @@ wiki check --fix wiki/architecture/*.md
 wiki check --fix "packages/auth/**/*.md"
 ```
 
-[Scans the same file set as `wiki check`](/packages/cli/src/commands/mesh/scaffold.rs#L159-L166) and creates a `git mesh` for every fragment link not yet covered. Runs as Fix #4 within the `--fix` pipeline, after link and anchor repairs. The meshes are created with anchors only (no why); the author is expected to add a `git mesh why` before or after committing (see [Adding Mesh Coverage](../guides/adding-mesh-coverage.md)).
+[Scans the same file set as `wiki check`](/packages/cli/src/commands/mesh/scaffold.rs#L163-L170) and creates a `git mesh` for every fragment link not yet covered. Runs as Fix #4 within the `--fix` pipeline, after link and anchor repairs. The meshes are created with anchors only (no why); the author is expected to add a `git mesh why` before or after committing (see [Adding Mesh Coverage](../guides/adding-mesh-coverage.md)).
 
 ### Mesh naming
 

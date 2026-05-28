@@ -103,11 +103,10 @@ pub fn bootstrap(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         ))?;
     } else {
         // Validate that the stored schema version matches ours.
-        let stored: i64 = conn.query_row(
-            "SELECT schema_version FROM state WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )?;
+        let stored: i64 =
+            conn.query_row("SELECT schema_version FROM state WHERE id = 1", [], |row| {
+                row.get(0)
+            })?;
         if stored != SCHEMA_VERSION {
             return Err(rusqlite::Error::InvalidQuery);
         }

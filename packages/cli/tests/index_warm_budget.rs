@@ -8,7 +8,7 @@ mod common;
 
 use std::time::Instant;
 
-use wiki::index::{WikiIndex, SEARCH_LIMIT};
+use wiki::index::{SEARCH_LIMIT, WikiIndex};
 
 #[test]
 fn warm_search_p95_under_50ms() {
