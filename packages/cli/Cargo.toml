@@ -6,7 +6,7 @@ build = "build.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-gix = { version = "=0.84", default-features = false, features = ["revision", "sha1", "attributes", "index", "status"] }
+gix = { version = "=0.84", default-features = false, features = ["revision", "sha1", "attributes", "index", "blob-diff", "excludes", "dirwalk"] }
 globset = "0.4"
 ignore = "0.4"
 serde = { version = "1", features = ["derive"] }
@@ -25,6 +25,9 @@ toml_edit = "0.22"
 fs4 = { version = "0.13", features = ["sync"] }
 anyhow = "1"
 indexmap = { version = "2", features = ["serde"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 # `git-mesh` is installed by npm as `git-mesh.cmd`/`git-mesh.ps1` shims on
 # Windows. `Command::new("git-mesh")` cannot find them (CreateProcessW ignores

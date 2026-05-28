@@ -97,44 +97,6 @@ fn open_persisted_index(repo: &gix::Repository) -> Result<gix::worktree::Index> 
         .ok_or_else(|| miette!("git index is absent — nothing staged"))
 }
 
-fn status_platform(
-    repo: &gix::Repository,
-) -> Result<gix::status::Platform<'_, gix::progress::Discard>> {
-    repo.status(gix::progress::Discard)
-        .into_diagnostic()
-        .wrap_err("failed to initialize git status platform")
-}
-
-fn collect_status_items(
-    repo: &gix::Repository,
-    include_untracked: bool,
-) -> Result<Vec<gix::status::index_worktree::Item>> {
-    let mut status = status_platform(repo)?;
-    if include_untracked {
-        status = status.untracked_files(gix::status::UntrackedFiles::Files);
-    } else {
-        status = status.untracked_files(gix::status::UntrackedFiles::None);
-        status = status.index_worktree_options_mut(|opts| {
-            opts.dirwalk_options = None;
-        });
-    }
-
-    let iter = status
-        .into_index_worktree_iter(Vec::<gix::bstr::BString>::new())
-        .into_diagnostic()
-        .wrap_err("failed to iterate git status")?;
-
-    let mut items = Vec::new();
-    for item in iter {
-        items.push(
-            item.into_diagnostic()
-                .wrap_err("git status iteration failed")?,
-        );
-    }
-
-    Ok(items)
-}
-
 /// Return the absolute path to the repository root containing the current
 /// working directory.
 pub fn repo_root() -> Result<PathBuf> {
@@ -196,45 +158,6 @@ pub fn git_acceleration_state(repo: &Path) -> Result<GitAccelerationState> {
     })
 }
 
-/// Return true when the working tree has unstaged tracked changes.
-pub fn has_unstaged_changes(repo: &Path) -> Result<bool> {
-    let repo = open_repo(repo)?;
-    Ok(collect_status_items(&repo, false)?
-        .into_iter()
-        .any(|item| item.summary().is_some()))
-}
-
-/// Return true when the index has staged tracked changes relative to `HEAD`.
-pub fn has_staged_changes(repo: &Path) -> Result<bool> {
-    let repo = open_repo(repo)?;
-    let index = repo
-        .index_or_load_from_head_or_empty()
-        .into_diagnostic()
-        .wrap_err("failed to load git index for staged-change probe")?;
-    let mut staged_changes = false;
-
-    repo.tree_index_status(
-        repo.head_tree_id_or_empty()
-            .into_diagnostic()
-            .wrap_err("failed to resolve HEAD tree for staged-change probe")?
-            .as_ref(),
-        match &index {
-            gix::worktree::IndexPersistedOrInMemory::Persisted(index) => index,
-            gix::worktree::IndexPersistedOrInMemory::InMemory(index) => index,
-        },
-        None,
-        gix::status::tree_index::TrackRenames::Disabled,
-        |_, _, _| {
-            staged_changes = true;
-            Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Break(()))
-        },
-    )
-    .into_diagnostic()
-    .wrap_err("failed to compare HEAD tree to index")?;
-
-    Ok(staged_changes)
-}
-
 /// Return tracked paths changed between two commits.
 pub fn changed_paths_between(repo: &Path, from_ref: &str, to_ref: &str) -> Result<Vec<String>> {
     let range = format!("{from_ref}..{to_ref}");
@@ -243,67 +166,54 @@ pub fn changed_paths_between(repo: &Path, from_ref: &str, to_ref: &str) -> Resul
     Ok(parse_line_paths(&out))
 }
 
-/// Return working-tree paths with modified, deleted, staged, or untracked
-/// changes using `git status --short`.
-pub fn working_tree_changed_paths(repo: &Path) -> Result<Vec<String>> {
-    let mut paths = Vec::new();
-    let repo = open_repo(repo)?;
-
-    for item in collect_status_items(&repo, true)? {
-        if item.summary().is_none() {
-            continue;
-        }
-        paths.push(utf8_repo_path(
-            item.rela_path(),
-            "git status path is not valid UTF-8",
-        )?);
-    }
-
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
-}
-
 /// Return the tracked and untracked, non-ignored repository file inventory as
 /// repo-relative UTF-8 paths.
+///
+/// Tracked paths are sourced from the git index; untracked-but-not-ignored
+/// paths are sourced from a `ignore::WalkBuilder` walk that honours
+/// `.gitignore`, `.git/info/exclude`, and `core.excludesFile` (the same set
+/// of sources `git status --short` consults).
 pub fn repo_inventory(repo: &Path) -> Result<Vec<String>> {
-    let repo = open_repo(repo)?;
-    let mut paths = Vec::new();
+    let gix_repo = open_repo(repo)?;
+    let mut paths: HashSet<String> = HashSet::new();
 
-    for_each_tracked_path(&repo, |path| {
-        paths.push(utf8_repo_path(
+    for_each_tracked_path(&gix_repo, |path| {
+        paths.insert(utf8_repo_path(
             path,
             "git inventory path is not valid UTF-8",
         )?);
         Ok(())
     })?;
 
-    for item in collect_status_items(&repo, true)? {
-        if item.summary() == Some(gix::status::index_worktree::iter::Summary::Added) {
-            paths.push(utf8_repo_path(
-                item.rela_path(),
-                "git inventory path is not valid UTF-8",
-            )?);
+    let walker = ignore::WalkBuilder::new(repo)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .require_git(false)
+        .follow_links(false)
+        .build();
+    for entry in walker.flatten() {
+        let entry_path = entry.path();
+        if entry_path == repo {
+            continue;
+        }
+        // Skip directories: we want files only. The walker yields both.
+        if entry.file_type().is_some_and(|t| t.is_dir()) {
+            continue;
+        }
+        // Skip `.git` and anything inside it.
+        if let Ok(rel) = entry_path.strip_prefix(repo) {
+            if rel.components().next().map(|c| c.as_os_str()) == Some(std::ffi::OsStr::new(".git"))
+            {
+                continue;
+            }
+            paths.insert(rel.to_string_lossy().into_owned());
         }
     }
 
+    let mut paths: Vec<String> = paths.into_iter().collect();
     paths.sort();
-    paths.dedup();
-    Ok(paths)
-}
-
-/// Return untracked, non-ignored repository file inventory as repo-relative
-/// UTF-8 paths.
-pub fn untracked_paths(repo: &Path) -> Result<Vec<String>> {
-    let repo = open_repo(repo)?;
-    let mut paths = collect_status_items(&repo, true)?
-        .into_iter()
-        .filter(|item| item.summary() == Some(gix::status::index_worktree::iter::Summary::Added))
-        .map(|item| utf8_repo_path(item.rela_path(), "git untracked path is not valid UTF-8"))
-        .collect::<Result<Vec<_>>>()?;
-
-    paths.sort();
-    paths.dedup();
     Ok(paths)
 }
 
@@ -912,33 +822,6 @@ mod tests {
         assert_eq!(
             inventory,
             vec!["notes/untracked.md".to_owned(), "tracked.md".to_owned()]
-        );
-    }
-
-    #[test]
-    fn status_probes_detect_staged_and_unstaged_changes_in_process() {
-        let repo = TestRepo::new();
-        repo.create_file("doc.md", "v1\n");
-        repo.commit("initial");
-
-        repo.create_file("doc.md", "v2\n");
-        assert!(
-            has_unstaged_changes(repo.path()).expect("unstaged probe"),
-            "expected unstaged modification"
-        );
-        assert_eq!(
-            working_tree_changed_paths(repo.path()).expect("working tree changed paths"),
-            vec!["doc.md".to_owned()]
-        );
-
-        repo.git(&["add", "doc.md"]);
-        assert!(
-            has_staged_changes(repo.path()).expect("staged probe"),
-            "expected staged modification"
-        );
-        assert_eq!(
-            untracked_paths(repo.path()).expect("untracked paths"),
-            Vec::<String>::new()
         );
     }
 

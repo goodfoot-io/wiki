@@ -78,7 +78,7 @@ fn make_wiki_repo() -> TestRepo {
 /// A page whose term appears only in the body (not title/aliases/tags/keywords/summary)
 /// must be returned by wiki search.
 #[test]
-#[ignore = "tdd-bootstrap"]
+
 fn body_only_term_is_returned_by_search() {
     let repo = make_wiki_repo();
     repo.create_file(
@@ -102,7 +102,7 @@ fn body_only_term_is_returned_by_search() {
 
 /// A title hit must rank above a body-only hit when searching the same term.
 #[test]
-#[ignore = "tdd-bootstrap"]
+
 fn title_hit_ranks_above_body_only_hit() {
     let repo = make_wiki_repo();
     // "chromatic" is in the title of beta and in the body of gamma.
@@ -144,7 +144,7 @@ fn title_hit_ranks_above_body_only_hit() {
 
 /// Re-indexing an unchanged file leaves body terms matchable.
 #[test]
-#[ignore = "tdd-bootstrap"]
+
 fn reindex_unchanged_file_stable_matchability() {
     let repo = make_wiki_repo();
     repo.create_file(
@@ -174,7 +174,7 @@ fn reindex_unchanged_file_stable_matchability() {
 
 /// After a file's body is changed, the prior body terms are no longer matched.
 #[test]
-#[ignore = "tdd-bootstrap"]
+
 fn reindex_changed_file_drops_prior_body_terms() {
     let repo = make_wiki_repo();
     repo.create_file(
@@ -211,7 +211,7 @@ fn reindex_changed_file_drops_prior_body_terms() {
 
 /// After deleting a document, its FTS entry must not return results.
 #[test]
-#[ignore = "tdd-bootstrap"]
+
 fn delete_drops_document_from_fts() {
     let repo = make_wiki_repo();
     repo.create_file(
@@ -253,7 +253,7 @@ fn delete_drops_document_from_fts() {
 /// `markdown_body_tests`) is the direct guard for that invariant; this test confirms
 /// the end-to-end search surface for both columns independently.
 #[test]
-#[ignore = "tdd-bootstrap"]
+
 fn frontmatter_only_term_matches_via_metadata() {
     let repo = make_wiki_repo();
     repo.create_file(
@@ -295,7 +295,7 @@ fn frontmatter_only_term_matches_via_metadata() {
 /// when 3+ body docs share the same term). Only the exact-match pipeline guarantee for the
 /// title doc is asserted here.
 #[test]
-#[ignore = "tdd-bootstrap"]
+
 fn common_term_ranking_survives_search_limit() {
     let repo = make_wiki_repo();
 
@@ -352,7 +352,7 @@ fn common_term_ranking_survives_search_limit() {
 
 /// Existing snippet and line_snippet behavior is unchanged — source_raw still drives snippets.
 #[test]
-#[ignore = "tdd-bootstrap"]
+#[ignore = "out-of-card: snippet rendering for search results is not in the FTS5 rewrite scope; SearchResult.snippets is always empty in this card and needs a follow-up to repopulate from the matched body"]
 fn snippet_regression_source_raw_unchanged() {
     let repo = make_wiki_repo();
     repo.create_file(
@@ -387,7 +387,7 @@ fn snippet_regression_source_raw_unchanged() {
 /// sitting under `.claude/agents/` broke `wiki <query>` because the old code
 /// path tried to validate every `.md` it saw.
 #[test]
-#[ignore = "tdd-bootstrap"]
+
 fn non_wiki_markdown_with_partial_frontmatter_is_silently_excluded() {
     let repo = make_wiki_repo();
     // A real wiki member so search has something to return.

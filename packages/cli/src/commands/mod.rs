@@ -70,7 +70,7 @@ pub(crate) fn git_mesh_command() -> Command {
 /// A string is treated as a path when it contains a `/` separator or ends
 /// with `.md`, so `wiki/page.md` and `./wiki/page.md` are both paths, while
 /// `My Page Title` is a title.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn looks_like_path(s: &str) -> bool {
     s.contains('/') || s.ends_with(".md")
 }

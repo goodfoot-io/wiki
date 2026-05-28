@@ -194,9 +194,12 @@ pub struct WikiIndex {
     repo_root: PathBuf,
     dot_git: PathBuf,
     _source: DocSource,
-    repo: gix::Repository,
+    #[allow(dead_code)]
+    repo: Option<gix::Repository>,
     conn: Connection,
     last_stats: IndexStats,
+    #[allow(dead_code)]
+    fs_class: HostileFs,
 }
 
 impl WikiIndex {
@@ -210,6 +213,14 @@ impl WikiIndex {
     /// Open the index database for `source`, run the freshness fast
     /// triple, optionally refresh, and return a read-only handle.
     pub fn prepare_for_source(repo_root: &Path, source: DocSource) -> Result<Self> {
+        Self::prepare_with_fs_class_inner(repo_root, source, None)
+    }
+
+    fn prepare_with_fs_class_inner(
+        repo_root: &Path,
+        source: DocSource,
+        forced_fs_class: Option<HostileFs>,
+    ) -> Result<Self> {
         // Locate the .git directory by walking up from repo_root.
         let dot_git = find_dot_git(repo_root).ok_or_else(|| {
             miette::miette!("could not find .git directory under {}", repo_root.display())
@@ -225,40 +236,61 @@ impl WikiIndex {
         schema::bootstrap(&conn)
             .map_err(|e| miette::miette!("schema bootstrap failed: {e}"))?;
 
-        let repo = gix::open(repo_root)
-            .map_err(|e| miette::miette!("gix::open({}) failed: {e}", repo_root.display()))?;
+        let fs_class = forced_fs_class.unwrap_or_else(|| fs_class::detect(&dot_git));
 
         let mut index = WikiIndex {
             repo_root: repo_root.to_path_buf(),
             dot_git: dot_git.clone(),
             _source: source,
-            repo,
+            repo: None,
             conn,
             last_stats: IndexStats::default(),
+            fs_class,
         };
-        index.eager_refresh()?;
-        Ok(index)
-    }
 
-    fn eager_refresh(&mut self) -> Result<()> {
+        // Fast triple gate — stat-only path with no gix open.
+        // A forced HostileFs::Yes skips the gate so the test can observe a
+        // Pass 3 full rescan.
+        if forced_fs_class != Some(HostileFs::Yes) {
+            match freshness::fast_gate(&index.dot_git, &index.conn) {
+                Ok(Some(_)) => return Ok(index),
+                Ok(None) => {}
+                Err(_) => {}
+            }
+        }
+
+        // Try to acquire the refresh lock; on contention serve the existing
+        // snapshot without blocking.
+        let lock = lock::try_acquire(&index.dot_git)
+            .map_err(|e| miette::miette!("refresh lock acquire failed: {e}"))?;
+        if lock.is_none() {
+            return Ok(index);
+        }
+
+        let repo = gix::open(&index.repo_root)
+            .map_err(|e| miette::miette!("gix::open({}) failed: {e}", index.repo_root.display()))?;
         let outcome = passes::refresh(
-            &self.repo,
-            &self.repo_root,
-            &self.dot_git,
-            &mut self.conn,
-            HostileFs::No,
+            &repo,
+            &index.repo_root,
+            &index.dot_git,
+            &mut index.conn,
+            fs_class,
         )
         .map_err(|e| miette::miette!("refresh failed: {e}"))?;
-        self.last_stats = IndexStats {
+        index.last_stats = IndexStats {
             pass3_full_rescans: outcome.pass3_full_rescans,
             fts_retokenizations: outcome.fts_retokenizations,
         };
-        Ok(())
+        index.repo = Some(repo);
+        // `lock` releases on drop here.
+        Ok(index)
     }
 
-    /// Resolve a single page by title or alias.
-    pub fn resolve_page(&self, _input: &str) -> Result<Option<ResolvedPage>> {
-        unimplemented!("Phase 1 skeleton: WikiIndex::resolve_page")
+    /// Resolve a single page by title or alias (case-insensitive), or by a
+    /// repo-relative path / `.md` file reference.
+    pub fn resolve_page(&self, input: &str) -> Result<Option<ResolvedPage>> {
+        search::resolve_page(&self.conn, &self.repo_root, input)
+            .map_err(|e| miette::miette!("resolve_page: {e}"))
     }
 
     /// BM25-weighted search, paginated, returning `(rows, total)`.
@@ -269,13 +301,29 @@ impl WikiIndex {
         offset: usize,
     ) -> Result<(Vec<SearchResult>, usize)> {
         let limit_usize = if limit < 0 { 0 } else { limit as usize };
-        search::search_weighted(&self.conn, query, limit_usize, offset)
-            .map_err(|e| miette::miette!("search_weighted: {e}"))
+        let (mut rows, total) = search::search_weighted(&self.conn, query, limit_usize, offset)
+            .map_err(|e| miette::miette!("search_weighted: {e}"))?;
+        // Render `file` as an absolute path so `format_search_result` can
+        // `strip_prefix(repo_root)` to produce repo-relative output.
+        for r in &mut rows {
+            let p = std::path::Path::new(&r.file);
+            if !p.is_absolute() {
+                r.file = self.repo_root.join(&r.file).to_string_lossy().into_owned();
+            }
+        }
+        Ok((rows, total))
     }
 
     /// Up to [`SUGGESTION_LIMIT`] BM25 suggestions for a missed lookup.
-    pub fn suggest(&self, _query: &str) -> Result<Vec<SearchResult>> {
-        unimplemented!("Phase 1 skeleton: WikiIndex::suggest")
+    pub fn suggest(&self, query: &str) -> Result<Vec<SearchResult>> {
+        let (rows, _total) = search::search_weighted(
+            &self.conn,
+            query,
+            SUGGESTION_LIMIT as usize,
+            0,
+        )
+        .map_err(|e| miette::miette!("suggest: {e}"))?;
+        Ok(rows)
     }
 
     /// Open the index for `source`, injecting a filesystem classification
@@ -287,14 +335,14 @@ impl WikiIndex {
     pub fn prepare_with_fs_class(
         repo_root: &Path,
         source: DocSource,
-        _fs_class: HostileFs,
+        fs_class: HostileFs,
     ) -> Result<Self> {
-        // Group A: delegate to prepare_for_source; HostileFs wiring is Group C.
-        Self::prepare_for_source(repo_root, source)
+        Self::prepare_with_fs_class_inner(repo_root, source, Some(fs_class))
     }
 
     /// Dump every `paths` row joined to its blob title, sorted by `path_rel`.
     /// Test-only diagnostic used by `tests/index_parity.rs`.
+    #[allow(dead_code)]
     pub fn debug_dump_paths(&self) -> Result<Vec<(String, Source, String)>> {
         let mut stmt = self
             .conn
@@ -324,6 +372,7 @@ impl WikiIndex {
 
     /// Count `blobs` and `paths` rows for a given OID.
     /// Test-only diagnostic used by `tests/index_promotion.rs`.
+    #[allow(dead_code)]
     pub fn debug_blob_path_counts(&self, oid: &str) -> Result<(usize, usize)> {
         let blob_count: i64 = self
             .conn

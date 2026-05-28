@@ -3,9 +3,11 @@
 
 use std::collections::HashSet;
 
+use std::path::Path;
+
 use rusqlite::{Connection, params};
 
-use crate::index::SearchResult;
+use crate::index::{ResolvedPage, SearchResult};
 
 /// Run a weighted search. Returns up to `limit` rows starting at `offset`,
 /// alongside the (uncapped) total match count.
@@ -153,6 +155,122 @@ pub fn search_weighted(
     let total = out.len();
     let paged: Vec<SearchResult> = out.into_iter().skip(offset).take(limit).collect();
     Ok((paged, total))
+}
+
+/// Resolve a single page by title, alias, repo-relative path, or `.md` link.
+///
+/// Returns the first match, prioritizing exact title/alias hits, then path
+/// fragment lookups. The returned `ResolvedPage` carries the *absolute* file
+/// path (joined against `repo_root`) so callers can `strip_prefix`.
+pub fn resolve_page(
+    conn: &Connection,
+    repo_root: &Path,
+    input: &str,
+) -> rusqlite::Result<Option<ResolvedPage>> {
+    let q_lower = input.to_lowercase();
+
+    // Exact title match.
+    let mut stmt = conn.prepare(
+        "SELECT b.rowid, b.title, b.summary, b.body, p.path_rel
+         FROM blobs b
+         JOIN paths p ON p.oid = b.oid
+         WHERE lower(b.title) = ?1
+         LIMIT 1",
+    )?;
+    let row: Option<(i64, String, String, String, String)> = stmt
+        .query_row(params![q_lower], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })
+        .ok();
+    if let Some((rowid, title, summary, body, path_rel)) = row {
+        return Ok(Some(ResolvedPage {
+            title,
+            file: repo_root.join(&path_rel).to_string_lossy().into_owned(),
+            summary,
+            content: body,
+            alias: None,
+            document_id: rowid,
+        }));
+    }
+
+    // Alias match: aliases_text is whitespace-joined.
+    let mut stmt = conn.prepare(
+        "SELECT b.rowid, b.title, b.summary, b.body, b.aliases_text, p.path_rel
+         FROM blobs b
+         JOIN paths p ON p.oid = b.oid",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, String>(5)?,
+        ))
+    })?;
+    for row in rows {
+        let (rowid, title, summary, body, aliases, path_rel) = row?;
+        let needle = q_lower.as_str();
+        let mut matched: Option<String> = None;
+        for a in aliases.split(|c: char| c.is_whitespace() || c == ',') {
+            let a = a.trim();
+            if !a.is_empty() && a.eq_ignore_ascii_case(needle) {
+                matched = Some(a.to_string());
+                break;
+            }
+        }
+        if matched.is_some() {
+            return Ok(Some(ResolvedPage {
+                title,
+                file: repo_root.join(&path_rel).to_string_lossy().into_owned(),
+                summary,
+                content: body,
+                alias: matched,
+                document_id: rowid,
+            }));
+        }
+    }
+
+    // Path lookup.
+    if input.contains('/') || input.ends_with(".md") {
+        let mut stmt = conn.prepare(
+            "SELECT b.rowid, b.title, b.summary, b.body, p.path_rel
+             FROM paths p JOIN blobs b ON b.oid = p.oid
+             WHERE p.path_rel = ?1 OR p.path_rel LIKE ?2
+             LIMIT 1",
+        )?;
+        let pat = format!("%{input}%");
+        let row: Option<(i64, String, String, String, String)> = stmt
+            .query_row(params![input, pat], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })
+            .ok();
+        if let Some((rowid, title, summary, body, path_rel)) = row {
+            return Ok(Some(ResolvedPage {
+                title,
+                file: repo_root.join(&path_rel).to_string_lossy().into_owned(),
+                summary,
+                content: body,
+                alias: None,
+                document_id: rowid,
+            }));
+        }
+    }
+
+    Ok(None)
 }
 
 /// Escape an FTS5 MATCH query: wrap the query in double quotes and double

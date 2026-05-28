@@ -127,18 +127,6 @@ pub fn scope_result<T, E>(
     result
 }
 
-#[allow(dead_code)]
-pub async fn scope_async_result<T, E, F>(name: &str, meta: Value, future: F) -> Result<T, E>
-where
-    F: std::future::Future<Output = Result<T, E>>,
-{
-    let start = Instant::now();
-    let result = future.await;
-    let status = if result.is_ok() { "ok" } else { "error" };
-    log_event(name, start.elapsed().as_secs_f64() * 1000.0, status, meta);
-    result
-}
-
 fn log_path(repo_root: &Path) -> Option<PathBuf> {
     fs::create_dir_all(repo_root).ok()?;
     Some(repo_root.join("wiki.log"))

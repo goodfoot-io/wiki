@@ -13,7 +13,6 @@ use assert_cmd::Command;
 use fs4::fs_std::FileExt;
 
 #[test]
-#[ignore = "tdd-bootstrap"]
 fn second_process_returns_without_waiting_on_lock() {
     let repo = common::make_parity_fixture();
 

@@ -8,7 +8,6 @@ mod common;
 use wiki::index::{DocSource, HostileFs, WikiIndex};
 
 #[test]
-#[ignore = "tdd-bootstrap"]
 fn hostile_fs_forces_full_pass3_rescan() {
     let repo = common::make_parity_fixture();
 

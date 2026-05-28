@@ -11,7 +11,6 @@ use std::time::Instant;
 use wiki::index::{WikiIndex, SEARCH_LIMIT};
 
 #[test]
-#[ignore = "tdd-bootstrap"]
 fn warm_search_p95_under_50ms() {
     let repo = common::make_parity_fixture();
 
