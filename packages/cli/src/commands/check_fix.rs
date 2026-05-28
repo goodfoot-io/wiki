@@ -879,9 +879,16 @@ fn parse_stale_json(stdout: &str) -> Result<Vec<MeshMovePlan>> {
 /// be) applied.
 ///
 /// When `dry_run` is false, patched content is written back to disk.
+///
+/// `scan_root` and `globs` define the scope of the run (as supplied to
+/// `check::run`). They are forwarded to `cleanup_orphaned_meshes` so that
+/// cleanup only touches orphans whose sole `.md` anchor falls within the
+/// same scope that the discovery pass used.
 pub fn run_fix_pass(
     files: &[PathBuf],
     repo_root: &Path,
+    scan_root: &Path,
+    globs: &[String],
     source: DocSource,
     dry_run: bool,
 ) -> Result<FixPlan> {
@@ -1511,7 +1518,11 @@ pub fn run_fix_pass(
 
     // Cleanup stage: delete scaffold meshes whose sole wiki page was removed.
     // Runs AFTER creation so the two halves never interfere.
-    let cleanup = super::mesh::scaffold::cleanup_orphaned_meshes(repo_root, dry_run)?;
+    // Scoped to the same scan_root + globs used for discovery so a subtree
+    // invocation only touches orphans whose sole .md anchor is within scope.
+    let cleanup = super::mesh::scaffold::cleanup_orphaned_meshes(
+        repo_root, scan_root, globs, dry_run,
+    )?;
     mesh.deleted.extend(cleanup.deleted);
     mesh.planned_deletions.extend(cleanup.planned_deletions);
     if !cleanup.advisories.is_empty() {
@@ -1683,6 +1694,8 @@ mod tests {
         let plan = run_fix_pass(
             &[source.clone(), target.clone()],
             repo.path(),
+            repo.path(),
+            &[],
             crate::index::DocSource::WorkingTree,
             /* dry_run */ true,
         )
@@ -1747,6 +1760,8 @@ mod tests {
         let plan = run_fix_pass(
             &[source.clone(), target.clone()],
             repo.path(),
+            repo.path(),
+            &[],
             crate::index::DocSource::WorkingTree,
             /* dry_run */ true,
         )

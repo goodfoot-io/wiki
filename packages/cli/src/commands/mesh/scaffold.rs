@@ -561,15 +561,24 @@ pub(crate) struct MeshCleanupResult {
 /// 2. No `why` prose (`!mesh_has_why`).
 /// 3. Exactly one distinct `.md` path among anchors.
 /// 4. That path's file is absent on disk.
+/// 5. The sole `.md` anchor falls within the run's scope (`scan_root`/`globs`).
 ///
 /// Ineligible-but-orphaned meshes (criteria 1+4 but NOT 2 or 3) produce an
-/// advisory. Meshes that are fully covered (no missing page) or have no `.md`
-/// anchor are left silently.
+/// advisory. Meshes that are fully covered (no missing page), have no `.md`
+/// anchor, or whose anchor is out of scope are left silently.
+///
+/// `scan_root` and `globs` mirror the discovery scope from the calling
+/// `check::run`. When `scan_root == repo_root` and `globs` is empty the scope
+/// predicate matches everything (whole-repo run — no behavior change).
 ///
 /// Best-effort: a failed `git mesh delete` is recorded and reported, never
-/// aborting the pass.
+/// aborting the pass. After each `git mesh delete` call, file absence is
+/// post-verified — a path is recorded as deleted only when the mesh file is
+/// actually gone (handles the ambiguous exit-1 from git-mesh).
 pub(crate) fn cleanup_orphaned_meshes(
     repo_root: &Path,
+    scan_root: &Path,
+    globs: &[String],
     dry_run: bool,
 ) -> Result<MeshCleanupResult> {
     let mesh_dir = resolve_mesh_dir(repo_root);
@@ -584,6 +593,42 @@ pub(crate) fn cleanup_orphaned_meshes(
             advisories,
         });
     }
+
+    // Build the scope predicate (Finding 3): a mesh's sole .md anchor must
+    // fall within this run's scan scope to be eligible for cleanup.
+    // Reuse the same helpers that `discover_files` uses so scope matching is
+    // byte-identical to discovery.
+    let scope_prefix = crate::commands::scan_prefix(scan_root, repo_root);
+    // Pre-compile any user globs into a globset using the same
+    // `glob_to_repo_relative` transform that `discover_files` uses.
+    let glob_set: Option<globset::GlobSet> = if globs.is_empty() {
+        None
+    } else {
+        let mut builder = globset::GlobSetBuilder::new();
+        for g in globs {
+            let repo_rel =
+                crate::commands::glob_to_repo_relative(g, scope_prefix.as_deref(), repo_root);
+            if let Ok(pat) = globset::Glob::new(&repo_rel) {
+                builder.add(pat);
+            }
+        }
+        builder.build().ok()
+    };
+
+    // Returns true when `path_rel` (repo-relative) is within this run's scope.
+    let in_scope = |path_rel: &str| -> bool {
+        if glob_set.is_none() {
+            // No explicit globs — scope is defined purely by scan_root prefix.
+            crate::commands::path_under_prefix(path_rel, scope_prefix.as_deref())
+        } else {
+            // Explicit globs: must match at least one glob AND be under the
+            // scan prefix (discovery requires both).
+            crate::commands::path_under_prefix(path_rel, scope_prefix.as_deref())
+                && glob_set
+                    .as_ref()
+                    .is_some_and(|gs| gs.is_match(path_rel))
+        }
+    };
 
     // Walk every regular file under mesh_dir.
     let mut stack: Vec<std::path::PathBuf> = vec![mesh_dir.clone()];
@@ -653,7 +698,16 @@ pub(crate) fn cleanup_orphaned_meshes(
                     continue;
                 }
 
-                // Eligible: single wiki page, scaffold-style, page gone.
+                // Finding 3: scope guard — the sole .md anchor must fall
+                // within this run's scan scope. Out-of-scope orphans are
+                // left silently; they will be cleaned up by the run that
+                // covers their subtree.
+                let sole_page = &distinct_paths[0];
+                if !in_scope(sole_page) {
+                    continue;
+                }
+
+                // Eligible: single wiki page, scaffold-style, page gone, in scope.
                 if dry_run {
                     planned_deletions.push(rel_path);
                 } else {
@@ -664,18 +718,33 @@ pub(crate) fn cleanup_orphaned_meshes(
                         .stderr(Stdio::inherit())
                         .status();
 
-                    match status {
-                        Ok(s) if s.success() => {
-                            deleted.push(rel_path);
-                        }
-                        Ok(s) if s.code() == Some(1) => {
-                            // Already missing — treat as success.
-                            deleted.push(rel_path);
-                        }
-                        _ => {
-                            eprintln!(
-                                "wiki check --fix: `git mesh delete {mesh_name}` failed — skipping"
-                            );
+                    // Finding 2: post-verify file absence. git-mesh exits 1
+                    // for both "not found" (benign) and genuine failures
+                    // (permission error, corrupt object, etc.). We determine
+                    // success solely by whether the mesh file is now absent —
+                    // if it is gone the deletion succeeded regardless of exit
+                    // code; if it is still present the delete failed.
+                    let mesh_file_gone = !mesh_dir.join(&mesh_name).exists();
+                    if mesh_file_gone {
+                        deleted.push(rel_path);
+                    } else {
+                        // File still present — the delete failed. The exit
+                        // code (0 or non-zero) does not distinguish real
+                        // failures from the benign "already missing" race;
+                        // what matters is the file is still on disk.
+                        match status {
+                            Ok(s) if s.success() => {
+                                // git-mesh reported success but file still
+                                // present — unexpected, treat as failure.
+                                eprintln!(
+                                    "wiki check --fix: `git mesh delete {mesh_name}` reported success but mesh file is still present — skipping"
+                                );
+                            }
+                            _ => {
+                                eprintln!(
+                                    "wiki check --fix: `git mesh delete {mesh_name}` failed — skipping"
+                                );
+                            }
                         }
                     }
                 }
@@ -2311,7 +2380,7 @@ mod tests {
         .unwrap();
 
         // Page does NOT exist on disk — eligible for deletion.
-        let result = cleanup_orphaned_meshes(root, true).unwrap();
+        let result = cleanup_orphaned_meshes(root, root, &[], true).unwrap();
         assert_eq!(result.planned_deletions, vec![".mesh/wiki-page"]);
         assert!(result.advisories.is_empty());
     }
@@ -2331,7 +2400,7 @@ mod tests {
         .unwrap();
 
         // Page does NOT exist — but ineligible due to why.
-        let result = cleanup_orphaned_meshes(root, true).unwrap();
+        let result = cleanup_orphaned_meshes(root, root, &[], true).unwrap();
         assert!(result.planned_deletions.is_empty());
         assert!(
             result.advisories.contains("curated why prose"),
@@ -2357,7 +2426,7 @@ mod tests {
         std::fs::create_dir_all(root.join("wiki")).unwrap();
         std::fs::write(root.join("wiki/b.md"), "present\n").unwrap();
 
-        let result = cleanup_orphaned_meshes(root, true).unwrap();
+        let result = cleanup_orphaned_meshes(root, root, &[], true).unwrap();
         assert!(result.planned_deletions.is_empty());
         assert!(
             result.advisories.contains("other pages"),
@@ -2382,7 +2451,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = cleanup_orphaned_meshes(root, true).unwrap();
+        let result = cleanup_orphaned_meshes(root, root, &[], true).unwrap();
         assert!(result.planned_deletions.is_empty());
         assert!(result.advisories.is_empty());
     }
@@ -2401,7 +2470,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = cleanup_orphaned_meshes(root, true).unwrap();
+        let result = cleanup_orphaned_meshes(root, root, &[], true).unwrap();
         assert!(result.planned_deletions.is_empty());
         assert!(result.advisories.is_empty());
     }

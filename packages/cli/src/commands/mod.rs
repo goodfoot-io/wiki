@@ -311,7 +311,7 @@ pub fn discover_files(
 /// same directory (the whole repo is in scope). Falls back to a canonicalized
 /// comparison so symlinked roots still resolve, and to `None` when `scan_root`
 /// is not under `repo_root` (selection then spans the whole repo).
-fn scan_prefix(scan_root: &Path, repo_root: &Path) -> Option<PathBuf> {
+pub(crate) fn scan_prefix(scan_root: &Path, repo_root: &Path) -> Option<PathBuf> {
     let non_empty = |rel: &Path| (!rel.as_os_str().is_empty()).then(|| rel.to_path_buf());
     if let Ok(rel) = scan_root.strip_prefix(repo_root) {
         return non_empty(rel);
@@ -328,7 +328,7 @@ fn scan_prefix(scan_root: &Path, repo_root: &Path) -> Option<PathBuf> {
 
 /// Whether a repo-relative path lies within the selection `prefix`. A `None`
 /// prefix means the whole repo is in scope.
-fn path_under_prefix(path_rel: &str, prefix: Option<&Path>) -> bool {
+pub(crate) fn path_under_prefix(path_rel: &str, prefix: Option<&Path>) -> bool {
     match prefix {
         None => true,
         Some(pre) => Path::new(path_rel).starts_with(pre),
@@ -341,7 +341,7 @@ fn path_under_prefix(path_rel: &str, prefix: Option<&Path>) -> bool {
 /// Filesystem-absolute globs are stripped to repo-relative; `/`-prefixed globs
 /// are already repo-relative; plain relative globs are anchored under the
 /// selection `prefix` so they match only the current subtree.
-fn glob_to_repo_relative(glob: &str, prefix: Option<&Path>, repo_root: &Path) -> String {
+pub(crate) fn glob_to_repo_relative(glob: &str, prefix: Option<&Path>, repo_root: &Path) -> String {
     let path = Path::new(glob);
     if path.is_absolute() {
         return path

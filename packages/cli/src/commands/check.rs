@@ -122,15 +122,27 @@ pub fn run(
 ) -> Result<i32> {
     // Files to check are selected from `scan_root` (the current working
     // directory); globs resolve relative to it.
+    //
+    // In `--fix` mode an empty discovered set is NOT an error: the user may
+    // have deleted the last wiki page (or demoted it to plain markdown), and
+    // cleanup_orphaned_meshes must still run over an empty corpus to delete
+    // the now-orphaned scaffold meshes. In non-fix mode we keep the existing
+    // exit-2 "no wiki pages found" signal — it is a useful diagnostic.
     let files = match discover_files(globs, scan_root, repo_root, source) {
         Ok(f) => f,
         Err(e) => {
-            if json {
-                eprintln!("{}", serde_json::json!({"error": e.to_string()}));
+            if fix {
+                // In fix mode, degrade to an empty file set so the fix pass
+                // (and in particular cleanup_orphaned_meshes) still runs.
+                Vec::new()
             } else {
-                eprintln!("error: {e}");
+                if json {
+                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
+                } else {
+                    eprintln!("error: {e}");
+                }
+                return Ok(2);
             }
-            return Ok(2);
         }
     };
     let files = match filter_files_for_source(files, repo_root, source) {
@@ -149,8 +161,15 @@ pub fn run(
     // repo root, so a subtree check resolves titles and detects collisions
     // against every page — making a subdirectory run equivalent to the same
     // pages selected by glob from the repo root.
+    //
+    // In `--fix` mode, an empty corpus degrades gracefully to an empty index
+    // rather than propagating the "no wiki pages found" error.
     let index_files = {
-        let raw = discover_files(&[], repo_root, repo_root, source)?;
+        let raw = if fix {
+            discover_files(&[], repo_root, repo_root, source).unwrap_or_default()
+        } else {
+            discover_files(&[], repo_root, repo_root, source)?
+        };
         filter_files_for_source(raw, repo_root, source)?
     };
 
@@ -168,7 +187,7 @@ pub fn run(
 
     // ── Fix pass ──────────────────────────────────────────────────────────────
     if fix {
-        let plan = match check_fix::run_fix_pass(&files, repo_root, source, fix_dry_run) {
+        let plan = match check_fix::run_fix_pass(&files, repo_root, scan_root, globs, source, fix_dry_run) {
             Ok(p) => p,
             Err(e) => {
                 if json {
@@ -1335,6 +1354,8 @@ mod tests {
         let plan = check_fix::run_fix_pass(
             &files,
             repo.path(),
+            repo.path(),
+            &[],
             crate::index::DocSource::WorkingTree,
             true,
         )

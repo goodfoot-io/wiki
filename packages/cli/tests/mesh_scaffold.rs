@@ -1269,3 +1269,324 @@ fn cleanup_no_deletion_when_file_present() {
         "mesh path must not appear on stdout for demoted-but-present page; stdout=\n{stdout}"
     );
 }
+
+// ── Regression tests for evaluator findings ───────────────────────────────────
+
+/// Finding 1 regression (full-delete variant): deleting the ONLY wiki page must
+/// not prevent cleanup from running. Scaffold mesh is deleted, its path printed
+/// on stdout, and a follow-up `wiki check` exits 0.
+#[test]
+fn finding1_last_page_deleted_cleanup_still_runs() {
+    if !git_mesh_available() {
+        eprintln!("skipping: git-mesh not installed");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "// l1\n// l2\n// l3\n").unwrap();
+    std::fs::write(
+        root.join("wiki/page.md"),
+        "---\ntitle: Page\nsummary: A page.\n---\n\nSee [lib](../src/lib.rs#L1-L3) for details.\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "init"]);
+
+    // Create the scaffold mesh for the sole page.
+    let first = check_fix_print_applied(&root.join("wiki"), true);
+    let first_stdout = String::from_utf8_lossy(&first.stdout);
+    assert!(
+        first.status.success(),
+        "first pass must succeed; stderr=\n{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let mesh_path = first_stdout
+        .lines()
+        .find(|l| l.starts_with(".mesh/"))
+        .expect("first pass must create a mesh")
+        .to_string();
+    assert!(root.join(&mesh_path).is_file(), "mesh must exist");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "mesh created"]);
+
+    // Delete the ONLY wiki page — corpus is now empty.
+    std::fs::remove_file(root.join("wiki/page.md")).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "last page deleted"]);
+
+    // Cleanup pass must still run despite zero wiki pages.
+    let cleanup = check_fix_print_applied(&root.join("wiki"), true);
+    let cleanup_stdout = String::from_utf8_lossy(&cleanup.stdout);
+    let cleanup_stderr = String::from_utf8_lossy(&cleanup.stderr);
+    assert!(
+        cleanup.status.success(),
+        "cleanup pass must exit 0 even with zero wiki pages; stderr=\n{cleanup_stderr}"
+    );
+
+    // The orphan mesh path must appear on stdout.
+    assert!(
+        cleanup_stdout.lines().any(|l| l == mesh_path),
+        "deleted mesh path must appear on stdout; stdout=\n{cleanup_stdout}"
+    );
+    // The mesh file must be gone.
+    assert!(
+        !root.join(&mesh_path).exists(),
+        "orphan mesh must be deleted"
+    );
+
+    // Follow-up check with --fix again must exit 0 (no orphan meshes remain).
+    // Using --no-exit-code because with zero wiki pages a plain `wiki check`
+    // exits 2 ("no wiki pages found"), which is correct non-fix behavior.
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let followup = Command::new(bin)
+        .args(["check", "--fix", "--no-exit-code", "**/*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("run wiki check --fix");
+    assert!(
+        followup.status.success(),
+        "follow-up fix pass must exit 0; stderr=\n{}",
+        String::from_utf8_lossy(&followup.stderr)
+    );
+    // No more meshes on disk.
+    let mesh_dir = root.join(".mesh");
+    if mesh_dir.is_dir() {
+        let remaining: Vec<_> = walkdir(&mesh_dir);
+        assert!(
+            remaining.is_empty(),
+            "no mesh files should remain after cleanup: {remaining:?}"
+        );
+    }
+}
+
+/// Finding 1 regression (demotion variant): demoting the last page to plain
+/// markdown (file still on disk) must let cleanup run, leave the mesh in place
+/// (the file exists), and exit 0.
+#[test]
+fn finding1_last_page_demoted_mesh_left_exit_0() {
+    if !git_mesh_available() {
+        eprintln!("skipping: git-mesh not installed");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "// l1\n// l2\n// l3\n").unwrap();
+    std::fs::write(
+        root.join("wiki/page.md"),
+        "---\ntitle: Page\nsummary: A page.\n---\n\nSee [lib](../src/lib.rs#L1-L3) for details.\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "init"]);
+
+    // Create scaffold mesh.
+    let create = check_fix_print_applied(&root.join("wiki"), true);
+    assert!(create.status.success());
+    let mesh_path = String::from_utf8_lossy(&create.stdout)
+        .lines()
+        .find(|l| l.starts_with(".mesh/"))
+        .expect("mesh must be created")
+        .to_string();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "mesh"]);
+
+    // Demote the ONLY page to plain markdown (remove frontmatter; file remains).
+    std::fs::write(root.join("wiki/page.md"), "# Plain markdown, no frontmatter\n").unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "demoted"]);
+
+    // Fix pass must exit 0 even though zero *wiki* pages remain.
+    let out = check_fix_print_applied(&root.join("wiki"), true);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "fix must exit 0 when sole page is demoted; stderr=\n{stderr}"
+    );
+
+    // Mesh must still be on disk (file exists → not eligible for deletion).
+    assert!(
+        root.join(&mesh_path).is_file(),
+        "mesh must NOT be deleted when file still exists on disk"
+    );
+    // Mesh path must not appear on stdout.
+    assert!(
+        !stdout.contains(&mesh_path),
+        "mesh path must not appear on stdout for demoted-but-present page; stdout=\n{stdout}"
+    );
+}
+
+/// Finding 2 regression: a path is pushed to `deleted` (and printed on stdout)
+/// ONLY when the mesh file is actually absent after the delete call.
+/// We test the success path (file gone) and, for the failure path,
+/// verify via the post-verify by hand-writing a mesh file and using
+/// `cleanup_orphaned_meshes` directly.
+///
+/// Integration: scaffold a mesh, delete the page, run cleanup → mesh is gone
+/// and path is in stdout. This covers the "file absent → success" branch;
+/// the "file still present → failure" branch is covered by the unit test
+/// in `scaffold.rs` (see `cleanup_post_verify_only_when_file_absent`).
+#[test]
+fn finding2_deleted_path_printed_only_when_file_absent() {
+    if !git_mesh_available() {
+        eprintln!("skipping: git-mesh not installed");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "// l1\n// l2\n// l3\n").unwrap();
+    std::fs::write(
+        root.join("wiki/page.md"),
+        "---\ntitle: Page\nsummary: A page.\n---\n\nSee [lib](../src/lib.rs#L1-L3) for details.\n",
+    )
+    .unwrap();
+    // Keep a second page so the corpus is non-empty after deletion.
+    std::fs::write(
+        root.join("wiki/other.md"),
+        "---\ntitle: Other\nsummary: Other page.\n---\n\n# Other\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "init"]);
+
+    // Create mesh and delete page.
+    let create = check_fix_print_applied(&root.join("wiki"), true);
+    let create_stdout = String::from_utf8_lossy(&create.stdout);
+    let mesh_path = create_stdout
+        .lines()
+        .find(|l| l.starts_with(".mesh/"))
+        .expect("mesh must be created")
+        .to_string();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "mesh"]);
+
+    std::fs::remove_file(root.join("wiki/page.md")).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "page deleted"]);
+
+    // Cleanup: mesh is deleted → path must appear in stdout.
+    let cleanup = check_fix_print_applied(&root.join("wiki"), true);
+    let cleanup_stdout = String::from_utf8_lossy(&cleanup.stdout);
+    assert!(
+        cleanup.status.success(),
+        "cleanup must succeed; stderr=\n{}",
+        String::from_utf8_lossy(&cleanup.stderr)
+    );
+    // The mesh must be gone on disk (post-verify was satisfied).
+    assert!(
+        !root.join(&mesh_path).exists(),
+        "mesh file must be gone after deletion"
+    );
+    // The path must appear on stdout (deletion was recorded as success).
+    assert!(
+        cleanup_stdout.lines().any(|l| l == mesh_path),
+        "deleted mesh path must appear on stdout; stdout=\n{cleanup_stdout}"
+    );
+}
+
+/// Finding 3 regression: a scoped invocation (`wiki check --fix subdirA/`)
+/// must only delete/print orphan meshes whose sole .md anchor is within the
+/// scoped subtree. An out-of-scope orphan mesh must be left untouched.
+#[test]
+fn finding3_scoped_cleanup_leaves_out_of_scope_orphan() {
+    if !git_mesh_available() {
+        eprintln!("skipping: git-mesh not installed");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki/a")).unwrap();
+    std::fs::create_dir_all(root.join("wiki/b")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), "// a1\n// a2\n// a3\n").unwrap();
+    std::fs::write(root.join("src/b.rs"), "// b1\n// b2\n// b3\n").unwrap();
+    std::fs::write(
+        root.join("wiki/a/page-a.md"),
+        "---\ntitle: Page A\nsummary: A page.\n---\n\nSee [a](../../src/a.rs#L1-L3) for details.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("wiki/b/page-b.md"),
+        "---\ntitle: Page B\nsummary: B page.\n---\n\nSee [b](../../src/b.rs#L1-L3) for details.\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "init"]);
+
+    // Create meshes for both pages (run from repo root).
+    let create_a = check_fix_print_applied(&root.join("wiki/a"), true);
+    assert!(
+        create_a.status.success(),
+        "create A; stderr=\n{}",
+        String::from_utf8_lossy(&create_a.stderr)
+    );
+    let mesh_a = String::from_utf8_lossy(&create_a.stdout)
+        .lines()
+        .find(|l| l.starts_with(".mesh/"))
+        .expect("mesh A must be created")
+        .to_string();
+
+    let create_b = check_fix_print_applied(&root.join("wiki/b"), true);
+    assert!(
+        create_b.status.success(),
+        "create B; stderr=\n{}",
+        String::from_utf8_lossy(&create_b.stderr)
+    );
+    let mesh_b = String::from_utf8_lossy(&create_b.stdout)
+        .lines()
+        .find(|l| l.starts_with(".mesh/"))
+        .expect("mesh B must be created")
+        .to_string();
+
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "meshes"]);
+
+    // Delete BOTH wiki pages (both are orphans now).
+    std::fs::remove_file(root.join("wiki/a/page-a.md")).unwrap();
+    std::fs::remove_file(root.join("wiki/b/page-b.md")).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "both pages deleted"]);
+
+    // Scoped run: only wiki/a/ subtree.
+    let scoped = check_fix_print_applied(&root.join("wiki/a"), true);
+    let scoped_stdout = String::from_utf8_lossy(&scoped.stdout);
+    let scoped_stderr = String::from_utf8_lossy(&scoped.stderr);
+    assert!(
+        scoped.status.success(),
+        "scoped cleanup must exit 0; stderr=\n{scoped_stderr}"
+    );
+
+    // mesh_a (in subdirA) must be cleaned up.
+    assert!(
+        !root.join(&mesh_a).exists(),
+        "in-scope orphan mesh_a must be deleted by scoped run"
+    );
+    assert!(
+        scoped_stdout.lines().any(|l| l == mesh_a),
+        "in-scope orphan mesh path must appear on stdout; stdout=\n{scoped_stdout}"
+    );
+
+    // mesh_b (in subdirB) must be left untouched by the scoped run.
+    assert!(
+        root.join(&mesh_b).is_file(),
+        "out-of-scope orphan mesh_b must NOT be deleted by scoped run"
+    );
+    assert!(
+        !scoped_stdout.contains(&mesh_b),
+        "out-of-scope orphan mesh path must NOT appear on stdout; stdout=\n{scoped_stdout}"
+    );
+}
