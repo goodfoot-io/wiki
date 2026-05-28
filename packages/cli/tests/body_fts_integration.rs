@@ -352,7 +352,6 @@ fn common_term_ranking_survives_search_limit() {
 
 /// Existing snippet and line_snippet behavior is unchanged — source_raw still drives snippets.
 #[test]
-#[ignore = "out-of-card: snippet rendering for search results is not in the FTS5 rewrite scope; SearchResult.snippets is always empty in this card and needs a follow-up to repopulate from the matched body"]
 fn snippet_regression_source_raw_unchanged() {
     let repo = make_wiki_repo();
     repo.create_file(

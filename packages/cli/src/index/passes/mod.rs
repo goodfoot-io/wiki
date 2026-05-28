@@ -54,6 +54,14 @@ pub struct RefreshOutcome {
     pub deltas_applied: usize,
     pub fts_retokenizations: u64,
     pub pass3_full_rescans: u64,
+    /// Number of directories Pass 3 had to descend into and stat/hash files
+    /// for (i.e. directories whose mtime differed from the recorded
+    /// `dir_mtimes` entry, or all directories on a hostile filesystem).
+    pub pass3_dir_walks: u64,
+    /// `true` when the orchestrator lost the state-row CAS on commit and
+    /// the transaction was rolled back. The caller must serve the prior
+    /// snapshot and must not bump any freshness gates.
+    pub cas_lost: bool,
 }
 
 /// Resolve a blob's bytes — first from disk (worktree), then via gix
@@ -94,8 +102,6 @@ pub fn refresh(
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(3 - 1)?)),
         )?;
-    let _ = prior_generation; // CAS bookkeeping (currently single-process — Group C adds the lock).
-
     let prior_head_tree_oid = if prior_head_tree.is_empty() {
         None
     } else {
@@ -120,8 +126,15 @@ pub fn refresh(
 
     // Pass 3: Worktree.
     let mut pass3_full_rescans: u64 = 0;
-    let worktree_deltas =
-        worktree::pass_worktree(repo, repo_root, &tx, hostile_fs, &mut pass3_full_rescans)?;
+    let mut pass3_dir_walks: u64 = 0;
+    let worktree_deltas = worktree::pass_worktree(
+        repo,
+        repo_root,
+        &tx,
+        hostile_fs,
+        &mut pass3_full_rescans,
+        &mut pass3_dir_walks,
+    )?;
 
     // Merge deltas in strict order Tree -> Index -> Worktree.
     // For each (source, path) we want the final OID assignment to obey
@@ -183,12 +196,28 @@ pub fn refresh(
         Err(_) => vec![0u8; 20],
     };
 
-    tx.execute(
+    // Compare-and-swap on the prior generation. If another writer
+    // committed between our state read and this UPDATE, zero rows match
+    // and we must roll back — the loser does not bump any freshness
+    // signal and the caller continues to serve the prior snapshot.
+    let updated = tx.execute(
         "UPDATE state SET head_oid = ?1, head_tree_oid = ?2, index_checksum = ?3,
                           generation = generation + 1
-         WHERE id = 1",
-        params![new_head_oid, new_head_tree, new_index_checksum],
+         WHERE id = 1 AND generation = ?4",
+        params![new_head_oid, new_head_tree, new_index_checksum, prior_generation],
     )?;
+
+    if updated == 0 {
+        // CAS lost — roll back every delta we applied in this tx.
+        drop(tx);
+        return Ok(RefreshOutcome {
+            deltas_applied: 0,
+            fts_retokenizations: 0,
+            pass3_full_rescans: 0,
+            pass3_dir_walks: 0,
+            cas_lost: true,
+        });
+    }
 
     tx.commit()?;
 
@@ -196,6 +225,8 @@ pub fn refresh(
         deltas_applied,
         fts_retokenizations,
         pass3_full_rescans,
+        pass3_dir_walks,
+        cas_lost: false,
     })
 }
 

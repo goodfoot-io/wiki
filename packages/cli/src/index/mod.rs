@@ -193,7 +193,7 @@ pub enum HostileFs {
 pub struct WikiIndex {
     repo_root: PathBuf,
     dot_git: PathBuf,
-    _source: DocSource,
+    source: DocSource,
     #[allow(dead_code)]
     repo: Option<gix::Repository>,
     conn: Connection,
@@ -241,7 +241,7 @@ impl WikiIndex {
         let mut index = WikiIndex {
             repo_root: repo_root.to_path_buf(),
             dot_git: dot_git.clone(),
-            _source: source,
+            source,
             repo: None,
             conn,
             last_stats: IndexStats::default(),
@@ -277,10 +277,13 @@ impl WikiIndex {
             fs_class,
         )
         .map_err(|e| miette::miette!("refresh failed: {e}"))?;
-        index.last_stats = IndexStats {
-            pass3_full_rescans: outcome.pass3_full_rescans,
-            fts_retokenizations: outcome.fts_retokenizations,
-        };
+        if !outcome.cas_lost {
+            index.last_stats = IndexStats {
+                pass3_full_rescans: outcome.pass3_full_rescans,
+                fts_retokenizations: outcome.fts_retokenizations,
+                pass3_dir_walks: outcome.pass3_dir_walks,
+            };
+        }
         index.repo = Some(repo);
         // `lock` releases on drop here.
         Ok(index)
@@ -289,7 +292,7 @@ impl WikiIndex {
     /// Resolve a single page by title or alias (case-insensitive), or by a
     /// repo-relative path / `.md` file reference.
     pub fn resolve_page(&self, input: &str) -> Result<Option<ResolvedPage>> {
-        search::resolve_page(&self.conn, &self.repo_root, input)
+        search::resolve_page(&self.conn, &self.repo_root, self.source, input)
             .map_err(|e| miette::miette!("resolve_page: {e}"))
     }
 
@@ -301,7 +304,7 @@ impl WikiIndex {
         offset: usize,
     ) -> Result<(Vec<SearchResult>, usize)> {
         let limit_usize = if limit < 0 { 0 } else { limit as usize };
-        let (mut rows, total) = search::search_weighted(&self.conn, query, limit_usize, offset)
+        let (mut rows, total) = search::search_weighted(&self.conn, self.source, query, limit_usize, offset)
             .map_err(|e| miette::miette!("search_weighted: {e}"))?;
         // Render `file` as an absolute path so `format_search_result` can
         // `strip_prefix(repo_root)` to produce repo-relative output.
@@ -318,6 +321,7 @@ impl WikiIndex {
     pub fn suggest(&self, query: &str) -> Result<Vec<SearchResult>> {
         let (rows, _total) = search::search_weighted(
             &self.conn,
+            self.source,
             query,
             SUGGESTION_LIMIT as usize,
             0,
@@ -415,4 +419,8 @@ pub struct IndexStats {
     /// Number of FTS rows that were deleted then re-inserted (re-tokenized)
     /// during the most recent refresh.  A rename must not bump this counter.
     pub fts_retokenizations: u64,
+    /// Number of directories Pass 3 actually descended into and stat/hashed
+    /// markdown files for. Directories whose mtime matched the recorded
+    /// `dir_mtimes` entry are skipped and do not contribute.
+    pub pass3_dir_walks: u64,
 }

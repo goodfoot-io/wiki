@@ -73,20 +73,105 @@ pub fn fast_gate(
 }
 
 /// Resolve `.git/HEAD` to a 40-char hex OID, following a single symref hop.
-/// Stat-only-ish (small reads of HEAD and the ref file); no gix open.
+/// Falls back to `.git/packed-refs` when the loose ref file is absent.
+/// Returns `Some(zero_oid)` for unborn HEAD (ref not found anywhere).
+/// Stat-only-ish (small reads of HEAD, the ref file, packed-refs); no gix open.
 fn read_head_oid(dot_git: &Path) -> Option<String> {
+    const ZERO_OID: &str = "0000000000000000000000000000000000000000";
+
     let head = fs::read_to_string(dot_git.join("HEAD")).ok()?;
     let trimmed = head.trim();
     if let Some(rest) = trimmed.strip_prefix("ref:") {
         let ref_name = rest.trim();
         let ref_path = dot_git.join(ref_name);
-        let resolved = fs::read_to_string(&ref_path).ok()?;
-        let oid = resolved.trim().to_string();
-        if oid.len() == 40 { Some(oid) } else { None }
+        // Try loose ref first.
+        if let Ok(resolved) = fs::read_to_string(&ref_path) {
+            let oid = resolved.trim().to_string();
+            if oid.len() == 40 {
+                return Some(oid);
+            }
+        }
+        // Fall back to packed-refs.
+        let packed = dot_git.join("packed-refs");
+        if let Ok(contents) = fs::read_to_string(&packed) {
+            for line in contents.lines() {
+                if line.starts_with('#') || line.starts_with('^') {
+                    continue;
+                }
+                let mut parts = line.splitn(2, ' ');
+                let oid_part = parts.next().unwrap_or("");
+                let ref_part = parts.next().unwrap_or("").trim();
+                if ref_part == ref_name && oid_part.len() == 40 {
+                    return Some(oid_part.to_string());
+                }
+            }
+        }
+        // Ref not found: unborn HEAD.
+        Some(ZERO_OID.to_string())
     } else if trimmed.len() == 40 {
+        // Detached HEAD: the file contains the OID directly.
         Some(trimmed.to_string())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn make_dot_git() -> TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("refs/heads")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn loose_ref_present() {
+        let tmp = make_dot_git();
+        let dot_git = tmp.path();
+        let oid = "aabbccddeeff00112233445566778899aabbccdd";
+        fs::write(dot_git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(dot_git.join("refs/heads/main"), format!("{oid}\n")).unwrap();
+        assert_eq!(read_head_oid(dot_git), Some(oid.to_string()));
+    }
+
+    #[test]
+    fn packed_refs_fallback() {
+        let tmp = make_dot_git();
+        let dot_git = tmp.path();
+        let oid = "1122334455667788990011223344556677889900";
+        fs::write(dot_git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        // No loose ref file — only packed-refs.
+        fs::write(
+            dot_git.join("packed-refs"),
+            format!("# pack-refs with: peeled fully-peeled\n{oid} refs/heads/main\n"),
+        )
+        .unwrap();
+        assert_eq!(read_head_oid(dot_git), Some(oid.to_string()));
+    }
+
+    #[test]
+    fn unborn_head_returns_zero_oid() {
+        let tmp = make_dot_git();
+        let dot_git = tmp.path();
+        // Neither loose ref nor packed-refs entry.
+        fs::write(dot_git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert_eq!(
+            read_head_oid(dot_git),
+            Some("0000000000000000000000000000000000000000".to_string())
+        );
+    }
+
+    #[test]
+    fn detached_head() {
+        let tmp = make_dot_git();
+        let dot_git = tmp.path();
+        let oid = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        fs::write(dot_git.join("HEAD"), format!("{oid}\n")).unwrap();
+        assert_eq!(read_head_oid(dot_git), Some(oid.to_string()));
     }
 }
 

@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -40,12 +41,22 @@ pub fn run(
 
     let walker = ignore::WalkBuilder::new(repo_root)
         .hidden(false)
+        .git_ignore(false)
         .git_global(false)
+        .git_exclude(false)
         .build();
 
     for entry in walker {
         let entry = entry.into_diagnostic()?;
         let path = entry.path();
+        // Skip the .git directory and its contents.
+        if let Ok(rel) = path.strip_prefix(repo_root) {
+            if rel.components().next().map(|c| c.as_os_str())
+                == Some(OsStr::new(".git"))
+            {
+                continue;
+            }
+        }
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }

@@ -39,5 +39,24 @@ pub fn detect(dot_git: &Path) -> HostileFs {
 
 #[cfg(not(target_os = "linux"))]
 pub fn detect(_dot_git: &Path) -> HostileFs {
-    HostileFs::No
+    // CARD.md requires fail-closed on hostile filesystems. `statfs` magic
+    // detection is Linux-only; without it we cannot distinguish overlayfs /
+    // NFS / CIFS / FUSE from APFS or NTFS. Conservatively treat all
+    // non-Linux filesystems as hostile so Pass 3 always runs a full rescan.
+    // This is slow but correct; the dir-mtime Merkle optimisation is Linux-
+    // only anyway.
+    HostileFs::Yes
+}
+
+#[cfg(not(target_os = "linux"))]
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn detect_non_linux_is_hostile() {
+        // Non-Linux platforms must return HostileFs::Yes (fail-closed contract).
+        assert_eq!(detect(Path::new("/any/path")), HostileFs::Yes);
+    }
 }
