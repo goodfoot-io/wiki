@@ -126,6 +126,13 @@ pub fn search_weighted(
     // 5 = `body`.
     let fts_query = make_fts_query(query);
     if !fts_query.is_empty() {
+        // SQL-side LIMIT keeps the FTS5 + bm25 + JOIN pipeline from
+        // materializing every match: a common-token query against a 5k-doc
+        // corpus returned ~5000 rows before the client-side `take(limit)`
+        // capped them, costing ~3s warm. The cap below leaves headroom for
+        // dedup across the exact / path / fts stages above without bloating
+        // the row set.
+        let cap = limit.saturating_add(offset).saturating_add(64) as i64;
         let mut stmt = conn.prepare(
             "SELECT b.oid, b.title, p.path_rel, b.summary,
                     snippet(fts, 5, '', '', '…', 24) AS snip
@@ -133,9 +140,10 @@ pub fn search_weighted(
              JOIN blobs b ON b.rowid = fts.rowid
              JOIN paths p ON p.oid   = b.oid AND p.source = ?2
              WHERE fts MATCH ?1
-             ORDER BY bm25(fts, 5, 4, 3, 3, 2, 1) ASC",
+             ORDER BY bm25(fts, 5, 4, 3, 3, 2, 1) ASC
+             LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![fts_query, src], |r| {
+        let rows = stmt.query_map(params![fts_query, src, cap], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,

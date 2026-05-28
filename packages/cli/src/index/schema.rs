@@ -46,6 +46,14 @@ CREATE TABLE dir_mtimes (
   mtime_ns INTEGER NOT NULL
 ) WITHOUT ROWID;
 
+-- Search JOINs go FTS → blobs → paths on b.oid = p.oid filtered by source.
+-- Without this index the JOIN scans `paths` per FTS hit (O(N²) on a 5k-doc
+-- corpus, ~3s warm path). The composite (oid, source) lets the planner
+-- satisfy the join + source filter from the index alone.
+CREATE INDEX idx_paths_oid_source ON paths(oid, source);
+
+CREATE INDEX idx_paths_parent_source ON paths(parent_dir, source);
+
 CREATE VIRTUAL TABLE fts USING fts5(
   title, aliases_text, tags_text, keywords_text, summary, body,
   content='blobs',
