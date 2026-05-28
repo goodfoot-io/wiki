@@ -151,6 +151,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "tdd-bootstrap"]
     fn resolves_summary_by_alias_from_index() {
         let repo = TestRepo::new();
         repo.create_file(

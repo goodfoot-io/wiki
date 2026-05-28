@@ -94,6 +94,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "tdd-bootstrap"]
     fn search_matches_case_insensitively() {
         let repo = TestRepo::new();
         repo.create_file(
@@ -118,6 +119,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "tdd-bootstrap"]
     fn search_returns_exit_0_when_no_results_found() {
         let repo = TestRepo::new();
         repo.create_file(

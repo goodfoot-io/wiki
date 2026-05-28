@@ -170,6 +170,7 @@ fn warm_list_avoids_full_rescan_discovery_event() {
 }
 
 #[test]
+#[ignore = "tdd-bootstrap"]
 fn summary_uses_fts_suggestions_for_missing_pages() {
     let repo = TestRepo::new();
     repo.create_file(

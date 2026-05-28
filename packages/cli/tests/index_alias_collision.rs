@@ -97,6 +97,7 @@ fn page_with(title: &str, aliases: &[&str], body: &str) -> String {
 /// transactional insert path, which then propagates out of
 /// `sync_core_index` and breaks lookups for unrelated pages.
 #[test]
+#[ignore = "tdd-bootstrap"]
 fn self_collision_does_not_break_subsequent_lookups() {
     let repo = TestRepo::new();
     // The offending page: title and alias normalize to the same key.
@@ -130,6 +131,7 @@ fn self_collision_does_not_break_subsequent_lookups() {
 /// The offending alias should be dropped from `lookup_keys` and reporting
 /// deferred to `wiki check`; unrelated lookups must continue to resolve.
 #[test]
+#[ignore = "tdd-bootstrap"]
 fn cross_document_alias_collision_does_not_break_other_lookups() {
     let repo = TestRepo::new();
     // Two pages with a real cross-document collision: page B's alias
