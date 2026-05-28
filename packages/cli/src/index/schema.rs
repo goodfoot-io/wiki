@@ -55,6 +55,59 @@ CREATE VIRTUAL TABLE fts USING fts5(
 );
 "#;
 
+/// Apply the schema and initial state row to `conn`, or validate an existing
+/// schema. Idempotent: safe to call on an already-bootstrapped database.
+///
+/// # Errors
+///
+/// Returns `Err(rusqlite::Error::InvalidQuery)` when the existing
+/// `schema_version` differs from [`SCHEMA_VERSION`] (greenfield — no
+/// migrations).
+pub fn bootstrap(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    // Pragmas must be executed outside a transaction.
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=NORMAL;
+         PRAGMA busy_timeout=5000;
+         PRAGMA mmap_size=268435456;",
+    )?;
+
+    // Detect whether the schema has been applied.
+    let state_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='state'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? > 0;
+
+    if !state_exists {
+        // First-time bootstrap: apply schema + triggers in one transaction.
+        conn.execute_batch(&format!(
+            "BEGIN;
+             {schema}
+             {triggers}
+             INSERT INTO state (id, head_oid, head_tree_oid, index_checksum,
+                                worktree_generation, schema_version, generation)
+             VALUES (1, '', '', zeroblob(20), 0, {version}, 0);
+             COMMIT;",
+            schema = SCHEMA_V1,
+            triggers = FTS_TRIGGERS,
+            version = SCHEMA_VERSION,
+        ))?;
+    } else {
+        // Validate that the stored schema version matches ours.
+        let stored: i64 = conn.query_row(
+            "SELECT schema_version FROM state WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        if stored != SCHEMA_VERSION {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    }
+
+    Ok(())
+}
+
 /// External-content sync triggers. Kept separate from `SCHEMA_V1` so the
 /// bootstrap path can rerun them defensively after schema upgrades.
 pub const FTS_TRIGGERS: &str = r#"
@@ -75,3 +128,48 @@ CREATE TRIGGER blobs_au AFTER UPDATE ON blobs BEGIN
   VALUES (new.rowid, new.title, new.aliases_text, new.tags_text, new.keywords_text, new.summary, new.body);
 END;
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_creates_state_row_and_triggers() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        bootstrap(&conn).unwrap();
+
+        // State row exists with correct schema version.
+        let (count, version): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), schema_version FROM state WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(version, SCHEMA_VERSION);
+
+        // FTS triggers exist.
+        let trigger_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='blobs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(trigger_count, 3, "expected blobs_ai, blobs_ad, blobs_au");
+    }
+
+    #[test]
+    fn bootstrap_is_idempotent() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        bootstrap(&conn).unwrap();
+        // Second call must succeed without error.
+        bootstrap(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM state", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+}

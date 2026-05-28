@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use miette::Result;
+use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
 
 pub mod blob;
@@ -21,6 +22,35 @@ pub mod passes;
 pub mod schema;
 pub mod search;
 pub mod state;
+
+/// Walk `start` and its ancestors looking for a `.git` entry (file or dir).
+/// Returns the resolved dotgit path (the `.git` dir itself, or the path the
+/// `.git` file points at) when found, or `None`.
+fn find_dot_git(start: &Path) -> Option<PathBuf> {
+    let mut cur = start;
+    loop {
+        let candidate = cur.join(".git");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        if candidate.is_file() {
+            // Worktree / submodule: read the `gitdir: <path>` pointer.
+            if let Ok(contents) = std::fs::read_to_string(&candidate) {
+                let line = contents.trim();
+                if let Some(rest) = line.strip_prefix("gitdir:") {
+                    let target = PathBuf::from(rest.trim());
+                    let resolved = if target.is_absolute() {
+                        target
+                    } else {
+                        cur.join(target)
+                    };
+                    return Some(resolved);
+                }
+            }
+        }
+        cur = cur.parent()?;
+    }
+}
 
 /// Hard cap on the number of results `wiki "<query>"` will print.
 pub const SEARCH_LIMIT: i64 = 3;
@@ -155,12 +185,12 @@ pub enum HostileFs {
 /// Public handle to the wiki search index.
 ///
 /// The pre-rewrite version held a Tokio current-thread runtime plus a
-/// Turso connection. The new version owns a rusqlite connection opened
-/// `SQLITE_OPEN_READONLY` and the repo root used to resolve relative
-/// paths during result rendering.
+/// Turso connection. The new version owns a rusqlite connection and the
+/// repo root used to resolve relative paths during result rendering.
 pub struct WikiIndex {
     _repo_root: PathBuf,
     _source: DocSource,
+    _conn: Connection,
 }
 
 impl WikiIndex {
@@ -172,8 +202,27 @@ impl WikiIndex {
 
     /// Open the index database for `source`, run the freshness fast
     /// triple, optionally refresh, and return a read-only handle.
-    pub fn prepare_for_source(_repo_root: &Path, _source: DocSource) -> Result<Self> {
-        unimplemented!("Phase 1 skeleton: WikiIndex::prepare_for_source")
+    pub fn prepare_for_source(repo_root: &Path, source: DocSource) -> Result<Self> {
+        // Locate the .git directory by walking up from repo_root.
+        let dot_git = find_dot_git(repo_root).ok_or_else(|| {
+            miette::miette!("could not find .git directory under {}", repo_root.display())
+        })?;
+
+        let db_path = dot_git.join("wiki-index.sqlite");
+        let conn = Connection::open_with_flags(
+            &db_path,
+            OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .map_err(|e| miette::miette!("failed to open wiki index at {}: {e}", db_path.display()))?;
+
+        schema::bootstrap(&conn)
+            .map_err(|e| miette::miette!("schema bootstrap failed: {e}"))?;
+
+        Ok(WikiIndex {
+            _repo_root: repo_root.to_path_buf(),
+            _source: source,
+            _conn: conn,
+        })
     }
 
     /// Resolve a single page by title or alias.
@@ -202,11 +251,12 @@ impl WikiIndex {
     /// Phase 3 wires this into `fs_class.rs` detection; until then, bodies
     /// stay `unimplemented!()`.
     pub fn prepare_with_fs_class(
-        _repo_root: &Path,
-        _source: DocSource,
+        repo_root: &Path,
+        source: DocSource,
         _fs_class: HostileFs,
     ) -> Result<Self> {
-        unimplemented!("Phase 1 skeleton: WikiIndex::prepare_with_fs_class")
+        // Group A: delegate to prepare_for_source; HostileFs wiring is Group C.
+        Self::prepare_for_source(repo_root, source)
     }
 
     /// Return diagnostic counters accumulated during the last refresh.
