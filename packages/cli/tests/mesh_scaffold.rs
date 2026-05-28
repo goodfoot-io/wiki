@@ -1496,6 +1496,111 @@ fn finding2_deleted_path_printed_only_when_file_absent() {
     );
 }
 
+/// Finding 2 regression: a scoped run with `cwd = wiki/` and a plain relative
+/// glob `*.md` (not `**/*.md`) must still delete an in-scope orphan mesh whose
+/// sole `.md` anchor is `wiki/page.md`, and must leave an out-of-scope orphan
+/// whose anchor is in a sibling directory untouched.
+///
+/// This guards against a future regression where the scope-predicate glob
+/// composition fails to incorporate the `scan_root` prefix, causing `*.md`
+/// to not match `wiki/page.md`.
+#[test]
+fn finding2_plain_glob_with_subdir_cwd_cleans_inscope_orphan() {
+    if !git_mesh_available() {
+        eprintln!("skipping: git-mesh not installed");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::create_dir_all(root.join("other")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "// l1\n// l2\n// l3\n").unwrap();
+    std::fs::write(root.join("src/aux.rs"), "// a1\n// a2\n// a3\n").unwrap();
+    std::fs::write(
+        root.join("wiki/page.md"),
+        "---\ntitle: Page\nsummary: A page.\n---\n\nSee [lib](../src/lib.rs#L1-L3) for details.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("other/aux.md"),
+        "---\ntitle: Aux\nsummary: Aux page.\n---\n\nSee [aux](../src/aux.rs#L1-L3) for details.\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "init"]);
+
+    // Create meshes for both pages by running from each directory.
+    let create_wiki = check_fix_print_applied(&root.join("wiki"), true);
+    assert!(
+        create_wiki.status.success(),
+        "create wiki mesh; stderr=\n{}",
+        String::from_utf8_lossy(&create_wiki.stderr)
+    );
+    let mesh_wiki = String::from_utf8_lossy(&create_wiki.stdout)
+        .lines()
+        .find(|l| l.starts_with(".mesh/"))
+        .expect("wiki mesh must be created")
+        .to_string();
+
+    let create_other = check_fix_print_applied(&root.join("other"), true);
+    assert!(
+        create_other.status.success(),
+        "create other mesh; stderr=\n{}",
+        String::from_utf8_lossy(&create_other.stderr)
+    );
+    let mesh_other = String::from_utf8_lossy(&create_other.stdout)
+        .lines()
+        .find(|l| l.starts_with(".mesh/"))
+        .expect("other mesh must be created")
+        .to_string();
+
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "meshes"]);
+
+    // Delete BOTH pages — both orphans.
+    std::fs::remove_file(root.join("wiki/page.md")).unwrap();
+    std::fs::remove_file(root.join("other/aux.md")).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "both pages deleted"]);
+
+    // Scoped cleanup using a plain `*.md` glob from wiki/ cwd.
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let out = std::process::Command::new(bin)
+        .args(["check", "--fix", "--print-applied", "--no-exit-code", "*.md"])
+        .current_dir(root.join("wiki"))
+        .output()
+        .expect("run wiki check");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "scoped cleanup must exit 0; stderr=\n{stderr}"
+    );
+
+    // In-scope orphan (wiki/page.md) must be deleted.
+    assert!(
+        !root.join(&mesh_wiki).exists(),
+        "in-scope orphan mesh must be deleted; mesh_wiki={mesh_wiki}"
+    );
+    assert!(
+        stdout.lines().any(|l| l == mesh_wiki),
+        "deleted mesh path must appear on stdout; stdout=\n{stdout}"
+    );
+
+    // Out-of-scope orphan (other/aux.md) must be left untouched.
+    assert!(
+        root.join(&mesh_other).is_file(),
+        "out-of-scope orphan mesh must NOT be deleted; mesh_other={mesh_other}"
+    );
+    assert!(
+        !stdout.contains(&mesh_other),
+        "out-of-scope mesh path must NOT appear on stdout; stdout=\n{stdout}"
+    );
+}
+
 /// Finding 3 regression: a scoped invocation (`wiki check --fix subdirA/`)
 /// must only delete/print orphan meshes whose sole .md anchor is within the
 /// scoped subtree. An out-of-scope orphan mesh must be left untouched.

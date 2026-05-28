@@ -128,21 +128,29 @@ pub fn run(
     // cleanup_orphaned_meshes must still run over an empty corpus to delete
     // the now-orphaned scaffold meshes. In non-fix mode we keep the existing
     // exit-2 "no wiki pages found" signal — it is a useful diagnostic.
+    // discover_files returns Ok(vec![]) for an empty corpus (no wiki pages
+    // found) and Err only for genuine infrastructure failures.  Non-fix mode
+    // treats an empty corpus as a fatal diagnostic (exit 2); fix mode degrades
+    // gracefully so cleanup_orphaned_meshes still runs over the empty set.
     let files = match discover_files(globs, scan_root, repo_root, source) {
+        Ok(f) if f.is_empty() && !fix => {
+            let msg = "no wiki pages found (no .md files matched)";
+            if json {
+                eprintln!("{}", serde_json::json!({"error": msg}));
+            } else {
+                eprintln!("error: {msg}");
+            }
+            return Ok(2);
+        }
         Ok(f) => f,
         Err(e) => {
-            if fix {
-                // In fix mode, degrade to an empty file set so the fix pass
-                // (and in particular cleanup_orphaned_meshes) still runs.
-                Vec::new()
+            // Real infrastructure failure — fail closed in both modes.
+            if json {
+                eprintln!("{}", serde_json::json!({"error": e.to_string()}));
             } else {
-                if json {
-                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
-                } else {
-                    eprintln!("error: {e}");
-                }
-                return Ok(2);
+                eprintln!("error: {e}");
             }
+            return Ok(2);
         }
     };
     let files = match filter_files_for_source(files, repo_root, source) {
@@ -164,12 +172,11 @@ pub fn run(
     //
     // In `--fix` mode, an empty corpus degrades gracefully to an empty index
     // rather than propagating the "no wiki pages found" error.
+    // Whole-repo index files for title/collision resolution.  discover_files
+    // returns Ok(vec![]) for an empty corpus, which is fine in both modes;
+    // real infrastructure failures propagate as Err and fail closed.
     let index_files = {
-        let raw = if fix {
-            discover_files(&[], repo_root, repo_root, source).unwrap_or_default()
-        } else {
-            discover_files(&[], repo_root, repo_root, source)?
-        };
+        let raw = discover_files(&[], repo_root, repo_root, source)?;
         filter_files_for_source(raw, repo_root, source)?
     };
 
@@ -376,8 +383,13 @@ pub fn collect_with_source(
     source: DocSource,
 ) -> Result<Vec<CheckDiagnostic>> {
     // This entry point (hook/tests) scans from the repo root rather than a
-    // narrower working directory.
+    // narrower working directory.  discover_files returns Ok(vec![]) for an
+    // empty corpus; propagate that as an error so the caller sees "no wiki
+    // pages found" rather than an empty diagnostic list with exit 0.
     let files = discover_files(globs, repo_root, repo_root, source)?;
+    if files.is_empty() {
+        return Err(miette::miette!("no wiki pages found (no .md files matched)"));
+    }
     let files = filter_files_for_source(files, repo_root, source)?;
     let index_files = if globs.is_empty() {
         files.clone()
@@ -1785,5 +1797,75 @@ mod tests {
             original, after,
             "file must not be mutated when source != worktree"
         );
+    }
+
+    /// Finding 1 regression: a genuine infrastructure error during `discover_files`
+    /// (not the empty-corpus condition) must exit 2 in `--fix` mode, not degrade to
+    /// an empty-corpus success.  We use `DocSource::Index` on a repo with no git
+    /// index at all (no `git add` ever run) so that `list_paths` fails with a real
+    /// git error; this is distinct from the empty-corpus condition (Ok(vec![])).
+    ///
+    /// The main.rs CLI guard rejects `--fix --source=index`, so we call `run`
+    /// directly — the same path a hook or test exercises.
+    #[test]
+    fn fix_mode_genuine_discover_error_exits_2_not_0() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        // Brand-new repo; no `git add` → no .git/index → Index.list_paths fails.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        // git init without any subsequent git add so the index file is absent.
+        std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(root)
+            .output()
+            .expect("git init");
+        // Place a wiki page on disk so this is not the "no .md files" case.
+        std::fs::create_dir_all(root.join("wiki")).expect("mkdir wiki");
+        std::fs::write(
+            root.join("wiki/page.md"),
+            make_wiki_page("Page", "No links."),
+        )
+        .expect("write page");
+
+        // fix=true, source=Index → discover_files calls list_paths which fails
+        // (no .git/index).  Must exit 2, not 0.
+        let code = run(
+            &[],
+            false,
+            root,
+            root,
+            false,
+            crate::index::DocSource::Index,
+            true,  // fix
+            false,
+            false,
+        )
+        .expect("run");
+        assert_eq!(
+            code, 2,
+            "genuine infrastructure error in --fix mode must exit 2, not 0"
+        );
+    }
+
+    /// Finding 1 regression (non-fix path): empty corpus in non-fix mode still
+    /// exits 2 with "no wiki pages found" after the discover_files contract change.
+    #[test]
+    fn non_fix_empty_corpus_still_exits_2() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        // No wiki pages at all.
+        let code = run(
+            &[],
+            false,
+            repo.path(),
+            repo.path(),
+            false,
+            crate::index::DocSource::WorkingTree,
+            false,
+            false,
+            false,
+        )
+        .expect("run");
+        assert_eq!(code, 2, "empty corpus must exit 2 in non-fix mode");
     }
 }
