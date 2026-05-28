@@ -195,4 +195,39 @@ impl WikiIndex {
     pub fn suggest(&self, _query: &str) -> Result<Vec<SearchResult>> {
         unimplemented!("Phase 1 skeleton: WikiIndex::suggest")
     }
+
+    /// Open the index for `source`, injecting a filesystem classification
+    /// so tests can force `HostileFs::Yes` without needing a real overlayfs.
+    ///
+    /// Phase 3 wires this into `fs_class.rs` detection; until then, bodies
+    /// stay `unimplemented!()`.
+    pub fn prepare_with_fs_class(
+        _repo_root: &Path,
+        _source: DocSource,
+        _fs_class: HostileFs,
+    ) -> Result<Self> {
+        unimplemented!("Phase 1 skeleton: WikiIndex::prepare_with_fs_class")
+    }
+
+    /// Return diagnostic counters accumulated during the last refresh.
+    ///
+    /// Exposed for `index_hostile_fs` (asserts `pass3_full_rescans > 0`) and
+    /// `index_rename` (asserts `fts_retokenizations == 0`).  Phase 3 fills in
+    /// real bookkeeping; until then the body is `unimplemented!()`.
+    pub fn stats(&self) -> IndexStats {
+        unimplemented!("Phase 1 skeleton: WikiIndex::stats")
+    }
+}
+
+/// Diagnostic counters from the most recent refresh pass.
+///
+/// All counts are zero when the index was opened read-only without refreshing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IndexStats {
+    /// Number of times Pass 3 performed a full directory rescan
+    /// (rather than the dir-mtime Merkle short-circuit).
+    pub pass3_full_rescans: u64,
+    /// Number of FTS rows that were deleted then re-inserted (re-tokenized)
+    /// during the most recent refresh.  A rename must not bump this counter.
+    pub fts_retokenizations: u64,
 }

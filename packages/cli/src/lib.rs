@@ -9,3 +9,7 @@
 
 #[path = "commands/install.rs"]
 pub mod install;
+
+pub mod index;
+pub mod git;
+pub mod frontmatter;
