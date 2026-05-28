@@ -64,24 +64,37 @@ pub struct RefreshOutcome {
     pub cas_lost: bool,
 }
 
-/// Resolve a blob's bytes — first from disk (worktree), then via gix
-/// (committed/staged blobs that may not exist as files).
+/// Resolve a blob's bytes for the requested OID.
+///
+/// `Source::Tree` and `Source::Index` rows must read from the git object
+/// database — reading the worktree file would silently substitute the
+/// worktree's content for HEAD's or the index's content whenever they
+/// diverge (the steady-state developer condition). `Source::Worktree`
+/// rows hashed the on-disk bytes to produce the OID in the first place,
+/// so reading from disk is the only option there: untracked and
+/// gitignored blobs are typically absent from the ODB.
 fn read_blob_bytes(
     repo: &gix::Repository,
     repo_root: &Path,
+    source: Source,
     path_rel: &Path,
     oid: &BlobOid,
 ) -> Result<Vec<u8>> {
-    let abs = repo_root.join(path_rel);
-    if let Ok(bytes) = std::fs::read(&abs) {
-        return Ok(bytes);
+    match source {
+        Source::Tree | Source::Index => {
+            let id = gix::ObjectId::from_hex(oid.0.as_bytes())
+                .map_err(|e| anyhow::anyhow!("invalid blob oid `{}`: {e}", oid.0))?;
+            let blob = repo
+                .find_blob(id)
+                .map_err(|e| anyhow::anyhow!("blob {} not in odb: {e}", oid.0))?;
+            Ok(blob.data.to_vec())
+        }
+        Source::Worktree => {
+            let abs = repo_root.join(path_rel);
+            std::fs::read(&abs)
+                .map_err(|e| anyhow::anyhow!("read worktree {}: {e}", abs.display()))
+        }
     }
-    let id = gix::ObjectId::from_hex(oid.0.as_bytes())
-        .map_err(|e| anyhow::anyhow!("invalid blob oid `{}`: {e}", oid.0))?;
-    let blob = repo
-        .find_blob(id)
-        .map_err(|e| anyhow::anyhow!("blob {} not in odb: {e}", oid.0))?;
-    Ok(blob.data.to_vec())
 }
 
 /// Drive Pass 1, Pass 2, Pass 3 and apply their deltas inside a single
@@ -255,7 +268,7 @@ fn apply_add(
     // Ensure the blob exists in the `blobs` table. If not, parse the
     // bytes; non-wiki blobs cause us to skip the path row entirely.
     if !blob_exists(tx, oid)? {
-        let bytes = read_blob_bytes(repo, repo_root, path_rel, oid)?;
+        let bytes = read_blob_bytes(repo, repo_root, source, path_rel, oid)?;
         let Some(fields) = parse_blob(&bytes) else {
             // Not a wiki page; skip recording this path entirely. If a
             // stale row existed at this (path, source), drop it.
