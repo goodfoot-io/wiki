@@ -11,7 +11,7 @@ use crate::index::{DocSource, ResolvedPage, SearchResult, Snippet};
 
 /// Numeric discriminator stored in `paths.source` matching
 /// [`crate::index::passes::source_id`].
-fn source_filter_id(source: DocSource) -> i64 {
+pub(crate) fn source_filter_id(source: DocSource) -> i64 {
     match source {
         DocSource::Head => 0,
         DocSource::Index => 1,

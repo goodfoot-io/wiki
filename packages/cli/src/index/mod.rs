@@ -322,6 +322,74 @@ impl WikiIndex {
         Ok((rows, total))
     }
 
+    /// Enumerate wiki pages (non-empty title and summary) for this index's
+    /// source, ordered by title then path. Optionally filtered to a single
+    /// tag (case-insensitive, exact-token), then offset/limit applied.
+    pub fn list_pages(
+        &self,
+        tag: Option<&str>,
+        offset: u64,
+        limit: Option<u64>,
+    ) -> Result<Vec<PageRow>> {
+        let src = search::source_filter_id(self.source);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT p.path_rel, b.title, b.summary, b.aliases_text, b.tags_text
+                 FROM blobs b
+                 JOIN paths p ON p.oid = b.oid
+                 WHERE p.source = ?1 AND b.title <> '' AND b.summary <> ''
+                 ORDER BY b.title COLLATE NOCASE, p.path_rel",
+            )
+            .map_err(|e| miette::miette!("list_pages prepare: {e}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params![src], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|e| miette::miette!("list_pages query: {e}"))?;
+
+        let tag_lc = tag.map(|t| t.to_lowercase());
+        let split = |s: &str| -> Vec<String> {
+            s.split_whitespace().map(|t| t.to_string()).collect()
+        };
+
+        let mut out: Vec<PageRow> = Vec::new();
+        let mut skipped: u64 = 0;
+        for row in rows {
+            let (path_rel, title, summary, aliases_text, tags_text) =
+                row.map_err(|e| miette::miette!("list_pages row: {e}"))?;
+            let tags = split(&tags_text);
+            if let Some(ref tag_lc) = tag_lc
+                && !tags.iter().any(|t| t.to_lowercase() == *tag_lc)
+            {
+                continue;
+            }
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+            out.push(PageRow {
+                path_rel,
+                title,
+                summary,
+                aliases: split(&aliases_text),
+                tags,
+            });
+            if let Some(n) = limit
+                && out.len() as u64 >= n
+            {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     /// Up to [`SUGGESTION_LIMIT`] BM25 suggestions for a missed lookup.
     pub fn suggest(&self, query: &str) -> Result<Vec<SearchResult>> {
         let (rows, _total) =
@@ -404,6 +472,16 @@ impl WikiIndex {
     }
 }
 
+/// One wiki page row enumerated by [`WikiIndex::list_pages`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageRow {
+    pub path_rel: String,
+    pub title: String,
+    pub summary: String,
+    pub aliases: Vec<String>,
+    pub tags: Vec<String>,
+}
+
 /// Diagnostic counters from the most recent refresh pass.
 ///
 /// All counts are zero when the index was opened read-only without refreshing.
@@ -419,4 +497,129 @@ pub struct IndexStats {
     /// markdown files for. Directories whose mtime matched the recorded
     /// `dir_mtimes` entry are skipped and do not contribute.
     pub pass3_dir_walks: u64,
+}
+
+#[cfg(test)]
+mod list_pages_tests {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    fn git(args: &[&str], cwd: &Path) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .expect("git spawns");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn create_file(root: &Path, rel: &str, body: &str) {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("mkdir parents");
+        }
+        fs::write(path, body).expect("write file");
+    }
+
+    fn page(title: &str, summary: &str, tags: &str) -> String {
+        format!("---\ntitle: {title}\nsummary: {summary}\ntags: [{tags}]\n---\n\nbody\n")
+    }
+
+    fn commit_repo(root: &Path) {
+        git(&["init", "-q"], root);
+        git(&["config", "user.email", "t@t"], root);
+        git(&["config", "user.name", "t"], root);
+        git(&["add", "-A"], root);
+        git(&["commit", "-q", "-m", "init"], root);
+    }
+
+    #[test]
+    fn only_pages_with_title_and_summary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        create_file(root, "good.md", &page("Good", "has both", ""));
+        create_file(root, "no_summary.md", "---\ntitle: NoSummary\n---\nbody\n");
+        create_file(root, "plain.md", "no frontmatter here\n");
+        commit_repo(root);
+
+        let index = WikiIndex::prepare_for_source(root, DocSource::Head).unwrap();
+        let rows = index.list_pages(None, 0, None).unwrap();
+        let titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(titles, vec!["Good"]);
+    }
+
+    #[test]
+    fn source_filtering_excludes_uncommitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        create_file(root, "committed.md", &page("Committed", "s", ""));
+        commit_repo(root);
+        // Add an uncommitted page; HEAD must not see it.
+        create_file(root, "fresh.md", &page("Fresh", "s", ""));
+
+        let head = WikiIndex::prepare_for_source(root, DocSource::Head).unwrap();
+        let head_titles: Vec<String> =
+            head.list_pages(None, 0, None).unwrap().into_iter().map(|r| r.title).collect();
+        assert_eq!(head_titles, vec!["Committed".to_string()]);
+
+        let wt = WikiIndex::prepare_for_source(root, DocSource::WorkingTree).unwrap();
+        let wt_titles: Vec<String> =
+            wt.list_pages(None, 0, None).unwrap().into_iter().map(|r| r.title).collect();
+        assert!(wt_titles.contains(&"Committed".to_string()));
+        assert!(wt_titles.contains(&"Fresh".to_string()));
+    }
+
+    #[test]
+    fn tag_filter_exact_token_case_insensitive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        create_file(root, "foo.md", &page("FooPage", "s", "foo"));
+        create_file(root, "cap.md", &page("CapPage", "s", "Foo"));
+        commit_repo(root);
+
+        let index = WikiIndex::prepare_for_source(root, DocSource::Head).unwrap();
+
+        // Prefix "fo" must NOT match exact token "foo".
+        let none = index.list_pages(Some("fo"), 0, None).unwrap();
+        assert!(none.is_empty(), "prefix should not match: {none:?}");
+
+        // Filter "foo" matches both "foo" and "Foo" (case-insensitive).
+        let mut both: Vec<String> = index
+            .list_pages(Some("foo"), 0, None)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.title)
+            .collect();
+        both.sort();
+        assert_eq!(both, vec!["CapPage".to_string(), "FooPage".to_string()]);
+    }
+
+    #[test]
+    fn limit_and_offset_bound_results() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        create_file(root, "a.md", &page("Apple", "s", ""));
+        create_file(root, "b.md", &page("Banana", "s", ""));
+        create_file(root, "c.md", &page("Cherry", "s", ""));
+        commit_repo(root);
+
+        let index = WikiIndex::prepare_for_source(root, DocSource::Head).unwrap();
+
+        let first_two: Vec<String> = index
+            .list_pages(None, 0, Some(2))
+            .unwrap()
+            .into_iter()
+            .map(|r| r.title)
+            .collect();
+        assert_eq!(first_two, vec!["Apple".to_string(), "Banana".to_string()]);
+
+        let offset_one: Vec<String> = index
+            .list_pages(None, 1, Some(1))
+            .unwrap()
+            .into_iter()
+            .map(|r| r.title)
+            .collect();
+        assert_eq!(offset_one, vec!["Banana".to_string()]);
+    }
 }
