@@ -1,4 +1,4 @@
-packages/cli/src/commands/mesh/scaffold.rs#L159-L166 sha256:1edec55a3583d32817d1d1734418063d81bb0af6ce9cd37cce682c5ee5ee5716
-wiki/architecture/wiki-mesh-integration.md#L28-L52 sha256:c922b60a570a5a75bd77e6e468e288bd41af3ccc3bab6961e63fc4f981191f01
+wiki/architecture/wiki-mesh-integration.md#L28-L52 sha256:f03fae5ec1855b194922492cba8f98b417863cc0f8674b5eb21fe6c993e8ccad
+packages/cli/src/commands/mesh/scaffold.rs#L163-L170 sha256:4de0a8ffe3d9e84daff17d695c7f067ea596c74773aff1dadda330e1b9bb1303
 
-Reference of `wiki scaffold` that exposes the uncovered-link command set to the author rewriting each `[why]` before commit.
+wiki check --fix mesh-coverage section that documents how uncovered fragment links become git meshes the author reviews before commit.

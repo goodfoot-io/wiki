@@ -1,4 +1,4 @@
-packages/cli/src/commands/mesh_coverage.rs#L205-L246 sha256:d9f24680a0fa1c45514de78fed69fb7bfcd2ce12598c5e6f5cb6971ecb325b48
-wiki/reference/git-mesh-usage.md sha256:d1b11abefa282b4679d7ef2f7ad9738cfb08494adaed369ea0a43bd46e8425a3
+wiki/reference/git-mesh-usage.md sha256:081f6f54eee2ac80a5e6d15e96fcfa4461a911c811245824ac321a3206a676b2
+packages/cli/src/commands/mesh_coverage.rs#L304-L358 sha256:3d7280d0fbde76defe28622d2d498ed3e6f43a848b7b6bb6f89b1ed2ab9c38c5
 
 Porcelain parser for `git mesh ls` output: extracts mesh name and anchor path from each tab-delimited row and recognises the `no meshes` sentinel the reference page describes.

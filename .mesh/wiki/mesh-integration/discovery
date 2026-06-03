@@ -1,4 +1,4 @@
-packages/cli/src/commands/mod.rs#L141-L183 sha256:06363ec142013bfc52542b6bbcdf4573ca608ff81d7f2d0c15715e54ef801ca0
-wiki/architecture/wiki-mesh-integration.md sha256:c6388362c5755c63ed9ed0dcdd2a3b8983c73825cf0587fb0527f300ff32e8fd
+wiki/architecture/wiki-mesh-integration.md sha256:0ac6e6689f9ab8c1ffbb634db995175990398eeb5dce0d922b74e9894d6991c7
+packages/cli/src/commands/mod.rs#L238-L243 sha256:f72134f348f904cd106ffa27c9856b4ed40bdb4f5d39d165b859bbed41a7ebdb
 
 The default file-discovery glob behavior shared by wiki check and wiki scaffold so mesh coverage validation matches the same file set the rest of the CLI walks. The architecture page is the doc; discover_files is the implementation.

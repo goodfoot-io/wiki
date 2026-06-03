@@ -1,4 +1,4 @@
-packages/cli/src/commands/mesh/scaffold.rs#L159-L166 sha256:1edec55a3583d32817d1d1734418063d81bb0af6ce9cd37cce682c5ee5ee5716
-wiki/architecture/wiki-mesh-integration.md#L28-L52 sha256:247d304cde6a3d880f1dc3f9360c66a83edc3b41663e5e4131fd68f7363bca4d
+wiki/architecture/wiki-mesh-integration.md#L28-L52 sha256:f03fae5ec1855b194922492cba8f98b417863cc0f8674b5eb21fe6c993e8ccad
+packages/cli/src/commands/mesh/scaffold.rs#L163-L170 sha256:4de0a8ffe3d9e84daff17d695c7f067ea596c74773aff1dadda330e1b9bb1303
 
-wiki scaffold output generator that emits ready-to-run git mesh add and git mesh why commands for fragment-linked sections.
+wiki check --fix mesh-coverage generator that creates a git mesh for every uncovered fragment-linked section.

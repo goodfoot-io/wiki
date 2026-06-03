@@ -1,4 +1,5 @@
-packages/cli/src/commands/mesh_coverage.rs#L76-L85 sha256:bea9735baaebcf7b025638468cdd48ff18cec713c7bda4481a31053a541e322f
-wiki/guides/adding-mesh-coverage.md#L14-L20 sha256:7a0e6f453558d451f90e3528feb0b188bd5aeae001b64e4a0cc221d664f2bca1
+wiki/guides/adding-mesh-coverage.md#L14-L20 sha256:b192e101d862dcc1231f8caf74b2a47019b59b038a6da8f6a5a72976c58d5923
+packages/cli/src/commands/mesh_coverage.rs#L83-L86 sha256:ec8829a26a98153d066d6dfa7a1cee3ca34729355d9da498725b7a838f1e1c83
+packages/cli/src/commands/mesh_coverage.rs#L76-L85 sha256:4a5c2e3f4c421e4c0931bdb996953166c24569a26baac050826763f88145a234
 
 Reference of `collect_mesh_diagnostics` that returns a vector of coverage findings to the `wiki check` command.

@@ -1,4 +1,4 @@
-packages/cli/src/commands/mesh_coverage.rs#L117-L125 sha256:c9fc45943844cfbf8292d6a1eac3083e5d04432a4519c26e6433171f19088d93
-wiki/reference/git-mesh-usage.md sha256:d1b11abefa282b4679d7ef2f7ad9738cfb08494adaed369ea0a43bd46e8425a3
+wiki/reference/git-mesh-usage.md sha256:081f6f54eee2ac80a5e6d15e96fcfa4461a911c811245824ac321a3206a676b2
+packages/cli/src/commands/mesh_coverage.rs#L22-L42 sha256:6480ffdcde715894a1b1d0deb6afec532edd13d919ea478a6079a99fe14469d0
 
 Coverage decision: a fragment link is covered iff some mesh anchors both the code region and the wiki file containing the link — the rule the reference page states.

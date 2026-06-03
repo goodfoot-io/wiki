@@ -1,4 +1,5 @@
-packages/cli/src/commands/mod.rs#L138-L180 sha256:8d8b342f8f794b98d87f7ebf76655662d5d9e7102e525dc6d809ddfee569ca4c
-wiki/architecture/wiki-mesh-integration.md#L97-L99 sha256:71da7b6afd045ae4a95f696e21c122836be904cdf91c1e7e5d4298b1155fc25c
+packages/cli/src/commands/mod.rs#L238-L243 sha256:f72134f348f904cd106ffa27c9856b4ed40bdb4f5d39d165b859bbed41a7ebdb
+wiki/architecture/wiki-mesh-integration.md#L94-L96 sha256:607cfacc6efd984e7f5f1982120d1f4dc5cac05462b2dd63e4256e056bca62d8
+packages/cli/src/commands/mod.rs#L140-L182 sha256:e86bd1ddababcdb4baf1411985ce03b16d51d3c71f87b66dc29ee2caad8936f9
 
 Discovery entry point that the architecture references section cites as the canonical implementation of the default file-walk.

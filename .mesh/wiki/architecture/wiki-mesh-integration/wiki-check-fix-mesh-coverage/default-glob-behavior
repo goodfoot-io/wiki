@@ -1,4 +1,3 @@
-wiki/architecture/wiki-mesh-integration.md#L55-L57 sha256:ce834d358d15b53035b86581c071f6741479911ec6be403d1b3b42310dca9187
-packages/cli/src/commands/mod.rs#L139-L181 sha256:e86bd1ddababcdb4baf1411985ce03b16d51d3c71f87b66dc29ee2caad8936f9
-packages/cli/src/commands/mod.rs#L140-L182 sha256:e86bd1ddababcdb4baf1411985ce03b16d51d3c71f87b66dc29ee2caad8936f9
+wiki/architecture/wiki-mesh-integration.md#L55-L57 sha256:26fe9e4ff4767e0c40bda8f182332d4b8af7095144b0d942719fd68e96428c43
+packages/cli/src/commands/mod.rs#L238-L243 sha256:f72134f348f904cd106ffa27c9856b4ed40bdb4f5d39d165b859bbed41a7ebdb
 
