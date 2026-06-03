@@ -5,5 +5,6 @@ wiki/architecture/wiki-mesh-integration.md#L16-L26 sha256:0af98dced4f76cdbd56371
 packages/cli/src/commands/mesh_coverage.rs#L55-L58 sha256:4606e08e07f2242aaf80d92bab3060e0f3eb30ca97bc59701dc873b208282478
 packages/cli/src/commands/mesh_coverage.rs#L147-L147 sha256:7dcbb12d2f9b52d5144f0c247163d7de41581f415efefd49f95c9801e974346f
 packages/cli/src/commands/mesh_coverage.rs#L106-L116 sha256:4e3e20812037840b46715c8c9b4570af64e0cebbcfdb04235773bfb3fc8f81d0
+packages/cli/src/commands/mesh_coverage.rs#L22-L48 sha256:036c055f7cf66fbb2d5f8f49b8103eebbc6be94ed00388a90cbde749825f90c8
 
 Mesh coverage enforcement that wiki check runs over fragment links, calling git mesh and reporting mesh_uncovered diagnostics.
