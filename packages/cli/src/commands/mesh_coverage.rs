@@ -447,6 +447,17 @@ mod tests {
     }
 
     #[test]
+    fn broad_anchor_covers_contained_narrow_range() {
+        // A broad anchor (1-100) in a mesh that also anchors the wiki page
+        // should cover a narrow link range (50-60) strictly contained within it.
+        let idx = build(
+            "mesh-a\tsrc/code.rs\t1-100\n\
+             mesh-a\twiki/page.md\t1-1\n",
+        );
+        assert!(idx.is_covered(Path::new("src/code.rs"), 50, 60, Path::new("wiki/page.md")));
+    }
+
+    #[test]
     fn paths_equal_ignores_leading_dotslash() {
         assert!(paths_equal(Path::new("./foo/bar"), Path::new("foo/bar")));
     }

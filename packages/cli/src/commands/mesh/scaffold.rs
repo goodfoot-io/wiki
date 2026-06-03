@@ -2474,4 +2474,74 @@ mod tests {
         assert!(result.planned_deletions.is_empty());
         assert!(result.advisories.is_empty());
     }
+
+    // ── range coalescing (oscillation bug with git mesh stale --fix) ──────────
+
+    /// `build_meshes` must coalesce overlapping/contiguous fragment-link ranges
+    /// on the same path within a section — mirroring git-mesh's rule (merge when
+    /// `next.start <= current.end + 1`). Without coalescing, a section linking
+    /// `card.ts#L69-L95`, `card.ts#L75-L75`, `card.ts#L81-L81` emits three
+    /// separate anchors that `git mesh stale --fix` re-collapses into one
+    /// `card.ts#L69-L95`, so the two tools oscillate forever.
+    #[test]
+    fn build_meshes_coalesces_overlapping_ranges_per_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // Real target file so anchor-path resolution keeps `card.ts`.
+        std::fs::write(root.join("card.ts"), "// card\n".repeat(100)).unwrap();
+
+        // Wiki page: one section with three fragment links into overlapping /
+        // contiguous ranges of the same file.
+        let page_rel = "page.md";
+        let content = "\
+## Section heading
+
+See [a](./card.ts#L69-L95), [b](./card.ts#L75-L75), [c](./card.ts#L81-L81).
+";
+        let page_abs = root.join(page_rel);
+        std::fs::write(&page_abs, content).unwrap();
+
+        // Build LinkInputs exactly as `run` does: parse + augment, keep internal
+        // links with a parsed start line.
+        let raw_links = parse_fragment_links(content);
+        let augmented = augment(&raw_links, content);
+        let mut inputs: Vec<LinkInput> = Vec::new();
+        for aug in augmented {
+            if aug.link.kind != LinkKind::Internal {
+                continue;
+            }
+            if aug.link.start_line.is_none() {
+                continue;
+            }
+            inputs.push(LinkInput {
+                wiki_file: page_abs.clone(),
+                augmented: aug,
+            });
+        }
+        assert_eq!(inputs.len(), 3, "fixture should yield three fragment links");
+
+        let mut page_subdirs: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        page_subdirs.insert(page_rel.to_string(), String::new());
+
+        let drafts = build_meshes(&inputs, root, &page_subdirs);
+        assert_eq!(drafts.len(), 1, "expected a single section draft");
+
+        // Code anchors follow the leading page-section anchor.
+        let code_anchors: Vec<&str> = drafts[0]
+            .anchors
+            .iter()
+            .skip(1)
+            .map(|s| s.as_str())
+            .collect();
+
+        // 69-95 covers 75 and 81 (overlap / containment), so the three ranges
+        // must collapse to one covering anchor.
+        assert_eq!(
+            code_anchors,
+            vec!["card.ts#L69-L95"],
+            "overlapping/contiguous ranges on the same path must coalesce into one anchor"
+        );
+    }
 }
