@@ -1,6 +1,6 @@
-packages/cli/src/commands/mesh_coverage.rs#L49-L52 sha256:686ed24f8b3a448c2cfc63a546b211152f8775400632fbfaba678b1bd1d60494
-packages/cli/src/commands/mesh_coverage.rs#L100-L110 sha256:e3230a235609d5ad74f6d6cf682337bb83e9e9dcada4fa1d0cfdcfe10a29fbab
-packages/cli/src/commands/mesh_coverage.rs#L141-L141 sha256:0a782289de8df69d01ed7304a81d1e2a1c6a1bc496bb9a3ad32c07a9c8b4546e
-wiki/architecture/wiki-mesh-integration.md#L16-L26 sha256:abe083082e071d85485bf17a183134e5ecaecb4c996fc8a3e4baea146c8cef7b
+packages/cli/src/commands/mesh_coverage.rs#L49-L52 sha256:4606e08e07f2242aaf80d92bab3060e0f3eb30ca97bc59701dc873b208282478
+packages/cli/src/commands/mesh_coverage.rs#L100-L110 sha256:4e3e20812037840b46715c8c9b4570af64e0cebbcfdb04235773bfb3fc8f81d0
+packages/cli/src/commands/mesh_coverage.rs#L141-L141 sha256:7dcbb12d2f9b52d5144f0c247163d7de41581f415efefd49f95c9801e974346f
+wiki/architecture/wiki-mesh-integration.md#L16-L26 sha256:0af98dced4f76cdbd56371a7ab608c2cb2d10c37329118aaf46ea8828d367632
 
 Mesh coverage enforcement that wiki check runs over fragment links, calling git mesh and reporting mesh_uncovered diagnostics.
