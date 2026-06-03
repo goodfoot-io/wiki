@@ -26,18 +26,24 @@ impl MeshIndex {
         end: u32,
         wiki_rel: &Path,
     ) -> bool {
-        // Check exact-range anchor and the whole-file sentinel (0-0).
-        let keys: &[(PathBuf, u32, u32)] = &[
-            (code_path.to_path_buf(), start, end),
-            (code_path.to_path_buf(), 0, 0),
-        ];
-        keys.iter()
-            .filter_map(|k| self.by_anchor.get(k))
-            .flatten()
-            .any(|name| {
-                self.paths_by_mesh
-                    .get(name)
-                    .is_some_and(|paths| paths.iter().any(|p| paths_equal(p, wiki_rel)))
+        // A link `(path, start, end)` is covered when some anchor on the same
+        // path — belonging to a mesh that also anchors the wiki file — either
+        // is the whole-file sentinel (0-0) or contains the link range
+        // (`anchor.start <= start && end <= anchor.end`). Containment (rather
+        // than exact-range matching) keeps `wiki check --fix` from re-splitting
+        // ranges that `git mesh stale --fix` has already coalesced.
+        let anchors_wiki = |name: &String| {
+            self.paths_by_mesh
+                .get(name)
+                .is_some_and(|paths| paths.iter().any(|p| paths_equal(p, wiki_rel)))
+        };
+        self.by_anchor
+            .iter()
+            .filter(|((path, _, _), _)| paths_equal(path, code_path))
+            .any(|((_, a_start, a_end), names)| {
+                let contains = (*a_start == 0 && *a_end == 0)
+                    || (*a_start <= start && end <= *a_end);
+                contains && names.iter().any(&anchors_wiki)
             })
     }
 

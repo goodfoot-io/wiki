@@ -942,6 +942,59 @@ pub(crate) fn normalize_heading_text(s: &str) -> String {
 
 /// Three-stage build/group/annotate pipeline that produces the final list of
 /// meshes (in per-page declaration order) ready for shell rendering.
+/// Coalesce overlapping or contiguous line-range anchors on the same path into
+/// one covering anchor, mirroring git-mesh's `coalesce_line_ranges` so
+/// `wiki check --fix` and `git mesh stale --fix` settle on a byte-identical
+/// fixed point.
+///
+/// Whole-file anchors (`0-0`) are inert — they are never merged and pass
+/// through unchanged. Output preserves first-occurrence path order; within a
+/// path, ranges are sorted by `(start, end)` then merged when
+/// `next.start <= current.end + 1`. The returned `Vec<String>` and
+/// `Vec<StructuredAnchor>` are in lockstep (same set, same order).
+fn coalesce_line_ranges(
+    anchors: Vec<draft::StructuredAnchor>,
+) -> (Vec<String>, Vec<draft::StructuredAnchor>) {
+    // Group ranges by path, preserving first-occurrence path order.
+    let mut path_order: Vec<String> = Vec::new();
+    let mut by_path: std::collections::HashMap<String, Vec<draft::StructuredAnchor>> =
+        std::collections::HashMap::new();
+    for anchor in anchors {
+        if !by_path.contains_key(&anchor.path) {
+            path_order.push(anchor.path.clone());
+        }
+        by_path.entry(anchor.path.clone()).or_default().push(anchor);
+    }
+
+    let mut structured: Vec<draft::StructuredAnchor> = Vec::new();
+    for path in &path_order {
+        let mut ranges = by_path.remove(path).expect("path tracked in order");
+        // Whole-file anchors are inert; never merge them.
+        let (whole_file, mut line_ranges): (Vec<_>, Vec<_>) =
+            ranges.drain(..).partition(|a| a.start_line == 0 && a.end_line == 0);
+        line_ranges.sort_by_key(|a| (a.start_line, a.end_line));
+
+        let mut merged: Vec<draft::StructuredAnchor> = Vec::new();
+        for range in line_ranges {
+            match merged.last_mut() {
+                Some(current) if range.start_line <= current.end_line.saturating_add(1) => {
+                    current.end_line = current.end_line.max(range.end_line);
+                    current.start_line = current.start_line.min(range.start_line);
+                }
+                _ => merged.push(range),
+            }
+        }
+        structured.extend(merged);
+        structured.extend(whole_file);
+    }
+
+    let rendered: Vec<String> = structured
+        .iter()
+        .map(|a| format!("{}#L{}-L{}", a.path, a.start_line, a.end_line))
+        .collect();
+    (rendered, structured)
+}
+
 fn build_meshes(
     inputs: &[LinkInput],
     repo_root: &Path,
@@ -996,7 +1049,6 @@ fn build_meshes(
             let leader = &section_entries[0].augmented;
             let mut seen: std::collections::HashSet<(String, u32, u32)> =
                 std::collections::HashSet::new();
-            let mut target_anchors: Vec<String> = Vec::new();
             let mut structured_targets: Vec<draft::StructuredAnchor> = Vec::new();
             for entry in section_entries {
                 let link = &entry.augmented.link;
@@ -1010,13 +1062,14 @@ fn build_meshes(
                 if !seen.insert(triple) {
                     continue;
                 }
-                target_anchors.push(format!("{anchor_rel}#L{start}-L{end}"));
                 structured_targets.push(draft::StructuredAnchor {
                     path: anchor_rel,
                     start_line: start,
                     end_line: end,
                 });
             }
+            let (target_anchors, structured_targets) =
+                coalesce_line_ranges(structured_targets);
             groups_storage.push((leader, key.0, key.1, target_anchors, structured_targets));
         }
         let groups: Vec<draft::SectionGroup<'_>> = groups_storage
