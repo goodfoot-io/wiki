@@ -18,7 +18,6 @@ pub mod freshness;
 pub mod fs_class;
 pub mod ingest;
 pub mod lock;
-pub mod mesh_cache;
 pub mod passes;
 pub mod schema;
 pub mod search;

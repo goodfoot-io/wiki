@@ -12,7 +12,6 @@ use crate::commands::mesh::store;
 use crate::commands::mesh_coverage::build_mesh_index;
 use crate::frontmatter::parse_frontmatter;
 use crate::headings::{extract_headings, github_slug, resolve_heading};
-use crate::index::mesh_cache::{CacheLocation, MeshCache};
 use crate::index::DocSource;
 use crate::parser::{LinkKind, parse_fragment_links};
 
@@ -759,11 +758,6 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<Vec<MeshMovePlan>> {
     let change_set = working_tree_change_set(repo_root)?;
     let mut change_set_cache: HashMap<String, Option<Vec<u8>>> = HashMap::new();
 
-    // Memoization cache: skip re-hashing anchors whose file has not changed.
-    // Opening is best-effort; a None cache means we always recompute (same
-    // correctness, just no memoization speedup).
-    let cache = MeshCache::open(repo_root);
-
     let mut plans: Vec<MeshMovePlan> = Vec::new();
 
     for (slug, mesh) in &meshes {
@@ -777,32 +771,6 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<Vec<MeshMovePlan>> {
                 }
             };
 
-            // Cache lookup: if the anchor's file is not in the change set and
-            // we have a generation-matching cache entry, use it without rehashing.
-            let file_changed = change_set.contains(&anchor.path);
-            if !file_changed
-                && let Some(ref c) = cache
-                && let Some(entry) = c.lookup(slug, &anchor.path, anchor.start_line, anchor.end_line)
-            {
-                // The cached entry records the resolved location.
-                // If the stored hash matches the anchor's stored hash the anchor
-                // was fresh when last verified — still fresh.
-                if hashes_equal(&entry.content_hash, &anchor.content_hash) {
-                    continue;
-                }
-                // A move was recorded: emit the cached plan.
-                plans.push(MeshMovePlan {
-                    mesh_name: slug.to_string(),
-                    old_path: PathBuf::from(&anchor.path),
-                    old_start: anchor.start_line,
-                    old_end: anchor.end_line,
-                    new_path: PathBuf::from(&entry.loc_path),
-                    new_start: entry.loc_start,
-                    new_end: entry.loc_end,
-                });
-                continue;
-            }
-
             // Read the anchor's own file once. A missing file yields empty
             // bytes; we then fall through to the change-set search.
             let own_bytes = std::fs::read(repo_root.join(&anchor.path)).unwrap_or_default();
@@ -812,21 +780,6 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<Vec<MeshMovePlan>> {
             if !own_bytes.is_empty() {
                 let fresh = git_mesh_core::hash_bytes_with_extent(&own_bytes, &extent);
                 if hashes_equal(&fresh, &anchor.content_hash) {
-                    // Fresh: cache this result keyed by the anchor's own coords.
-                    if let Some(ref c) = cache {
-                        c.upsert(
-                            slug,
-                            &anchor.path,
-                            anchor.start_line,
-                            anchor.end_line,
-                            &anchor.content_hash,
-                            CacheLocation {
-                                path: &anchor.path,
-                                start: anchor.start_line,
-                                end: anchor.end_line,
-                            },
-                        );
-                    }
                     continue;
                 }
             }
@@ -841,21 +794,6 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<Vec<MeshMovePlan>> {
                 let hits =
                     scan_for_content_hash(&own_candidate, &anchor.content_hash, extent, near);
                 if hits.len() == 1 {
-                    // Cache the move result before emitting the plan.
-                    if let Some(ref c) = cache {
-                        c.upsert(
-                            slug,
-                            &anchor.path,
-                            anchor.start_line,
-                            anchor.end_line,
-                            &anchor.content_hash,
-                            CacheLocation {
-                                path: &hits[0].path,
-                                start: hits[0].start_line,
-                                end: hits[0].end_line,
-                            },
-                        );
-                    }
                     push_plan(&mut plans, slug, anchor, &hits[0]);
                     continue;
                 }
@@ -881,21 +819,6 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<Vec<MeshMovePlan>> {
             // untouched.
             let hits = scan_for_content_hash(&candidates, &anchor.content_hash, extent, None);
             if hits.len() == 1 {
-                // Cache the cross-file move result.
-                if let Some(ref c) = cache {
-                    c.upsert(
-                        slug,
-                        &anchor.path,
-                        anchor.start_line,
-                        anchor.end_line,
-                        &anchor.content_hash,
-                        CacheLocation {
-                            path: &hits[0].path,
-                            start: hits[0].start_line,
-                            end: hits[0].end_line,
-                        },
-                    );
-                }
                 push_plan(&mut plans, slug, anchor, &hits[0]);
             }
         }
@@ -1815,13 +1738,14 @@ mod tests {
         );
     }
 
-    // ── mesh cache parity tests ───────────────────────────────────────────────
+    // ── mesh staleness fixture (shared with phase-2 move/conflict tests) ─────
 
     /// Build a git repo with a `.wiki/` mesh whose anchor points at `src/lib.rs`
     /// at a known line range, then append a line to the file so the anchor is
     /// stale and the function actually runs the scan path.
     ///
     /// Returns `(repo, anchor_content_hash)`.
+    #[allow(dead_code)]
     fn setup_stale_mesh_repo() -> (TestRepo, String) {
         use crate::commands::mesh::store;
         use git_mesh_core::mesh_file::MeshFile;
@@ -1854,87 +1778,5 @@ mod tests {
         // returns false so `plan_mesh_follows` actually runs.
 
         (repo, hash)
-    }
-
-    /// Cold-vs-warm parity: `plan_mesh_follows` over the fixture yields the
-    /// same `MeshMovePlan` list regardless of whether the cache was empty or
-    /// pre-warmed from a prior run.
-    #[test]
-    fn plan_mesh_follows_cold_and_warm_produce_identical_results() {
-        let (repo, _hash) = setup_stale_mesh_repo();
-
-        // Cold run (empty cache).
-        let cold = plan_mesh_follows(repo.path()).unwrap();
-
-        // Warm run (cache populated by the first call).
-        let warm = plan_mesh_follows(repo.path()).unwrap();
-
-        assert_eq!(
-            cold.len(),
-            warm.len(),
-            "cold and warm runs must return the same number of plans; \
-             cold={cold:?} warm={warm:?}"
-        );
-
-        for (c, w) in cold.iter().zip(warm.iter()) {
-            assert_eq!(
-                c.mesh_name, w.mesh_name,
-                "mesh_name mismatch: cold={c:?} warm={w:?}"
-            );
-            assert_eq!(c.old_path, w.old_path);
-            assert_eq!(c.old_start, w.old_start);
-            assert_eq!(c.old_end, w.old_end);
-            assert_eq!(c.new_path, w.new_path);
-            assert_eq!(c.new_start, w.new_start);
-            assert_eq!(c.new_end, w.new_end);
-        }
-    }
-
-    /// Generation invalidation: after the `worktree_generation` advances the
-    /// cache must not serve the stale entry.
-    #[test]
-    fn plan_mesh_follows_cache_invalidated_on_generation_bump() {
-        use crate::index::find_dot_git;
-        use rusqlite::Connection;
-
-        let (repo, _hash) = setup_stale_mesh_repo();
-
-        // First run populates the cache at generation 0.
-        let first = plan_mesh_follows(repo.path()).unwrap();
-
-        // Bump worktree_generation in the DB to simulate a new tree scan.
-        {
-            let dot_git = find_dot_git(repo.path()).unwrap();
-            let conn = Connection::open(dot_git.join("wiki-index.sqlite")).unwrap();
-            conn.execute(
-                "UPDATE state SET worktree_generation = worktree_generation + 1 WHERE id = 1",
-                [],
-            )
-            .unwrap();
-        }
-
-        // Restore the source file to its original state (anchor is fresh again).
-        let original = "fn foo() {\n    42\n}\n";
-        repo.write("src/lib.rs", original);
-
-        // Second run must not reuse the stale cached entry — it should re-hash
-        // and find the anchor fresh this time.
-        let second = plan_mesh_follows(repo.path()).unwrap();
-
-        // The first run found a moved anchor (or genuinely stale); the second
-        // run with the restored file should find no moves.
-        assert!(
-            second.is_empty(),
-            "after restoring the source file and bumping generation, \
-             no move plans should be emitted; got: {second:?}"
-        );
-        // Confirm the first run actually produced output (i.e. the anchor was stale).
-        assert!(
-            !first.is_empty() || first.is_empty(),
-            // Either outcome is acceptable — what matters is the second run
-            // reflects the actual state, not the stale cache. This assertion
-            // just documents the intent.
-            "first run result: {first:?}"
-        );
     }
 }

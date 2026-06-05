@@ -62,13 +62,28 @@ pub(crate) fn read_all(repo_root: &Path) -> Result<Vec<(String, MeshFile)>> {
             continue;
         }
         let path = entry.path();
+        // Skip hidden/dotfiles (e.g. .DS_Store, editor swap files).
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with('.'))
+            .unwrap_or(false)
+        {
+            continue;
+        }
         let Some(slug) = slug_for(&root, path) else {
             continue;
         };
-        let text = fs::read_to_string(path)
-            .map_err(|e| miette::miette!("failed to read {}: {e}", path.display()))?;
-        let mesh = MeshFile::parse(&text)
-            .map_err(|e| miette::miette!("invalid mesh `{slug}`: {e}"))?;
+        // Skip files that cannot be read as UTF-8 or parsed as a mesh.
+        // One stray file must not abort the entire pass.
+        let text = match fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let mesh = match MeshFile::parse(&text) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
         out.push((slug, mesh));
     }
     Ok(out)
@@ -267,6 +282,27 @@ mod tests {
         let got = hash_anchor(root, "file.txt", AnchorExtent::WholeFile).unwrap();
         let expected = hash_bytes_with_extent(content, &AnchorExtent::WholeFile);
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn read_all_skips_stray_non_mesh_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Write a valid mesh.
+        write(root, "goodslug", &sample_mesh()).unwrap();
+
+        // Seed a .DS_Store with binary bytes in the .wiki/ dir.
+        let wiki = wiki_dir(root);
+        fs::write(wiki.join(".DS_Store"), b"\x00\x01\x02\xff\xfe binary junk").unwrap();
+
+        // Seed a plain README with prose (not a valid mesh file).
+        fs::write(wiki.join("README"), b"This is documentation, not a mesh.\n").unwrap();
+
+        // read_all must return only the valid mesh and must not error.
+        let all = read_all(root).unwrap();
+        assert_eq!(all.len(), 1, "expected only the valid mesh, got: {all:?}");
+        assert_eq!(all[0].0, "goodslug");
     }
 
     #[test]
