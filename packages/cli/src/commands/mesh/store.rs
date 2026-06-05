@@ -74,16 +74,13 @@ pub(crate) fn read_all(repo_root: &Path) -> Result<Vec<(String, MeshFile)>> {
         let Some(slug) = slug_for(&root, path) else {
             continue;
         };
-        // Skip files that cannot be read as UTF-8 or parsed as a mesh.
-        // One stray file must not abort the entire pass.
-        let text = match fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        let mesh = match MeshFile::parse(&text) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
+        // Fail closed: any non-dotfile that cannot be read as UTF-8 or parsed
+        // as a mesh is a hard error. A committed mesh file with git conflict
+        // markers must surface loudly rather than silently drop coverage.
+        let text = fs::read_to_string(path)
+            .map_err(|e| miette::miette!("failed to read mesh `{}`: {e}", path.display()))?;
+        let mesh = MeshFile::parse(&text)
+            .map_err(|e| miette::miette!("malformed mesh `{}`: {e}", path.display()))?;
         out.push((slug, mesh));
     }
     Ok(out)
@@ -344,17 +341,66 @@ mod tests {
         // Write a valid mesh.
         write(root, "goodslug", &sample_mesh()).unwrap();
 
-        // Seed a .DS_Store with binary bytes in the .wiki/ dir.
+        // Seed dotfiles with junk — these must be silently skipped, not errored.
         let wiki = wiki_dir(root);
         fs::write(wiki.join(".DS_Store"), b"\x00\x01\x02\xff\xfe binary junk").unwrap();
-
-        // Seed a plain README with prose (not a valid mesh file).
-        fs::write(wiki.join("README"), b"This is documentation, not a mesh.\n").unwrap();
+        fs::write(wiki.join(".foo.swp"), b"editor swap content").unwrap();
 
         // read_all must return only the valid mesh and must not error.
         let all = read_all(root).unwrap();
         assert_eq!(all.len(), 1, "expected only the valid mesh, got: {all:?}");
         assert_eq!(all[0].0, "goodslug");
+    }
+
+    #[test]
+    fn read_all_fails_closed_on_conflict_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Write a valid mesh alongside the corrupt one.
+        write(root, "goodslug", &sample_mesh()).unwrap();
+
+        // Seed a non-dotfile with git conflict markers — must error, not skip.
+        let wiki = wiki_dir(root);
+        fs::write(
+            wiki.join("conflicted"),
+            b"<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>> other\n",
+        )
+        .unwrap();
+
+        let result = read_all(root);
+        assert!(
+            result.is_err(),
+            "read_all must fail closed on a conflict-markered mesh file"
+        );
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("conflicted"),
+            "error message must name the offending file: {msg}"
+        );
+    }
+
+    #[test]
+    fn read_all_fails_closed_on_non_dot_prose_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        write(root, "goodslug", &sample_mesh()).unwrap();
+
+        // A non-dot file with arbitrary prose (not a mesh) must also error.
+        let wiki = wiki_dir(root);
+        fs::write(wiki.join("README"), b"This is documentation, not a mesh.\n").unwrap();
+
+        let result = read_all(root);
+        assert!(
+            result.is_err(),
+            "read_all must fail closed on a non-dot unparseable file"
+        );
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("README"),
+            "error message must name the offending file: {msg}"
+        );
     }
 
     #[test]
