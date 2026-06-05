@@ -40,7 +40,7 @@ wiki check --fix "packages/auth/**/*.md"
 Names follow the `wiki/<page-title-slug>/<target-slug>` convention:
 
 - **Page title slug** — derived from the wiki page's frontmatter `title` field (falling back to the filename stem). This keeps names stable across file renames.
-- **Target slug** — derived from the link label ([truncated at five words](/packages/cli/src/commands/mesh/draft.rs#L166-L166), falling back to the target file stem for long or path-style labels).
+- **Target slug** — derived from the link label ([truncated at five words](/packages/cli/src/commands/mesh/draft.rs#L163-L163), falling back to the target file stem for long or path-style labels).
 
 Names are topical, not path-derived: one wiki page will typically produce several meshes covering different subsystems. Authors are expected to rename generated slugs to match the conceptual relationship before committing.
 
