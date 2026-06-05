@@ -606,7 +606,7 @@ checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
 [[package]]
 name = "git-mesh-core"
 version = "0.1.0"
-source = "git+https://github.com/goodfoot-io/git-mesh.git?rev=2726552030c8f470c3c56eba3cad58e5fd47e992#2726552030c8f470c3c56eba3cad58e5fd47e992"
+source = "git+https://github.com/goodfoot-io/git-mesh.git?rev=b37f18ae7cff523cb37724e88fe71af4b2c377ef#b37f18ae7cff523cb37724e88fe71af4b2c377ef"
 dependencies = [
  "sha2",
  "thiserror",

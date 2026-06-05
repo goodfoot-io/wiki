@@ -6,7 +6,7 @@ use std::process::Command;
 use miette::Result;
 use serde::Serialize;
 
-use git_mesh_core::{AnchorExtent, scan_for_content_hash};
+use git_mesh_core::{AnchorExtent, LineIndex, hash_extent_indexed, scan_indexed};
 
 use crate::commands::mesh::store;
 use crate::commands::mesh_coverage::build_mesh_index;
@@ -786,10 +786,36 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<MeshFollowOutcome> {
     }
 
     // Working-tree change set: repo-relative paths that differ from HEAD
-    // (staged, unstaged, or untracked). Read once and reused for every stale
-    // anchor's cross-file search.
+    // (staged, unstaged, or untracked).
     let change_set = working_tree_change_set(repo_root)?;
-    let mut change_set_cache: HashMap<String, Option<Vec<u8>>> = HashMap::new();
+
+    // Read every file an anchor names plus every change-set file exactly once
+    // (a file with K anchors is read once, not K times), so `LineIndex` and the
+    // content hashes are computed over a single owned buffer per path.
+    let mut file_bytes: HashMap<String, Vec<u8>> = HashMap::new();
+    for path in change_set
+        .iter()
+        .cloned()
+        .chain(meshes.iter().flat_map(|(_, m)| m.anchors.iter().map(|a| a.path.clone())))
+    {
+        file_bytes
+            .entry(path.clone())
+            .or_insert_with(|| std::fs::read(repo_root.join(&path)).unwrap_or_default());
+    }
+
+    // Build the change-set line index once and reuse it for every stale
+    // anchor's cross-file search. The anchor's own file may appear here too:
+    // by the time control reaches the change-set scan the own-file pass has
+    // already found 0 matches (a unique hit or a ≥2 ambiguity would have
+    // `continue`d), so its inclusion contributes nothing and the result is
+    // identical to excluding it.
+    let change_set_idx: Vec<(String, LineIndex)> = change_set
+        .iter()
+        .filter_map(|p| {
+            let b = file_bytes.get(p)?;
+            (!b.is_empty()).then(|| (p.clone(), LineIndex::build(b)))
+        })
+        .collect();
 
     let mut plans: Vec<MeshMovePlan> = Vec::new();
     let mut conflicts: Vec<MeshConflict> = Vec::new();
@@ -805,28 +831,31 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<MeshFollowOutcome> {
                 }
             };
 
-            // Read the anchor's own file once. A missing file yields empty
-            // bytes; we then fall through to the change-set search.
-            let own_bytes = std::fs::read(repo_root.join(&anchor.path)).unwrap_or_default();
+            // The anchor's own file, read once above. Missing/empty ⇒ skip
+            // straight to the change-set search.
+            let own_bytes = file_bytes
+                .get(&anchor.path)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
 
-            // 1. Freshness — re-hash in place. If it matches, the anchor is
-            //    fresh; nothing to do.
             if !own_bytes.is_empty() {
-                let fresh = git_mesh_core::hash_bytes_with_extent(&own_bytes, &extent);
+                // Index the own file once and reuse it for both the freshness
+                // check and the same-file move scan.
+                let own_pair = [(anchor.path.clone(), LineIndex::build(own_bytes))];
+
+                // 1. Freshness — re-hash in place. If it matches, the anchor is
+                //    fresh; nothing to do.
+                let fresh = hash_extent_indexed(&own_pair[0].1, &extent);
                 if hashes_equal(&fresh, &anchor.content_hash) {
                     continue;
                 }
-            }
 
-            // 2. Same-file-first move.
-            let near = match extent {
-                AnchorExtent::WholeFile => None,
-                AnchorExtent::LineRange { start, .. } => Some(start),
-            };
-            if !own_bytes.is_empty() {
-                let own_candidate = vec![(anchor.path.clone(), own_bytes.clone())];
-                let hits =
-                    scan_for_content_hash(&own_candidate, &anchor.content_hash, extent, near);
+                // 2. Same-file-first move (exhaustive, fail-closed on ambiguity).
+                let near = match extent {
+                    AnchorExtent::WholeFile => None,
+                    AnchorExtent::LineRange { start, .. } => Some(start),
+                };
+                let hits = scan_indexed(&own_pair, &anchor.content_hash, extent, near);
                 if hits.len() == 1 {
                     push_plan(&mut plans, slug, anchor, &hits[0]);
                     continue;
@@ -839,25 +868,10 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<MeshFollowOutcome> {
                 }
             }
 
-            // 3. Change-set move. Build candidates from the change set, skipping
-            //    the anchor's own file (already searched above).
-            let mut candidates: Vec<(String, Vec<u8>)> = Vec::new();
-            for path in &change_set {
-                if path == &anchor.path {
-                    continue;
-                }
-                let bytes = change_set_cache
-                    .entry(path.clone())
-                    .or_insert_with(|| std::fs::read(repo_root.join(path)).ok());
-                if let Some(bytes) = bytes {
-                    candidates.push((path.clone(), bytes.clone()));
-                }
-            }
-
-            // Exactly one match ⇒ a unique relocation. Zero ⇒ genuinely stale,
-            // no auto-fix. Two or more ⇒ conflict: fail-closed, leave the link
-            // untouched.
-            let hits = scan_for_content_hash(&candidates, &anchor.content_hash, extent, None);
+            // 3. Change-set move. Exactly one match ⇒ a unique relocation.
+            //    Zero ⇒ genuinely stale, no auto-fix. Two or more ⇒ conflict:
+            //    fail-closed, leave the link untouched.
+            let hits = scan_indexed(&change_set_idx, &anchor.content_hash, extent, None);
             if hits.len() == 1 {
                 push_plan(&mut plans, slug, anchor, &hits[0]);
             } else if hits.len() >= 2 {
