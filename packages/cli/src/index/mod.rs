@@ -18,6 +18,7 @@ pub mod freshness;
 pub mod fs_class;
 pub mod ingest;
 pub mod lock;
+pub mod mesh_cache;
 pub mod passes;
 pub mod schema;
 pub mod search;
@@ -26,7 +27,7 @@ pub mod state;
 /// Walk `start` and its ancestors looking for a `.git` entry (file or dir).
 /// Returns the resolved dotgit path (the `.git` dir itself, or the path the
 /// `.git` file points at) when found, or `None`.
-fn find_dot_git(start: &Path) -> Option<PathBuf> {
+pub(crate) fn find_dot_git(start: &Path) -> Option<PathBuf> {
     let mut cur = start;
     loop {
         let candidate = cur.join(".git");

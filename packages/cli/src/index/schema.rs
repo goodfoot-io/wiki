@@ -5,7 +5,7 @@
 //! `fts` synchronized so an FTS row dies the moment the corresponding
 //! `blobs.refcount` hits zero.
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub const SCHEMA_V1: &str = r#"
 CREATE TABLE state (
@@ -61,6 +61,22 @@ CREATE VIRTUAL TABLE fts USING fts5(
   tokenize='unicode61 remove_diacritics 2',
   prefix='2 3 4'
 );
+
+-- Memoization cache for mesh anchor freshness / move resolution.
+-- Keyed by (slug, path, start_line, end_line); invalidated by worktree_generation.
+-- A cache miss is safe: the caller recomputes the full hash + scan.
+CREATE TABLE mesh_anchor (
+  slug TEXT NOT NULL,
+  path TEXT NOT NULL,
+  start_line INTEGER NOT NULL,
+  end_line INTEGER NOT NULL,
+  content_hash TEXT NOT NULL,
+  loc_path TEXT NOT NULL,
+  loc_start INTEGER NOT NULL,
+  loc_end INTEGER NOT NULL,
+  verified_generation INTEGER NOT NULL,
+  PRIMARY KEY (slug, path, start_line, end_line)
+) STRICT;
 "#;
 
 /// Apply the schema and initial state row to `conn`, or validate an existing
@@ -155,6 +171,7 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(version, 2);
 
         // FTS triggers exist.
         let trigger_count: i64 = conn
@@ -165,6 +182,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(trigger_count, 3, "expected blobs_ai, blobs_ad, blobs_au");
+
+        // mesh_anchor table exists.
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='mesh_anchor'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 1, "mesh_anchor table must exist after bootstrap");
     }
 
     #[test]
