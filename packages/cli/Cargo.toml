@@ -25,6 +25,7 @@ toml_edit = "0.22"
 fs4 = { version = "0.13", features = ["sync"] }
 anyhow = "1"
 indexmap = { version = "2", features = ["serde"] }
+git-mesh-core = { git = "https://github.com/goodfoot-io/git-mesh.git", rev = "2726552030c8f470c3c56eba3cad58e5fd47e992", package = "git-mesh-core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
