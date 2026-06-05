@@ -36,6 +36,9 @@ use crate::perf;
 /// resolution fails the returned `Command` still spawns to a `NotFound`
 /// error, preserving every call site's existing `ErrorKind::NotFound`
 /// handling.
+// Retained for Group 5's final binary deletion + grep gate; only the test
+// helper references it now that the production move-detection path is in-process.
+#[allow(dead_code)]
 pub(crate) fn git_mesh_command() -> Command {
     #[cfg(windows)]
     {

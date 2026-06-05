@@ -52,6 +52,26 @@ fn find_dot_git(start: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Stat-only check that the working tree is unchanged since the last verified
+/// index state. Resolves `.git`, opens the index DB read-only, and runs
+/// [`freshness::fast_gate`].
+///
+/// Returns `true` only when the gate confirms an unchanged tree. Any error,
+/// missing `.git`, or stale state returns `false` (fail-open toward doing the
+/// work — callers must re-hash when this is `false`).
+pub fn tree_unchanged(repo_root: &Path) -> bool {
+    let Some(dot_git) = find_dot_git(repo_root) else {
+        return false;
+    };
+    let db_path = dot_git.join("wiki-index.sqlite");
+    // Open read-only; if the DB does not exist yet there is no verified state.
+    let conn = match Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    matches!(freshness::fast_gate(&dot_git, &conn), Ok(Some(_)))
+}
+
 /// Hard cap on the number of results `wiki "<query>"` will print.
 pub const SEARCH_LIMIT: i64 = 3;
 

@@ -1,12 +1,14 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
-use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use miette::Result;
 use serde::Serialize;
 
+use git_mesh_core::{AnchorExtent, scan_for_content_hash};
+
+use crate::commands::mesh::store;
 use crate::commands::mesh_coverage::build_mesh_index;
 use crate::frontmatter::parse_frontmatter;
 use crate::headings::{extract_headings, github_slug, resolve_heading};
@@ -700,13 +702,12 @@ fn read_blob_at(repo_root: &Path, sha: &str, path: &str) -> Result<Option<String
 
 // ── Fix #2: mesh auto-follow ──────────────────────────────────────────────────
 
-/// A MOVED anchor found by `git mesh stale --format=json` that passes the
-/// four guardrails (verbatim blob, same path, no Changed sibling, opt-in active).
+/// A stale anchor that `git-mesh-core` relocated to a unique new position.
 ///
 /// Carries both the anchored (old) coordinates and the destination (new)
-/// coordinates so callers can rewrite wiki link fragments. In the v1.0.80
-/// file-backed model there is no mesh-advancing step; reading
-/// `moved_to.extent` directly works in both staged and committed cases.
+/// coordinates so callers can rewrite wiki link fragments. Computed in-process
+/// from the `.wiki/` mesh store: re-hash the anchored extent, and when it no
+/// longer matches the stored hash, find where the verbatim content moved.
 #[derive(Debug)]
 pub struct MeshMovePlan {
     #[allow(dead_code)]
@@ -720,156 +721,167 @@ pub struct MeshMovePlan {
     pub new_end: u32,
 }
 
-/// Run `git mesh stale --format=json` and return all MOVED anchors whose mesh
-/// has no CHANGED sibling. Returns `Ok(vec![])` when git-mesh is not found.
+/// Compute mesh move plans in-process from the `.wiki/` store, without spawning
+/// `git mesh`.
+///
+/// Hot-path gate: if the working tree is unchanged since the last verified
+/// index state ([`crate::index::tree_unchanged`]), no anchor can have drifted,
+/// so we return no plans without re-hashing anything.
+///
+/// Per anchor (across every mesh in `.wiki/`):
+/// 1. **Freshness.** Re-hash the anchored extent in the file it names. If it
+///    equals the stored hash, the anchor is fresh — skip.
+/// 2. **Same-file-first.** If stale, scan only the anchor's own file with
+///    `near = old_start` (whole-file: no `near`). Exactly one match ⇒ a plan to
+///    the new range in the same file.
+/// 3. **Change set.** Still unmatched ⇒ scan the working-tree change set with
+///    `near = None`. Exactly one match ⇒ plan. Two or more matches ⇒ conflict:
+///    no plan, the link is left untouched (fail-closed). Zero ⇒ genuinely
+///    stale, no auto-fix.
+///
+/// The candidate set is the change set by default; there is no `--rescan` flag
+/// in the current CLI surface, so a whole-tree rescan is not offered here.
 pub fn plan_mesh_follows(repo_root: &Path) -> Result<Vec<MeshMovePlan>> {
-    let mut cmd = super::git_mesh_command();
-    cmd.current_dir(repo_root)
-        .args(["stale", "--format=json"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        // Inherit stderr so git-mesh's diagnostics and GIT_MESH_PERF=1 timing
-        // lines reach our stderr rather than being captured and discarded.
-        .stderr(Stdio::inherit());
-
-    let child = match cmd.spawn() {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
-        Err(e) => return Err(miette::miette!("git-mesh stale failed: {e}")),
-        Ok(c) => c,
-    };
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| miette::miette!("git-mesh stale failed: {e}"))?;
-
-    // exit 1 means drift was found — that's fine; we want to read the output.
-    // Only bail on other exit codes if stderr looks like a hard error.
-    if !output.status.success() && output.status.code() != Some(1) {
-        // git-mesh's stderr is inherited, so its diagnostics are already on the
-        // terminal; we only add the exit status for context.
-        return Err(miette::miette!(
-            "git-mesh stale exited with status {}",
-            output.status
-        ));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if stdout.trim().is_empty() {
+    // Stat-gate the whole pass: an unchanged tree cannot have drifted anchors,
+    // so there is nothing to re-hash.
+    if crate::index::tree_unchanged(repo_root) {
         return Ok(vec![]);
     }
 
-    parse_stale_json(&stdout)
-}
-
-/// Parse the JSON document emitted by `git mesh stale --format=json` into
-/// MOVED plans. Free function so unit tests can feed canned JSON.
-fn parse_stale_json(stdout: &str) -> Result<Vec<MeshMovePlan>> {
-    let v: serde_json::Value = serde_json::from_str(stdout)
-        .map_err(|e| miette::miette!("git-mesh stale --format=json: parse error: {e}"))?;
-
-    let findings = match v.get("findings").and_then(|f| f.as_array()) {
-        Some(a) => a,
-        None => return Ok(vec![]),
-    };
-
-    struct Row {
-        status: String,
-        mesh: String,
-        old_path: PathBuf,
-        old_start: u32,
-        old_end: u32,
-        new_path: Option<PathBuf>,
-        new_start: Option<u32>,
-        new_end: Option<u32>,
+    let meshes = store::read_all(repo_root)?;
+    if meshes.is_empty() {
+        return Ok(vec![]);
     }
 
-    let mut rows: Vec<Row> = Vec::new();
-    for f in findings {
-        let status = f
-            .get("status")
-            .and_then(|s| s.get("code"))
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .to_string();
-        let mesh = f
-            .get("mesh")
-            .and_then(|m| m.as_str())
-            .unwrap_or("")
-            .to_string();
+    // Working-tree change set: repo-relative paths that differ from HEAD
+    // (staged, unstaged, or untracked). Read once and reused for every stale
+    // anchor's cross-file search.
+    let change_set = working_tree_change_set(repo_root)?;
+    let mut change_set_cache: HashMap<String, Option<Vec<u8>>> = HashMap::new();
 
-        let anchored = f.get("anchored");
-        let old_path = anchored
-            .and_then(|a| a.get("path"))
-            .and_then(|p| p.as_str())
-            .map(PathBuf::from)
-            .unwrap_or_default();
-        let old_extent = anchored.and_then(|a| a.get("extent"));
-        let old_start = old_extent
-            .and_then(|e| e.get("start"))
-            .and_then(|n| n.as_u64())
-            .unwrap_or(0) as u32;
-        let old_end = old_extent
-            .and_then(|e| e.get("end"))
-            .and_then(|n| n.as_u64())
-            .unwrap_or(0) as u32;
+    let mut plans: Vec<MeshMovePlan> = Vec::new();
 
-        let moved_to = f.get("moved_to");
-        let new_path = moved_to
-            .and_then(|m| m.get("path"))
-            .and_then(|p| p.as_str())
-            .map(PathBuf::from);
-        let new_extent = moved_to.and_then(|m| m.get("extent"));
-        let new_start = new_extent
-            .and_then(|e| e.get("start"))
-            .and_then(|n| n.as_u64())
-            .map(|n| n as u32);
-        let new_end = new_extent
-            .and_then(|e| e.get("end"))
-            .and_then(|n| n.as_u64())
-            .map(|n| n as u32);
+    for (slug, mesh) in &meshes {
+        for anchor in &mesh.anchors {
+            let extent = if anchor.start_line == 0 && anchor.end_line == 0 {
+                AnchorExtent::WholeFile
+            } else {
+                AnchorExtent::LineRange {
+                    start: anchor.start_line,
+                    end: anchor.end_line,
+                }
+            };
 
-        rows.push(Row {
-            status,
-            mesh,
-            old_path,
-            old_start,
-            old_end,
-            new_path,
-            new_start,
-            new_end,
-        });
-    }
+            // Read the anchor's own file once. A missing file yields empty
+            // bytes; we then fall through to the change-set search.
+            let own_bytes = std::fs::read(repo_root.join(&anchor.path)).unwrap_or_default();
 
-    // Identify meshes that have at least one CHANGED row.
-    let mut changed_meshes: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for row in &rows {
-        if row.status == "CHANGED" {
-            changed_meshes.insert(row.mesh.clone());
+            // 1. Freshness — re-hash in place. If it matches, the anchor is
+            //    fresh; nothing to do.
+            if !own_bytes.is_empty() {
+                let fresh = git_mesh_core::hash_bytes_with_extent(&own_bytes, &extent);
+                if hashes_equal(&fresh, &anchor.content_hash) {
+                    continue;
+                }
+            }
+
+            // 2. Same-file-first move.
+            let near = match extent {
+                AnchorExtent::WholeFile => None,
+                AnchorExtent::LineRange { start, .. } => Some(start),
+            };
+            if !own_bytes.is_empty() {
+                let own_candidate = vec![(anchor.path.clone(), own_bytes.clone())];
+                let hits =
+                    scan_for_content_hash(&own_candidate, &anchor.content_hash, extent, near);
+                if hits.len() == 1 {
+                    push_plan(&mut plans, slug, anchor, &hits[0]);
+                    continue;
+                }
+            }
+
+            // 3. Change-set move. Build candidates from the change set, skipping
+            //    the anchor's own file (already searched above).
+            let mut candidates: Vec<(String, Vec<u8>)> = Vec::new();
+            for path in &change_set {
+                if path == &anchor.path {
+                    continue;
+                }
+                let bytes = change_set_cache
+                    .entry(path.clone())
+                    .or_insert_with(|| std::fs::read(repo_root.join(path)).ok());
+                if let Some(bytes) = bytes {
+                    candidates.push((path.clone(), bytes.clone()));
+                }
+            }
+
+            // Exactly one match ⇒ a unique relocation. Zero ⇒ genuinely stale,
+            // no auto-fix. Two or more ⇒ conflict: fail-closed, leave the link
+            // untouched.
+            let hits = scan_for_content_hash(&candidates, &anchor.content_hash, extent, None);
+            if hits.len() == 1 {
+                push_plan(&mut plans, slug, anchor, &hits[0]);
+            }
         }
     }
 
-    // Return MOVED rows whose mesh has no CHANGED sibling and that carry
-    // destination coordinates.
-    let plans: Vec<MeshMovePlan> = rows
-        .into_iter()
-        .filter(|r| r.status == "MOVED" && !changed_meshes.contains(&r.mesh))
-        .filter_map(|r| {
-            let new_path = r.new_path?;
-            let new_start = r.new_start?;
-            let new_end = r.new_end?;
-            Some(MeshMovePlan {
-                mesh_name: r.mesh,
-                old_path: r.old_path,
-                old_start: r.old_start,
-                old_end: r.old_end,
-                new_path,
-                new_start,
-                new_end,
-            })
-        })
-        .collect();
-
     Ok(plans)
+}
+
+/// Whether two content hashes are equal, tolerating an optional `sha256:`
+/// prefix on either side.
+fn hashes_equal(a: &str, b: &str) -> bool {
+    let na = a.strip_prefix("sha256:").unwrap_or(a);
+    let nb = b.strip_prefix("sha256:").unwrap_or(b);
+    na == nb
+}
+
+/// Append a [`MeshMovePlan`] for `anchor` relocated to `hit`.
+fn push_plan(
+    plans: &mut Vec<MeshMovePlan>,
+    slug: &str,
+    anchor: &git_mesh_core::mesh_file::AnchorRecord,
+    hit: &git_mesh_core::Location,
+) {
+    plans.push(MeshMovePlan {
+        mesh_name: slug.to_string(),
+        old_path: PathBuf::from(&anchor.path),
+        old_start: anchor.start_line,
+        old_end: anchor.end_line,
+        new_path: PathBuf::from(&hit.path),
+        new_start: hit.start_line,
+        new_end: hit.end_line,
+    });
+}
+
+/// Repo-relative paths that differ from HEAD in the working tree: staged,
+/// unstaged, and untracked. Parsed from `git status --porcelain -z`.
+fn working_tree_change_set(repo_root: &Path) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(["status", "--porcelain", "-z", "--no-renames"])
+        .output()
+        .map_err(|e| miette::miette!("git status failed: {e}"))?;
+
+    if !output.status.success() {
+        return Ok(vec![]);
+    }
+
+    // `-z` records are NUL-separated; each is `XY <path>` (no rename arrows
+    // because `--no-renames` is set, so there is never a second path field).
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut paths = Vec::new();
+    for record in text.split('\0') {
+        if record.len() < 4 {
+            continue;
+        }
+        // Status is two chars + a space, then the path.
+        let path = &record[3..];
+        if !path.is_empty() {
+            paths.push(path.to_string());
+        }
+    }
+    Ok(paths)
 }
 
 // ── Fix #1 implementation ─────────────────────────────────────────────────────
@@ -1178,23 +1190,25 @@ pub fn run_fix_pass(
 
     // ── Fix #2: mesh auto-follow (line-range anchors) ─────────────────────────
     //
-    // Find MOVED anchors with no Changed sibling, then rewrite wiki page
-    // fragment hrefs directly from the planned `moved_to` coords.
+    // Compute move plans in-process from the `.wiki/` store (no `git mesh`):
+    // each stale anchor is relocated to its unique new position, and ambiguity
+    // is reported rather than rewritten (fail-closed). Then rewrite wiki page
+    // fragment hrefs directly from the planned destination coords.
     //
-    // Always run (even in dry_run) to emit SkippedFix records.
-    // `git mesh stale --format=json` reports `moved_to.extent` for every MOVED
-    // finding regardless of whether the code shift is staged or committed, so
-    // we can drive both dry-run previews and real-fix rewrites from this single
-    // read-only call. The v1.0.80 file-backed model has no mesh-advancing step.
+    // Always run (even in dry_run) to emit SkippedFix records. Working-tree
+    // content drives the re-hash, so staged and committed shifts are handled
+    // identically.
     let move_plans = plan_mesh_follows(repo_root)?;
 
-    // Map (path, old_start, old_end) → (new_start, new_end) for direct lookup.
-    let eligible: HashMap<(PathBuf, u32, u32), (u32, u32)> = move_plans
+    // Map (old_path, old_start, old_end) → (new_path, new_start, new_end).
+    // The destination path is carried so a cross-file move rewrites the link's
+    // path too, not only the line range.
+    let eligible: HashMap<(PathBuf, u32, u32), (PathBuf, u32, u32)> = move_plans
         .iter()
         .map(|p| {
             (
                 (p.old_path.clone(), p.old_start, p.old_end),
-                (p.new_start, p.new_end),
+                (p.new_path.clone(), p.new_start, p.new_end),
             )
         })
         .collect();
@@ -1254,7 +1268,8 @@ pub fn run_fix_pass(
             // as MOVED. Only attempt to rewrite links whose (target, start, end)
             // triple matches a MOVED plan — even if the range is still technically
             // within bounds (the mesh has shifted to a new position).
-            let Some(&(new_start, new_end)) = eligible.get(&(resolved.clone(), old_start, old_end))
+            let Some((new_path, new_start, new_end)) =
+                eligible.get(&(resolved.clone(), old_start, old_end)).cloned()
             else {
                 continue;
             };
@@ -1276,17 +1291,34 @@ pub fn run_fix_pass(
                 continue;
             }
 
-            if new_start == old_start && new_end == old_end {
+            let path_changed = new_path != resolved;
+            if !path_changed && new_start == old_start && new_end == old_end {
                 // No actual change — skip.
                 continue;
             }
 
-            // Build the new href by replacing only the `#Lstart-Lend` fragment.
-            let path_part = match link.original_href.find('#') {
-                Some(idx) => &link.original_href[..idx],
-                None => &link.original_href,
+            // Compute the new path component. For a same-file shift, keep the
+            // original addressing verbatim. For a cross-file move, recompute the
+            // path in the link's existing addressing style.
+            let new_path_part: String = if path_changed {
+                let frag_split = link.original_href.find('#');
+                let path_only = match frag_split {
+                    Some(idx) => &link.original_href[..idx],
+                    None => &link.original_href,
+                };
+                if path_only.starts_with('/') {
+                    format!("/{}", new_path.display())
+                } else {
+                    // Recompute a relative path from the wiki file's directory.
+                    rewrite_href(path_only, None, &new_path, file, repo_root)
+                }
+            } else {
+                match link.original_href.find('#') {
+                    Some(idx) => link.original_href[..idx].to_string(),
+                    None => link.original_href.clone(),
+                }
             };
-            let new_href = format!("{path_part}#L{new_start}-L{new_end}");
+            let new_href = format!("{new_path_part}#L{new_start}-L{new_end}");
 
             fixes.push(Fix {
                 file: file_rel.clone(),
@@ -1534,78 +1566,6 @@ pub fn run_fix_pass(
         skipped,
         mesh,
     })
-}
-
-/// Run `git-mesh list --porcelain` and find the current anchor coordinates for
-/// `path` (repo-relative). Returns the first match found, or `None`.
-///
-/// No longer used by Fix #2 (which now reads `moved_to` from
-/// `git mesh stale --format=json` directly), but kept for potential reuse.
-#[allow(dead_code)]
-fn get_new_anchor_coords(repo_root: &Path, path: &Path) -> Result<Option<(u32, u32)>> {
-    let mut cmd = super::git_mesh_command();
-    cmd.current_dir(repo_root)
-        .args(["list", "--porcelain"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = match cmd.spawn() {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(miette::miette!("git-mesh list failed: {e}")),
-        Ok(c) => c,
-    };
-
-    if let Some(mut stdin) = child.stdin.take() {
-        writeln!(stdin, "{}", path.display())
-            .map_err(|e| miette::miette!("write to git-mesh stdin: {e}"))?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| miette::miette!("git-mesh list failed: {e}"))?;
-
-    if !output.status.success() {
-        return Ok(None);
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.is_empty() || line == "no meshes" {
-            continue;
-        }
-        // Format: <mesh-name>\t<path>\t<start>-<end>
-        // We parse right-to-left to handle mesh names with tabs.
-        let mut right = line.rsplitn(2, '\t');
-        let range_token = right.next().unwrap_or("");
-        let prefix = match right.next() {
-            Some(p) => p,
-            None => continue,
-        };
-        let mut mid = prefix.rsplitn(2, '\t');
-        let path_str = mid.next().unwrap_or("");
-
-        // Match the path.
-        if path_str != path.to_string_lossy().as_ref() {
-            continue;
-        }
-
-        // Parse range token.
-        if let Some((start, end)) = range_token.split_once('-').and_then(|(a, b)| {
-            let s = a.parse::<u32>().ok()?;
-            let e = b.parse::<u32>().ok()?;
-            // Skip whole-file sentinel 0-0.
-            if s == 0 && e == 0 {
-                return None;
-            }
-            Some((s, e))
-        }) {
-            return Ok(Some((start, end)));
-        }
-    }
-
-    Ok(None)
 }
 
 #[cfg(test)]

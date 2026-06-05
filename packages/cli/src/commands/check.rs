@@ -628,6 +628,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::commands::mesh::store;
+    use git_mesh_core::AnchorExtent;
     use git_mesh_core::mesh_file::{AnchorRecord, MeshFile};
 
     /// Serialize tests that read or write PATH for `git-mesh` resolution.
@@ -698,12 +699,9 @@ mod tests {
             let repo = TestRepo { dir };
             repo.git(&["init"]);
             repo.git(&["checkout", "-b", "main"]);
-            // Persist identity in the repo's local config, not just via env on
-            // our own `git` calls. `wiki check --fix` spawns `git-mesh`
-            // (auto-follow) as a subprocess that does NOT inherit our per-call
-            // env vars; without a configured identity that subprocess cannot
-            // record the advanced anchor, so coverage would see stale ranges.
-            // Real environments always have a git identity — mirror that.
+            // Persist identity in the repo's local config so any git
+            // invocation that does not inherit our per-call env vars still has
+            // a committer. Real environments always have a git identity.
             repo.git(&["config", "user.email", "test@example.com"]);
             repo.git(&["config", "user.name", "Test Author"]);
             repo
@@ -724,10 +722,6 @@ mod tests {
         fn commit(&self, message: &str) {
             self.git(&["add", "-A"]);
             self.git(&["commit", "-m", message]);
-            // git-mesh stale reads the commit-graph file; some test environments
-            // do not auto-write it, which makes git-mesh exit non-zero. Refresh
-            // it after every commit so mesh-dependent tests are deterministic.
-            self.git(&["commit-graph", "write", "--reachable", "--changed-paths"]);
         }
 
         fn git(&self, args: &[&str]) {
@@ -748,6 +742,9 @@ mod tests {
             );
         }
 
+        // Retained for Group 5's final binary deletion + grep gate. No test in
+        // this group invokes the `git mesh` binary.
+        #[allow(dead_code)]
         fn git_mesh(&self, args: &[&str]) {
             let output = crate::commands::git_mesh_command()
                 .current_dir(self.dir.path())
@@ -767,20 +764,6 @@ mod tests {
             );
         }
 
-        /// Mirror a mesh from the git-mesh `.mesh/<slug>` location to the
-        /// in-process `.wiki/<slug>` location that `build_mesh_index` reads.
-        /// Required for tests that create meshes via `git_mesh` (which writes
-        /// to `.mesh/`) and then exercise fix paths that depend on the wiki
-        /// mesh-coverage index.
-        fn mirror_mesh_to_wiki(&self, slug: &str) {
-            let mesh_path = self.dir.path().join(format!(".mesh/{slug}"));
-            let text = std::fs::read_to_string(&mesh_path)
-                .unwrap_or_else(|e| panic!("could not read .mesh/{slug}: {e}"));
-            let mesh = git_mesh_core::mesh_file::MeshFile::parse(&text)
-                .unwrap_or_else(|e| panic!("could not parse .mesh/{slug}: {e}"));
-            store::write(self.dir.path(), slug, &mesh)
-                .unwrap_or_else(|e| panic!("could not write .wiki/{slug}: {e}"));
-        }
     }
 
     fn make_wiki_page(title: &str, body: &str) -> String {
@@ -1276,14 +1259,30 @@ mod tests {
         assert_eq!(code, 1);
     }
 
-    /// Fix 2: when a line-range anchor drifted because lines were inserted above
-    /// it (committed), --fix updates the wiki link range to the `moved_to`
-    /// position reported by `git mesh stale --format=json`. In the v1.0.80
-    /// file-backed model there is no mesh-advancing step, so the mesh anchor
-    /// stays at its old coordinates and the run still reports drift — the
-    /// assertion is on the rewritten link, not the exit code.
+    /// Seed a `.wiki/<slug>` mesh directly via `store::write`, with each
+    /// anchor's stored hash computed from the current worktree content via
+    /// `store::hash_anchor`. No `git mesh` binary involved.
+    fn seed_mesh(repo: &TestRepo, slug: &str, anchors: &[(&str, AnchorExtent)]) {
+        let records: Vec<AnchorRecord> = anchors
+            .iter()
+            .map(|(path, extent)| {
+                let hash = store::hash_anchor(repo.path(), path, *extent)
+                    .unwrap_or_else(|e| panic!("hash_anchor {path}: {e}"));
+                store::anchor_record(path.to_string(), *extent, hash)
+            })
+            .collect();
+        let mesh = MeshFile {
+            anchors: records,
+            why: "Test mesh.".to_string(),
+        };
+        store::write(repo.path(), slug, &mesh).unwrap_or_else(|e| panic!("seed {slug}: {e}"));
+    }
+
+    /// Fix 2: an in-file line shift relocates the anchor uniquely. The anchored
+    /// block (`fn a() {}`) drifts down one line when a preamble is inserted;
+    /// `--fix` rewrites the wiki link to the new range.
     #[test]
-    fn fix2_mesh_anchor_follows_line_shift() {
+    fn fix2_in_file_shift_relocates() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
         repo.create_file("src/code.rs", "fn a() {}\n");
@@ -1291,24 +1290,26 @@ mod tests {
             "wiki/page.md",
             &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
         );
-        repo.commit("baseline with mesh");
+        repo.commit("baseline");
 
-        repo.git_mesh(&["add", "fix2-mesh", "wiki/page.md", "src/code.rs#L1-L1"]);
-        repo.git_mesh(&["why", "fix2-mesh", "-m", "Test mesh."]);
-        repo.mirror_mesh_to_wiki("fix2-mesh");
-        repo.commit("commit mesh");
-
-        // Insert a line before the anchored function and commit so that
-        // git-mesh stale --format=json reports the anchor as MOVED.
+        // Seed the mesh against the baseline content, then introduce the shift
+        // as a working-tree change so it lands in the change set.
+        seed_mesh(
+            &repo,
+            "fix2-mesh",
+            &[
+                ("wiki/page.md", AnchorExtent::WholeFile),
+                ("src/code.rs", AnchorExtent::LineRange { start: 1, end: 1 }),
+            ],
+        );
         repo.create_file("src/code.rs", "// preamble\nfn a() {}\n");
-        repo.commit("shift code");
 
         let _code = run(
             &[],
             false,
             repo.path(),
             repo.path(),
-            true, // no_exit_code — mesh stays at old coords, drift expected
+            true,
             crate::index::DocSource::WorkingTree,
             true,
             false,
@@ -1323,147 +1324,39 @@ mod tests {
         );
     }
 
-    /// Fix 2 skip: when the anchored range has Changed content (not just a pure
-    /// line shift), Fix #2 declines to rewrite because the mesh guardrails
-    /// disqualify Changed anchors.
+    /// Fix 2: when the anchored content moves to a different file in the change
+    /// set, `--fix` relocates the link to the new file/range.
     #[test]
-    fn fix2_skips_when_changed_sibling_present() {
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        let repo = TestRepo::new();
-        // Three functions on L1-L3. The wiki page links L2-L3 (fn b and fn c).
-        repo.create_file("src/code.rs", "fn a() {}\nfn b() {}\nfn c() {}\n");
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", "See [code](/src/code.rs#L2-L3)."),
-        );
-        repo.commit("baseline with mesh");
-
-        // Mesh covers the wiki page and L2-L3 of code.rs.
-        repo.git_mesh(&[
-            "add",
-            "fix2-changed-mesh",
-            "wiki/page.md",
-            "src/code.rs#L2-L3",
-        ]);
-        repo.git_mesh(&["why", "fix2-changed-mesh", "-m", "Test mesh."]);
-        repo.mirror_mesh_to_wiki("fix2-changed-mesh");
-        repo.commit("commit mesh");
-
-        // Replace the file with only one line. The anchor L2-L3 is now both
-        // out of bounds AND content-changed → git-mesh reports CHANGED (not MOVED).
-        repo.create_file("src/code.rs", "fn a_only() {}\n");
-        repo.commit("change and shrink code");
-
-        // Run --fix. The anchor #L2-L3 is out of bounds (file now has 1 line).
-        let code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false,
-            crate::index::DocSource::WorkingTree,
-            true,
-            false,
-            false,
-        )
-        .expect("run");
-
-        // Fix #2 should NOT have rewritten the link because the content changed.
-        let content = std::fs::read_to_string(repo.path().join("wiki/page.md")).expect("read page");
-        assert!(
-            content.contains("#L2-L3"),
-            "expected anchor NOT rewritten (content changed), got:\n{content}"
-        );
-        // Post-fix the diagnostic should still be present (link still broken) → exit 1.
-        assert_eq!(code, 1, "expected exit 1 (broken anchor remains)");
-    }
-
-    /// Fix 2: dry-run previews a staged-but-not-committed line shift using the
-    /// `moved_to` coordinates from `git mesh stale --format=json` — no mutation
-    /// required. In the v1.0.80 file-backed model there is no mesh-advancing
-    /// step; the wiki rewrite uses the planned `moved_to` coords directly.
-    #[test]
-    fn fix2_dry_run_previews_staged_shift() {
+    fn fix2_cross_file_move_relocates() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
         repo.create_file("src/code.rs", "fn a() {}\n");
+        repo.create_file("src/other.rs", "// nothing here\n");
         repo.create_file(
             "wiki/page.md",
             &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
         );
-        repo.commit("baseline with mesh");
+        repo.commit("baseline");
 
-        repo.git_mesh(&["add", "fix2-dry-mesh", "wiki/page.md", "src/code.rs#L1-L1"]);
-        repo.git_mesh(&["why", "fix2-dry-mesh", "-m", "Test mesh."]);
-        repo.mirror_mesh_to_wiki("fix2-dry-mesh");
-        repo.commit("commit mesh");
-
-        // STAGE the code shift but do NOT commit it.
-        repo.create_file("src/code.rs", "// preamble\nfn a() {}\n");
-        repo.git(&["add", "src/code.rs"]);
-
-        // Dry-run via run_fix_pass so we can inspect the plan directly.
-        let files = vec![repo.path().join("wiki/page.md")];
-        let plan = check_fix::run_fix_pass(
-            &files,
-            repo.path(),
-            repo.path(),
-            &[],
-            crate::index::DocSource::WorkingTree,
-            true,
-        )
-        .expect("run_fix_pass");
-        let mesh_fix = plan
-            .fixes
-            .iter()
-            .find(|f| matches!(f.kind, check_fix::FixKind::MeshAnchorShift))
-            .expect("expected a mesh_anchor_shift fix");
-        assert_eq!(mesh_fix.old_href, "/src/code.rs#L1-L1");
-        assert_eq!(mesh_fix.new_href, "/src/code.rs#L2-L2");
-
-        // Dry-run must not have mutated the file on disk.
-        let content = std::fs::read_to_string(repo.path().join("wiki/page.md")).expect("read page");
-        assert!(
-            content.contains("#L1-L1"),
-            "expected dry-run NOT to mutate page, got:\n{content}"
+        seed_mesh(
+            &repo,
+            "fix2-move-mesh",
+            &[
+                ("wiki/page.md", AnchorExtent::WholeFile),
+                ("src/code.rs", AnchorExtent::LineRange { start: 1, end: 1 }),
+            ],
         );
-    }
 
-    /// Fix 2: real-fix rewrites the wiki link when the code shift is only staged
-    /// (not committed). The mesh anchor itself stays at the old coordinates, but
-    /// the wiki link reflects the planned `moved_to` destination immediately
-    /// (`git mesh stale --format=json` reports MOVED for staged shifts too).
-    #[test]
-    fn fix2_applies_to_staged_shift() {
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        let repo = TestRepo::new();
-        repo.create_file("src/code.rs", "fn a() {}\n");
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
-        );
-        repo.commit("baseline with mesh");
-
-        repo.git_mesh(&[
-            "add",
-            "fix2-staged-mesh",
-            "wiki/page.md",
-            "src/code.rs#L1-L1",
-        ]);
-        repo.git_mesh(&["why", "fix2-staged-mesh", "-m", "Test mesh."]);
-        repo.mirror_mesh_to_wiki("fix2-staged-mesh");
-        repo.commit("commit mesh");
-
-        // STAGE the code shift but do NOT commit it.
-        repo.create_file("src/code.rs", "// preamble\nfn a() {}\n");
-        repo.git(&["add", "src/code.rs"]);
+        // Move the anchored line out of code.rs into other.rs (both changed).
+        repo.create_file("src/code.rs", "// emptied\n");
+        repo.create_file("src/other.rs", "// header\nfn a() {}\n");
 
         let _code = run(
             &[],
             false,
             repo.path(),
             repo.path(),
-            true, // no_exit_code — mesh still drifted, but that's expected
+            true,
             crate::index::DocSource::WorkingTree,
             true,
             false,
@@ -1473,8 +1366,121 @@ mod tests {
 
         let content = std::fs::read_to_string(repo.path().join("wiki/page.md")).expect("read page");
         assert!(
-            content.contains("#L2-L2"),
-            "expected wiki link rewritten to L2-L2 for staged shift, got:\n{content}"
+            content.contains("/src/other.rs#L2-L2"),
+            "expected anchor relocated to src/other.rs#L2-L2, got:\n{content}"
+        );
+    }
+
+    /// Fix 2 (fail-closed): when the anchored content appears in two files in
+    /// the change set, the match is ambiguous and the link is left untouched.
+    #[test]
+    fn fix2_two_matches_conflict_no_rewrite() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file("src/code.rs", "fn a() {}\n");
+        repo.create_file("src/dup.rs", "// nothing\n");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
+        );
+        repo.commit("baseline");
+
+        seed_mesh(
+            &repo,
+            "fix2-conflict-mesh",
+            &[("src/code.rs", AnchorExtent::LineRange { start: 1, end: 1 })],
+        );
+
+        // Empty the original and place the same block in TWO change-set files.
+        repo.create_file("src/code.rs", "// emptied\n");
+        repo.create_file("src/dup.rs", "fn a() {}\nfn a() {}\n");
+
+        let _code = run(
+            &[],
+            false,
+            repo.path(),
+            repo.path(),
+            true,
+            crate::index::DocSource::WorkingTree,
+            true,
+            false,
+            false,
+        )
+        .expect("run");
+
+        let content = std::fs::read_to_string(repo.path().join("wiki/page.md")).expect("read page");
+        assert!(
+            content.contains("/src/code.rs#L1-L1"),
+            "expected link left untouched on ambiguous match, got:\n{content}"
+        );
+    }
+
+    /// Fix 2: a fresh anchor (content unchanged) produces no plan, so the link
+    /// is not rewritten.
+    #[test]
+    fn fix2_fresh_anchor_unchanged() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file("src/code.rs", "fn a() {}\n");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
+        );
+        repo.commit("baseline");
+
+        seed_mesh(
+            &repo,
+            "fix2-fresh-mesh",
+            &[("src/code.rs", AnchorExtent::LineRange { start: 1, end: 1 })],
+        );
+
+        // Touch an unrelated file so the tree is "changed" (the gate does not
+        // short-circuit) but the anchored content itself is untouched.
+        repo.create_file("src/unrelated.rs", "// noise\n");
+
+        let plans = check_fix::plan_mesh_follows(repo.path()).expect("plan");
+        assert!(
+            plans.is_empty(),
+            "fresh anchor must yield no move plan, got: {plans:?}"
+        );
+    }
+
+    /// Fix 2 (acceptance signal #4): an unchanged working tree resolves through
+    /// the stat gate without re-hashing — `plan_mesh_follows` returns no plans
+    /// even though a stale anchor would otherwise be detectable.
+    #[test]
+    fn fix2_unchanged_tree_skips_rehash() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file("src/code.rs", "fn a() {}\n");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
+        );
+        repo.commit("baseline");
+
+        // Seed a mesh whose stored hash is deliberately wrong: a real re-hash
+        // would flag this anchor as stale. The stat gate must prevent that.
+        let mesh = MeshFile {
+            anchors: vec![store::anchor_record(
+                "src/code.rs".to_string(),
+                AnchorExtent::LineRange { start: 1, end: 1 },
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            )],
+            why: "Test mesh.".to_string(),
+        };
+        store::write(repo.path(), "fix2-gate-mesh", &mesh).expect("seed");
+        repo.git(&["add", "-A"]);
+        repo.commit("commit mesh");
+
+        // Prime the index so the state row matches the on-disk triple, then run
+        // with a genuinely unchanged tree. The gate short-circuits the pass.
+        crate::index::WikiIndex::prepare(repo.path()).expect("prepare index");
+
+        let plans = check_fix::plan_mesh_follows(repo.path()).expect("plan");
+        assert!(
+            plans.is_empty(),
+            "unchanged tree must short-circuit the gate (no re-hash, no plans), got: {plans:?}"
         );
     }
 
