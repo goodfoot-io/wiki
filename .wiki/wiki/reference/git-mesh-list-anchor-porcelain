@@ -2,5 +2,5 @@ wiki/reference/git-mesh-usage.md#L16-L40 sha256:752056ed103c4a9725b78179a966e93c
 packages/cli/src/commands/mesh_coverage.rs#L117-L125 sha256:ed7ee3b072dd8cca500a456882c9d1afeb5276610763e872ef00f2a4f390b13c
 packages/cli/src/commands/mesh_coverage.rs#L157-L159 sha256:b3bf52a4fc01e904df8681b2eaa8e87dd9e4aa5aa2ee1f2f9a68b717281eacd6
 packages/cli/src/commands/mesh_coverage.rs#L205-L246 sha256:651199868d478446632bfbdfb4b16da368563613080fbf284aee05ac76599700
-packages/cli/src/commands/check.rs#L203-L270 sha256:5d078dfb8655f97116bb23fe528561e22a9ff36f50c845d11ec8238f0b2ceb26
+packages/cli/src/commands/check.rs#L247-L314 sha256:5d078dfb8655f97116bb23fe528561e22a9ff36f50c845d11ec8238f0b2ceb26
 
