@@ -1,9 +1,8 @@
-examples/githooks/scripts/gemini-wiki-maintenance.sh#L68-L85 sha256:45fa7f7a760a529c31197511ae3e9f6f4b15953a5176c9024d5d085c5460395a
-examples/githooks/scripts/gemini-wiki-maintenance.sh#L87-L92 sha256:0541e4b5769c0dadcc414017b0e8d6ae1b302d3818d370c252ced0a5169ec46c
-examples/githooks/scripts/gemini-wiki-maintenance.sh#L94-L100 sha256:256554eef649328c9575ed2f5e1f72ab8e862d3221da3151b2356f49335610e8
-examples/githooks/scripts/gemini-wiki-maintenance.sh#L104-L149 sha256:03c1f16da37ff3db73c9ab22c2bd13dfa9cfaf68a7c1070dab750db091d4b188
-examples/githooks/scripts/gemini-wiki-maintenance.sh#L151-L155 sha256:b1ede3fe220f0d71f98de580c93d386dd4aaeefea9300762b57ebd085d3d8809
-examples/githooks/scripts/gemini-wiki-maintenance.sh#L182-L202 sha256:095920a924fa0f23f5f8d72f723d2d6eb68225c1154c7a3dce28ad428d64fb5d
-wiki/guides/gemini-wiki-maintenance.md#L22-L34 sha256:e4288dcc105c645719fdfadbafa7a9ec7a04e05fa96b32a80a2d79c0069c2730
+wiki/guides/gemini-wiki-maintenance.md#L22-L34 sha256:3f4b76f1038df9a6e5cd74fd2c35abd06340c05fc06ab320eb12fa4c25bc3d54
+examples/githooks/scripts/gemini-wiki-maintenance.sh#L68-L85 sha256:42916517a9b8d337dc4f7d90067fc013b1c23ff9a4e097963c717e2b626c7be1
+examples/githooks/scripts/gemini-wiki-maintenance.sh#L87-L92 sha256:1a4f77d094cf10d10a90ba5c750aa66d52ff5e3f73e3b2118dddf0b5baca256f
+examples/githooks/scripts/gemini-wiki-maintenance.sh#L94-L100 sha256:6316961d3c990659a3dd9a26ce0e7469ba7d771aa158995907b18800f15f4758
+examples/githooks/scripts/gemini-wiki-maintenance.sh#L104-L149 sha256:cc809e7d1f4b2b9ee49c474ab4ef1288e49c717f35799a39488b835681f0de4d
+examples/githooks/scripts/gemini-wiki-maintenance.sh#L151-L155 sha256:6aca7102975242d6dab1fd76ea324beb22fd5e36b87f68d95ea88bdd8fe4f9c1
+examples/githooks/scripts/gemini-wiki-maintenance.sh#L182-L202 sha256:73d7f0017696f46bf428a3b5274a2077e886f7dee875d26aa52fe8904e687d39
 
-Reference of the gemini-wiki-maintenance hook that describes the sandboxed five-stage pipeline (isolated worktree, sandboxed Gemini invocation, post-run `wiki check`, two-path merge-or-patch, EXIT-trap cleanup) consumed by the host repository's pre-existing wiki.

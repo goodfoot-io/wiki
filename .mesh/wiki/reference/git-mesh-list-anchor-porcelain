@@ -1,7 +1,6 @@
 wiki/reference/git-mesh-usage.md#L16-L40 sha256:752056ed103c4a9725b78179a966e93c1b75b614fb57087671b2a1c76c593d07
-packages/cli/src/commands/check.rs#L611-L615 sha256:fd55c782f20c068f81a4e108ee79a69449d26de2517d90b9d7b74aa6c326035d
-packages/cli/src/commands/mesh_coverage.rs#L22-L42 sha256:6480ffdcde715894a1b1d0deb6afec532edd13d919ea478a6079a99fe14469d0
-packages/cli/src/commands/mesh_coverage.rs#L240-L290 sha256:ef00546c4a88a00b72327a807a5faeb7fe43b6a00cc5492999da21299efcaf4d
-packages/cli/src/commands/mesh_coverage.rs#L304-L358 sha256:3d7280d0fbde76defe28622d2d498ed3e6f43a848b7b6bb6f89b1ed2ab9c38c5
+packages/cli/src/commands/mesh_coverage.rs#L117-L125 sha256:ed7ee3b072dd8cca500a456882c9d1afeb5276610763e872ef00f2a4f390b13c
+packages/cli/src/commands/mesh_coverage.rs#L157-L159 sha256:b3bf52a4fc01e904df8681b2eaa8e87dd9e4aa5aa2ee1f2f9a68b717281eacd6
+packages/cli/src/commands/mesh_coverage.rs#L205-L246 sha256:651199868d478446632bfbdfb4b16da368563613080fbf284aee05ac76599700
+packages/cli/src/commands/check.rs#L203-L270 sha256:89f5aa1676b69793b57178a6d218bfea1045875dca1d5ea95014b7625bab3765
 
-Reference of `git-mesh list --porcelain` that exposes a tab-separated mesh/path/range vocabulary to the `wiki check` coverage rule.

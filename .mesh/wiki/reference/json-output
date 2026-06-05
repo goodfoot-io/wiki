@@ -1,5 +1,3 @@
-packages/cli/src/main.rs#L44-L46 sha256:1c095a3f1a05ec15cb2e2d0aebe027cbe1b4a59adf003fda0a54d7c8bbebc9a3
-packages/cli/src/main.rs#L48-L50 sha256:073b975d0f95f2bf7ebe67205d2a48183867d7505ab07aef525d6ef4b092cfe5
-wiki/reference/wiki-cli-advanced-usage.md#L78-L88 sha256:61250e9b73a7af3c9f1e581663d67897ea68ceb15de5da6b86efd51cc001a912
+wiki/reference/wiki-cli-advanced-usage.md#L65-L74 sha256:7d1f7c75ab8d8911bf36e525e3fd0a7716e80df41efe2c9dd67d72d392591c01
+packages/cli/src/main.rs#L48-L50 sha256:c844fdd8ad7e89e4accef47eb1cec6dff1a37ab23a322c1165749c79720c884a
 
-Global --format flag that switches every wiki subcommand from human-readable text to machine-readable JSON output.

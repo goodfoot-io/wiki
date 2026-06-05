@@ -1,0 +1,6 @@
+packages/cli/src/commands/mod.rs#L238-L243 sha256:f72134f348f904cd106ffa27c9856b4ed40bdb4f5d39d165b859bbed41a7ebdb
+wiki/architecture/wiki-mesh-integration.md#L55-L57 sha256:26fe9e4ff4767e0c40bda8f182332d4b8af7095144b0d942719fd68e96428c43
+packages/cli/src/commands/mod.rs#L140-L182 sha256:e86bd1ddababcdb4baf1411985ce03b16d51d3c71f87b66dc29ee2caad8936f9
+packages/cli/src/commands/mod.rs#L143-L185 sha256:e86bd1ddababcdb4baf1411985ce03b16d51d3c71f87b66dc29ee2caad8936f9
+
+Default file-discovery glob shared by wiki check and wiki scaffold so mesh coverage runs over the same file set the rest of the CLI walks.

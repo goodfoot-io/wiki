@@ -1,0 +1,5 @@
+packages/cli/src/commands/list.rs#L17-L52 sha256:11776c83ac3e77c203164f3fe8c96885d0738e1ef3efd97f75939897557f70fe
+packages/cli/src/commands/list.rs#L17-L77 sha256:85b9bb0b0b3d19937a9ef2087c5e10c6611bad223c1757f1dd63c5f2d89829cf
+wiki/reference/wiki-cli-advanced-usage.md#L10-L20 sha256:ae1252f6dc521725311b5a36a3f26f42901ce044bba70bb45ad0197e0810e7ff
+
+wiki list enumerates every wiki page with its title, summary, aliases, tags, and file path.

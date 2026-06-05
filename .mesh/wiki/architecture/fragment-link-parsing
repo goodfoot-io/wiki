@@ -1,7 +1,5 @@
-packages/cli/src/parser.rs#L6-L12 sha256:640f0daad55e844d3260690863b1d5119fc2ac4f2231aa12e8499e9a96fc7a83
-packages/cli/src/parser.rs#L79-L79 sha256:00519d93f10a8856abc867f189fc06d1200dc3294c61118a5003956e59e19033
-packages/cli/src/parser.rs#L213-L213 sha256:4239e6c4a6dd8222ca884efa224a0a952658c523c0bccbf5f16b3bc1bb7d30e5
-packages/cli/src/parser.rs#L304-L304 sha256:094e295ae5d7e912e113fd52d2790728543e26c1f4122fdd436eabcfc417cf1b
-wiki/architecture/wiki-cli.md#L10-L12 sha256:b7cc86100199fa20ddb307c23bdebd5f237d6367584b5fee3d3c26794320db72
+wiki/architecture/wiki-cli.md#L10-L12 sha256:576693f04570dd94ef1f834ef8b2db3316593bfb2cb857127522004737a87adf
+packages/cli/src/parser.rs#L6-L12 sha256:60604d859eec7224ed4efe9272e9ffb37841d480dc969abc8164de3aefba824d
+packages/cli/src/parser.rs#L79-L79 sha256:5e1b7cf98506225066aff4f4d456c1e55f323d4ff150b90f512f7cb504f2afd8
+packages/cli/src/parser.rs#L213-L213 sha256:4292a41b25a448805eff1becc8dee802b4a57340bd22f19b238d8c4a9b2f76b7
 
-Fragment-link and wikilink parsing routines that the wiki CLI architecture page documents as the entry point for link extraction.

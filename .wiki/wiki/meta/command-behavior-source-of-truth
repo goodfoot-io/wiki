@@ -1,0 +1,7 @@
+packages/cli/src/main.rs#L23-L57 sha256:8c13769a0c4fc3cbbe9daf4b87032c0e5562ed6d97bc7941b58740af8db17bec
+packages/cli/src/main.rs#L275-L357 sha256:cc583843b737bdcc5eb4ff17ed088f9f9091854845d9c5cdcbc56f9fe8ce712f
+wiki/meta/wiki-documentation-touchpoints.md#L14-L16 sha256:2a4ccfbeca6c01b7d1f8fe4099ba6325a9a10e25f1b80d1e9571ee726cb477a8
+packages/cli/src/main.rs#L26-L60 sha256:35d41d67785ac3430327504c3d2f0f2b477d3794c627ee745c628d6e50e37659
+packages/cli/src/main.rs#L292-L374 sha256:08a549c6f0b24bd10e299c7f33987b5521bac0b6e722abc9e30cf15324cc335c
+
+Reference of `packages/cli/src/main.rs` that exposes the Clap subcommand vocabulary to the wiki documentation touchpoints index.

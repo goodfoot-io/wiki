@@ -1,5 +1,3 @@
-packages/cli/src/commands/print.rs#L9-L9 sha256:7d71e00a47bd79ad6a73e2b4f592662ae2e2483bd2714b9cda008d6846b9c95b
-packages/cli/src/commands/summary.rs#L130-L130 sha256:05f049e8bf6a8fdeba3a124da60e285a830f1b054ad9e6beb86a72442ab3a58e
-wiki/architecture/wiki-cli.md#L26-L34 sha256:6eb685d74dc055650ccc766d69c0a7b7c9c4f55ee1ebf8dca10fabe749523791
+wiki/architecture/wiki-cli.md#L22-L28 sha256:2680ee2040c035a6bcf5ce1d0d139eaff221ac5f52aa5cd09bd1feec992fe17e
+packages/cli/src/commands/summary.rs#L130-L130 sha256:86afdf70a95436e883aa7fc5c06a2ab083719054438f1218d15ebdaf287b4bac
 
-wiki summary and wiki print commands that expose page navigation and discovery surfaces the architecture page lists.

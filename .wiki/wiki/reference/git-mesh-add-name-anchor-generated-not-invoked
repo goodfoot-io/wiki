@@ -1,0 +1,4 @@
+packages/cli/src/commands/mesh/render.rs#L137-L146 sha256:8b28ad2d1aa63b597bac2128ea55b9f28e7b6e9c6dcdc745d4c3d0f2f900552b
+wiki/reference/git-mesh-usage.md sha256:48488d87eda1872b22fa294f49adb5efec4e310a59b080b2c7719fe2fe7f0856
+
+Where wiki scaffold renders the generated 'git mesh add' command line for each uncovered fragment link.

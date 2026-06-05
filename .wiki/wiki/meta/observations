@@ -1,0 +1,9 @@
+packages/cli/src/commands/search.rs#L9-L38 sha256:325df9a234b424b3ac860a6fc78893b4a550ef1cbc7081bb1ec62cc6437db664
+packages/cli/src/commands/summary.rs#L72-L100 sha256:9133c28d85f615f391e363275507b7805ebd176fd19911fb21893c653ed72f8c
+packages/cli/src/main.rs#L114-L127 sha256:dda64a4eb713d22f267af76e308c123d492fcb74d0594dc638fec7fd8695594d
+wiki/meta/wiki-feedback.md#L21-L26 sha256:21cf44c52d6dca19cdc2d01e209300d258e0db373cf11094676518d50fa4831f
+packages/cli/src/commands/search.rs#L61-L90 sha256:af5f498a509405129faed8ea5e7a97421076b769af54611e6e4f8e132f4b5207
+packages/cli/src/main.rs#L117-L130 sha256:daedadc1134ac04c81c147e13cd4f7ffcabc2548a1716b569783dec314842144
+packages/cli/src/commands/summary.rs#L130-L158 sha256:e33220a77923ec9e44934e6a034c0cd6276dab1b6e984eccc37103c0d8324eeb
+
+Reference of wiki CLI subcommand quirks that exposes exit-code and argument contracts to the operator.

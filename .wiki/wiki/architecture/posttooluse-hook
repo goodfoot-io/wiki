@@ -1,0 +1,4 @@
+packages/cli/src/commands/hook_check.rs#L16-L63 sha256:e79400dda5266bd1b91956813f69231432897d9783d60ef93a26d2d584bda987
+wiki/architecture/wiki-cli.md#L22-L24 sha256:43f7bf4ec9a9a66a93dc3b727e7d791c694352ee0e4766290782932aa37d382e
+
+PostToolUse hook handler that runs wiki check against just-edited files and emits JSON systemMessages on validation failure.

@@ -1,9 +1,5 @@
-.claude/skills/wiki/SKILL.md#L73-L172 sha256:b9fcb0b93515bf2521a3caad968b64e7a9c6e5ff66b5d74617895ffae754bcff
-CLAUDE.md#L83-L94 sha256:69a3b4471fb92147d74d00cb62a45a8ebd3164f1fab0e682ff8e548c9af30678
-packages/cli/src/main.rs#L23-L57 sha256:8c13769a0c4fc3cbbe9daf4b87032c0e5562ed6d97bc7941b58740af8db17bec
-packages/cli/src/main.rs#L275-L357 sha256:cc583843b737bdcc5eb4ff17ed088f9f9091854845d9c5cdcbc56f9fe8ce712f
-wiki/meta/wiki-documentation-touchpoints.md#L35-L43 sha256:6f3f4ae24f1319c6ce1a0b4e79e1a2c3add98d32a1108b38f7a1e2b6cc61f347
-packages/cli/src/main.rs#L26-L60 sha256:35d41d67785ac3430327504c3d2f0f2b477d3794c627ee745c628d6e50e37659
-packages/cli/src/main.rs#L292-L374 sha256:08a549c6f0b24bd10e299c7f33987b5521bac0b6e722abc9e30cf15324cc335c
+wiki/meta/wiki-documentation-touchpoints.md#L35-L43 sha256:b4dd64f64f785db7c70483753df23d33ea7810b9829e7a2fc287954c69f2f2cb
+packages/cli/src/main.rs#L26-L60 sha256:0f300523cb51cb27bdf0188c8df2021deaa166e9787148228a5f7d2502743eb6
+packages/cli/src/main.rs#L292-L374 sha256:7c673dc80a7b109810dd3708012c955e45bc7bc02a2cf2a3e249242709ce75e2
+CLAUDE.md#L83-L94 sha256:004bee9a95c402877c22e10ef1544e5986fce6faf5d7f3fd2d03000f0f866f0c
 
-Reference of wiki-documentation update touchpoints that exposes an ordered revision sequence to maintainers changing wiki CLI behavior.
