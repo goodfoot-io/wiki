@@ -1,0 +1,5 @@
+reports/git-mesh-requests.md#L47-L68 sha256:fa6ade8a7d22ca1d26b9f9cb2bcf64708ab629a37b908953f2153056dc74eca5
+reports/git-mesh-requests.md#L70-L99 sha256:9573e93848605482c922f5abaf250e6e4ae60e8094190e546aa41c7e139b5d16
+reports/git-mesh-requests.md#L102-L115 sha256:822cedf2efac817d1bd861002c02b0e72015084e89b582121c99f987888c5488
+
+Wiki decouples from git-mesh binary by extracting pure mesh-core crate and calling in-process APIs instead of spawning git-mesh command.
