@@ -1,6 +1,6 @@
 //! In-process `.wiki/<slug>` mesh storage.
 //!
-//! Owns the storage and hashing primitives that replace the `git mesh` binary
+//! Owns the storage and hashing primitives for in-process mesh operations.
 //! shell-outs. Anchors live under `repo_root/.wiki/<slug>` as plain text in the
 //! `git-mesh-core` [`MeshFile`] format (byte-identical to the legacy `.mesh/`
 //! format). Every hash flows through [`git_mesh_core::hash_bytes_with_extent`]

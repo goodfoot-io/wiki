@@ -722,8 +722,7 @@ pub struct MeshMovePlan {
     pub new_end: u32,
 }
 
-/// Compute mesh move plans in-process from the `.wiki/` store, without spawning
-/// `git mesh`.
+/// Compute mesh move plans in-process from the `.wiki/` store.
 ///
 /// Hot-path gate: if the working tree is unchanged since the last verified
 /// index state ([`crate::index::tree_unchanged`]), no anchor can have drifted,
@@ -1267,7 +1266,7 @@ pub fn run_fix_pass(
 
     // ── Fix #2: mesh auto-follow (line-range anchors) ─────────────────────────
     //
-    // Compute move plans in-process from the `.wiki/` store (no `git mesh`):
+    // Compute move plans in-process from the `.wiki/` store:
     // each stale anchor is relocated to its unique new position, and ambiguity
     // is reported rather than rewritten (fail-closed). Then rewrite wiki page
     // fragment hrefs directly from the planned destination coords.

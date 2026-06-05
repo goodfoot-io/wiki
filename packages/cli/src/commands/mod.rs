@@ -9,7 +9,6 @@ pub mod search;
 pub mod summary;
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use miette::{IntoDiagnostic, Result, WrapErr, miette};
@@ -20,51 +19,6 @@ use crate::frontmatter::Frontmatter;
 use crate::git::repo_inventory;
 use crate::index::DocSource;
 use crate::perf;
-
-/// Build a [`Command`] that invokes the `git-mesh` executable, accounting for
-/// npm's Windows shim layout.
-///
-/// `Command::new("git-mesh")` resolves through `CreateProcessW`, which only
-/// appends `.exe` and never consults `PATHEXT`. npm installs `git-mesh` as
-/// `git-mesh.cmd` / `git-mesh.ps1` shims (plus an extensionless POSIX `sh`
-/// script that Windows cannot execute), so the bare spawn fails with
-/// `NotFound` on Windows even when `git-mesh` is on `PATH`. Resolve the real
-/// path with PATHEXT-aware `which`; when it lands on a `.cmd`/`.bat` batch
-/// shim, route through `cmd /C` (the only way Windows runs a batch file).
-///
-/// On non-Windows targets this is exactly `Command::new("git-mesh")`. When
-/// resolution fails the returned `Command` still spawns to a `NotFound`
-/// error, preserving every call site's existing `ErrorKind::NotFound`
-/// handling.
-// Retained for Group 5's final binary deletion + grep gate; only the test
-// helper references it now that the production move-detection path is in-process.
-#[allow(dead_code)]
-pub(crate) fn git_mesh_command() -> Command {
-    #[cfg(windows)]
-    {
-        match which::which("git-mesh") {
-            Ok(path) => {
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(str::to_ascii_lowercase);
-                match ext.as_deref() {
-                    Some("cmd") | Some("bat") => {
-                        let mut cmd = Command::new("cmd");
-                        cmd.arg("/C").arg(path);
-                        cmd
-                    }
-                    _ => Command::new(path),
-                }
-            }
-            Err(_) => Command::new("git-mesh"),
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        Command::new("git-mesh")
-    }
-}
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
@@ -581,7 +535,7 @@ mod tests {
     use super::*;
     use crate::frontmatter::Frontmatter;
     use std::fs;
-    use std::process::Command;
+    use std::process::Command; // used by TestRepo::git
     use tempfile::TempDir;
 
     fn make_fm(title: &str) -> Frontmatter {

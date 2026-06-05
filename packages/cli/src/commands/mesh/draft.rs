@@ -27,8 +27,7 @@ pub(crate) struct MeshDraft {
     /// Generated slug, e.g. `wiki/perf/sync-detection`.
     pub(crate) slug: String,
     /// Ordered list of anchor strings (page section anchor first, then targets
-    /// like `src/index.rs#L10-L20`). Render emits these as a single
-    /// `git mesh add`.
+    /// like `src/index.rs#L10-L20`). These are written via the store.
     pub(crate) anchors: Vec<String>,
     /// Structured anchor triples, parallel to `anchors`. The first entry is the
     /// page section anchor; the rest are targets in document order.
@@ -51,8 +50,8 @@ pub(crate) struct MeshDraft {
     /// When `Some(name)`, the draft extends a pre-existing mesh whose anchors
     /// already include this page section. Rendering switches to "extend mode":
     /// the slug is `name`, the page-section anchor and any code anchors that
-    /// `name` already carries are dropped from the emission, and the `git mesh
-    /// why` line is suppressed (the mesh already has a why).
+    /// `name` already carries are dropped from the emission, and the `why`
+    /// line is suppressed (the mesh already has a why).
     pub(crate) extends_existing: Option<String>,
 }
 

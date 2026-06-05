@@ -42,7 +42,7 @@ pub(crate) fn render_advisories(
                 let _ = writeln!(
                     out,
                     "Skipped gitignored anchor `{}` in mesh `{}` (page `{}`); \
-                     git-mesh cannot anchor a path git never sees.",
+                     a path not tracked by git cannot be anchored.",
                     path, d.slug, d.page
                 );
             }

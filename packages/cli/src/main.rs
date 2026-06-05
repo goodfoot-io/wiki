@@ -97,10 +97,9 @@ enum Commands {
     /// collisions (case-insensitive).
     ///
     /// Always verifies that every fragment link with a line range is
-    /// covered by a `git mesh` that anchors both the wiki file and the
-    /// link target. `git mesh` must be installed; missing the binary
-    /// fails the check. With `--fix`, also creates that mesh coverage
-    /// best-effort (the "Fix #4" pass).
+    /// covered by a mesh that anchors both the wiki file and the link
+    /// target (stored under `.wiki/`). With `--fix`, also creates that
+    /// mesh coverage best-effort (the "Fix #4" pass).
     Check {
         /// Glob patterns to match wiki pages (default: `**/*.md` under the current directory)
         #[arg(value_name = "glob")]

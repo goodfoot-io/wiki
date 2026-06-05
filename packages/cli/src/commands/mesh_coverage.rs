@@ -156,9 +156,9 @@ pub(super) fn collect_mesh_diagnostics(
     }
 
     // A fragment link into a gitignored path (a generated build artifact) is
-    // exempt from the mesh-coverage contract: git-mesh resolves content through
-    // git and cannot anchor a path git never sees, so demanding coverage would
-    // be unsatisfiable and `wiki check` would fail closed forever. Mirrors the
+    // exempt from the mesh-coverage contract: a path git never sees cannot be
+    // anchored, so demanding coverage would be unsatisfiable and `wiki check`
+    // would fail closed forever. Mirrors the
     // existing exemptions for external links and links without a line range.
     // Untracked-but-not-ignored targets are NOT exempt — they resolve once
     // committed, so a missing mesh for them is a real, fixable finding.

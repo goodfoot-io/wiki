@@ -304,11 +304,11 @@ pub fn run(
                 }
             }
         }
-        // Mesh-creation failures always go to stderr — git-mesh already printed
+        // Mesh-creation failures always go to stderr — the in-process store already printed
         // each reason; name the slug that could not be created.
         for failure in &plan.mesh.failures {
             eprintln!(
-                "wiki check --fix: could not create mesh `{}` (see git-mesh output above)",
+                "wiki check --fix: could not create mesh `{}` (see error output above)",
                 failure.slug
             );
         }
@@ -631,7 +631,7 @@ mod tests {
     use git_mesh_core::AnchorExtent;
     use git_mesh_core::mesh_file::{AnchorRecord, MeshFile};
 
-    /// Serialize tests that read or write PATH for `git-mesh` resolution.
+    /// Serialize tests that share process-level state (e.g. PATH or env vars).
     static PATH_MUTEX: Mutex<()> = Mutex::new(());
 
     fn make_anchor(path: &str, start: u32, end: u32) -> AnchorRecord {
@@ -738,28 +738,6 @@ mod tests {
                 output.status.success(),
                 "git {:?} failed:\n{}",
                 args,
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
-        // Retained for Group 5's final binary deletion + grep gate. No test in
-        // this group invokes the `git mesh` binary.
-        #[allow(dead_code)]
-        fn git_mesh(&self, args: &[&str]) {
-            let output = crate::commands::git_mesh_command()
-                .current_dir(self.dir.path())
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Test Author")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test Committer")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .expect("spawn git-mesh");
-            assert!(
-                output.status.success(),
-                "git-mesh {:?} failed:\nstdout: {}\nstderr: {}",
-                args,
-                String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
         }
@@ -1061,7 +1039,7 @@ mod tests {
     }
 
     /// A fragment link into a gitignored (generated) file is exempt from the
-    /// mesh-coverage contract: git-mesh cannot anchor a path git never sees, so
+    /// mesh-coverage contract: a path git never sees cannot be anchored, so
     /// demanding coverage would fail closed forever. `wiki check` must not emit
     /// `mesh_uncovered` for it and must exit 0.
     #[test]
@@ -1261,7 +1239,7 @@ mod tests {
 
     /// Seed a `.wiki/<slug>` mesh directly via `store::write`, with each
     /// anchor's stored hash computed from the current worktree content via
-    /// `store::hash_anchor`. No `git mesh` binary involved.
+    /// `store::hash_anchor`.
     fn seed_mesh(repo: &TestRepo, slug: &str, anchors: &[(&str, AnchorExtent)]) {
         let records: Vec<AnchorRecord> = anchors
             .iter()

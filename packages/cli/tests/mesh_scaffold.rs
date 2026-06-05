@@ -2,18 +2,22 @@
 //! `wiki check --fix --print-applied`.
 //!
 //! `wiki scaffold` was folded into `wiki check --fix` (the "Fix #4" pass): a
-//! single command rewrites drifted links/anchors AND creates the `git mesh`
-//! coverage every fragment link requires, best-effort. The *set of meshes
-//! produced for any corpus is unchanged* from the former `scaffold` command,
-//! so assertions about emitted mesh paths and contents port over directly.
+//! single command rewrites drifted links/anchors AND creates mesh coverage every
+//! fragment link requires, best-effort. The *set of meshes produced for any
+//! corpus is unchanged* from the former `scaffold` command, so assertions about
+//! emitted mesh paths and contents port over directly.
 //!
 //! Output contract under `--print-applied`: stdout is EXACTLY the repo-relative
-//! `.mesh/<slug>` paths created/renamed this run (one per line); the fix/skip
+//! `.wiki/<slug>` paths created or renamed this run (one per line); the fix/skip
 //! summary, advisories, and post-fix diagnostics go to stderr. So a hook can
 //! `xargs git add` stdout directly.
 
 use std::path::Path;
 use std::process::Command;
+
+use git_mesh_core::AnchorExtent;
+use git_mesh_core::hash_bytes_with_extent;
+use git_mesh_core::mesh_file::{AnchorRecord, MeshFile};
 
 fn copy_dir_recursive(src: &Path, dst: &Path) {
     std::fs::create_dir_all(dst).unwrap();
@@ -29,55 +33,6 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
     }
 }
 
-/// `git mesh add` rejects a slug whose ancestor mesh was renamed away within
-/// the SAME uncommitted working tree: its prefix-collision guard reads the
-/// committed HEAD tree, not the index or worktree (verified empirically
-/// against git-mesh 1.0.81). The blocker-rename apply path therefore cannot
-/// free the slug for an in-run `git mesh add` until the rename is committed —
-/// which the engine deliberately never does. Apply-mode integration tests for
-/// the rename remedy skip on such a git-mesh, exactly like the `git-mesh not
-/// installed` skip; the rename derivation, fail-open, and dry-run paths remain
-/// fully covered by unit + dry-run tests.
-fn git_mesh_add_sees_uncommitted_rename() -> bool {
-    let tmp = match tempfile::tempdir() {
-        Ok(t) => t,
-        Err(_) => return false,
-    };
-    let root = tmp.path();
-    if std::fs::create_dir_all(root.join("src")).is_err() {
-        return false;
-    }
-    let _ = std::fs::write(root.join("src/x"), "a\nb\nc\n");
-    let run = |args: &[&str]| {
-        Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    };
-    if !run(&["init", "-q", "-b", "main"]) {
-        return false;
-    }
-    if !run(&["mesh", "add", "wiki/b", "src/x#L1-L1"]) {
-        return false;
-    }
-    let _ = run(&["-c", "user.email=t", "-c", "user.name=t", "add", "-A"]);
-    let _ = run(&[
-        "-c",
-        "user.email=t",
-        "-c",
-        "user.name=t",
-        "commit",
-        "-q",
-        "-m",
-        "i",
-    ]);
-    let _ = run(&["mesh", "move", "wiki/b", "wiki/tmp"]);
-    let _ = run(&["mesh", "move", "wiki/tmp", "wiki/b/index"]);
-    run(&["mesh", "add", "wiki/b/leaf", "src/x#L1-L1"])
-}
-
 fn git(workdir: &Path, args: &[&str]) {
     let status = Command::new("git")
         .args(args)
@@ -89,10 +44,6 @@ fn git(workdir: &Path, args: &[&str]) {
         .status()
         .expect("git available");
     assert!(status.success(), "git {args:?} failed");
-}
-
-fn git_mesh_available() -> bool {
-    Command::new("git-mesh").arg("--version").output().is_ok()
 }
 
 /// Run `wiki check --fix --print-applied` from `cwd` (best-effort: pass
@@ -142,15 +93,11 @@ fn walkdir_mesh(mesh_dir: &Path) -> Vec<(std::path::PathBuf, String)> {
 /// The fixture corpus (which deliberately includes degenerate-excerpt and
 /// over-range edge cases) is run through `wiki check --fix --print-applied`.
 /// The engine applies a non-empty set of meshes best-effort; every applied
-/// path is a real `.mesh/` file that anchors a real fragment link, and stdout
+/// path is a real `.wiki/` file that anchors a real fragment link, and stdout
 /// stays a clean stage list while advisories for the dropped edge cases go to
 /// stderr.
 #[test]
 fn fixture_corpus_applies_meshes_best_effort() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mesh-scaffold");
 
     let tmp = tempfile::tempdir().unwrap();
@@ -171,7 +118,7 @@ fn fixture_corpus_applies_meshes_best_effort() {
         "--no-exit-code must exit 0; stdout=\n{stdout}\nstderr=\n{stderr}"
     );
 
-    // stdout is a clean stage list: every non-empty line is a `.mesh/` path on
+    // stdout is a clean stage list: every non-empty line is a `.wiki/` path on
     // disk that anchors a real link (no advisory/command text leaks).
     let applied: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
     assert!(
@@ -181,7 +128,7 @@ fn fixture_corpus_applies_meshes_best_effort() {
     for line in &applied {
         assert!(
             line.starts_with(".wiki/"),
-            "stdout line not a .mesh/ path: {line:?}"
+            "stdout line not a .wiki/ path: {line:?}"
         );
         let body = std::fs::read_to_string(tmp.path().join(line))
             .unwrap_or_else(|_| panic!("applied path missing on disk: {line}"));
@@ -216,14 +163,10 @@ fn fixture_corpus_applies_meshes_best_effort() {
     );
 }
 
-/// `--print-applied` emits exactly bare `.mesh/<slug>` paths on stdout; an
+/// `--print-applied` emits exactly bare `.wiki/<slug>` paths on stdout; an
 /// advisory for a link to a missing path is routed to stderr.
 #[test]
 fn print_applied_emits_bare_paths_and_advisory_on_stderr() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
@@ -261,7 +204,7 @@ fn print_applied_emits_bare_paths_and_advisory_on_stderr() {
     for line in &lines {
         assert!(
             line.starts_with(".wiki/"),
-            "stdout line not a .mesh/ path: {line:?}"
+            "stdout line not a .wiki/ path: {line:?}"
         );
         assert!(
             root.join(line).is_file(),
@@ -281,13 +224,9 @@ fn print_applied_emits_bare_paths_and_advisory_on_stderr() {
 }
 
 /// With no fragment links, `--print-applied` stdout is empty (every non-empty
-/// line must be a `.mesh/` path), and no markdown/advisory leaks onto stdout.
+/// line must be a `.wiki/` path), and no markdown/advisory leaks onto stdout.
 #[test]
 fn print_applied_empty_when_no_fragment_links() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
@@ -322,10 +261,6 @@ fn print_applied_empty_when_no_fragment_links() {
 /// both after all work.
 #[test]
 fn best_effort_creates_others_logs_one_failure() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
@@ -448,13 +383,9 @@ fn scaffold_subcommand_and_no_mesh_flag_are_removed() {
 }
 
 /// `--fix-dry-run` previews the meshes that WOULD be created without mutating
-/// `.mesh/`.
+/// `.wiki/`.
 #[test]
 fn fix_dry_run_previews_meshes_without_mutating() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
@@ -500,15 +431,11 @@ fn fix_dry_run_previews_meshes_without_mutating() {
 }
 
 /// A line-ranged fragment link into a gitignored (generated) file must NOT be
-/// anchored: git-mesh cannot anchor a path git never sees, so the engine drops
+/// anchored: a path not tracked by git cannot be anchored, so the engine drops
 /// it with an advisory and creates no mesh for the gitignored path. With
 /// --no-exit-code the run exits 0.
 #[test]
 fn skips_gitignored_anchor_target() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
@@ -560,10 +487,6 @@ fn skips_gitignored_anchor_target() {
 /// covering the *tracked* anchor; only the gitignored anchor is stripped.
 #[test]
 fn keeps_tracked_anchor_when_co_cited_with_gitignored() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
@@ -624,10 +547,6 @@ fn keeps_tracked_anchor_when_co_cited_with_gitignored() {
 /// and (with --no-exit-code) the run exits 0.
 #[test]
 fn over_range_anchor_dropped_with_named_advisory() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
@@ -659,13 +578,9 @@ fn over_range_anchor_dropped_with_named_advisory() {
 }
 
 /// Running `wiki check --fix` twice on an unchanged tree produces identical
-/// mesh content (git-mesh idempotency) and exits 0 both times.
+/// mesh content (idempotency) and exits 0 both times.
 #[test]
 fn fix_mesh_creation_is_idempotent() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
@@ -700,10 +615,6 @@ fn fix_mesh_creation_is_idempotent() {
 /// the mesh is dropped with an advisory and no mesh is created for it.
 #[test]
 fn drops_mesh_with_missing_anchor_path() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
@@ -755,10 +666,6 @@ fn drops_mesh_with_missing_anchor_path() {
 /// than creating a new one.
 #[test]
 fn extends_existing_section_mesh_with_new_code_links() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
@@ -822,23 +729,12 @@ fn extends_existing_section_mesh_with_new_code_links() {
 /// `--print-applied`.
 #[test]
 fn renames_blocker_and_keeps_others() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
-    if !git_mesh_add_sees_uncommitted_rename() {
-        eprintln!(
-            "skipping: this git-mesh's add collision check is HEAD-based — \
-             an uncommitted in-run rename cannot free the slug"
-        );
-        return;
-    }
-
+    let lib_content = b"// lib\n// line2\n// line3\n";
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki/arch/scaff")).unwrap();
     std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::write(root.join("src/lib.rs"), "// lib\n// line2\n// line3\n").unwrap();
+    std::fs::write(root.join("src/lib.rs"), lib_content).unwrap();
     std::fs::write(
         root.join("wiki/arch/scaff/page.md"),
         "---\ntitle: Scaff Page\nsummary: Colliding page.\n---\n\n\
@@ -847,16 +743,20 @@ fn renames_blocker_and_keeps_others() {
     .unwrap();
 
     git(root, &["init", "-q", "-b", "main"]);
-    let mesh_status = Command::new("git")
-        .args(["mesh", "add", "wiki/arch/scaff", "src/lib.rs#L1-L1"])
-        .current_dir(root)
-        .status()
-        .expect("git mesh add available");
-    assert!(mesh_status.success(), "pre-create blocker mesh failed");
-    // git mesh add writes to .mesh/; mirror to .wiki/ where the wiki engine reads.
-    let dot_mesh_blocker = root.join(".mesh/wiki/arch/scaff");
-    let blocker_before = std::fs::read_to_string(&dot_mesh_blocker)
-        .expect("git mesh add must have created .mesh/wiki/arch/scaff");
+
+    // Seed the pre-existing blocker mesh directly into .wiki/ (no binary needed).
+    let hash = hash_bytes_with_extent(lib_content, &AnchorExtent::LineRange { start: 1, end: 1 });
+    let blocker_mesh = MeshFile {
+        anchors: vec![AnchorRecord {
+            path: "src/lib.rs".to_string(),
+            start_line: 1,
+            end_line: 1,
+            algorithm: "sha256".to_string(),
+            content_hash: hash,
+        }],
+        why: String::new(),
+    };
+    let blocker_before = blocker_mesh.serialize();
     std::fs::create_dir_all(root.join(".wiki/wiki/arch")).unwrap();
     std::fs::write(root.join(".wiki/wiki/arch/scaff"), &blocker_before).unwrap();
 
@@ -906,15 +806,12 @@ fn renames_blocker_and_keeps_others() {
 /// `--fix-dry-run` reports the planned blocker rename and mutates nothing.
 #[test]
 fn fix_dry_run_reports_planned_rename_without_mutating() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
+    let lib_content = b"// lib\n// line2\n// line3\n";
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki/arch/scaff")).unwrap();
     std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::write(root.join("src/lib.rs"), "// lib\n// line2\n// line3\n").unwrap();
+    std::fs::write(root.join("src/lib.rs"), lib_content).unwrap();
     std::fs::write(
         root.join("wiki/arch/scaff/page.md"),
         "---\ntitle: Scaff Page\nsummary: Colliding page.\n---\n\n\
@@ -923,16 +820,20 @@ fn fix_dry_run_reports_planned_rename_without_mutating() {
     .unwrap();
 
     git(root, &["init", "-q", "-b", "main"]);
-    let mesh_status = Command::new("git")
-        .args(["mesh", "add", "wiki/arch/scaff", "src/lib.rs#L1-L1"])
-        .current_dir(root)
-        .status()
-        .expect("git mesh add available");
-    assert!(mesh_status.success(), "pre-create blocker mesh failed");
-    // git mesh add writes to .mesh/; mirror to .wiki/ where the wiki engine reads.
-    let dot_mesh_blocker = root.join(".mesh/wiki/arch/scaff");
-    let blocker_before = std::fs::read_to_string(&dot_mesh_blocker)
-        .expect("git mesh add must have created .mesh/wiki/arch/scaff");
+
+    // Seed the pre-existing blocker mesh directly into .wiki/ (no binary needed).
+    let hash = hash_bytes_with_extent(lib_content, &AnchorExtent::LineRange { start: 1, end: 1 });
+    let blocker_mesh = MeshFile {
+        anchors: vec![AnchorRecord {
+            path: "src/lib.rs".to_string(),
+            start_line: 1,
+            end_line: 1,
+            algorithm: "sha256".to_string(),
+            content_hash: hash,
+        }],
+        why: String::new(),
+    };
+    let blocker_before = blocker_mesh.serialize();
     std::fs::create_dir_all(root.join(".wiki/wiki/arch")).unwrap();
     std::fs::write(root.join(".wiki/wiki/arch/scaff"), &blocker_before).unwrap();
     let blocker = root.join(".wiki/wiki/arch/scaff");
@@ -996,10 +897,6 @@ fn check_fix_dry_run(cwd: &Path) -> std::process::Output {
 /// follow-up `wiki check` reports no residual diagnostics.
 #[test]
 fn cleanup_round_trip_deletes_orphan_mesh() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
@@ -1084,10 +981,6 @@ fn cleanup_round_trip_deletes_orphan_mesh() {
 /// `--fix-dry-run` lists the would-delete mesh and mutates nothing.
 #[test]
 fn cleanup_dry_run_previews_deletion_without_mutating() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
@@ -1147,10 +1040,6 @@ fn cleanup_dry_run_previews_deletion_without_mutating() {
 /// Curated `why` orphan ⇒ advisory on stderr, mesh untouched.
 #[test]
 fn cleanup_curated_why_produces_advisory_not_deletion() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let wiki_dir = root.join(".wiki");
@@ -1200,10 +1089,6 @@ fn cleanup_curated_why_produces_advisory_not_deletion() {
 /// Multi-page mesh with one page gone ⇒ advisory on stderr, mesh untouched.
 #[test]
 fn cleanup_multi_page_mesh_produces_advisory_not_deletion() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let wiki_dir = root.join(".wiki");
@@ -1251,10 +1136,6 @@ fn cleanup_multi_page_mesh_produces_advisory_not_deletion() {
 /// Frontmatter demotion (file still on disk) ⇒ no deletion.
 #[test]
 fn cleanup_no_deletion_when_file_present() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
@@ -1309,10 +1190,6 @@ fn cleanup_no_deletion_when_file_present() {
 /// on stdout, and a follow-up `wiki check` exits 0.
 #[test]
 fn finding1_last_page_deleted_cleanup_still_runs() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
@@ -1400,10 +1277,6 @@ fn finding1_last_page_deleted_cleanup_still_runs() {
 /// (the file exists), and exit 0.
 #[test]
 fn finding1_last_page_demoted_mesh_left_exit_0() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
@@ -1468,10 +1341,6 @@ fn finding1_last_page_demoted_mesh_left_exit_0() {
 /// in `scaffold.rs` (see `cleanup_post_verify_only_when_file_absent`).
 #[test]
 fn finding2_deleted_path_printed_only_when_file_absent() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
@@ -1538,10 +1407,6 @@ fn finding2_deleted_path_printed_only_when_file_absent() {
 /// to not match `wiki/page.md`.
 #[test]
 fn finding2_plain_glob_with_subdir_cwd_cleans_inscope_orphan() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
@@ -1638,10 +1503,6 @@ fn finding2_plain_glob_with_subdir_cwd_cleans_inscope_orphan() {
 /// scoped subtree. An out-of-scope orphan mesh must be left untouched.
 #[test]
 fn finding3_scoped_cleanup_leaves_out_of_scope_orphan() {
-    if !git_mesh_available() {
-        eprintln!("skipping: git-mesh not installed");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir_all(root.join("wiki/a")).unwrap();

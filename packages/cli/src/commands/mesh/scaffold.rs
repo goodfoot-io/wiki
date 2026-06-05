@@ -68,15 +68,13 @@ pub(crate) enum DropReason {
     /// An anchor's code target file is absent in the active source.
     MissingPath { path: String },
     /// An anchor's code target is gitignored — a build artifact that is never
-    /// committed. `git mesh add` refuses such a path (it resolves content
-    /// through git and cannot track a path git never sees), so anchoring it
-    /// would either fail the add or produce a permanently-`deleted` anchor.
-    /// Skipped with an advisory rather than escalated. Distinct from
-    /// untracked-but-not-ignored targets, which resolve once committed and are
-    /// left to anchor normally.
+    /// committed. A path git never tracks cannot be anchored and would produce a
+    /// permanently-stale anchor. Skipped with an advisory rather than escalated.
+    /// Distinct from untracked-but-not-ignored targets, which resolve once
+    /// committed and are left to anchor normally.
     IgnoredPath { path: String },
-    /// An anchor is statically invalid for git-mesh: line range exceeds the
-    /// target file's line count, start > end, or start < 1.
+    /// An anchor is statically invalid: line range exceeds the target file's
+    /// line count, start > end, or start < 1.
     InvalidAnchor { anchor: String, detail: String },
     /// The generated slug cannot be created because a pre-existing mesh
     /// occupies a conflicting path (an ancestor file, or a directory at the
@@ -114,9 +112,9 @@ use super::group;
 use super::render;
 use super::store;
 
-/// A mesh draft that `git mesh add` failed to apply. The failure reason was
-/// already printed by git-mesh to the inherited stderr; we only carry the slug
-/// so the caller can name what could not be created.
+/// A mesh draft that the in-process store failed to apply. The failure reason was
+/// already emitted to stderr; we only carry the slug so the caller can name what
+/// could not be created.
 #[derive(Debug, Clone)]
 pub(crate) struct MeshFailure {
     pub(crate) slug: String,
@@ -149,11 +147,8 @@ pub(crate) struct MeshCoverageOutcome {
 /// pipeline (byte-identical mesh set to the former `scaffold` command), then:
 /// - `dry_run = true`: mutates nothing; `planned` lists the meshes that would
 ///   be created (and renamed-blocker NEW paths).
-/// - `dry_run = false`: applies every draft via `git mesh add`, accumulating
+/// - `dry_run = false`: applies every draft via the in-process store, accumulating
 ///   per-draft failures and continuing past them.
-///
-/// When `git-mesh` is unavailable the outcome is empty (no-op): the
-/// `mesh_unavailable` diagnostic from the check pass owns that signal.
 pub(crate) fn create_mesh_coverage(
     files: &[PathBuf],
     repo_root: &Path,
@@ -172,8 +167,7 @@ pub(crate) fn create_mesh_coverage(
         .collect();
 
     // Coverage index: filter out fragment links already covered by a mesh in
-    // the repo. When `git-mesh` is unavailable, no-op — the check pass already
-    // emits a `mesh_unavailable` diagnostic that drives the exit code.
+    // the repo.
     let mesh_index = match crate::commands::mesh_coverage::build_mesh_index(repo_root, &files) {
         Ok(Some(idx)) => idx,
         Ok(None) => return Ok(MeshCoverageOutcome::default()),
@@ -275,15 +269,16 @@ pub(crate) fn create_mesh_coverage(
     let mut dropped_meshes: Vec<DroppedMesh> = Vec::new();
 
     // ── Slug-path-collision pass ──────────────────────────────────────────
-    // A pre-existing mesh occupying a conflicting path makes `git mesh add`
-    // structurally impossible. When the collision is a strict ANCESTOR FILE
+    // A pre-existing mesh occupying a conflicting path makes writing a new
+    // mesh at a longer slug structurally impossible (the existing file would
+    // need to become a directory). When the collision is a strict ANCESTOR FILE
     // (existing shorter mesh `B` blocks new longer slug `B/...`), the remedy
     // is to RENAME the blocker out of the way (apply mode) / report the
     // planned rename (dry-run), keeping the new draft. The blocker is read and
     // its single distinct wiki-page anchor drives a reused-noun leaf for the
     // rename target. Any failure (non-ancestor-file collision, unreadable
-    // blocker, `git mesh move` non-zero) FAILS OPEN to the legacy
-    // drop-with-advisory path (exit 0) — never fail-closed, never panic.
+    // blocker) FAILS OPEN to the drop-with-advisory path (exit 0) — never
+    // fail-closed, never panic.
     //
     // Extension drafts reuse an existing slug verbatim, so they are exempt.
     let section_noun: std::collections::HashMap<(String, u32, u32), String> = consolidated
@@ -311,8 +306,8 @@ pub(crate) fn create_mesh_coverage(
                 planned_renames.push(plan);
                 true
             }
-            // Fail open: not an ancestor-file case, unreadable blocker, or
-            // `git mesh move` failed → drop-with-advisory, exit 0.
+            // Fail open: not an ancestor-file case or unreadable blocker →
+            // drop-with-advisory, exit 0.
             _ => {
                 dropped_meshes.push(DroppedMesh {
                     slug: draft.slug.clone(),
@@ -327,8 +322,8 @@ pub(crate) fn create_mesh_coverage(
     });
 
     // A gitignored fragment-link target (a generated build artifact) is exempt
-    // from mesh coverage exactly as `wiki check` treats it: git-mesh refuses to
-    // anchor a path git never sees, so demanding coverage would be
+    // from mesh coverage exactly as `wiki check` treats it: a path git never
+    // sees cannot be anchored, so demanding coverage would be
     // unsatisfiable. Strip ONLY the gitignored anchors from each draft (with a
     // per-anchor advisory), keeping the section's co-cited *tracked* anchors
     // covered; drop a draft entirely only when no code anchor remains. An
@@ -408,7 +403,7 @@ pub(crate) fn create_mesh_coverage(
                 return false;
             }
             // The path exists — statically validate the anchor's line range
-            // against the target file before it ever reaches `git mesh add`.
+            // against the target file before writing it to the store.
             // An over-range / inverted / zero-start anchor is a drifted wiki
             // link (a fixable wiki condition), NOT a hard build failure: drop
             // it with a named advisory so the link resurfaces as a residual
@@ -843,7 +838,7 @@ fn apply_drafts(
 /// anchors that exact triple, the draft is converted: code anchors already in
 /// M are dropped, the section anchor itself is dropped, `slug` is overwritten
 /// with M's name, and `extends_existing = Some(M)` flags the renderer to emit
-/// `git mesh add M ...` with no `git mesh why` line.
+/// an extension (add to M) with no `why` line.
 ///
 /// Drafts left with no remaining code anchors are filtered out entirely —
 /// nothing new for the user to commit.
@@ -953,7 +948,7 @@ pub(crate) fn normalize_heading_text(s: &str) -> String {
 /// Three-stage build/group/annotate pipeline that produces the final list of
 /// meshes (in per-page declaration order) ready for shell rendering.
 /// Coalesce overlapping or contiguous line-range anchors on the same path into
-/// one covering anchor, mirroring git-mesh's `coalesce_line_ranges` so
+/// one covering anchor, matching `git-mesh-core`'s coalesce_line_ranges so
 /// `wiki check --fix` and `git mesh stale --fix` settle on a byte-identical
 /// fixed point.
 ///
@@ -1107,8 +1102,8 @@ fn build_meshes(
     // into one survivor; only then does the collision resolver (run from
     // [`run`] after heading-chain trimming) see contiguous slugs. Doing this
     // in the reverse order leaks suffix gaps (`foo`, `foo-3`, no `foo-2`)
-    // into the footer's `git mesh commit` lines whenever consolidation
-    // prunes a duplicate the dedup already suffixed.
+    // into the applied stage list whenever consolidation prunes a duplicate
+    // the dedup already suffixed.
     let mut consolidated: Vec<MeshDraft> = Vec::new();
     for (start, end) in page_spans {
         let page_drafts: Vec<MeshDraft> = all_drafts[start..end].to_vec();
@@ -1560,12 +1555,12 @@ fn path_relative_to(path: &Path, repo_root: &Path) -> String {
 }
 
 /// Statically validate a structured anchor's line range against the target
-/// file the same way git-mesh would, *before* `git mesh add` is invoked.
+/// file before writing it to the store.
 ///
-/// Returns `Some(detail)` describing why the anchor is invalid (mirroring
-/// git-mesh's own diagnostics), or `None` when the anchor is acceptable.
-/// `None` here means "let it through" — a genuine `git mesh add` failure on
-/// an otherwise-valid anchor must still fail closed downstream.
+/// Returns `Some(detail)` describing why the anchor is invalid, or `None`
+/// when the anchor is acceptable. `None` here means "let it through" — a
+/// genuine store write failure on an otherwise-valid anchor still fails
+/// closed downstream.
 fn invalid_anchor_detail(
     repo_root: &Path,
     anchor: &draft::StructuredAnchor,
@@ -1573,7 +1568,7 @@ fn invalid_anchor_detail(
     source_paths: &Option<std::collections::HashSet<String>>,
 ) -> Option<String> {
     let (start, end) = (anchor.start_line, anchor.end_line);
-    // start < 1 (git-mesh uses 1-based inclusive line numbers).
+    // start < 1 (anchors use 1-based inclusive line numbers).
     if start < 1 {
         return Some(format!("start line {start} is below 1"));
     }
@@ -1597,16 +1592,15 @@ fn invalid_anchor_detail(
     None
 }
 
-/// Count the lines in `content` the way git-mesh does: a trailing newline does
-/// not introduce a phantom final line, and empty content has zero lines.
+/// Count the lines in `content` using inclusive line-count semantics: a trailing
+/// newline does not introduce a phantom final line, and empty content has zero lines.
 fn count_lines(content: &str) -> u64 {
     if content.is_empty() {
         return 0;
     }
     let mut n = content.lines().count() as u64;
     // `str::lines` already drops a single trailing newline's empty segment, so
-    // "a\n" → 1 line, "a\nb" → 2 lines, "a\nb\n" → 2 lines. That matches
-    // git-mesh's inclusive line-count semantics.
+    // "a\n" → 1 line, "a\nb" → 2 lines, "a\nb\n" → 2 lines.
     if n == 0 {
         n = 1;
     }
@@ -2430,11 +2424,11 @@ mod tests {
         assert!(result.advisories.is_empty());
     }
 
-    // ── range coalescing (oscillation bug with git mesh stale --fix) ──────────
+    // ── range coalescing (oscillation-prevention) ─────────────────────────────
 
     /// `build_meshes` must coalesce overlapping/contiguous fragment-link ranges
-    /// on the same path within a section — mirroring git-mesh's rule (merge when
-    /// `next.start <= current.end + 1`). Without coalescing, a section linking
+    /// on the same path within a section — matching `git-mesh-core`'s rule (merge
+    /// when `next.start <= current.end + 1`). Without coalescing, a section linking
     /// `card.ts#L69-L95`, `card.ts#L75-L75`, `card.ts#L81-L81` emits three
     /// separate anchors that `git mesh stale --fix` re-collapses into one
     /// `card.ts#L69-L95`, so the two tools oscillate forever.
