@@ -766,6 +766,21 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+
+        /// Mirror a mesh from the git-mesh `.mesh/<slug>` location to the
+        /// in-process `.wiki/<slug>` location that `build_mesh_index` reads.
+        /// Required for tests that create meshes via `git_mesh` (which writes
+        /// to `.mesh/`) and then exercise fix paths that depend on the wiki
+        /// mesh-coverage index.
+        fn mirror_mesh_to_wiki(&self, slug: &str) {
+            let mesh_path = self.dir.path().join(format!(".mesh/{slug}"));
+            let text = std::fs::read_to_string(&mesh_path)
+                .unwrap_or_else(|e| panic!("could not read .mesh/{slug}: {e}"));
+            let mesh = git_mesh_core::mesh_file::MeshFile::parse(&text)
+                .unwrap_or_else(|e| panic!("could not parse .mesh/{slug}: {e}"));
+            store::write(self.dir.path(), slug, &mesh)
+                .unwrap_or_else(|e| panic!("could not write .wiki/{slug}: {e}"));
+        }
     }
 
     fn make_wiki_page(title: &str, body: &str) -> String {
@@ -1168,7 +1183,6 @@ mod tests {
 
     /// Fix 1: when a link target was renamed in git, --fix rewrites the path.
     #[test]
-    #[ignore = "re-enable in write-path group: production write path still targets .mesh/"]
     fn fix1_broken_link_rewrites_renamed_path() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
@@ -1269,7 +1283,6 @@ mod tests {
     /// stays at its old coordinates and the run still reports drift — the
     /// assertion is on the rewritten link, not the exit code.
     #[test]
-    #[ignore = "re-enable in write-path group: production write path still targets .mesh/"]
     fn fix2_mesh_anchor_follows_line_shift() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
@@ -1282,6 +1295,7 @@ mod tests {
 
         repo.git_mesh(&["add", "fix2-mesh", "wiki/page.md", "src/code.rs#L1-L1"]);
         repo.git_mesh(&["why", "fix2-mesh", "-m", "Test mesh."]);
+        repo.mirror_mesh_to_wiki("fix2-mesh");
         repo.commit("commit mesh");
 
         // Insert a line before the anchored function and commit so that
@@ -1313,7 +1327,6 @@ mod tests {
     /// line shift), Fix #2 declines to rewrite because the mesh guardrails
     /// disqualify Changed anchors.
     #[test]
-    #[ignore = "re-enable in write-path group: production write path still targets .mesh/"]
     fn fix2_skips_when_changed_sibling_present() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
@@ -1333,6 +1346,7 @@ mod tests {
             "src/code.rs#L2-L3",
         ]);
         repo.git_mesh(&["why", "fix2-changed-mesh", "-m", "Test mesh."]);
+        repo.mirror_mesh_to_wiki("fix2-changed-mesh");
         repo.commit("commit mesh");
 
         // Replace the file with only one line. The anchor L2-L3 is now both
@@ -1369,7 +1383,6 @@ mod tests {
     /// required. In the v1.0.80 file-backed model there is no mesh-advancing
     /// step; the wiki rewrite uses the planned `moved_to` coords directly.
     #[test]
-    #[ignore = "re-enable in write-path group: production write path still targets .mesh/"]
     fn fix2_dry_run_previews_staged_shift() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
@@ -1382,6 +1395,7 @@ mod tests {
 
         repo.git_mesh(&["add", "fix2-dry-mesh", "wiki/page.md", "src/code.rs#L1-L1"]);
         repo.git_mesh(&["why", "fix2-dry-mesh", "-m", "Test mesh."]);
+        repo.mirror_mesh_to_wiki("fix2-dry-mesh");
         repo.commit("commit mesh");
 
         // STAGE the code shift but do NOT commit it.
@@ -1420,7 +1434,6 @@ mod tests {
     /// the wiki link reflects the planned `moved_to` destination immediately
     /// (`git mesh stale --format=json` reports MOVED for staged shifts too).
     #[test]
-    #[ignore = "re-enable in write-path group: production write path still targets .mesh/"]
     fn fix2_applies_to_staged_shift() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
@@ -1438,6 +1451,7 @@ mod tests {
             "src/code.rs#L1-L1",
         ]);
         repo.git_mesh(&["why", "fix2-staged-mesh", "-m", "Test mesh."]);
+        repo.mirror_mesh_to_wiki("fix2-staged-mesh");
         repo.commit("commit mesh");
 
         // STAGE the code shift but do NOT commit it.

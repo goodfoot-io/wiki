@@ -9,10 +9,9 @@
 //! Greenfield: the location is fixed at `repo_root/.wiki` — no env or
 //! git-config indirection, no `.mesh` handling, no fallback.
 //!
-//! Group 1 (foundation) lands these primitives and their parity/round-trip
-//! tests; the five shell-out call sites are rewired in later groups, so the
-//! public surface is currently unused outside tests.
-#![allow(dead_code)]
+//! Groups 1–3 complete the cutover: Group 1 landed the primitives, Group 2
+//! wired the read path, and Group 3 wires the write path. All public items are
+//! now used in production code.
 
 use std::fs;
 use std::path::{Path, PathBuf};

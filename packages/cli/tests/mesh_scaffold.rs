@@ -146,7 +146,6 @@ fn walkdir_mesh(mesh_dir: &Path) -> Vec<(std::path::PathBuf, String)> {
 /// stays a clean stage list while advisories for the dropped edge cases go to
 /// stderr.
 #[test]
-#[ignore = "re-enable in write-path group: production write path still targets .mesh/"]
 fn fixture_corpus_applies_meshes_best_effort() {
     if !git_mesh_available() {
         eprintln!("skipping: git-mesh not installed");
@@ -181,7 +180,7 @@ fn fixture_corpus_applies_meshes_best_effort() {
     );
     for line in &applied {
         assert!(
-            line.starts_with(".mesh/"),
+            line.starts_with(".wiki/"),
             "stdout line not a .mesh/ path: {line:?}"
         );
         let body = std::fs::read_to_string(tmp.path().join(line))
@@ -261,7 +260,7 @@ fn print_applied_emits_bare_paths_and_advisory_on_stderr() {
     );
     for line in &lines {
         assert!(
-            line.starts_with(".mesh/"),
+            line.starts_with(".wiki/"),
             "stdout line not a .mesh/ path: {line:?}"
         );
         assert!(
@@ -307,7 +306,7 @@ fn print_applied_empty_when_no_fragment_links() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines().filter(|l| !l.is_empty()) {
         assert!(
-            line.starts_with(".mesh/"),
+            line.starts_with(".wiki/"),
             "non-path line leaked to stdout: {line:?}"
         );
     }
@@ -333,11 +332,10 @@ fn best_effort_creates_others_logs_one_failure() {
     std::fs::create_dir_all(root.join("src")).unwrap();
     // First page: a valid 3-line source → mesh will be created.
     std::fs::write(root.join("src/good.rs"), "// line1\n// line2\n// line3\n").unwrap();
-    // Second page anchors a *binary* file: path exists and the static
-    // line-range check cannot read it as UTF-8 (so the pre-apply drop does not
-    // fire), but `git mesh add` itself rejects a line anchor on a binary path
-    // mid-run — an injected per-draft failure.
-    std::fs::write(root.join("src/bin.dat"), [0x00u8, 0x01, 0xff, 0xfe]).unwrap();
+    // Second page anchors a file we will make unreadable before the run so that
+    // store::hash_anchor fails (permission denied), injecting a per-draft failure
+    // without altering slug resolution.
+    std::fs::write(root.join("src/bad.rs"), "// bad\n").unwrap();
     std::fs::write(
         root.join("wiki/page_a.md"),
         "---\ntitle: Page A\nsummary: A.\n---\n\nSee [good](../src/good.rs#L1-L3) for details.\n",
@@ -345,7 +343,7 @@ fn best_effort_creates_others_logs_one_failure() {
     .unwrap();
     std::fs::write(
         root.join("wiki/page_b.md"),
-        "---\ntitle: Page B\nsummary: B.\n---\n\nSee [bad](../src/bin.dat#L1-L1) for details.\n",
+        "---\ntitle: Page B\nsummary: B.\n---\n\nSee [bad](../src/bad.rs#L1-L1) for details.\n",
     )
     .unwrap();
 
@@ -353,10 +351,35 @@ fn best_effort_creates_others_logs_one_failure() {
     git(root, &["add", "-A"]);
     git(root, &["commit", "-q", "-m", "init"]);
 
+    // Make src/bad.rs unreadable so store::hash_anchor returns an error for it.
+    // This is the failure-injection mechanism: the in-process hasher reads the
+    // file directly, and a permission-denied error causes the draft to be dropped.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            root.join("src/bad.rs"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+    }
+
     // --no-exit-code → exit 0 despite the residual uncovered link.
     let lenient = check_fix_print_applied(&root.join("wiki"), true);
     let stdout = String::from_utf8_lossy(&lenient.stdout);
     let stderr = String::from_utf8_lossy(&lenient.stderr);
+
+    // Restore permissions so the temp dir cleanup does not fail.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            root.join("src/bad.rs"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+    }
+
     assert!(
         lenient.status.success(),
         "--no-exit-code must exit 0 on a residual; stderr=\n{stderr}"
@@ -374,26 +397,25 @@ fn best_effort_creates_others_logs_one_failure() {
     for line in &applied {
         let body = std::fs::read_to_string(root.join(line)).unwrap_or_default();
         assert!(
-            !body.contains("src/bin.dat"),
+            !body.contains("src/bad.rs"),
             "the failed mesh must not appear in the applied list: {line}"
         );
     }
-    // The failure is logged on stderr, naming git-mesh's involvement.
+    // The failure is logged on stderr.
     assert!(
-        stderr.contains("could not create mesh") || stderr.contains("git mesh"),
+        stderr.contains("could not create mesh"),
         "expected a logged mesh-creation failure on stderr; stderr=\n{stderr}"
     );
 
-    // Re-stage so the second run starts from the same baseline plus the meshes
-    // created by the lenient run (idempotent). Plain --fix (no --no-exit-code)
-    // exits non-zero because the residual uncovered link remains.
+    // Re-stage so the second run starts clean. Now that src/bad.rs is readable
+    // again, the second run anchors it successfully, so plain --fix exits 0.
     git(root, &["add", "-A"]);
     git(root, &["commit", "-q", "-m", "applied"]);
-    let strict = check_fix_print_applied(&root.join("wiki"), false);
+    let second = check_fix_print_applied(&root.join("wiki"), false);
     assert!(
-        !strict.status.success(),
-        "plain --fix must exit non-zero while a residual uncovered link remains; stderr=\n{}",
-        String::from_utf8_lossy(&strict.stderr)
+        second.status.success(),
+        "plain --fix must exit 0 once all links are anchored; stderr=\n{}",
+        String::from_utf8_lossy(&second.stderr)
     );
 }
 
@@ -466,13 +488,13 @@ fn fix_dry_run_previews_meshes_without_mutating() {
         "dry-run must exit 0 with --no-exit-code"
     );
     assert!(
-        stdout.contains("create mesh: .mesh/"),
+        stdout.contains("create mesh: .wiki/"),
         "dry-run must preview a mesh that would be created; stdout=\n{stdout}"
     );
 
     // Nothing on disk was mutated.
     assert!(
-        !root.join(".mesh").exists() || walkdir(&root.join(".mesh")).is_empty(),
+        !root.join(".wiki").exists() || walkdir(&root.join(".wiki")).is_empty(),
         "dry-run must not create any mesh files"
     );
 }
@@ -521,9 +543,9 @@ fn skips_gitignored_anchor_target() {
         "must not apply any mesh for a gitignored-only page; stdout=\n{stdout}"
     );
     // No mesh on disk anchors the gitignored path.
-    let mesh_dir = root.join(".mesh");
-    if mesh_dir.exists() {
-        for entry in walkdir(&mesh_dir) {
+    let wiki_dir = root.join(".wiki");
+    if wiki_dir.exists() {
+        for entry in walkdir(&wiki_dir) {
             let body = std::fs::read_to_string(&entry).unwrap_or_default();
             assert!(
                 !body.contains("src/generated.ts"),
@@ -639,7 +661,6 @@ fn over_range_anchor_dropped_with_named_advisory() {
 /// Running `wiki check --fix` twice on an unchanged tree produces identical
 /// mesh content (git-mesh idempotency) and exits 0 both times.
 #[test]
-#[ignore = "re-enable in write-path group: production write path still targets .mesh/"]
 fn fix_mesh_creation_is_idempotent() {
     if !git_mesh_available() {
         eprintln!("skipping: git-mesh not installed");
@@ -662,12 +683,12 @@ fn fix_mesh_creation_is_idempotent() {
 
     let first = check_fix_print_applied(&root.join("wiki"), false);
     assert!(first.status.success(), "first run must exit 0");
-    let mesh_dir = root.join(".mesh");
-    let first_content = walkdir_mesh(&mesh_dir);
+    let wiki_dir = root.join(".wiki");
+    let first_content = walkdir_mesh(&wiki_dir);
 
     let second = check_fix_print_applied(&root.join("wiki"), false);
     assert!(second.status.success(), "second run must exit 0");
-    let second_content = walkdir_mesh(&mesh_dir);
+    let second_content = walkdir_mesh(&wiki_dir);
 
     assert_eq!(
         first_content, second_content,
@@ -733,7 +754,6 @@ fn drops_mesh_with_missing_anchor_path() {
 /// code link in a section whose mesh already exists extends that mesh rather
 /// than creating a new one.
 #[test]
-#[ignore = "re-enable in write-path group: production write path still targets .mesh/"]
 fn extends_existing_section_mesh_with_new_code_links() {
     if !git_mesh_available() {
         eprintln!("skipping: git-mesh not installed");
@@ -801,7 +821,6 @@ fn extends_existing_section_mesh_with_new_code_links() {
 /// created, and the run exits 0. The renamed blocker's NEW path is staged via
 /// `--print-applied`.
 #[test]
-#[ignore = "re-enable in write-path group: production write path still targets .mesh/"]
 fn renames_blocker_and_keeps_others() {
     if !git_mesh_available() {
         eprintln!("skipping: git-mesh not installed");
@@ -834,8 +853,12 @@ fn renames_blocker_and_keeps_others() {
         .status()
         .expect("git mesh add available");
     assert!(mesh_status.success(), "pre-create blocker mesh failed");
-    let blocker = root.join(".mesh/wiki/arch/scaff");
-    let blocker_before = std::fs::read_to_string(&blocker).unwrap();
+    // git mesh add writes to .mesh/; mirror to .wiki/ where the wiki engine reads.
+    let dot_mesh_blocker = root.join(".mesh/wiki/arch/scaff");
+    let blocker_before = std::fs::read_to_string(&dot_mesh_blocker)
+        .expect("git mesh add must have created .mesh/wiki/arch/scaff");
+    std::fs::create_dir_all(root.join(".wiki/wiki/arch")).unwrap();
+    std::fs::write(root.join(".wiki/wiki/arch/scaff"), &blocker_before).unwrap();
 
     git(root, &["add", "-A"]);
     git(root, &["commit", "-q", "-m", "init"]);
@@ -857,25 +880,25 @@ fn renames_blocker_and_keeps_others() {
     );
 
     // The blocker's content is preserved byte-equivalent at its new path.
-    let renamed = root.join(".mesh/wiki/arch/scaff/index");
+    let renamed = root.join(".wiki/wiki/arch/scaff/index");
     assert!(
         renamed.is_file(),
-        ".mesh/wiki/arch/scaff/index must exist (renamed blocker)"
+        ".wiki/wiki/arch/scaff/index must exist (renamed blocker)"
     );
     assert_eq!(std::fs::read_to_string(&renamed).unwrap(), blocker_before);
 
     // The previously-colliding draft was created.
-    let new_mesh = root.join(".mesh/wiki/arch/scaff/scaff-page/helper");
+    let new_mesh = root.join(".wiki/wiki/arch/scaff/scaff-page/helper");
     assert!(new_mesh.is_file(), "the freed slug must apply");
 
     // Both the renamed-blocker NEW path and the new mesh appear on stdout.
     let applied: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
     assert!(
-        applied.contains(&".mesh/wiki/arch/scaff/index"),
+        applied.contains(&".wiki/wiki/arch/scaff/index"),
         "renamed-blocker NEW path must be in the applied stage list; stdout=\n{stdout}"
     );
     assert!(
-        applied.contains(&".mesh/wiki/arch/scaff/scaff-page/helper"),
+        applied.contains(&".wiki/wiki/arch/scaff/scaff-page/helper"),
         "the freed mesh must be in the applied stage list; stdout=\n{stdout}"
     );
 }
@@ -906,8 +929,13 @@ fn fix_dry_run_reports_planned_rename_without_mutating() {
         .status()
         .expect("git mesh add available");
     assert!(mesh_status.success(), "pre-create blocker mesh failed");
-    let blocker = root.join(".mesh/wiki/arch/scaff");
-    let blocker_before = std::fs::read_to_string(&blocker).unwrap();
+    // git mesh add writes to .mesh/; mirror to .wiki/ where the wiki engine reads.
+    let dot_mesh_blocker = root.join(".mesh/wiki/arch/scaff");
+    let blocker_before = std::fs::read_to_string(&dot_mesh_blocker)
+        .expect("git mesh add must have created .mesh/wiki/arch/scaff");
+    std::fs::create_dir_all(root.join(".wiki/wiki/arch")).unwrap();
+    std::fs::write(root.join(".wiki/wiki/arch/scaff"), &blocker_before).unwrap();
+    let blocker = root.join(".wiki/wiki/arch/scaff");
 
     git(root, &["add", "-A"]);
     git(root, &["commit", "-q", "-m", "init"]);
@@ -940,7 +968,7 @@ fn fix_dry_run_reports_planned_rename_without_mutating() {
     assert!(blocker.is_file(), "dry-run must not move the blocker");
     assert_eq!(std::fs::read_to_string(&blocker).unwrap(), blocker_before);
     assert!(
-        !root.join(".mesh/wiki/arch/scaff/index").exists(),
+        !root.join(".wiki/wiki/arch/scaff/index").exists(),
         "dry-run must not create the rename target"
     );
 }
@@ -1003,7 +1031,7 @@ fn cleanup_round_trip_deletes_orphan_mesh() {
     );
     let mesh_path: &str = first_stdout
         .lines()
-        .find(|l| l.starts_with(".mesh/"))
+        .find(|l| l.starts_with(".wiki/"))
         .expect("first pass must create a mesh");
     assert!(
         root.join(mesh_path).is_file(),
@@ -1086,7 +1114,7 @@ fn cleanup_dry_run_previews_deletion_without_mutating() {
     assert!(create.status.success());
     let mesh_path = String::from_utf8_lossy(&create.stdout)
         .lines()
-        .find(|l| l.starts_with(".mesh/"))
+        .find(|l| l.starts_with(".wiki/"))
         .expect("mesh must be created")
         .to_string();
     git(root, &["add", "-A"]);
@@ -1125,14 +1153,14 @@ fn cleanup_curated_why_produces_advisory_not_deletion() {
     }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    let mesh_dir = root.join(".mesh");
-    std::fs::create_dir_all(&mesh_dir).unwrap();
+    let wiki_dir = root.join(".wiki");
+    std::fs::create_dir_all(&wiki_dir).unwrap();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
     std::fs::create_dir_all(root.join("src")).unwrap();
 
     // Hand-write a curated mesh (with why prose) whose page is absent.
     std::fs::write(
-        mesh_dir.join("curated-flow"),
+        wiki_dir.join("curated-flow"),
         "wiki/gone.md#L1-L5 sha256:abc\n\nCurated description of the flow.\n",
     )
     .unwrap();
@@ -1154,7 +1182,7 @@ fn cleanup_curated_why_produces_advisory_not_deletion() {
 
     // Mesh must not be deleted.
     assert!(
-        mesh_dir.join("curated-flow").is_file(),
+        wiki_dir.join("curated-flow").is_file(),
         "curated mesh must not be deleted"
     );
     // Advisory must appear on stderr.
@@ -1178,13 +1206,13 @@ fn cleanup_multi_page_mesh_produces_advisory_not_deletion() {
     }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    let mesh_dir = root.join(".mesh");
-    std::fs::create_dir_all(&mesh_dir).unwrap();
+    let wiki_dir = root.join(".wiki");
+    std::fs::create_dir_all(&wiki_dir).unwrap();
     std::fs::create_dir_all(root.join("wiki")).unwrap();
 
     // Multi-page scaffold mesh: two .md paths, one gone.
     std::fs::write(
-        mesh_dir.join("shared-flow"),
+        wiki_dir.join("shared-flow"),
         "wiki/gone.md#L1-L3 sha256:aaa\nwiki/present.md#L2-L4 sha256:bbb\n\n",
     )
     .unwrap();
@@ -1205,7 +1233,7 @@ fn cleanup_multi_page_mesh_produces_advisory_not_deletion() {
 
     // Mesh must not be deleted.
     assert!(
-        mesh_dir.join("shared-flow").is_file(),
+        wiki_dir.join("shared-flow").is_file(),
         "multi-page mesh must not be deleted"
     );
     // Advisory must appear on stderr.
@@ -1247,7 +1275,7 @@ fn cleanup_no_deletion_when_file_present() {
     assert!(create.status.success());
     let mesh_path = String::from_utf8_lossy(&create.stdout)
         .lines()
-        .find(|l| l.starts_with(".mesh/"))
+        .find(|l| l.starts_with(".wiki/"))
         .expect("mesh must be created")
         .to_string();
     git(root, &["add", "-A"]);
@@ -1310,7 +1338,7 @@ fn finding1_last_page_deleted_cleanup_still_runs() {
     );
     let mesh_path = first_stdout
         .lines()
-        .find(|l| l.starts_with(".mesh/"))
+        .find(|l| l.starts_with(".wiki/"))
         .expect("first pass must create a mesh")
         .to_string();
     assert!(root.join(&mesh_path).is_file(), "mesh must exist");
@@ -1357,9 +1385,9 @@ fn finding1_last_page_deleted_cleanup_still_runs() {
         String::from_utf8_lossy(&followup.stderr)
     );
     // No more meshes on disk.
-    let mesh_dir = root.join(".mesh");
-    if mesh_dir.is_dir() {
-        let remaining: Vec<_> = walkdir(&mesh_dir);
+    let wiki_dir = root.join(".wiki");
+    if wiki_dir.is_dir() {
+        let remaining: Vec<_> = walkdir(&wiki_dir);
         assert!(
             remaining.is_empty(),
             "no mesh files should remain after cleanup: {remaining:?}"
@@ -1396,7 +1424,7 @@ fn finding1_last_page_demoted_mesh_left_exit_0() {
     assert!(create.status.success());
     let mesh_path = String::from_utf8_lossy(&create.stdout)
         .lines()
-        .find(|l| l.starts_with(".mesh/"))
+        .find(|l| l.starts_with(".wiki/"))
         .expect("mesh must be created")
         .to_string();
     git(root, &["add", "-A"]);
@@ -1470,7 +1498,7 @@ fn finding2_deleted_path_printed_only_when_file_absent() {
     let create_stdout = String::from_utf8_lossy(&create.stdout);
     let mesh_path = create_stdout
         .lines()
-        .find(|l| l.starts_with(".mesh/"))
+        .find(|l| l.starts_with(".wiki/"))
         .expect("mesh must be created")
         .to_string();
     git(root, &["add", "-A"]);
@@ -1545,7 +1573,7 @@ fn finding2_plain_glob_with_subdir_cwd_cleans_inscope_orphan() {
     );
     let mesh_wiki = String::from_utf8_lossy(&create_wiki.stdout)
         .lines()
-        .find(|l| l.starts_with(".mesh/"))
+        .find(|l| l.starts_with(".wiki/"))
         .expect("wiki mesh must be created")
         .to_string();
 
@@ -1557,7 +1585,7 @@ fn finding2_plain_glob_with_subdir_cwd_cleans_inscope_orphan() {
     );
     let mesh_other = String::from_utf8_lossy(&create_other.stdout)
         .lines()
-        .find(|l| l.starts_with(".mesh/"))
+        .find(|l| l.starts_with(".wiki/"))
         .expect("other mesh must be created")
         .to_string();
 
@@ -1645,7 +1673,7 @@ fn finding3_scoped_cleanup_leaves_out_of_scope_orphan() {
     );
     let mesh_a = String::from_utf8_lossy(&create_a.stdout)
         .lines()
-        .find(|l| l.starts_with(".mesh/"))
+        .find(|l| l.starts_with(".wiki/"))
         .expect("mesh A must be created")
         .to_string();
 
@@ -1657,7 +1685,7 @@ fn finding3_scoped_cleanup_leaves_out_of_scope_orphan() {
     );
     let mesh_b = String::from_utf8_lossy(&create_b.stdout)
         .lines()
-        .find(|l| l.starts_with(".mesh/"))
+        .find(|l| l.starts_with(".wiki/"))
         .expect("mesh B must be created")
         .to_string();
 

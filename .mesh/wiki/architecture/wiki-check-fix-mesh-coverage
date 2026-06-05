@@ -1,4 +1,5 @@
 wiki/architecture/wiki-mesh-integration.md#L28-L36 sha256:0a8f32139695722119f742bea017db37d460397e8d57f478ffd1d1a3e93d160b
 packages/cli/src/commands/mesh/scaffold.rs#L163-L170 sha256:4de0a8ffe3d9e84daff17d695c7f067ea596c74773aff1dadda330e1b9bb1303
+packages/cli/src/commands/mesh/scaffold.rs#L165-L172 sha256:4de0a8ffe3d9e84daff17d695c7f067ea596c74773aff1dadda330e1b9bb1303
 
 wiki check --fix mesh-coverage pass (Fix #4) that scans the same file set as wiki check and creates a git mesh for every fragment link not yet covered.

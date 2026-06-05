@@ -1,14 +1,12 @@
 //! Mesh-coverage engine.
 //!
-//! Discover wiki files, parse their fragment links, and create git meshes
-//! covering those links via `git mesh add`. Driven by `wiki check --fix`
-//! (the "Fix #4" slot): the pipeline produces consolidated mesh drafts and
-//! applies them best-effort. Output is owned by `check`; this module only
-//! returns a [`MeshCoverageOutcome`].
+//! Discover wiki files, parse their fragment links, and create `.wiki/<slug>`
+//! mesh files in-process. Driven by `wiki check --fix` (the "Fix #4" slot):
+//! the pipeline produces consolidated mesh drafts and applies them best-effort.
+//! Output is owned by `check`; this module only returns a [`MeshCoverageOutcome`].
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use miette::Result;
 use regex::Regex;
@@ -107,10 +105,14 @@ impl ParseErrorKind {
     }
 }
 
+use git_mesh_core::mesh_file::MeshFile;
+use git_mesh_core::AnchorExtent;
+
 use super::augment::{AugmentedLink, augment};
 use super::draft::{self, MeshDraft};
 use super::group;
 use super::render;
+use super::store;
 
 /// A mesh draft that `git mesh add` failed to apply. The failure reason was
 /// already printed by git-mesh to the inherited stderr; we only carry the slug
@@ -127,17 +129,17 @@ pub(crate) struct MeshFailure {
 /// performed/planned renames) and per-draft `failures` to stderr.
 #[derive(Debug, Default)]
 pub(crate) struct MeshCoverageOutcome {
-    /// Repo-relative `.mesh/<slug>` paths created or extended this run.
+    /// Repo-relative `.wiki/<slug>` paths created or extended this run.
     pub(crate) applied: Vec<String>,
-    /// Drafts `git mesh add` could not apply (best-effort: the rest still ran).
+    /// Drafts that could not be applied (best-effort: the rest still ran).
     pub(crate) failures: Vec<MeshFailure>,
     /// Rendered advisory block (parse errors + dropped meshes + renames).
     pub(crate) advisories: String,
-    /// Repo-relative `.mesh/<slug>` paths that WOULD be created (dry-run preview).
+    /// Repo-relative `.wiki/<slug>` paths that WOULD be created (dry-run preview).
     pub(crate) planned: Vec<String>,
-    /// Repo-relative `.mesh/<slug>` paths deleted this run (scaffold-orphan cleanup).
+    /// Repo-relative `.wiki/<slug>` paths deleted this run (scaffold-orphan cleanup).
     pub(crate) deleted: Vec<String>,
-    /// Repo-relative `.mesh/<slug>` paths that WOULD be deleted (dry-run preview).
+    /// Repo-relative `.wiki/<slug>` paths that WOULD be deleted (dry-run preview).
     pub(crate) planned_deletions: Vec<String>,
 }
 
@@ -253,9 +255,9 @@ pub(crate) fn create_mesh_coverage(
     // Resolve slug collisions across both already-assigned slugs in this run
     // and any meshes that already live in the repo. Extension drafts opt out:
     // they reuse the existing mesh's slug verbatim and skip the probe entirely.
-    let mesh_dir = resolve_mesh_dir(repo_root);
+    let mesh_dir = store::wiki_dir(repo_root);
     let probe =
-        |slug: &str| mesh_exists(repo_root, slug) || mesh_fs_prefix_collision(&mesh_dir, slug);
+        |slug: &str| store::exists(repo_root, slug) || mesh_fs_prefix_collision(&mesh_dir, slug);
     resolve_slug_collisions(&mut consolidated, &page_titles, &probe);
 
     // Drop meshes whose non-wiki anchors reference paths that don't exist in
@@ -437,7 +439,7 @@ pub(crate) fn create_mesh_coverage(
     }
     render::render_rename_advisories(&mut advisories, &planned_renames, dry_run);
 
-    // Repo-relative path of a mesh-dir-relative name (`.mesh/<slug>`,
+    // Repo-relative path of a wiki-dir-relative name (`.wiki/<slug>`,
     // forward slashes).
     let rel_mesh_path = |name: &str| -> String {
         match mesh_dir.strip_prefix(repo_root) {
@@ -571,17 +573,16 @@ pub(crate) struct MeshCleanupResult {
 /// `check::run`. When `scan_root == repo_root` and `globs` is empty the scope
 /// predicate matches everything (whole-repo run — no behavior change).
 ///
-/// Best-effort: a failed `git mesh delete` is recorded and reported, never
-/// aborting the pass. After each `git mesh delete` call, file absence is
-/// post-verified — a path is recorded as deleted only when the mesh file is
-/// actually gone (handles the ambiguous exit-1 from git-mesh).
+/// Best-effort: a failed `store::delete` is recorded and reported, never
+/// aborting the pass. After each delete call, file absence is post-verified —
+/// a path is recorded as deleted only when the mesh file is actually gone.
 pub(crate) fn cleanup_orphaned_meshes(
     repo_root: &Path,
     scan_root: &Path,
     globs: &[String],
     dry_run: bool,
 ) -> Result<MeshCleanupResult> {
-    let mesh_dir = resolve_mesh_dir(repo_root);
+    let mesh_dir = store::wiki_dir(repo_root);
     let mut deleted: Vec<String> = Vec::new();
     let mut planned_deletions: Vec<String> = Vec::new();
     let mut advisories = String::new();
@@ -642,22 +643,31 @@ pub(crate) fn cleanup_orphaned_meshes(
             if path.is_dir() {
                 stack.push(path);
             } else if path.is_file() {
-                let text = match std::fs::read_to_string(&path) {
+                // Parse the mesh file via MeshFile::parse (replaces local parser).
+                let mesh_name = match path.strip_prefix(&mesh_dir) {
+                    Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+                    Err(_) => continue,
+                };
+                let mesh_file = match store::read_one(repo_root, &mesh_name) {
+                    Ok(Some(m)) => m,
+                    Ok(None) => continue,
+                    Err(_) => continue,
+                };
+
+                // Extract distinct .md anchor paths from the parsed MeshFile.
+                let text_for_why = match std::fs::read_to_string(&path) {
                     Ok(t) => t,
                     Err(_) => continue,
                 };
-                let anchors = parse_mesh_wiki_anchors(&text);
-                if anchors.is_empty() {
+                let mut distinct_paths: Vec<String> = Vec::new();
+                for anchor in &mesh_file.anchors {
+                    if anchor.path.ends_with(".md") && !distinct_paths.contains(&anchor.path) {
+                        distinct_paths.push(anchor.path.clone());
+                    }
+                }
+                if distinct_paths.is_empty() {
                     // No .md anchors — hand-authored, leave silently.
                     continue;
-                }
-
-                // Collect distinct .md paths.
-                let mut distinct_paths: Vec<String> = Vec::new();
-                for (p, _, _) in &anchors {
-                    if !distinct_paths.contains(p) {
-                        distinct_paths.push(p.clone());
-                    }
                 }
 
                 // Check which distinct paths are missing on disk.
@@ -671,14 +681,9 @@ pub(crate) fn cleanup_orphaned_meshes(
                     continue;
                 }
 
-                // Mesh-dir-relative name for this mesh file.
-                let mesh_name = match path.strip_prefix(&mesh_dir) {
-                    Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
-                    Err(_) => continue,
-                };
                 let rel_path = mesh_rel_path(repo_root, &mesh_dir, &mesh_name);
 
-                if mesh_has_why(&text) {
+                if mesh_has_why(&text_for_why) {
                     // Curated why — advisory only.
                     for m in &missing {
                         advisories.push_str(&format!(
@@ -711,40 +716,23 @@ pub(crate) fn cleanup_orphaned_meshes(
                 if dry_run {
                     planned_deletions.push(rel_path);
                 } else {
-                    let status = Command::new("git")
-                        .args(["mesh", "delete", &mesh_name])
-                        .current_dir(repo_root)
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::inherit())
-                        .status();
-
-                    // Finding 2: post-verify file absence. git-mesh exits 1
-                    // for both "not found" (benign) and genuine failures
-                    // (permission error, corrupt object, etc.). We determine
-                    // success solely by whether the mesh file is now absent —
-                    // if it is gone the deletion succeeded regardless of exit
-                    // code; if it is still present the delete failed.
-                    let mesh_file_gone = !mesh_dir.join(&mesh_name).exists();
-                    if mesh_file_gone {
-                        deleted.push(rel_path);
-                    } else {
-                        // File still present — the delete failed. The exit
-                        // code (0 or non-zero) does not distinguish real
-                        // failures from the benign "already missing" race;
-                        // what matters is the file is still on disk.
-                        match status {
-                            Ok(s) if s.success() => {
-                                // git-mesh reported success but file still
-                                // present — unexpected, treat as failure.
+                    // In-process delete via store::delete (idempotent: missing is ok).
+                    match store::delete(repo_root, &mesh_name) {
+                        Ok(()) => {
+                            // Post-verify: record success only when the file is gone.
+                            let mesh_file_gone = !mesh_dir.join(&mesh_name).exists();
+                            if mesh_file_gone {
+                                deleted.push(rel_path);
+                            } else {
                                 eprintln!(
-                                    "wiki check --fix: `git mesh delete {mesh_name}` reported success but mesh file is still present — skipping"
+                                    "wiki check --fix: mesh `{mesh_name}` delete reported ok but file is still present — skipping"
                                 );
                             }
-                            _ => {
-                                eprintln!(
-                                    "wiki check --fix: `git mesh delete {mesh_name}` failed — skipping"
-                                );
-                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "wiki check --fix: mesh `{mesh_name}` delete failed: {e} — skipping"
+                            );
                         }
                     }
                 }
@@ -759,16 +747,15 @@ pub(crate) fn cleanup_orphaned_meshes(
     })
 }
 
-/// Apply each `MeshDraft` by invoking `git mesh add <slug> <anchors…>`.
+/// Apply each `MeshDraft` by writing a `.wiki/<slug>` mesh file in-process.
 ///
 /// Extension drafts (`extends_existing.is_some()`) re-use the existing slug;
-/// git-mesh appends anchors idempotently.
+/// the new code anchors are merged into the existing mesh (or a fresh one if
+/// the slug doesn't exist yet).
 ///
-/// Best-effort: every draft is attempted. A non-zero `git mesh add`, or a mesh
-/// file that is unexpectedly absent after a reported success, is recorded as a
-/// per-draft [`MeshFailure`] (git-mesh already printed its reason to the
-/// inherited stderr) and the loop continues. Returns the repo-relative
-/// `.mesh/<slug>` paths that were created and the failures.
+/// Best-effort: every draft is attempted. A write error is recorded as a
+/// per-draft [`MeshFailure`] and the loop continues. Returns the repo-relative
+/// `.wiki/<slug>` paths that were created and the failures.
 fn apply_drafts(
     drafts: &[MeshDraft],
     repo_root: &Path,
@@ -783,43 +770,66 @@ fn apply_drafts(
             .as_deref()
             .unwrap_or(draft.slug.as_str());
 
-        let mut args: Vec<&str> = vec!["mesh", "add", slug];
-        let anchor_strs: Vec<String> = draft.anchors.clone();
-        for a in &anchor_strs {
-            args.push(a.as_str());
-        }
+        // Build AnchorRecords from the draft's structured anchors.
+        // For extension drafts all entries are code anchors; for new-mesh drafts
+        // the first entry is the page section anchor. All are hashed the same way.
+        let anchor_records_result: Result<Vec<git_mesh_core::mesh_file::AnchorRecord>> =
+            draft.structured_anchors.iter().map(|a| {
+                let extent = if a.start_line == 0 && a.end_line == 0 {
+                    AnchorExtent::WholeFile
+                } else {
+                    AnchorExtent::LineRange { start: a.start_line, end: a.end_line }
+                };
+                let content_hash = store::hash_anchor(repo_root, &a.path, extent)
+                    .map_err(|e| miette::miette!("failed to hash anchor {}: {e}", a.path))?;
+                Ok(store::anchor_record(a.path.clone(), extent, content_hash))
+            }).collect();
 
-        // Inherit stderr so git-mesh's failure reason — and GIT_MESH_PERF=1
-        // timing lines — print directly rather than being buffered here.
-        let status = Command::new("git")
-            .args(&args)
-            .current_dir(repo_root)
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .status();
+        let new_records = match anchor_records_result {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("wiki check --fix: could not create mesh `{slug}`: {e}");
+                failures.push(MeshFailure { slug: slug.to_string() });
+                continue;
+            }
+        };
 
-        let succeeded = matches!(&status, Ok(s) if s.success());
-        if !succeeded {
-            // git-mesh already printed its reason to the inherited stderr.
-            failures.push(MeshFailure {
-                slug: slug.to_string(),
-            });
+        // For extension drafts: merge new anchors into the existing mesh.
+        // For new-mesh drafts: write a fresh mesh with empty why.
+        let mesh = if draft.extends_existing.is_some() {
+            match store::read_one(repo_root, slug) {
+                Ok(Some(mut existing)) => {
+                    // Append only anchors not already present (path+range match).
+                    for rec in new_records {
+                        let already = existing.anchors.iter().any(|a| {
+                            a.path == rec.path
+                                && a.start_line == rec.start_line
+                                && a.end_line == rec.end_line
+                        });
+                        if !already {
+                            existing.anchors.push(rec);
+                        }
+                    }
+                    existing
+                }
+                Ok(None) => MeshFile { anchors: new_records, why: String::new() },
+                Err(e) => {
+                    eprintln!("wiki check --fix: could not read mesh `{slug}` for extension: {e}");
+                    failures.push(MeshFailure { slug: slug.to_string() });
+                    continue;
+                }
+            }
+        } else {
+            MeshFile { anchors: new_records, why: String::new() }
+        };
+
+        if let Err(e) = store::write(repo_root, slug, &mesh) {
+            eprintln!("wiki check --fix: could not create mesh `{slug}`: {e}");
+            failures.push(MeshFailure { slug: slug.to_string() });
             continue;
         }
 
-        let rel = mesh_rel_path(repo_root, mesh_dir, slug);
-        if !mesh_dir.join(slug).is_file() {
-            // Reported success but the deterministic mesh file is absent — treat
-            // as a per-draft failure rather than emitting an incomplete path.
-            eprintln!(
-                "wiki check --fix: `git mesh add {slug}` reported success but expected mesh file {rel} is absent"
-            );
-            failures.push(MeshFailure {
-                slug: slug.to_string(),
-            });
-            continue;
-        }
-        applied.push(rel);
+        applied.push(mesh_rel_path(repo_root, mesh_dir, slug));
     }
     (applied, failures)
 }
@@ -1108,57 +1118,6 @@ fn build_meshes(
     consolidated
 }
 
-/// Resolve the git-mesh storage directory for `repo_root`.
-///
-/// Precedence (highest first):
-/// 1. `GIT_MESH_DIR` environment variable.
-/// 2. `git config --get git-mesh.dir` (non-zero exit / empty value = unset).
-/// 3. Default `.mesh`.
-///
-/// A relative resolved value is joined onto `repo_root`; an absolute value is
-/// used as-is. `wiki` never passes `--mesh-dir`, so that tier is intentionally
-/// not modeled here.
-fn resolve_mesh_dir(repo_root: &Path) -> PathBuf {
-    let configured = std::env::var("GIT_MESH_DIR")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| {
-            Command::new("git")
-                .args(["config", "--get", "git-mesh.dir"])
-                .current_dir(repo_root)
-                .stderr(Stdio::null())
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .and_then(|o| {
-                    let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                    if s.is_empty() { None } else { Some(s) }
-                })
-        });
-
-    match configured {
-        Some(v) => {
-            let p = PathBuf::from(&v);
-            if p.is_absolute() {
-                p
-            } else {
-                repo_root.join(p)
-            }
-        }
-        None => repo_root.join(".mesh"),
-    }
-}
-
-/// Probe whether a mesh with `slug` already exists in `repo_root`.
-///
-/// git-mesh stores every mesh as a tracked working-tree file at
-/// `<mesh_dir>/<name>`, where `<name>` is the slug with `/` as real nested
-/// directory separators. Existence is therefore a pure filesystem check: the
-/// mesh exists iff `<mesh_dir>/<slug>` is a regular file. No `git mesh`
-/// subprocess is involved.
-fn mesh_exists(repo_root: &Path, slug: &str) -> bool {
-    resolve_mesh_dir(repo_root).join(slug).is_file()
-}
 
 /// True if slugs `a` and `b` cannot both exist as nested mesh files: they are
 /// equal, or one is a strict segment-wise path prefix of the other.
@@ -1242,43 +1201,6 @@ fn ancestor_file_blocker(mesh_dir: &Path, slug: &str) -> Option<String> {
     None
 }
 
-/// Parsed view of a tracked mesh file: the distinct wiki-page anchors (RELPATH
-/// ends `.md`) it carries, as `(path, start, end)` triples.
-fn parse_mesh_wiki_anchors(text: &str) -> Vec<(String, u32, u32)> {
-    let mut out: Vec<(String, u32, u32)> = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            // Blank line ends the anchor block; the rest is `why` prose.
-            break;
-        }
-        // `RELPATH#L<start>-L<end> sha256:<hex>` or whole-file
-        // `RELPATH sha256:<hex>`.
-        let first = line.split_whitespace().next().unwrap_or("");
-        let (relpath, range) = match first.split_once("#L") {
-            Some((p, r)) => (p, Some(r)),
-            None => (first, None),
-        };
-        if !relpath.ends_with(".md") {
-            continue;
-        }
-        let (start, end) = match range {
-            None => (0u32, 0u32),
-            Some(r) => match r.split_once("-L") {
-                Some((s, e)) => match (s.parse::<u32>(), e.parse::<u32>()) {
-                    (Ok(s), Ok(e)) => (s, e),
-                    _ => continue,
-                },
-                None => continue,
-            },
-        };
-        let triple = (relpath.to_string(), start, end);
-        if !out.contains(&triple) {
-            out.push(triple);
-        }
-    }
-    out
-}
 
 /// A rename of a blocker mesh that frees a slug path for a new draft.
 #[derive(Debug, Clone)]
@@ -1354,8 +1276,22 @@ fn plan_blocker_rename(
     section_noun: &std::collections::HashMap<(String, u32, u32), String>,
 ) -> Option<PlannedRename> {
     let blocker = ancestor_file_blocker(mesh_dir, slug)?;
-    let text = fs::read_to_string(mesh_dir.join(&blocker)).ok()?;
-    let wiki_anchors = parse_mesh_wiki_anchors(&text);
+    // repo_root is the parent of wiki_dir: wiki_dir = repo_root/.wiki
+    let repo_root = mesh_dir.parent()?;
+    let mesh_file = store::read_one(repo_root, &blocker).ok()??;
+    // Extract distinct .md anchor triples from the parsed MeshFile.
+    let wiki_anchors: Vec<(String, u32, u32)> = {
+        let mut out: Vec<(String, u32, u32)> = Vec::new();
+        for anchor in &mesh_file.anchors {
+            if anchor.path.ends_with(".md") {
+                let triple = (anchor.path.clone(), anchor.start_line, anchor.end_line);
+                if !out.contains(&triple) {
+                    out.push(triple);
+                }
+            }
+        }
+        out
+    };
     let target = derive_rename_target(mesh_dir, &blocker, &wiki_anchors, section_noun);
     Some(PlannedRename {
         from: blocker,
@@ -1365,57 +1301,30 @@ fn plan_blocker_rename(
     })
 }
 
-/// Run one `git mesh move <old> <new>` with cwd `repo_root`. `true` iff the
-/// subprocess spawned and exited zero.
-fn git_mesh_move(repo_root: &Path, old: &str, new: &str) -> bool {
-    matches!(
-        Command::new("git")
-            .args(["mesh", "move", old, new])
-            .current_dir(repo_root)
-            .stdout(Stdio::null())
-            // Inherit stderr so git-mesh diagnostics and GIT_MESH_PERF=1 timing
-            // lines surface instead of being captured and discarded.
-            .stderr(Stdio::inherit())
-            .status(),
-        Ok(s) if s.success()
-    )
-}
-
-/// Execute a planned blocker rename.
+/// Execute a planned blocker rename in-process.
 ///
-/// The rename target `<B>/<leaf>` is always a strict DESCENDANT of the blocker
-/// `<B>`, and `git mesh move` cannot turn the existing file `<B>` directly
-/// into the directory `<B>/…` in one step. So the move is performed in two
-/// hops through a fresh, collision-free temporary mesh name that is *not*
-/// under `<B>`: `B → tmp`, then `tmp → B/target`. If the second hop fails the
-/// first is rolled back (`tmp → B`) so the blocker is left exactly as found.
+/// Reads the blocker mesh, writes it to `plan.to`, and deletes the old slug.
+/// If either the write or delete fails, the operation fails open and the caller
+/// drops the draft with a SlugPathCollision advisory.
 ///
-/// Returns `true` only when the blocker ends up at `plan.to`. Any spawn /
-/// non-zero exit yields `false` (caller fails open to drop-with-advisory) with
-/// the blocker restored to its original name.
-fn run_blocker_rename(repo_root: &Path, mesh_dir: &Path, plan: &PlannedRename) -> bool {
-    // A unique temp name at the mesh root, never under `plan.from`.
-    let flat: String = plan
-        .from
-        .chars()
-        .map(|c| if c == '/' { '-' } else { c })
-        .collect();
-    let mut tmp = format!("wiki-scaffold-tmp-{flat}");
-    let mut n = 2;
-    while mesh_dir.join(&tmp).exists() || mesh_fs_prefix_collision(mesh_dir, &tmp) {
-        tmp = format!("wiki-scaffold-tmp-{flat}-{n}");
-        n += 1;
-        if n > 99 {
-            return false;
-        }
-    }
-
-    if !git_mesh_move(repo_root, &plan.from, &tmp) {
+/// Returns `true` only when the blocker ends up at `plan.to`.
+fn run_blocker_rename(repo_root: &Path, _mesh_dir: &Path, plan: &PlannedRename) -> bool {
+    // Read the blocker.
+    let mesh = match store::read_one(repo_root, &plan.from) {
+        Ok(Some(m)) => m,
+        _ => return false,
+    };
+    // The rename target may need `plan.from`'s path as a directory component
+    // (e.g. renaming `wiki/foo` to `wiki/foo/index` requires `wiki/foo` to
+    // become a directory). Delete the old location first so `create_dir_all`
+    // can succeed, then write the new location.
+    if store::delete(repo_root, &plan.from).is_err() {
         return false;
     }
-    if !git_mesh_move(repo_root, &tmp, &plan.to) {
-        // Roll back so the blocker is byte-identical at its original name.
-        let _ = git_mesh_move(repo_root, &tmp, &plan.from);
+    // Write to the new location. If it fails, we cannot restore the old file
+    // here without risking data loss on a partial write; fail open so the
+    // caller drops the draft with an advisory.
+    if store::write(repo_root, &plan.to, &mesh).is_err() {
         return false;
     }
     true
@@ -1811,26 +1720,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_mesh_wiki_anchors_collects_only_md_anchors_before_blank() {
-        let text = "wiki/arch/page.md#L5-L12 sha256:abc\n\
-                     src/lib.rs#L1-L3 sha256:def\n\
-                     \n\
-                     why prose here\n\
-                     wiki/ignored.md#L1-L1 sha256:zzz\n";
-        let anchors = parse_mesh_wiki_anchors(text);
-        assert_eq!(anchors, vec![("wiki/arch/page.md".to_string(), 5, 12)]);
-    }
-
-    #[test]
-    fn parse_mesh_wiki_anchors_handles_whole_file_md_anchor() {
-        let text = "wiki/whole.md sha256:abc\n\nwhy\n";
-        assert_eq!(
-            parse_mesh_wiki_anchors(text),
-            vec![("wiki/whole.md".to_string(), 0, 0)]
-        );
-    }
-
-    #[test]
     fn derive_rename_target_reuses_section_noun() {
         let tmp = tempfile::tempdir().unwrap();
         let md = tmp.path();
@@ -1903,15 +1792,19 @@ mod tests {
     #[test]
     fn plan_blocker_rename_ok_for_ancestor_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let md = tmp.path();
-        std::fs::create_dir_all(md.join("wiki/arch")).unwrap();
-        std::fs::write(
-            md.join("wiki/arch/scaff"),
-            "src/lib.rs#L1-L1 sha256:abc\n\nwhy\n",
-        )
-        .unwrap();
+        let root = tmp.path();
+        // Store a blocker mesh at slug "wiki/arch/scaff" under root/.wiki/.
+        super::store::write(root, "wiki/arch/scaff", &git_mesh_core::mesh_file::MeshFile {
+            anchors: vec![super::store::anchor_record(
+                "src/lib.rs".to_string(),
+                git_mesh_core::AnchorExtent::LineRange { start: 1, end: 1 },
+                "abc".to_string(),
+            )],
+            why: "why".to_string(),
+        }).unwrap();
+        let mesh_dir = super::store::wiki_dir(root);
         let nouns = std::collections::HashMap::new();
-        let plan = plan_blocker_rename(md, "wiki/arch/scaff/helper", "p.md", &nouns).unwrap();
+        let plan = plan_blocker_rename(&mesh_dir, "wiki/arch/scaff/helper", "p.md", &nouns).unwrap();
         assert_eq!(plan.from, "wiki/arch/scaff");
         assert_eq!(plan.to, "wiki/arch/scaff/index");
         assert_eq!(plan.for_slug, "wiki/arch/scaff/helper");
@@ -1920,22 +1813,24 @@ mod tests {
     #[test]
     fn plan_blocker_rename_none_for_dir_at_slug_path() {
         let tmp = tempfile::tempdir().unwrap();
-        let md = tmp.path();
-        std::fs::create_dir_all(md.join("wiki/scaffold/child")).unwrap();
+        let root = tmp.path();
+        let mesh_dir = super::store::wiki_dir(root);
+        std::fs::create_dir_all(mesh_dir.join("wiki/scaffold/child")).unwrap();
         let nouns = std::collections::HashMap::new();
         // `wiki/scaffold` is a directory, not an ancestor file → fail open.
-        assert!(plan_blocker_rename(md, "wiki/scaffold", "p.md", &nouns).is_none());
+        assert!(plan_blocker_rename(&mesh_dir, "wiki/scaffold", "p.md", &nouns).is_none());
     }
 
     #[test]
     fn plan_blocker_rename_none_for_unreadable_blocker() {
         let tmp = tempfile::tempdir().unwrap();
-        let md = tmp.path();
-        std::fs::create_dir_all(md.join("wiki")).unwrap();
-        // Non-UTF8 payload → `read_to_string` fails → fail open.
-        std::fs::write(md.join("wiki/b"), [0xff, 0xfe, 0x00]).unwrap();
+        let root = tmp.path();
+        let mesh_dir = super::store::wiki_dir(root);
+        std::fs::create_dir_all(mesh_dir.join("wiki")).unwrap();
+        // Non-UTF8 payload → `MeshFile::parse` fails → fail open.
+        std::fs::write(mesh_dir.join("wiki/b"), [0xff, 0xfe, 0x00]).unwrap();
         let nouns = std::collections::HashMap::new();
-        assert!(plan_blocker_rename(md, "wiki/b/leaf", "p.md", &nouns).is_none());
+        assert!(plan_blocker_rename(&mesh_dir, "wiki/b/leaf", "p.md", &nouns).is_none());
     }
 
     #[test]
@@ -2422,19 +2317,19 @@ mod tests {
     fn cleanup_eligible_when_single_page_gone() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let mesh_dir = root.join(".mesh");
-        std::fs::create_dir_all(&mesh_dir).unwrap();
-
-        // Scaffold mesh: anchor only, no why, single .md page, page absent.
-        std::fs::write(
-            mesh_dir.join("wiki-page"),
-            "wiki/page.md#L1-L5 sha256:abc\n\n",
-        )
-        .unwrap();
+        // Meshes live under .wiki/ (the in-process store location).
+        super::store::write(root, "wiki-page", &git_mesh_core::mesh_file::MeshFile {
+            anchors: vec![super::store::anchor_record(
+                "wiki/page.md".to_string(),
+                git_mesh_core::AnchorExtent::LineRange { start: 1, end: 5 },
+                "abc".to_string(),
+            )],
+            why: String::new(),
+        }).unwrap();
 
         // Page does NOT exist on disk — eligible for deletion.
         let result = cleanup_orphaned_meshes(root, root, &[], true).unwrap();
-        assert_eq!(result.planned_deletions, vec![".mesh/wiki-page"]);
+        assert_eq!(result.planned_deletions, vec![".wiki/wiki-page"]);
         assert!(result.advisories.is_empty());
     }
 
@@ -2442,15 +2337,15 @@ mod tests {
     fn cleanup_advisory_when_has_why() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let mesh_dir = root.join(".mesh");
-        std::fs::create_dir_all(&mesh_dir).unwrap();
-
         // Curated mesh — has why after blank line.
-        std::fs::write(
-            mesh_dir.join("wiki-curated"),
-            "wiki/page.md#L1-L5 sha256:abc\n\nCurated reason here.\n",
-        )
-        .unwrap();
+        super::store::write(root, "wiki-curated", &git_mesh_core::mesh_file::MeshFile {
+            anchors: vec![super::store::anchor_record(
+                "wiki/page.md".to_string(),
+                git_mesh_core::AnchorExtent::LineRange { start: 1, end: 5 },
+                "abc".to_string(),
+            )],
+            why: "Curated reason here.".to_string(),
+        }).unwrap();
 
         // Page does NOT exist — but ineligible due to why.
         let result = cleanup_orphaned_meshes(root, root, &[], true).unwrap();
@@ -2466,15 +2361,22 @@ mod tests {
     fn cleanup_advisory_when_multi_page_one_gone() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let mesh_dir = root.join(".mesh");
-        std::fs::create_dir_all(&mesh_dir).unwrap();
-
         // Multi-page mesh: two distinct .md paths, one gone.
-        std::fs::write(
-            mesh_dir.join("shared"),
-            "wiki/a.md#L1-L3 sha256:abc\nwiki/b.md#L2-L4 sha256:def\n\n",
-        )
-        .unwrap();
+        super::store::write(root, "shared", &git_mesh_core::mesh_file::MeshFile {
+            anchors: vec![
+                super::store::anchor_record(
+                    "wiki/a.md".to_string(),
+                    git_mesh_core::AnchorExtent::LineRange { start: 1, end: 3 },
+                    "abc".to_string(),
+                ),
+                super::store::anchor_record(
+                    "wiki/b.md".to_string(),
+                    git_mesh_core::AnchorExtent::LineRange { start: 2, end: 4 },
+                    "def".to_string(),
+                ),
+            ],
+            why: String::new(),
+        }).unwrap();
         // wiki/a.md is absent; wiki/b.md present.
         std::fs::create_dir_all(root.join("wiki")).unwrap();
         std::fs::write(root.join("wiki/b.md"), "present\n").unwrap();
@@ -2492,17 +2394,17 @@ mod tests {
     fn cleanup_leave_when_page_present() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let mesh_dir = root.join(".mesh");
-        std::fs::create_dir_all(&mesh_dir).unwrap();
-
         // Scaffold mesh — page IS present on disk.
         std::fs::create_dir_all(root.join("wiki")).unwrap();
         std::fs::write(root.join("wiki/page.md"), "# Present\n").unwrap();
-        std::fs::write(
-            mesh_dir.join("wiki-page"),
-            "wiki/page.md#L1-L3 sha256:abc\n\n",
-        )
-        .unwrap();
+        super::store::write(root, "wiki-page", &git_mesh_core::mesh_file::MeshFile {
+            anchors: vec![super::store::anchor_record(
+                "wiki/page.md".to_string(),
+                git_mesh_core::AnchorExtent::LineRange { start: 1, end: 3 },
+                "abc".to_string(),
+            )],
+            why: String::new(),
+        }).unwrap();
 
         let result = cleanup_orphaned_meshes(root, root, &[], true).unwrap();
         assert!(result.planned_deletions.is_empty());
@@ -2513,15 +2415,15 @@ mod tests {
     fn cleanup_leave_silently_when_no_md_anchor() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let mesh_dir = root.join(".mesh");
-        std::fs::create_dir_all(&mesh_dir).unwrap();
-
         // Hand-authored mesh with only non-.md anchors.
-        std::fs::write(
-            mesh_dir.join("hand-authored"),
-            "src/lib.rs#L1-L5 sha256:abc\n\n",
-        )
-        .unwrap();
+        super::store::write(root, "hand-authored", &git_mesh_core::mesh_file::MeshFile {
+            anchors: vec![super::store::anchor_record(
+                "src/lib.rs".to_string(),
+                git_mesh_core::AnchorExtent::LineRange { start: 1, end: 5 },
+                "abc".to_string(),
+            )],
+            why: String::new(),
+        }).unwrap();
 
         let result = cleanup_orphaned_meshes(root, root, &[], true).unwrap();
         assert!(result.planned_deletions.is_empty());
