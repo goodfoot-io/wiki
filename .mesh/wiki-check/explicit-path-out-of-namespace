@@ -1,5 +1,5 @@
-packages/cli/src/commands/check.rs#L304-L319 sha256:fcccd47021d6cd419f194f7e811aa4be2cdef9f011e4ba0ce9c82d342889eae6
-packages/cli/src/commands/mesh/scaffold.rs#L163-L204 sha256:e8d71b4caa9b517aa5c9f56763dda48b35976341f2f08fa250e95517c3ec411d
-packages/cli/src/commands/mod.rs#L39-L80 sha256:285a67dba0887c841e8ca90d29d21d488ffdd65b5c69b8a3a8a12013af8075a5
+packages/cli/src/commands/check.rs#L304-L319 sha256:eddfccf0840b8bcee2be59c45402a0005241094f86e84ad36ca68b44e4044031
+packages/cli/src/commands/mesh/scaffold.rs#L163-L204 sha256:270448bf569167fd413736df47f1f15eaf9c1acf5cf229ff1b45ca39140863bd
+packages/cli/src/commands/mod.rs#L39-L80 sha256:d85ef7f5b9cd1a398a09b311b31d001448b699d3a00aa2a31df10e9892cf231f
 
 Explicit-path globs (the cwd-relative normalizer) feed the multi-namespace dispatch loops in wiki check and wiki scaffold; both loops must treat an iteration that finds no matching wiki pages as an empty set rather than a fatal runtime error so a path resolving outside one namespace does not abort the whole run.

@@ -1,4 +1,4 @@
-packages/cli/src/commands/check.rs#L336-L408 sha256:79d2c9a68e733753ec7fce7d59f20df8ec32c31899ac33ebf0ccbe43be63bda6
-packages/cli/src/commands/hook_check.rs#L39-L72 sha256:fae49df7d75f54c10cbce53d321f7868be22a7fa288b4ee85ca3f5a35ef3bb12
+packages/cli/src/commands/check.rs#L336-L408 sha256:ee0a2021630b5d19e690b86eeb65815e241b31eacf04341f5defc798b98725b2
+packages/cli/src/commands/hook_check.rs#L39-L72 sha256:292c9204fbe83f0cbb58dd81dabaa44e1659d365f26d85a7a64c4c4c7a9b3ff4
 
 Two surfaces — the multi-namespace check dispatch and the PostToolUse hook — independently decide which wiki owns a *.wiki.md float (frontmatter namespace, then deepest enclosing wiki, then default); the two decisions must agree so a file flagged interactively matches what a hook on the same edit would surface.
