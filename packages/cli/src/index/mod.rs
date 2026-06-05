@@ -52,6 +52,17 @@ pub(crate) fn find_dot_git(start: &Path) -> Option<PathBuf> {
     }
 }
 
+/// The `.wiki/` directory anchored at the repo root, where the index cache DB
+/// and its sidecar files live alongside the mesh store.
+pub(crate) fn wiki_dir(repo_root: &Path) -> PathBuf {
+    repo_root.join(".wiki")
+}
+
+/// Path of the index cache database under `.wiki/`.
+pub(crate) fn index_db_path(repo_root: &Path) -> PathBuf {
+    wiki_dir(repo_root).join("wiki-index.sqlite")
+}
+
 /// Stat-only check that the working tree is unchanged since the last verified
 /// index state. Resolves `.git`, opens the index DB read-only, and runs
 /// [`freshness::fast_gate`].
@@ -63,7 +74,7 @@ pub fn tree_unchanged(repo_root: &Path) -> bool {
     let Some(dot_git) = find_dot_git(repo_root) else {
         return false;
     };
-    let db_path = dot_git.join("wiki-index.sqlite");
+    let db_path = index_db_path(repo_root);
     // Open read-only; if the DB does not exist yet there is no verified state.
     let conn = match Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
         Ok(c) => c,
@@ -251,7 +262,12 @@ impl WikiIndex {
             )
         })?;
 
-        let db_path = dot_git.join("wiki-index.sqlite");
+        // The cache DB and its sidecars live under `.wiki/` alongside the mesh
+        // store. Ensure the directory exists before opening for write.
+        let wiki = wiki_dir(repo_root);
+        std::fs::create_dir_all(&wiki)
+            .map_err(|e| miette::miette!("failed to create {}: {e}", wiki.display()))?;
+        let db_path = index_db_path(repo_root);
         let conn = Connection::open_with_flags(
             &db_path,
             OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_READ_WRITE,
@@ -285,7 +301,7 @@ impl WikiIndex {
 
         // Try to acquire the refresh lock; on contention serve the existing
         // snapshot without blocking.
-        let lock = lock::try_acquire(&index.dot_git)
+        let lock = lock::try_acquire(&wiki)
             .map_err(|e| miette::miette!("refresh lock acquire failed: {e}"))?;
         if lock.is_none() {
             return Ok(index);

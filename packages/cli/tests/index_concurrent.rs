@@ -1,7 +1,7 @@
 //! Concurrency test: a second `wiki` process must return results without
 //! waiting on a held refresh lock.
 //!
-//! Contract: when `.git/wiki-refresh.lock` is held by an external process,
+//! Contract: when `.wiki/wiki-refresh.lock` is held by an external process,
 //! a `wiki search <query>` invocation exits with code 0 in < 200ms.
 
 mod common;
@@ -18,7 +18,9 @@ fn second_process_returns_without_waiting_on_lock() {
 
     // Hold the refresh lock ourselves to simulate a long-running refresh in
     // a sibling process.
-    let lock_path = repo.root.join(".git").join("wiki-refresh.lock");
+    let wiki_dir = repo.root.join(".wiki");
+    std::fs::create_dir_all(&wiki_dir).expect("create .wiki dir");
+    let lock_path = wiki_dir.join("wiki-refresh.lock");
     let lock_file = OpenOptions::new()
         .create(true)
         .write(true)

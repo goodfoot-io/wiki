@@ -132,17 +132,29 @@ pub fn run(
     // found) and Err only for genuine infrastructure failures.  Non-fix mode
     // treats an empty corpus as a fatal diagnostic (exit 2); fix mode degrades
     // gracefully so cleanup_orphaned_meshes still runs over the empty set.
-    let files = match discover_files(globs, scan_root, repo_root, source) {
-        Ok(f) if f.is_empty() && !fix => {
-            let msg = "no wiki pages found (no .md files matched)";
-            if json {
-                eprintln!("{}", serde_json::json!({"error": msg}));
-            } else {
-                eprintln!("error: {msg}");
+    // The resolution/collision corpus is the entire wiki, scanned from the
+    // repo root, so a subtree check resolves titles and detects collisions
+    // against every page — making a subdirectory run equivalent to the same
+    // pages selected by glob from the repo root.
+    //
+    // This whole-repo walk happens FIRST and exactly once. In the no-glob
+    // case the scoped `files` set is a prefix-filtered subset of it, so we
+    // derive it in memory rather than walking the tree a second time.
+    // discover_files returns Ok(vec![]) for an empty corpus, which is fine in
+    // both modes; real infrastructure failures propagate as Err and fail
+    // closed.
+    let index_files = match discover_files(&[], repo_root, repo_root, source) {
+        Ok(f) => match filter_files_for_source(f, repo_root, source) {
+            Ok(f) => f,
+            Err(e) => {
+                if json {
+                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
+                } else {
+                    eprintln!("error: {e}");
+                }
+                return Ok(2);
             }
-            return Ok(2);
-        }
-        Ok(f) => f,
+        },
         Err(e) => {
             // Real infrastructure failure — fail closed in both modes.
             if json {
@@ -153,32 +165,64 @@ pub fn run(
             return Ok(2);
         }
     };
-    let files = match filter_files_for_source(files, repo_root, source) {
-        Ok(f) => f,
-        Err(e) => {
-            if json {
-                eprintln!("{}", serde_json::json!({"error": e.to_string()}));
-            } else {
-                eprintln!("error: {e}");
+
+    // Scoped selection (the pages to validate). When no explicit globs are
+    // given, the scoped set is the whole-repo corpus restricted to the
+    // `scan_root` subtree, so derive it by in-memory prefix filtering instead
+    // of walking the tree again. With explicit globs we MUST keep the dedicated
+    // walk: glob selection deliberately includes fixture pages
+    // (`is_fixture_path`) that the membership-filtered whole-repo walk omits.
+    let files = if globs.is_empty() {
+        let prefix = crate::commands::scan_prefix(scan_root, repo_root);
+        index_files
+            .iter()
+            .filter(|p| {
+                let rel = p
+                    .strip_prefix(repo_root)
+                    .map(|r| r.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| p.to_string_lossy().into_owned());
+                crate::commands::path_under_prefix(&rel, prefix.as_deref())
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        let raw = match discover_files(globs, scan_root, repo_root, source) {
+            Ok(f) => f,
+            Err(e) => {
+                if json {
+                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
+                } else {
+                    eprintln!("error: {e}");
+                }
+                return Ok(2);
             }
-            return Ok(2);
+        };
+        match filter_files_for_source(raw, repo_root, source) {
+            Ok(f) => f,
+            Err(e) => {
+                if json {
+                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
+                } else {
+                    eprintln!("error: {e}");
+                }
+                return Ok(2);
+            }
         }
     };
 
-    // The resolution/collision corpus is the entire wiki, scanned from the
-    // repo root, so a subtree check resolves titles and detects collisions
-    // against every page — making a subdirectory run equivalent to the same
-    // pages selected by glob from the repo root.
-    //
-    // In `--fix` mode, an empty corpus degrades gracefully to an empty index
-    // rather than propagating the "no wiki pages found" error.
-    // Whole-repo index files for title/collision resolution.  discover_files
-    // returns Ok(vec![]) for an empty corpus, which is fine in both modes;
-    // real infrastructure failures propagate as Err and fail closed.
-    let index_files = {
-        let raw = discover_files(&[], repo_root, repo_root, source)?;
-        filter_files_for_source(raw, repo_root, source)?
-    };
+    // Empty-corpus semantics: in non-fix mode an empty scoped selection is the
+    // "no wiki pages found" fatal diagnostic (exit 2). In `--fix` mode it
+    // degrades gracefully so cleanup_orphaned_meshes still runs over the empty
+    // set.
+    if files.is_empty() && !fix {
+        let msg = "no wiki pages found (no .md files matched)";
+        if json {
+            eprintln!("{}", serde_json::json!({"error": msg}));
+        } else {
+            eprintln!("error: {msg}");
+        }
+        return Ok(2);
+    }
 
     let diagnostics = match collect_for_files(&files, &index_files, repo_root, source) {
         Ok(d) => d,

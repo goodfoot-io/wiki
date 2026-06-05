@@ -39,6 +39,17 @@ fn slug_path(repo_root: &Path, slug: &str) -> PathBuf {
     path
 }
 
+/// Whether a filename under `.wiki/` is a non-mesh runtime artifact written by
+/// the CLI (the index cache DB, its SQLite WAL/SHM/journal sidecars, the
+/// refresh lock, and the perf log). These coexist with mesh files under
+/// `.wiki/` but must never be parsed as meshes.
+fn is_runtime_artifact(name: &str) -> bool {
+    name == "wiki-index.sqlite"
+        || name.starts_with("wiki-index.sqlite-")
+        || name == "wiki-refresh.lock"
+        || name == "wiki.log"
+}
+
 /// Slug for a file under `.wiki/`: the relative path with forward slashes.
 fn slug_for(root: &Path, file: &Path) -> Option<String> {
     let rel = file.strip_prefix(root).ok()?;
@@ -62,11 +73,14 @@ pub(crate) fn read_all(repo_root: &Path) -> Result<Vec<(String, MeshFile)>> {
             continue;
         }
         let path = entry.path();
-        // Skip hidden/dotfiles (e.g. .DS_Store, editor swap files).
+        // Skip hidden/dotfiles (e.g. .DS_Store, editor swap files) and the
+        // index cache DB / its sidecars / runtime files that live under `.wiki/`
+        // alongside the mesh store. These are not meshes and must never be
+        // parsed (MeshFile::parse fails closed on the sqlite binary).
         if path
             .file_name()
             .and_then(|n| n.to_str())
-            .map(|n| n.starts_with('.'))
+            .map(|n| n.starts_with('.') || is_runtime_artifact(n))
             .unwrap_or(false)
         {
             continue;
@@ -347,6 +361,28 @@ mod tests {
         fs::write(wiki.join(".foo.swp"), b"editor swap content").unwrap();
 
         // read_all must return only the valid mesh and must not error.
+        let all = read_all(root).unwrap();
+        assert_eq!(all.len(), 1, "expected only the valid mesh, got: {all:?}");
+        assert_eq!(all[0].0, "goodslug");
+    }
+
+    #[test]
+    fn read_all_skips_runtime_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        write(root, "goodslug", &sample_mesh()).unwrap();
+
+        // The index cache DB, its SQLite sidecars, the refresh lock, and the
+        // perf log coexist under `.wiki/` but must never be parsed as meshes —
+        // even though they are not dotfiles and the DB is binary.
+        let wiki = wiki_dir(root);
+        fs::write(wiki.join("wiki-index.sqlite"), b"SQLite format 3\x00\xff\xfe").unwrap();
+        fs::write(wiki.join("wiki-index.sqlite-wal"), b"\x00\x01wal").unwrap();
+        fs::write(wiki.join("wiki-index.sqlite-shm"), b"\x00\x01shm").unwrap();
+        fs::write(wiki.join("wiki-refresh.lock"), b"").unwrap();
+        fs::write(wiki.join("wiki.log"), b"{\"event\":\"x\"}\n").unwrap();
+
         let all = read_all(root).unwrap();
         assert_eq!(all.len(), 1, "expected only the valid mesh, got: {all:?}");
         assert_eq!(all[0].0, "goodslug");
