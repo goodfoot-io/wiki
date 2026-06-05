@@ -1,5 +1,0 @@
-packages/cli/src/index.rs#L912-L912 sha256:d64d3c36b9ca4e63c3d112050b8a11ac678ff373a59f15e08fd2faa8359bb728
-packages/cli/src/index.rs#L1525-L1525 sha256:e6b04491469722e8363a94e4044538e013a2a217e36b1e568ba60acb7b4c8f2e
-wiki/guides/wiki-performance-optimization.md sha256:a5bc54acc1758122c8093fb76a6a4ac33e7797656daf26154d62aa5bc2b6d3ba
-
-Deferred full-text search index: core document indexing stays on the fast path while FTS rebuilds happen lazily on the next search query.

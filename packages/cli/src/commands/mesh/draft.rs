@@ -111,17 +111,15 @@ pub(crate) fn build(
 
 /// Compose the slug from a page subdir and a kebab-cased noun.
 ///
-/// Slug = `wiki/<inner-subdir>/<noun>`, where:
-///   - `<inner-subdir>` is the page's directory relative to its owning wiki
-///     root (empty for pages at the wiki root, and empty for pages that have
-///     no owning root);
+/// Slug = `<subdir>/<noun>`, where:
+///   - `<subdir>` is the page's directory relative to the repo root (empty for
+///     pages at the repo root);
 ///   - `<noun>` comes from the deepest section heading kebab-cased, falling
 ///     back to the link label, then the target file stem.
 ///
-/// The `wiki/` prefix is added exactly once and never repeated inside the
-/// slug: any inner-subdir segment equal to `wiki` is stripped before
-/// concatenation, so a page at `wiki/wiki/foo.md` does not produce duplicate
-/// prefix segments.
+/// The slug mirrors the page's actual location in the source tree — no prefix
+/// is prepended. Repeated path segments are collapsed so a page at
+/// `a/a/foo.md` does not produce a duplicate segment.
 pub(crate) fn build_slug(page_subdir: &str, noun: &str) -> String {
     build_slug_with_qualifiers(page_subdir, &[], noun)
 }
@@ -132,16 +130,15 @@ pub(crate) fn build_slug(page_subdir: &str, noun: &str) -> String {
 /// context when the base slug clashes with an existing mesh.
 ///
 /// Qualifiers are subject to the same no-repeat invariant: any qualifier
-/// segment equal to `wiki` or already present in `parts` is silently dropped
-/// so we never emit `wiki/foo/foo/bar`.
+/// segment already present in `parts` is silently dropped so we never emit
+/// `foo/foo/bar`.
 pub(crate) fn build_slug_with_qualifiers(
     page_subdir: &str,
     qualifiers: &[String],
     noun: &str,
 ) -> String {
-    let mut parts: Vec<String> = vec!["wiki".to_string()];
+    let mut parts: Vec<String> = Vec::new();
     let mut reserved: std::collections::HashSet<String> = std::collections::HashSet::new();
-    reserved.insert("wiki".to_string());
     for seg in page_subdir.split('/') {
         if seg.is_empty() || reserved.contains(seg) {
             continue;
@@ -262,34 +259,30 @@ mod tests {
 
     #[test]
     fn slug_top_level() {
-        assert_eq!(build_slug("", "billing"), "wiki/billing");
+        assert_eq!(build_slug("", "billing"), "billing");
     }
 
     #[test]
     fn slug_with_subdir() {
-        assert_eq!(
-            build_slug("perf", "sync-detection"),
-            "wiki/perf/sync-detection"
-        );
+        assert_eq!(build_slug("perf", "sync-detection"), "perf/sync-detection");
     }
 
     #[test]
     fn slug_with_nested_subdir() {
-        assert_eq!(build_slug("perf/sub", "bar"), "wiki/perf/sub/bar");
+        assert_eq!(build_slug("perf/sub", "bar"), "perf/sub/bar");
     }
 
     #[test]
-    fn slug_strips_repeated_wiki_segment() {
-        // A page at wiki/wiki/foo.md in the wiki at wiki/ would produce
-        // subdir "wiki" — drop it so the prefix is not repeated.
-        assert_eq!(build_slug("wiki", "foo"), "wiki/foo");
+    fn slug_collapses_repeated_subdir_segment() {
+        // A repeated path segment is deduped so we never emit `a/a/foo`.
+        assert_eq!(build_slug("a/a", "foo"), "a/foo");
     }
 
     #[test]
     fn qualifiers_insert_between_subdir_and_noun() {
         assert_eq!(
             build_slug_with_qualifiers("perf", &["bootstrap".to_string()], "sync-detection"),
-            "wiki/perf/bootstrap/sync-detection"
+            "perf/bootstrap/sync-detection"
         );
     }
 
@@ -301,20 +294,21 @@ mod tests {
                 &["billing".to_string(), "checkout".to_string()],
                 "charge-handler"
             ),
-            "wiki/billing/checkout/charge-handler"
+            "billing/checkout/charge-handler"
         );
     }
 
     #[test]
-    fn qualifiers_drop_reserved_segments() {
-        // `wiki` is reserved (prefix); `perf` is already in subdir.
+    fn qualifiers_drop_segments_already_in_subdir() {
+        // `perf` is already in the subdir, so the qualifier copy is dropped;
+        // other qualifiers are kept in order.
         assert_eq!(
             build_slug_with_qualifiers(
                 "perf",
-                &["wiki".to_string(), "perf".to_string(), "extra".to_string()],
+                &["perf".to_string(), "extra".to_string()],
                 "leaf"
             ),
-            "wiki/perf/extra/leaf"
+            "perf/extra/leaf"
         );
     }
 
@@ -359,7 +353,7 @@ mod tests {
         };
         let drafts = build("wiki/perf/indexing.md", &[group], Path::new("/"), "perf");
         assert_eq!(drafts.len(), 1);
-        assert_eq!(drafts[0].slug, "wiki/perf/sync-detection");
+        assert_eq!(drafts[0].slug, "perf/sync-detection");
         assert_eq!(
             drafts[0].anchors,
             vec![

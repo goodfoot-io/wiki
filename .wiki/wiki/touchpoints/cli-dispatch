@@ -1,4 +1,0 @@
-packages/cli/src/main.rs#L292-L292 sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b
-wiki/meta/wiki-documentation-touchpoints.md sha256:08ed54c69381186e678f0117610ff90c98374c753507d41afa580bc169631979
-
-Top-level run() match that decides bare `wiki [query]` performs ranked lookup; the touchpoints register ties operator-facing docs to this routing decision.

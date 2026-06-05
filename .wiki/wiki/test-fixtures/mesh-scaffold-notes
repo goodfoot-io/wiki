@@ -1,4 +1,0 @@
-packages/cli/tests/fixtures/mesh-scaffold/src/charge.ts#L2-L7 sha256:33703cef14685396b44e8afca103dadf9d74fdfa4ef9486870811181a7985c9a
-packages/cli/tests/fixtures/mesh-scaffold/src/notes.wiki.md sha256:0f7eca8238529f124189e93a304e1ba5afae626b4a6106ddecfef226b62a7fe3
-
-Test fixture pairing for the mesh-scaffold integration test: the wiki note documents the charge handler and references it by line range so the scaffold command has covered input. The fixture pair is normative for the test, not for production code.

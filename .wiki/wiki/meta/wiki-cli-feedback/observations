@@ -1,6 +1,0 @@
-packages/cli/src/commands/search.rs#L61-L90 sha256:325df9a234b424b3ac860a6fc78893b4a550ef1cbc7081bb1ec62cc6437db664
-packages/cli/src/commands/summary.rs#L130-L158 sha256:9133c28d85f615f391e363275507b7805ebd176fd19911fb21893c653ed72f8c
-packages/cli/src/main.rs#L117-L130 sha256:dda64a4eb713d22f267af76e308c123d492fcb74d0594dc638fec7fd8695594d
-wiki/meta/wiki-feedback.md#L21-L26 sha256:4021a8cc7ce284f7d6b4061051150f73068cc7f8570f1d0cead4cd379a55506e
-
-Search, summary, and arg-handling surfaces the feedback observations highlight as rough edges in everyday CLI use.

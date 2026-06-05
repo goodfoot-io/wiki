@@ -1,5 +1,0 @@
-packages/cli/src/commands/mod.rs#L182-L209 sha256:8dcfa16980d818f313c08d111dd7a09fe9c4aeea6e7802c239134f1584883e29
-wiki/guides/wiki-performance-optimization.md#L18-L20 sha256:b253a0fd203a04de4ab60cd8312e6414e9644903c7cfc86b52ab4eff0e356b2b
-packages/cli/src/commands/mod.rs#L184-L211 sha256:6026c1b3261b9ba52fac3afd8d73dae9df5596263e95217299c12e06eebb276f
-
-Reference of the DocSource-dispatched discovery branch that returns a candidate file list to the wiki command pipeline.

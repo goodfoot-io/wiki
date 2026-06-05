@@ -1,5 +1,0 @@
-packages/cli/logging.wiki.md#L213-L218 sha256:bf9e8cd490655ee79a2f2421659ed3b02590fe96430696c027a70ab0fb44e067
-packages/cli/src/perf.rs#L67-L96 sha256:74bbaafe3bf4bf7975c936995026e15d377b98e07d691b7dd8cb4a4f7c892e4e
-packages/cli/src/perf.rs#L98-L108 sha256:03b1df4cb7a123b9841619e436c4cd7e180600cd972920f5fe419c7fc94f144b
-
-Vocabulary of `perf` lifecycle hooks that exposes the `command_start` and `command_finish` event names to the CLI log stream.

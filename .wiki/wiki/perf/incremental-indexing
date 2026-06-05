@@ -1,5 +1,0 @@
-packages/cli/src/index.rs#L945-L945 sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b
-packages/cli/src/index.rs#L960-L960 sha256:b727f99de84bbe1c06aedc35d1e8b0081bca72711e61a866f34b4ae3ffa93260
-wiki/guides/wiki-performance-optimization.md sha256:a5bc54acc1758122c8093fb76a6a4ac33e7797656daf26154d62aa5bc2b6d3ba
-
-Incremental WikiIndex sync that detects changes by probing Git state (HEAD SHA, wiki dir, working-tree status) so only added, modified, or deleted pages are re-parsed.

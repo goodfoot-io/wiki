@@ -1,5 +1,0 @@
-packages/cli/src/commands/mesh/render.rs#L147-L147 sha256:2d7e15fc2254f0aac5dd74ad2b155c8c078c9dda11227dac86d6c54ec032ea12
-packages/cli/src/commands/mesh/scaffold.rs#L159-L200 sha256:2222ce4e55a58c85e60b3e66e7d7925e51906cd4aaf8554bc1e9aa2af2bcbd45
-wiki/reference/git-mesh-usage.md#L52-L60 sha256:ee0d77434b801ca05dda7cadcd1c094d733810b769bb0314a74e324519e67064
-
-Scaffold renderer that emits git mesh why placeholder lines paired with each generated add command for human follow-up.

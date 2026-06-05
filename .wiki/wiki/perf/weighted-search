@@ -1,4 +1,0 @@
-packages/cli/src/index.rs#L1362-L1362 sha256:7b638b05703cb42cc8d42875789bbd5c901c67fbe6cfcbede7191089a52186f6
-wiki/guides/wiki-performance-optimization.md sha256:a5bc54acc1758122c8093fb76a6a4ac33e7797656daf26154d62aa5bc2b6d3ba
-
-Weighted search ranking that fuses exact title, repo-relative path, and BM25 full-text passes into a single ranked result so common navigational queries stay near-instant.

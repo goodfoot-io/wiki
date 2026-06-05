@@ -1,6 +1,0 @@
-packages/cli/src/commands/extract.rs#L17-L17 sha256:e8593231f823907b8c320298a454526d3b39e8314e99fb3e78a5cfd5fab26137
-packages/cli/src/parser.rs#L79-L79 sha256:00519d93f10a8856abc867f189fc06d1200dc3294c61118a5003956e59e19033
-packages/cli/src/parser.rs#L304-L304 sha256:094e295ae5d7e912e113fd52d2790728543e26c1f4122fdd436eabcfc417cf1b
-wiki/architecture/wikilink-resolution.md#L16-L18 sha256:206067cbb75aefbeeae62493766a7c4e5e47c18dd20c518bde7ec8b1bc8256ef
-
-Contract of the extract command that exposes a resolved-wikilink report to stderr-reading callers.

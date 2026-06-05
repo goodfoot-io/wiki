@@ -1,6 +1,4 @@
-packages/cli/src/commands/links.rs#L115-L150 sha256:0b62b494eb6f5ac00dd0f6a263c2d82b27ca45cfedd1eda1d81b89988afc48c9
-packages/cli/src/commands/search.rs#L61-L90 sha256:325df9a234b424b3ac860a6fc78893b4a550ef1cbc7081bb1ec62cc6437db664
-packages/cli/src/commands/summary.rs#L130-L158 sha256:9133c28d85f615f391e363275507b7805ebd176fd19911fb21893c653ed72f8c
-wiki/reference/wiki-cli-advanced-usage.md#L45-L68 sha256:ac5d484e7c1b521ab0e2319562b6c2db648b52061c22e4585131092b76707250
+wiki/reference/wiki-cli-advanced-usage.md#L33-L55 sha256:ce8656d3ecf1f895a679bf52e821af445460c944266915c9228c53547e1ce3c2
+packages/cli/src/commands/search.rs#L61-L90 sha256:af5f498a509405129faed8ea5e7a97421076b769af54611e6e4f8e132f4b5207
+packages/cli/src/commands/summary.rs#L130-L158 sha256:9da1e5ee96ca267cad424c6d1de5c9d2833f89ce69c35936d7e96e76df7cc6db
 
-Contract of the three path-accepting subcommands that exposes a uniform `&str` target parameter to the stdin-and-path input dispatcher.

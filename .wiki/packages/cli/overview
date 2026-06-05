@@ -1,5 +1,4 @@
-packages/cli/logging.wiki.md#L6-L14 sha256:0460ddf8659f0cfc7eb6e0bd48ec742d3949450ef71aec947d69fe64b01058b9
-packages/cli/src/perf.rs#L119-L129 sha256:64a165de1736a1d056f4418d0929493666d02d9bba57cb3bb43de7d151e3c4ed
-packages/cli/src/perf.rs#L131-L140 sha256:2c4f8a007c4411cfbdb6a092e42f7bdab1b1c7256a242abaa014310ba83bbd59
+packages/cli/logging.wiki.md#L6-L14 sha256:717cdf0463ff54c8bf60916de80d1edb091711b27082b46297f3a82f138b3044
+packages/cli/src/perf.rs#L119-L129 sha256:2a12b715bf7a1be4f44984cc1a89ac53da0fcffeab1d900a67415f8c4825cbb0
+packages/cli/src/perf.rs#L131-L140 sha256:3f1a0f57a2510911bea2b7cc1c941a787850270c1c6ac32c6ddc27c090f402c5
 
-Perf instrumentation that records lifecycle timings, captures phase events, and writes the structured log entries the wiki overview describes.

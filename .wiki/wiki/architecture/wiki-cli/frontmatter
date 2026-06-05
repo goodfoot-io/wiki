@@ -1,4 +1,0 @@
-packages/cli/src/frontmatter.rs#L45-L50 sha256:66b922d3b48656c0506c92309fd5489af83f5706c866aec880bfedd0360b6836
-wiki/architecture/wiki-cli.md#L40-L42 sha256:85097d199eaa64558bb76f663ae2242a9c18502e95ddda7f8a8efbad27979b9f
-
-Vocabulary of the frontmatter module that exposes reserved titles to the wiki command-line dispatcher.

@@ -1,5 +1,3 @@
-packages/cli/src/main.rs#L115-L117 sha256:84b4af27e7d14a634536cff537aac8adea86e0759ed425fa206d98bdcb3e8227
-packages/cli/src/main.rs#L118-L120 sha256:48369cf227feaff93cce0fce0b3297b13efed534f3f0725ea686a1324f1b2ccc
-wiki/reference/wiki-cli-advanced-usage.md#L70-L76 sha256:d38fe1d22254a21e4dcd19b766f56162aa59e56d890083111bddd56a445677d0
+wiki/reference/wiki-cli-advanced-usage.md#L57-L63 sha256:b9b284642e3b83a00b24f7a2833d8266ed7ee930c60bbfd56d14dea7429a7d46
+packages/cli/src/main.rs#L114-L116 sha256:f4526f15819f03e1e9a12b64c192435b1d514f36ccfbd4e093064df6d12c4bcf
 
-Glob argument that lets every wiki subcommand target an explicit file set instead of scanning the discovered wiki root.

@@ -1,3 +1,0 @@
-packages/cli/src/commands/mesh/scaffold.rs#L945-L996 sha256:a15402ff4c912ffa672dd86f5d5002c5121cd7e5b3744457b9997e340e3bbfbe
-
-Coalescing of overlapping and contiguous line-range anchors on the same path, mirroring git-mesh's rule so wiki check --fix and git mesh stale --fix settle on a byte-identical fixed point instead of oscillating.

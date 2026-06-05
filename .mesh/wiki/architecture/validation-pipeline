@@ -1,4 +1,0 @@
-wiki/architecture/wiki-cli.md#L14-L16 sha256:0d494b82c495d77e6285652550c0398843a0eb36dd0a847d8a3d89cd84e11ce8
-packages/cli/src/commands/check.rs#L28-L29 sha256:4b70c0c9ffdc82ace0f9b43fce7139d127d0ba2fd49ce7001240c7bc80b2ea24
-packages/cli/src/frontmatter.rs#L56-L56 sha256:f69a5c6d523e5de8c3d6ab0f51b3daaefb4d2d45d9f8eddd773773c2d3f2afba
-

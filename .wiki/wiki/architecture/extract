@@ -1,7 +1,0 @@
-packages/cli/src/commands/extract.rs#L10-L15 sha256:87e4863036ff83c83a66e23577bcc1e84ff7acaa90e359a34ea5e67427be5d36
-packages/cli/src/commands/extract.rs#L17-L17 sha256:e8593231f823907b8c320298a454526d3b39e8314e99fb3e78a5cfd5fab26137
-packages/cli/src/commands/extract.rs#L28-L33 sha256:530f2370a650d9f21061e0da0a72558a84b25ad844749780fc8e2e631f98d0ca
-wiki/architecture/wiki-cli.md#L18-L20 sha256:94a27e898b7c9844eb51358215aabcf5d0f28bddb731da29ee7f5ec98c951161
-packages/cli/src/commands/hook_check.rs#L16-L63 sha256:e16fb9a84fa0b78db0f43a34eb50b140badb111eca76cc25062614199f194de9
-
-wiki extract command that pulls wikilinks and fragment-link anchors out of arbitrary markdown for downstream tooling.

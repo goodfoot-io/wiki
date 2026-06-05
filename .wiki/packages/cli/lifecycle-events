@@ -1,5 +1,4 @@
-packages/cli/logging.wiki.md#L213-L218 sha256:5ec6a2f829d86e235a9e42bab5b4bcc5f36793aa1bebbee54827ea7560efa3dd
-packages/cli/src/perf.rs#L67-L96 sha256:74bbaafe3bf4bf7975c936995026e15d377b98e07d691b7dd8cb4a4f7c892e4e
-packages/cli/src/perf.rs#L98-L108 sha256:03b1df4cb7a123b9841619e436c4cd7e180600cd972920f5fe419c7fc94f144b
+packages/cli/logging.wiki.md#L191-L196 sha256:ab0e3e7488792d1bbfc95612a64fd1e23b4d3a3271236028f5cfa036d72d28db
+packages/cli/src/perf.rs#L67-L96 sha256:d42946021b5b40510b74e3eef5fd7b961ea63db25293fe8fb418c0a6b13fbc72
+packages/cli/src/perf.rs#L98-L108 sha256:25b47b4608ea94938bfcd0d7e67cec0e7a966a5fd0c334c62053d2ec59a08d6a
 
-Perf lifecycle event emitters that write the structured start/end records appearing in the wiki log file format.

@@ -1,5 +1,0 @@
-packages/cli/src/commands/mesh/render.rs#L137-L146 sha256:76566421b344f895e5f193a352cf0efb7907a184b7ffdd5ae256912766e29263
-packages/cli/src/commands/mesh/scaffold.rs#L159-L200 sha256:2222ce4e55a58c85e60b3e66e7d7925e51906cd4aaf8554bc1e9aa2af2bcbd45
-wiki/reference/git-mesh-usage.md#L42-L50 sha256:b2610aa40e9b64d54cfab5d4bc0c9865c4fc2c3890dce4e89731f17728ca140d
-
-Scaffold renderer that emits git mesh add command blocks for fragment-linked sections without invoking them itself.

@@ -1,5 +1,0 @@
-packages/cli/src/frontmatter.rs#L37-L37 sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b
-packages/cli/src/frontmatter.rs#L45-L50 sha256:66b922d3b48656c0506c92309fd5489af83f5706c866aec880bfedd0360b6836
-wiki/architecture/wiki-cli.md sha256:ae29c3ccfda44739f95922e80f1e08f063f3178e62275dde9edf588fa34d30ea
-
-Wiki page frontmatter contract: the YAML preamble (title, summary, aliases, tags, reserved-name guards) that every page must carry for indexing and dispatch to work.

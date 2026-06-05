@@ -1,7 +1,0 @@
-packages/cli/src/commands/check.rs#L28-L29 sha256:60aaac31d865be4c57b20fd379a946454061039c2e32efad6bfa6795c155920e
-packages/cli/src/commands/hook_check.rs#L16-L63 sha256:2185e645745069faf18394126310bf7a4e41e49a77d0c259d67f8221c3693959
-packages/cli/src/frontmatter.rs#L37-L47 sha256:8a00c57ec319f999146a82afa86e00e5e16a3e7018c99d5ec4db251bf39f05e8
-packages/cli/src/parser.rs#L6-L12 sha256:640f0daad55e844d3260690863b1d5119fc2ac4f2231aa12e8499e9a96fc7a83
-wiki/architecture/wiki-cli.md#L8-L41 sha256:36dac80d10addc6885b0faef4dcf099aa3c935482eac37400047a4c8723e0874
-
-The wiki CLI surface that parses fragment links and wikilinks, validates fragment-link bounds and frontmatter reservations, and integrates with the PostToolUse hook. The architecture page is the doc; the Rust modules are the implementation.

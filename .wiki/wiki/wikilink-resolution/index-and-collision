@@ -1,5 +1,0 @@
-packages/cli/src/commands/check.rs#L28-L29 sha256:60aaac31d865be4c57b20fd379a946454061039c2e32efad6bfa6795c155920e
-packages/cli/src/index.rs#L567-L577 sha256:b99d3d4dcc1fba770846420e0c07c909c2bd08d90de4272718210b63678ee17a
-wiki/architecture/wikilink-resolution.md sha256:11fe3a0cca7f7d998df84a0226f7a0364c7bdec79bf84148a1e5cf2e0323daa5
-
-The wikilink resolution path: how WikiIndex builds the title/alias map and how check enforces title/alias uniqueness so resolution is unambiguous. The architecture page is the doc; the Rust modules are the implementation.

@@ -1981,7 +1981,7 @@ mod tests {
             std::collections::HashMap::new();
         let exists = |_slug: &str| false;
         resolve_slug_collisions(&mut drafts, &titles, &exists);
-        assert_eq!(drafts[0].slug, "wiki/charge-handler");
+        assert_eq!(drafts[0].slug, "charge-handler");
     }
 
     #[test]
@@ -1995,10 +1995,10 @@ mod tests {
         let titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
         let existing: std::collections::HashSet<String> =
-            ["wiki/charge-handler".to_string()].into_iter().collect();
+            ["charge-handler".to_string()].into_iter().collect();
         let exists = |slug: &str| existing.contains(slug);
         resolve_slug_collisions(&mut drafts, &titles, &exists);
-        assert_eq!(drafts[0].slug, "wiki/checkout/charge-handler");
+        assert_eq!(drafts[0].slug, "checkout/charge-handler");
     }
 
     #[test]
@@ -2015,14 +2015,14 @@ mod tests {
         let titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
         let existing: std::collections::HashSet<String> = [
-            "wiki/charge-handler".to_string(),
-            "wiki/checkout/charge-handler".to_string(),
+            "charge-handler".to_string(),
+            "checkout/charge-handler".to_string(),
         ]
         .into_iter()
         .collect();
         let exists = |slug: &str| existing.contains(slug);
         resolve_slug_collisions(&mut drafts, &titles, &exists);
-        assert_eq!(drafts[0].slug, "wiki/payments/checkout/charge-handler");
+        assert_eq!(drafts[0].slug, "payments/checkout/charge-handler");
     }
 
     #[test]
@@ -2040,8 +2040,8 @@ mod tests {
             Some("Billing Service".to_string()),
         );
         let existing: std::collections::HashSet<String> = [
-            "wiki/charge-handler".to_string(),
-            "wiki/checkout/charge-handler".to_string(),
+            "charge-handler".to_string(),
+            "checkout/charge-handler".to_string(),
         ]
         .into_iter()
         .collect();
@@ -2049,7 +2049,7 @@ mod tests {
         resolve_slug_collisions(&mut drafts, &titles, &exists);
         assert_eq!(
             drafts[0].slug,
-            "wiki/billing-service/checkout/charge-handler"
+            "billing-service/checkout/charge-handler"
         );
     }
 
@@ -2059,12 +2059,12 @@ mod tests {
         let titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
         let existing: std::collections::HashSet<String> =
-            ["wiki/charge-handler".to_string()].into_iter().collect();
+            ["charge-handler".to_string()].into_iter().collect();
         let exists = |slug: &str| existing.contains(slug);
         resolve_slug_collisions(&mut drafts, &titles, &exists);
         // No chain, no title — only the base slug is a unique candidate,
         // so the digit fallback runs against it.
-        assert_eq!(drafts[0].slug, "wiki/charge-handler-2");
+        assert_eq!(drafts[0].slug, "charge-handler-2");
     }
 
     #[test]
@@ -2079,8 +2079,8 @@ mod tests {
             std::collections::HashMap::new();
         let exists = |_slug: &str| false;
         resolve_slug_collisions(&mut drafts, &titles, &exists);
-        assert_eq!(drafts[0].slug, "wiki/foo");
-        assert_eq!(drafts[1].slug, "wiki/foo-2");
+        assert_eq!(drafts[0].slug, "foo");
+        assert_eq!(drafts[1].slug, "foo-2");
     }
 
     #[test]
@@ -2093,10 +2093,10 @@ mod tests {
             std::collections::HashMap::new();
         let exists = |_slug: &str| false;
         resolve_slug_collisions(&mut drafts, &titles, &exists);
-        assert_eq!(drafts[0].slug, "wiki/foo");
+        assert_eq!(drafts[0].slug, "foo");
         // Second clashes only with the first draft (in-run); the parent
         // heading "Second" resolves it without needing a digit.
-        assert_eq!(drafts[1].slug, "wiki/second/foo");
+        assert_eq!(drafts[1].slug, "second/foo");
     }
 
     #[test]
@@ -2109,10 +2109,10 @@ mod tests {
             std::collections::HashMap::new();
         titles.insert("mesh/page.md".to_string(), Some("Outer".to_string()));
         let existing: std::collections::HashSet<String> =
-            ["wiki/mesh/leaf".to_string()].into_iter().collect();
+            ["mesh/leaf".to_string()].into_iter().collect();
         let exists = |slug: &str| existing.contains(slug);
         resolve_slug_collisions(&mut drafts, &titles, &exists);
-        assert_eq!(drafts[0].slug, "wiki/mesh/outer/leaf");
+        assert_eq!(drafts[0].slug, "mesh/outer/leaf");
     }
 
     // ── resolve_page_subdir ──────────────────────────────────────────────────

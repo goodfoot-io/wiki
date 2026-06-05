@@ -1,4 +1,0 @@
-packages/cli/src/commands/mod.rs#L238-L243 sha256:f72134f348f904cd106ffa27c9856b4ed40bdb4f5d39d165b859bbed41a7ebdb
-wiki/architecture/wiki-mesh-integration.md#L94-L96 sha256:607cfacc6efd984e7f5f1982120d1f4dc5cac05462b2dd63e4256e056bca62d8
-
-Reference of `discover_files` that exposes a wiki-page path set to mesh-integration callers.

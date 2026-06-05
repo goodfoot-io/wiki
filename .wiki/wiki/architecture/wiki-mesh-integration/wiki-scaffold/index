@@ -1,4 +1,0 @@
-wiki/architecture/wiki-mesh-integration.md#L28-L52 sha256:f03fae5ec1855b194922492cba8f98b417863cc0f8674b5eb21fe6c993e8ccad
-packages/cli/src/commands/mesh/scaffold.rs#L163-L170 sha256:4de0a8ffe3d9e84daff17d695c7f067ea596c74773aff1dadda330e1b9bb1303
-
-wiki check --fix mesh-coverage section that documents how uncovered fragment links become git meshes the author reviews before commit.

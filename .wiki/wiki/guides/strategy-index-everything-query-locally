@@ -1,4 +1,0 @@
-packages/cli/src/index.rs#L234-L248 sha256:9c439cc52d8f9300ffaf9144c8116e399edb1f086bd952218d0913cd2883a4dc
-wiki/guides/wiki-performance-optimization.md#L8-L10 sha256:21aaf44d7cca3c98ed28f0827e90402f182f4a892e06f1daf66ab98fdbe20528
-
-Reference of the `WikiIndex` struct that exposes a cached title/alias/summary/full-text surface to the `wiki` CLI commands.

@@ -1,4 +1,0 @@
-.claude/skills/wiki/SKILL.md#L73-L73 sha256:ee74afcf1437dd611f57db5ff26a6dc749fc077583ec8253450ea481f884e1b5
-wiki/meta/wiki-documentation-touchpoints.md sha256:08ed54c69381186e678f0117610ff90c98374c753507d41afa580bc169631979
-
-Wiki skill workflow contract that defines page-discovery, location, validation, and cross-linking steps for agents; the touchpoints register holds it in sync with the CLI it drives.

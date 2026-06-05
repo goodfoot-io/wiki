@@ -1,4 +1,0 @@
-packages/cli/src/commands/check.rs#L28-L28 sha256:85fb97c654c2dab9cbb1f43fa4368644c531080ac79b5f4bdbac25d70b5331e6
-wiki/architecture/wiki-cli.md sha256:ae29c3ccfda44739f95922e80f1e08f063f3178e62275dde9edf588fa34d30ea
-
-End-to-end validation pass that drives frontmatter parsing, title/alias collision detection, wikilink resolution, and fragment-link verification for every wiki page.

@@ -1,4 +1,0 @@
-packages/cli/src/commands/mod.rs#L238-L243 sha256:f72134f348f904cd106ffa27c9856b4ed40bdb4f5d39d165b859bbed41a7ebdb
-wiki/architecture/wiki-mesh-integration.md#L55-L57 sha256:26fe9e4ff4767e0c40bda8f182332d4b8af7095144b0d942719fd68e96428c43
-
-Reference of `discover_files` that exposes the default-glob union vocabulary to wiki commands.

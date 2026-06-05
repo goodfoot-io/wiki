@@ -1,6 +1,0 @@
-packages/cli/src/wiki_config.rs#L31-L33 sha256:60010fbcca23db5201d6fada8388aa2343b2869e09711207b40e198a52644650
-packages/cli/src/wiki_config.rs#L34-L38 sha256:a75fb63201a1dc33e8a3d6707af7f5b23ffb0d69fdb031a1a09054b9032922cf
-packages/cli/src/wiki_config.rs#L39-L43 sha256:4435e5f9aad737ac81fb88ee4e8feca984e9449687d97aee0c12e7b28d323db1
-wiki/guides/manual-testing-procedure.md#L65-L73 sha256:0f9817b796ae2058621188b99b1a07b2be85aed9e5193eb56e42f39d856090a0
-
-Reference of namespace validation rules that exposes the rejection vocabulary to the `wiki init` operator.

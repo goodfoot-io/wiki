@@ -1,5 +1,0 @@
-packages/cli/src/commands/check.rs#L19-L20 sha256:4d54d80de38b032cc1f9aa30cd25bb1768e6748f2cd76694872242b504aacf21
-packages/cli/src/frontmatter.rs#L55-L55 sha256:7db0ae23b46ed69fe4a3613f6e4dc628cfedf423f63ffe9c15828b9155a09cbe
-wiki/architecture/wiki-cli.md#L14-L16 sha256:86f35b93ac1f1108891b7cd6abb4084cedb029bce760adbfdbf2fa5b9679bc07
-
-Contract of the check command that exposes a frontmatter-and-fragment-link validation pass to the wiki CLI operator.

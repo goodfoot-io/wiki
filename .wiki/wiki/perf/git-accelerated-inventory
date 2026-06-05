@@ -1,4 +1,0 @@
-packages/cli/src/commands/mod.rs#L184-L184 sha256:875789f7b36913959e23fa2ba975518d4bd0443a8e3ed480a6fc20c8c74795cf
-wiki/guides/wiki-performance-optimization.md sha256:a5bc54acc1758122c8093fb76a6a4ac33e7797656daf26154d62aa5bc2b6d3ba
-
-Git-index-accelerated default file inventory that resolves the wiki page set from Git's tracked-content view instead of a full filesystem walk.

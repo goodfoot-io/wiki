@@ -1,4 +1,0 @@
-packages/cli/src/main.rs#L37-L57 sha256:be3df1290e1a247b9373b0a3107254ca5375eb713fdc30254ed72b1acb71587e
-wiki/guides/manual-testing-procedure.md#L7-L11 sha256:e616ffe5c2e474a974185fbc3f84608d9e3e61f38608bee4ccf9745ab0ba6642
-
-Reference of the wiki CLI clap parser that exposes the subcommand and flag surface to the manual testing walkthrough.
