@@ -173,6 +173,58 @@ pub(crate) fn anchor_record(path: String, extent: AnchorExtent, content_hash: St
     }
 }
 
+/// Relocate an anchor in place within the `.wiki/<slug>` mesh file.
+///
+/// Finds the [`AnchorRecord`] matching the old `(old_path, old_start, old_end)`
+/// triple, replaces its path/coordinates with the new location, recomputes its
+/// `content_hash` by re-reading the worktree bytes at the new location, and
+/// writes the mesh back. The whole-file sentinel (`0/0`) is handled by reading
+/// the new extent directly from the new coordinates.
+///
+/// This is the move-follow writeback: it keeps the stored anchor pointing at the
+/// content's current location so it is not re-detected as stale on the next run,
+/// and so coverage queries reflect the new range. Returns `Ok(false)` when no
+/// matching anchor or mesh is found (nothing relocated).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn relocate_anchor(
+    repo_root: &Path,
+    slug: &str,
+    old_path: &str,
+    old_start: u32,
+    old_end: u32,
+    new_path: &str,
+    new_start: u32,
+    new_end: u32,
+) -> Result<bool> {
+    let Some(mut mesh) = read_one(repo_root, slug)? else {
+        return Ok(false);
+    };
+
+    let Some(anchor) = mesh.anchors.iter_mut().find(|a| {
+        a.path == old_path && a.start_line == old_start && a.end_line == old_end
+    }) else {
+        return Ok(false);
+    };
+
+    let new_extent = if new_start == 0 && new_end == 0 {
+        AnchorExtent::WholeFile
+    } else {
+        AnchorExtent::LineRange {
+            start: new_start,
+            end: new_end,
+        }
+    };
+    let new_hash = hash_anchor(repo_root, new_path, new_extent)?;
+
+    anchor.path = new_path.to_string();
+    anchor.start_line = new_start;
+    anchor.end_line = new_end;
+    anchor.content_hash = new_hash;
+
+    write(repo_root, slug, &mesh)?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,6 +355,88 @@ mod tests {
         let all = read_all(root).unwrap();
         assert_eq!(all.len(), 1, "expected only the valid mesh, got: {all:?}");
         assert_eq!(all[0].0, "goodslug");
+    }
+
+    #[test]
+    fn relocate_anchor_in_place_refreshes_hash_no_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Seed source + mesh anchoring line 1.
+        fs::write(root.join("code.rs"), b"fn a() {}\n").unwrap();
+        let h1 = hash_anchor(root, "code.rs", AnchorExtent::LineRange { start: 1, end: 1 }).unwrap();
+        write(
+            root,
+            "m",
+            &MeshFile {
+                anchors: vec![anchor_record(
+                    "code.rs".to_string(),
+                    AnchorExtent::LineRange { start: 1, end: 1 },
+                    h1,
+                )],
+                why: "w.".to_string(),
+            },
+        )
+        .unwrap();
+
+        // The block drifts to line 2.
+        fs::write(root.join("code.rs"), b"// pre\nfn a() {}\n").unwrap();
+
+        let moved = relocate_anchor(root, "m", "code.rs", 1, 1, "code.rs", 2, 2).unwrap();
+        assert!(moved);
+
+        let mesh = read_one(root, "m").unwrap().unwrap();
+        assert_eq!(mesh.anchors.len(), 1, "must relocate in place, not append");
+        let a = &mesh.anchors[0];
+        assert_eq!((a.start_line, a.end_line), (2, 2));
+        let expected = hash_anchor(root, "code.rs", AnchorExtent::LineRange { start: 2, end: 2 }).unwrap();
+        assert_eq!(a.content_hash, expected, "hash must match the NEW range");
+    }
+
+    #[test]
+    fn relocate_anchor_cross_file_and_whole_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.rs"), b"x\n").unwrap();
+        fs::write(root.join("b.rs"), b"y\nx\n").unwrap();
+        write(
+            root,
+            "m",
+            &MeshFile {
+                anchors: vec![anchor_record(
+                    "a.rs".to_string(),
+                    AnchorExtent::WholeFile,
+                    "stale".to_string(),
+                )],
+                why: "w.".to_string(),
+            },
+        )
+        .unwrap();
+
+        // Whole-file anchor relocates to b.rs whole-file (0/0 handled).
+        let moved = relocate_anchor(root, "m", "a.rs", 0, 0, "b.rs", 0, 0).unwrap();
+        assert!(moved);
+        let mesh = read_one(root, "m").unwrap().unwrap();
+        assert_eq!(mesh.anchors.len(), 1);
+        let a = &mesh.anchors[0];
+        assert_eq!(a.path, "b.rs");
+        assert_eq!((a.start_line, a.end_line), (0, 0));
+        let expected = hash_anchor(root, "b.rs", AnchorExtent::WholeFile).unwrap();
+        assert_eq!(a.content_hash, expected);
+    }
+
+    #[test]
+    fn relocate_anchor_no_match_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.rs"), b"x\n").unwrap();
+        write(root, "m", &sample_mesh()).unwrap();
+        // No anchor matches (1,1) in foo.rs (sample has 2-4).
+        let moved = relocate_anchor(root, "m", "src/foo.rs", 1, 1, "src/foo.rs", 9, 9).unwrap();
+        assert!(!moved);
+        // Missing mesh.
+        let moved = relocate_anchor(root, "absent", "p", 1, 1, "p", 2, 2).unwrap();
+        assert!(!moved);
     }
 
     #[test]

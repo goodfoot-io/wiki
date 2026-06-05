@@ -91,6 +91,11 @@ pub struct FixPlan {
     pub fixes: Vec<Fix>,
     pub skipped: Vec<SkippedFix>,
     pub(crate) mesh: super::mesh::scaffold::MeshCoverageOutcome,
+    /// Number of ambiguous (≥ 2-match) move-follow conflicts surfaced during the
+    /// pass. Each is also recorded in `skipped` with an actionable message; this
+    /// count drives a non-zero exit so the conflict fails pre-commit/CI (the
+    /// `wiki check --fix` hot path). Fail-closed: a conflict never auto-rewrites.
+    pub mesh_conflicts: usize,
 }
 
 // ── Rename map ────────────────────────────────────────────────────────────────
@@ -710,7 +715,6 @@ fn read_blob_at(repo_root: &Path, sha: &str, path: &str) -> Result<Option<String
 /// longer matches the stored hash, find where the verbatim content moved.
 #[derive(Debug)]
 pub struct MeshMovePlan {
-    #[allow(dead_code)]
     pub mesh_name: String,
     pub old_path: PathBuf,
     pub old_start: u32,
@@ -719,6 +723,35 @@ pub struct MeshMovePlan {
     pub new_path: PathBuf,
     pub new_start: u32,
     pub new_end: u32,
+}
+
+/// A stale anchor whose content was found in two or more candidate locations.
+///
+/// Fail-closed: the move-follow refuses to guess which location the link should
+/// point at, so it rewrites nothing and surfaces the conflict for a human to
+/// resolve. Carries enough context to name the anchor and the candidate count
+/// in a user-visible report.
+#[derive(Debug)]
+pub struct MeshConflict {
+    /// The mesh slug the conflicting anchor belongs to.
+    pub mesh_name: String,
+    /// Repo-relative path the anchor names today.
+    pub path: PathBuf,
+    /// 1-based start line of the anchor (0 for whole-file).
+    pub start: u32,
+    /// 1-based end line of the anchor (0 for whole-file).
+    pub end: u32,
+    /// Number of candidate locations the content was found in (≥ 2).
+    pub candidate_count: usize,
+}
+
+/// The outcome of a move-follow pass: unique relocations and ambiguous conflicts.
+#[derive(Debug, Default)]
+pub struct MeshFollowOutcome {
+    /// Anchors whose content moved to a single unambiguous new location.
+    pub plans: Vec<MeshMovePlan>,
+    /// Anchors whose content matched ≥ 2 candidate locations (fail-closed).
+    pub conflicts: Vec<MeshConflict>,
 }
 
 /// Compute mesh move plans in-process from the `.wiki/` store.
@@ -740,16 +773,16 @@ pub struct MeshMovePlan {
 ///
 /// The candidate set is the change set by default; there is no `--rescan` flag
 /// in the current CLI surface, so a whole-tree rescan is not offered here.
-pub fn plan_mesh_follows(repo_root: &Path) -> Result<Vec<MeshMovePlan>> {
+pub fn plan_mesh_follows(repo_root: &Path) -> Result<MeshFollowOutcome> {
     // Stat-gate the whole pass: an unchanged tree cannot have drifted anchors,
     // so there is nothing to re-hash.
     if crate::index::tree_unchanged(repo_root) {
-        return Ok(vec![]);
+        return Ok(MeshFollowOutcome::default());
     }
 
     let meshes = store::read_all(repo_root)?;
     if meshes.is_empty() {
-        return Ok(vec![]);
+        return Ok(MeshFollowOutcome::default());
     }
 
     // Working-tree change set: repo-relative paths that differ from HEAD
@@ -759,6 +792,7 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<Vec<MeshMovePlan>> {
     let mut change_set_cache: HashMap<String, Option<Vec<u8>>> = HashMap::new();
 
     let mut plans: Vec<MeshMovePlan> = Vec::new();
+    let mut conflicts: Vec<MeshConflict> = Vec::new();
 
     for (slug, mesh) in &meshes {
         for anchor in &mesh.anchors {
@@ -797,6 +831,12 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<Vec<MeshMovePlan>> {
                     push_plan(&mut plans, slug, anchor, &hits[0]);
                     continue;
                 }
+                if hits.len() >= 2 {
+                    // Same-file ambiguity: the content appears in ≥ 2 places in
+                    // the anchor's own file. Fail-closed — report, no rewrite.
+                    push_conflict(&mut conflicts, slug, anchor, hits.len());
+                    continue;
+                }
             }
 
             // 3. Change-set move. Build candidates from the change set, skipping
@@ -820,11 +860,13 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<Vec<MeshMovePlan>> {
             let hits = scan_for_content_hash(&candidates, &anchor.content_hash, extent, None);
             if hits.len() == 1 {
                 push_plan(&mut plans, slug, anchor, &hits[0]);
+            } else if hits.len() >= 2 {
+                push_conflict(&mut conflicts, slug, anchor, hits.len());
             }
         }
     }
 
-    Ok(plans)
+    Ok(MeshFollowOutcome { plans, conflicts })
 }
 
 /// Whether two content hashes are equal, tolerating an optional `sha256:`
@@ -850,6 +892,22 @@ fn push_plan(
         new_path: PathBuf::from(&hit.path),
         new_start: hit.start_line,
         new_end: hit.end_line,
+    });
+}
+
+/// Append a [`MeshConflict`] for `anchor` matched in `candidate_count` places.
+fn push_conflict(
+    conflicts: &mut Vec<MeshConflict>,
+    slug: &str,
+    anchor: &git_mesh_core::mesh_file::AnchorRecord,
+    candidate_count: usize,
+) {
+    conflicts.push(MeshConflict {
+        mesh_name: slug.to_string(),
+        path: PathBuf::from(&anchor.path),
+        start: anchor.start_line,
+        end: anchor.end_line,
+        candidate_count,
     });
 }
 
@@ -1197,20 +1255,49 @@ pub fn run_fix_pass(
     // Always run (even in dry_run) to emit SkippedFix records. Working-tree
     // content drives the re-hash, so staged and committed shifts are handled
     // identically.
-    let move_plans = plan_mesh_follows(repo_root)?;
+    let MeshFollowOutcome {
+        plans: move_plans,
+        conflicts: mesh_conflicts,
+    } = plan_mesh_follows(repo_root)?;
 
-    // Map (old_path, old_start, old_end) → (new_path, new_start, new_end).
+    // Map (old_path, old_start, old_end) → (slug, new_path, new_start, new_end).
     // The destination path is carried so a cross-file move rewrites the link's
-    // path too, not only the line range.
-    let eligible: HashMap<(PathBuf, u32, u32), (PathBuf, u32, u32)> = move_plans
+    // path too, not only the line range. The slug is carried so the move-follow
+    // can relocate the stored anchor in place once the link is rewritten.
+    // Keyed by the old (path, start, end); value is (slug, new_path, new_start,
+    // new_end).
+    type EligibleKey = (PathBuf, u32, u32);
+    type EligibleVal = (String, PathBuf, u32, u32);
+    let eligible: HashMap<EligibleKey, EligibleVal> = move_plans
         .iter()
         .map(|p| {
             (
                 (p.old_path.clone(), p.old_start, p.old_end),
-                (p.new_path.clone(), p.new_start, p.new_end),
+                (p.mesh_name.clone(), p.new_path.clone(), p.new_start, p.new_end),
             )
         })
         .collect();
+
+    // Surface ambiguous (≥ 2-match) moves as visible skipped fixes. Fail-closed:
+    // the link is left untouched for a human to resolve. These also drive a
+    // non-zero exit (see `FixPlan.mesh_conflicts` and `check::run`).
+    for c in &mesh_conflicts {
+        let anchor_label = if c.start == 0 && c.end == 0 {
+            format!("{} (whole file)", c.path.display())
+        } else {
+            format!("{}#L{}-L{}", c.path.display(), c.start, c.end)
+        };
+        skipped.push(SkippedFix {
+            file: format!(".wiki/{}", c.mesh_name),
+            line: 0,
+            kind: FixKind::MeshAnchorShift,
+            reason: format!(
+                "anchor {anchor_label} in mesh {}: content found in {} candidate \
+                 locations — not rewriting, resolve manually",
+                c.mesh_name, c.candidate_count
+            ),
+        });
+    }
 
     // Build the MeshIndex using all in-scope files.
     let mesh_index_opt = build_mesh_index(repo_root, files)?;
@@ -1267,7 +1354,7 @@ pub fn run_fix_pass(
             // as MOVED. Only attempt to rewrite links whose (target, start, end)
             // triple matches a MOVED plan — even if the range is still technically
             // within bounds (the mesh has shifted to a new position).
-            let Some((new_path, new_start, new_end)) =
+            let Some((slug, new_path, new_start, new_end)) =
                 eligible.get(&(resolved.clone(), old_start, old_end)).cloned()
             else {
                 continue;
@@ -1334,6 +1421,21 @@ pub fn run_fix_pass(
                 confidence: Confidence::High,
             });
             file_patches.push((link.href_byte_start, link.href_byte_end, new_href));
+
+            // Relocate the stored mesh anchor in place so it points at the
+            // content's new location with a refreshed hash. Without this the
+            // anchor keeps its stale coordinates: it is re-detected as moved on
+            // every subsequent run, still claims coverage of the OLD range, and
+            // Fix #4's coverage extension appends a duplicate for the new range.
+            // Skipped under dry-run (no writes). The new location's bytes are
+            // the worktree file, which the move-follow already verified.
+            if !dry_run {
+                let new_rel = new_path.to_string_lossy().into_owned();
+                store::relocate_anchor(
+                    repo_root, &slug, &resolved.to_string_lossy(), old_start, old_end,
+                    &new_rel, new_start, new_end,
+                )?;
+            }
         }
 
         if !file_patches.is_empty() {
@@ -1564,6 +1666,7 @@ pub fn run_fix_pass(
         fixes,
         skipped,
         mesh,
+        mesh_conflicts: mesh_conflicts.len(),
     })
 }
 

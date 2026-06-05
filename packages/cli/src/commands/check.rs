@@ -250,7 +250,10 @@ pub fn run(
                     print!("{}", plan.mesh.advisories);
                 }
             }
-            if !diagnostics.is_empty() && !no_exit_code {
+            // A move-follow conflict (≥ 2-match ambiguity) fails closed: it is
+            // surfaced as a skipped fix above and must make the run non-zero so
+            // it blocks pre-commit/CI, unless the caller opted out of exit codes.
+            if (!diagnostics.is_empty() || plan.mesh_conflicts > 0) && !no_exit_code {
                 return Ok(1);
             }
             return Ok(0);
@@ -348,7 +351,9 @@ pub fn run(
             }
         }
 
-        if !post_diagnostics.is_empty() && !no_exit_code {
+        // As in the dry-run path, an unresolved move-follow conflict fails
+        // closed and drives a non-zero exit (unless `--no-exit-code`).
+        if (!post_diagnostics.is_empty() || plan.mesh_conflicts > 0) && !no_exit_code {
             return Ok(1);
         }
         return Ok(0);
@@ -1393,6 +1398,236 @@ mod tests {
         );
     }
 
+    /// F3: a followed in-file move relocates the stored mesh anchor in place
+    /// (refreshed hash), leaves exactly one anchor, and is idempotent across a
+    /// second `--fix` (no duplicate accumulation, no further change).
+    #[test]
+    fn fix2_followed_move_relocates_stored_anchor_idempotently() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file("src/code.rs", "fn a() {}\n");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
+        );
+        repo.commit("baseline");
+
+        seed_mesh(
+            &repo,
+            "fix2-writeback-mesh",
+            &[
+                ("wiki/page.md", AnchorExtent::WholeFile),
+                ("src/code.rs", AnchorExtent::LineRange { start: 1, end: 1 }),
+            ],
+        );
+        // Shift the anchored block down one line in the working tree.
+        repo.create_file("src/code.rs", "// preamble\nfn a() {}\n");
+
+        let run_fix = || {
+            run(
+                &[],
+                false,
+                repo.path(),
+                repo.path(),
+                true,
+                crate::index::DocSource::WorkingTree,
+                true,
+                false,
+                false,
+            )
+            .expect("run")
+        };
+
+        run_fix();
+
+        // The stored anchor moved in place: exactly one src anchor at L2-L2 with
+        // a hash matching the new range.
+        let mesh = store::read_one(repo.path(), "fix2-writeback-mesh")
+            .expect("read")
+            .expect("mesh");
+        let src_anchors: Vec<_> = mesh
+            .anchors
+            .iter()
+            .filter(|a| a.path == "src/code.rs")
+            .collect();
+        assert_eq!(
+            src_anchors.len(),
+            1,
+            "expected exactly one src anchor after follow, got: {src_anchors:?}"
+        );
+        assert_eq!((src_anchors[0].start_line, src_anchors[0].end_line), (2, 2));
+        let expected = store::hash_anchor(
+            repo.path(),
+            "src/code.rs",
+            AnchorExtent::LineRange { start: 2, end: 2 },
+        )
+        .expect("hash");
+        assert_eq!(
+            src_anchors[0].content_hash, expected,
+            "stored hash must match the new range"
+        );
+
+        let serialized_after_first = store::read_one(repo.path(), "fix2-writeback-mesh")
+            .unwrap()
+            .unwrap();
+
+        // Second --fix: anchor is now fresh, nothing changes (idempotent).
+        run_fix();
+        let serialized_after_second = store::read_one(repo.path(), "fix2-writeback-mesh")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serialized_after_first, serialized_after_second,
+            "second --fix must not mutate the mesh (no accumulation)"
+        );
+    }
+
+    /// F3: a cross-file followed move relocates the stored anchor to the new
+    /// file with a refreshed hash, leaving exactly one anchor for that content.
+    #[test]
+    fn fix2_followed_cross_file_move_relocates_stored_anchor() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file("src/code.rs", "fn a() {}\n");
+        repo.create_file("src/other.rs", "// nothing here\n");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
+        );
+        repo.commit("baseline");
+
+        seed_mesh(
+            &repo,
+            "fix2-xfile-mesh",
+            &[
+                ("wiki/page.md", AnchorExtent::WholeFile),
+                ("src/code.rs", AnchorExtent::LineRange { start: 1, end: 1 }),
+            ],
+        );
+        repo.create_file("src/code.rs", "// emptied\n");
+        repo.create_file("src/other.rs", "// header\nfn a() {}\n");
+
+        run(
+            &[],
+            false,
+            repo.path(),
+            repo.path(),
+            true,
+            crate::index::DocSource::WorkingTree,
+            true,
+            false,
+            false,
+        )
+        .expect("run");
+
+        let mesh = store::read_one(repo.path(), "fix2-xfile-mesh")
+            .unwrap()
+            .unwrap();
+        let movable: Vec<_> = mesh
+            .anchors
+            .iter()
+            .filter(|a| a.path == "src/code.rs" || a.path == "src/other.rs")
+            .collect();
+        assert_eq!(
+            movable.len(),
+            1,
+            "expected exactly one relocated anchor, got: {movable:?}"
+        );
+        assert_eq!(movable[0].path, "src/other.rs");
+        assert_eq!((movable[0].start_line, movable[0].end_line), (2, 2));
+        let expected = store::hash_anchor(
+            repo.path(),
+            "src/other.rs",
+            AnchorExtent::LineRange { start: 2, end: 2 },
+        )
+        .expect("hash");
+        assert_eq!(movable[0].content_hash, expected);
+    }
+
+    /// F5: an ambiguous (≥ 2-match) move is reported as a conflict, leaves the
+    /// link untouched, and makes `--fix` exit non-zero so it fails CI/pre-commit.
+    /// Under `--no-exit-code` the conflict still reports but the exit is 0.
+    #[test]
+    fn fix2_conflict_reports_and_exits_nonzero() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        repo.create_file("src/code.rs", "fn a() {}\n");
+        repo.create_file("src/dup.rs", "// nothing\n");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
+        );
+        repo.commit("baseline");
+
+        seed_mesh(
+            &repo,
+            "fix2-conflict-exit-mesh",
+            &[("src/code.rs", AnchorExtent::LineRange { start: 1, end: 1 })],
+        );
+        // Empty the original; place the same block in TWO change-set files.
+        repo.create_file("src/code.rs", "// emptied\n");
+        repo.create_file("src/dup.rs", "fn a() {}\nfn a() {}\n");
+
+        // The conflict is carried in the FixPlan; assert it surfaces a skip and
+        // counts the conflict.
+        let plan = check_fix::run_fix_pass(
+            &discover_files(&[], repo.path(), repo.path(), crate::index::DocSource::WorkingTree)
+                .unwrap(),
+            repo.path(),
+            repo.path(),
+            &[],
+            crate::index::DocSource::WorkingTree,
+            false,
+        )
+        .expect("fix pass");
+        assert_eq!(plan.mesh_conflicts, 1, "expected one conflict recorded");
+        assert!(
+            plan.skipped.iter().any(|s| s
+                .reason
+                .contains("candidate locations — not rewriting, resolve manually")),
+            "expected an actionable conflict skip message, got: {:?}",
+            plan.skipped
+        );
+
+        // Re-seed (the pass above already ran writeback for nothing here) and
+        // drive the full `run` to assert exit code behavior.
+        let code = run(
+            &[],
+            false,
+            repo.path(),
+            repo.path(),
+            false, // no_exit_code = false
+            crate::index::DocSource::WorkingTree,
+            true,
+            false,
+            false,
+        )
+        .expect("run");
+        assert_eq!(code, 1, "conflict must drive a non-zero exit");
+
+        // The link was left untouched.
+        let content = std::fs::read_to_string(repo.path().join("wiki/page.md")).expect("read");
+        assert!(
+            content.contains("/src/code.rs#L1-L1"),
+            "conflict must leave the link untouched, got:\n{content}"
+        );
+
+        // Under --no-exit-code the conflict still reports but exit is 0.
+        let code = run(
+            &[],
+            false,
+            repo.path(),
+            repo.path(),
+            true, // no_exit_code = true
+            crate::index::DocSource::WorkingTree,
+            true,
+            false,
+            false,
+        )
+        .expect("run");
+        assert_eq!(code, 0, "--no-exit-code suppresses the conflict exit");
+    }
+
     /// Fix 2: a fresh anchor (content unchanged) produces no plan, so the link
     /// is not rewritten.
     #[test]
@@ -1416,10 +1651,11 @@ mod tests {
         // short-circuit) but the anchored content itself is untouched.
         repo.create_file("src/unrelated.rs", "// noise\n");
 
-        let plans = check_fix::plan_mesh_follows(repo.path()).expect("plan");
+        let outcome = check_fix::plan_mesh_follows(repo.path()).expect("plan");
         assert!(
-            plans.is_empty(),
-            "fresh anchor must yield no move plan, got: {plans:?}"
+            outcome.plans.is_empty(),
+            "fresh anchor must yield no move plan, got: {:?}",
+            outcome.plans
         );
     }
 
@@ -1455,10 +1691,11 @@ mod tests {
         // with a genuinely unchanged tree. The gate short-circuits the pass.
         crate::index::WikiIndex::prepare(repo.path()).expect("prepare index");
 
-        let plans = check_fix::plan_mesh_follows(repo.path()).expect("plan");
+        let outcome = check_fix::plan_mesh_follows(repo.path()).expect("plan");
         assert!(
-            plans.is_empty(),
-            "unchanged tree must short-circuit the gate (no re-hash, no plans), got: {plans:?}"
+            outcome.plans.is_empty(),
+            "unchanged tree must short-circuit the gate (no re-hash, no plans), got: {:?}",
+            outcome.plans
         );
     }
 
