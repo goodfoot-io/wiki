@@ -1,6 +1,6 @@
 [package]
 name = "wiki"
-version = "0.5.87"
+version = "0.5.88"
 edition = "2024"
 build = "build.rs"
 
@@ -25,7 +25,7 @@ toml_edit = "0.22"
 fs4 = { version = "0.13", features = ["sync"] }
 anyhow = "1"
 indexmap = { version = "2", features = ["serde"] }
-git-mesh-core = { git = "https://github.com/goodfoot-io/git-mesh.git", rev = "b37f18ae7cff523cb37724e88fe71af4b2c377ef", package = "git-mesh-core" }
+git-mesh-core = { git = "https://github.com/goodfoot-io/git-mesh.git", rev = "5396c8d30a9bc9f66c233ce356d401f7d0cca29d", package = "git-mesh-core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

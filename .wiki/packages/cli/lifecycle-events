@@ -1,4 +1,4 @@
-packages/cli/logging.wiki.md#L191-L196 sha256:ab0e3e7488792d1bbfc95612a64fd1e23b4d3a3271236028f5cfa036d72d28db
-packages/cli/src/perf.rs#L67-L96 sha256:d42946021b5b40510b74e3eef5fd7b961ea63db25293fe8fb418c0a6b13fbc72
-packages/cli/src/perf.rs#L98-L108 sha256:25b47b4608ea94938bfcd0d7e67cec0e7a966a5fd0c334c62053d2ec59a08d6a
+packages/cli/logging.wiki.md#L191-L196 rk64:9f4b154cb5b4fbcb
+packages/cli/src/perf.rs#L67-L96 rk64:18e33b4348935dbe
+packages/cli/src/perf.rs#L98-L108 rk64:205b9999f239005d
 

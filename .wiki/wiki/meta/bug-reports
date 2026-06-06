@@ -1,6 +1,5 @@
-wiki/meta/wiki-feedback.md#L17-L19 sha256:997f9076fb7f8ecbcd607c0dce248d8bd6c0b9bea01450b344672a9cc2d24a1c
-packages/cli/src/commands/check.rs#L203-L270 sha256:5d078dfb8655f97116bb23fe528561e22a9ff36f50c845d11ec8238f0b2ceb26
-packages/cli/src/commands/mod.rs#L358-L370 sha256:5202fcdddf2fc6098e24ee57cf93bc898521fd45d6e0d4da985e0c300fc4f9c7
-packages/cli/src/commands/mod.rs#L375-L380 sha256:99f32d03e9ca6e9289a299a711fc23bdfe71a355183ada2ec308c2480a4833fd
-packages/cli/src/commands/check.rs#L247-L314 sha256:5d078dfb8655f97116bb23fe528561e22a9ff36f50c845d11ec8238f0b2ceb26
+wiki/meta/wiki-feedback.md#L17-L19 rk64:e5fc3ed5dfc3a71e
+packages/cli/src/commands/check.rs#L247-L314 rk64:a0a6c8e6e5ce4f6b
+packages/cli/src/commands/mod.rs#L358-L370 rk64:e3f012904edf4930
+packages/cli/src/commands/mod.rs#L375-L380 rk64:77fb4a5e3d542cc4
 

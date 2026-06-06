@@ -6,7 +6,9 @@ use std::process::Command;
 use miette::Result;
 use serde::Serialize;
 
-use git_mesh_core::{AnchorExtent, LineIndex, hash_extent_indexed, scan_indexed};
+use git_mesh_core::{
+    AnchorExtent, LineIndex, cheap_fingerprint_indexed, rk64_from_hex, scan_indexed_rk64,
+};
 
 use crate::commands::mesh::store;
 use crate::commands::mesh_coverage::build_mesh_index;
@@ -831,6 +833,13 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<MeshFollowOutcome> {
                 }
             };
 
+            // The stored content identity is an rk64 fingerprint (16 hex).
+            // A record that does not parse as rk64 cannot be matched against
+            // rk64 windows — skip it rather than guess.
+            let Some(stored_fp) = rk64_from_hex(&anchor.content_hash) else {
+                continue;
+            };
+
             // The anchor's own file, read once above. Missing/empty ⇒ skip
             // straight to the change-set search.
             let own_bytes = file_bytes
@@ -843,19 +852,19 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<MeshFollowOutcome> {
                 // check and the same-file move scan.
                 let own_pair = [(anchor.path.clone(), LineIndex::build(own_bytes))];
 
-                // 1. Freshness — re-hash in place. If it matches, the anchor is
-                //    fresh; nothing to do.
-                let fresh = hash_extent_indexed(&own_pair[0].1, &extent);
-                if hashes_equal(&fresh, &anchor.content_hash) {
+                // 1. Freshness — re-fingerprint in place. If it matches, the
+                //    anchor is fresh; nothing to do.
+                if cheap_fingerprint_indexed(&own_pair[0].1, &extent) == stored_fp {
                     continue;
                 }
 
-                // 2. Same-file-first move (exhaustive, fail-closed on ambiguity).
+                // 2. Same-file-first move (exhaustive over the file's windows,
+                //    fail-closed on rk64 ambiguity).
                 let near = match extent {
                     AnchorExtent::WholeFile => None,
                     AnchorExtent::LineRange { start, .. } => Some(start),
                 };
-                let hits = scan_indexed(&own_pair, &anchor.content_hash, extent, near);
+                let hits = scan_indexed_rk64(&own_pair, stored_fp, extent, near);
                 if hits.len() == 1 {
                     push_plan(&mut plans, slug, anchor, &hits[0]);
                     continue;
@@ -871,7 +880,7 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<MeshFollowOutcome> {
             // 3. Change-set move. Exactly one match ⇒ a unique relocation.
             //    Zero ⇒ genuinely stale, no auto-fix. Two or more ⇒ conflict:
             //    fail-closed, leave the link untouched.
-            let hits = scan_indexed(&change_set_idx, &anchor.content_hash, extent, None);
+            let hits = scan_indexed_rk64(&change_set_idx, stored_fp, extent, None);
             if hits.len() == 1 {
                 push_plan(&mut plans, slug, anchor, &hits[0]);
             } else if hits.len() >= 2 {
@@ -881,14 +890,6 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<MeshFollowOutcome> {
     }
 
     Ok(MeshFollowOutcome { plans, conflicts })
-}
-
-/// Whether two content hashes are equal, tolerating an optional `sha256:`
-/// prefix on either side.
-fn hashes_equal(a: &str, b: &str) -> bool {
-    let na = a.strip_prefix("sha256:").unwrap_or(a);
-    let nb = b.strip_prefix("sha256:").unwrap_or(b);
-    na == nb
 }
 
 /// Append a [`MeshMovePlan`] for `anchor` relocated to `hit`.

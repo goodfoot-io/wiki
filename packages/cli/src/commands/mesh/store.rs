@@ -3,7 +3,7 @@
 //! Owns the storage and hashing primitives for in-process mesh operations.
 //! shell-outs. Anchors live under `repo_root/.wiki/<slug>` as plain text in the
 //! `git-mesh-core` [`MeshFile`] format (byte-identical to the legacy `.mesh/`
-//! format). Every hash flows through [`git_mesh_core::hash_bytes_with_extent`]
+//! format). Every anchor identity flows through [`git_mesh_core::cheap_fingerprint_with_extent`] (rk64)
 //! so a stored hash means the same thing on both sides by construction.
 //!
 //! Greenfield: the location is fixed at `repo_root/.wiki` — no env or
@@ -20,10 +20,7 @@ use miette::Result;
 use walkdir::WalkDir;
 
 use git_mesh_core::mesh_file::{AnchorRecord, MeshFile};
-use git_mesh_core::{AnchorExtent, hash_bytes_with_extent};
-
-/// Algorithm name recorded in every [`AnchorRecord`] written by wiki.
-const SHA256: &str = "sha256";
+use git_mesh_core::{AnchorExtent, RK64_ALGORITHM, cheap_fingerprint_with_extent, rk64_to_hex};
 
 /// The fixed mesh storage directory: `repo_root/.wiki`.
 pub(crate) fn wiki_dir(repo_root: &Path) -> PathBuf {
@@ -153,8 +150,11 @@ pub(crate) fn delete(repo_root: &Path, slug: &str) -> Result<()> {
 
 /// Read the worktree file at `repo_root/path` and hash the named extent.
 ///
-/// Returns the bare lowercase-hex SHA-256 produced by
-/// [`git_mesh_core::hash_bytes_with_extent`] (no `sha256:` prefix).
+/// Returns the bare lowercase-hex rk64 fingerprint produced by
+/// [`git_mesh_core::cheap_fingerprint_with_extent`] + [`git_mesh_core::rk64_to_hex`]
+/// (16 hex digits, no `rk64:` prefix). rk64 is a non-cryptographic identity —
+/// sound here because wiki anchors track documentation links, where a rare
+/// wrong/missed match is self-correcting, not a data-integrity event.
 pub(crate) fn hash_anchor(
     repo_root: &Path,
     path: &str,
@@ -163,12 +163,12 @@ pub(crate) fn hash_anchor(
     let abs = repo_root.join(path);
     let bytes = fs::read(&abs)
         .map_err(|e| miette::miette!("failed to read {}: {e}", abs.display()))?;
-    Ok(hash_bytes_with_extent(&bytes, &extent))
+    Ok(rk64_to_hex(cheap_fingerprint_with_extent(&bytes, &extent)))
 }
 
 /// Build an [`AnchorRecord`] from a path, extent, and bare-hex content hash.
 ///
-/// The algorithm is fixed to `"sha256"`. Whole-file anchors use the
+/// The algorithm is fixed to [`RK64_ALGORITHM`]. Whole-file anchors use the
 /// `start_line == 0 && end_line == 0` sentinel.
 pub(crate) fn anchor_record(path: String, extent: AnchorExtent, content_hash: String) -> AnchorRecord {
     let (start_line, end_line) = match extent {
@@ -179,7 +179,7 @@ pub(crate) fn anchor_record(path: String, extent: AnchorExtent, content_hash: St
         path,
         start_line,
         end_line,
-        algorithm: SHA256.to_string(),
+        algorithm: RK64_ALGORITHM.to_string(),
         content_hash,
     }
 }
@@ -258,25 +258,26 @@ mod tests {
         }
     }
 
-    /// Frozen parity vector: a known buffer + line range must hash to this
-    /// exact lowercase-hex digest. Pins the `git-mesh-core` hash contract so
-    /// future crate drift is caught (acceptance signal #2).
+    /// Frozen parity vector: a known buffer + line range must fingerprint to
+    /// this exact lowercase 16-hex rk64 value. Pins the `git-mesh-core` rk64
+    /// canonicalization so future crate drift is caught (acceptance signal #2).
     #[test]
     fn frozen_hash_parity_vector() {
         let buf = b"line one\nline two\nline three\nline four\nline five\n";
 
-        let range = hash_bytes_with_extent(buf, &AnchorExtent::LineRange { start: 2, end: 4 });
+        let range = rk64_to_hex(cheap_fingerprint_with_extent(
+            buf,
+            &AnchorExtent::LineRange { start: 2, end: 4 },
+        ));
         assert_eq!(
-            range,
-            "d0c948cc8b26ad880ae92259ebc2524dc21dee3116718adb59eae0828678f896",
-            "range 2-4 hash drifted from frozen vector"
+            range, "f27948ccff0093a1",
+            "range 2-4 fingerprint drifted from frozen vector"
         );
 
-        let whole = hash_bytes_with_extent(buf, &AnchorExtent::WholeFile);
+        let whole = rk64_to_hex(cheap_fingerprint_with_extent(buf, &AnchorExtent::WholeFile));
         assert_eq!(
-            whole,
-            "1b0deaa0ac952c6dcc836234ce4270a8f0dba9e12f5ec4cf1d65108168a17843",
-            "whole-file hash drifted from frozen vector"
+            whole, "4616a82389f999f7",
+            "whole-file fingerprint drifted from frozen vector"
         );
     }
 
@@ -343,7 +344,7 @@ mod tests {
         fs::write(root.join("file.txt"), content).unwrap();
 
         let got = hash_anchor(root, "file.txt", AnchorExtent::WholeFile).unwrap();
-        let expected = hash_bytes_with_extent(content, &AnchorExtent::WholeFile);
+        let expected = rk64_to_hex(cheap_fingerprint_with_extent(content, &AnchorExtent::WholeFile));
         assert_eq!(got, expected);
     }
 
@@ -525,6 +526,6 @@ mod tests {
     fn anchor_record_whole_file_uses_zero_sentinel() {
         let rec = anchor_record("p".to_string(), AnchorExtent::WholeFile, "h".to_string());
         assert_eq!((rec.start_line, rec.end_line), (0, 0));
-        assert_eq!(rec.algorithm, "sha256");
+        assert_eq!(rec.algorithm, "rk64");
     }
 }
