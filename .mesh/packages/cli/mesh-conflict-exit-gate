@@ -1,6 +1,6 @@
-packages/cli/src/commands/check_fix.rs#L90-L99 sha256:5614f50daa26991e3e71a141a66b110a7b432856ef65276301c1f70dcf925afc
-packages/cli/src/commands/check.rs#L297-L303 sha256:41d13ee4bb526db26a9d6c76370d5b6d7410ac136e0d3049040b8ac7853f6f41
-packages/cli/src/commands/check.rs#L398-L403 sha256:03bf5c1f958ee33f67476cf80465762573b983b23698302599be2653d375955b
-packages/cli/src/commands/check_fix.rs#L1295-L1313 sha256:5f22caee034ae5d02cdabf45510342b4389e3015162e11d94258752b479c2e92
+packages/cli/src/commands/check_fix.rs#L90-L99 rk64:17bc1f0af8d80ff8
+packages/cli/src/commands/check.rs#L297-L303 rk64:4b5205308ec87764
+packages/cli/src/commands/check.rs#L398-L403 rk64:7ffe6ae905eeb2f0
+packages/cli/src/commands/check_fix.rs#L1295-L1313 rk64:94027d1c5ebde49a
 
 check_fix.rs counts ambiguous (>=2-match) move-follow conflicts into FixPlan.mesh_conflicts and fails closed (never auto-rewrites). check::run must gate its non-zero exit on plan.mesh_conflicts > 0 at both the dry-run and apply sites, or an unresolved ambiguous move would silently exit 0 and slip past pre-commit/CI. The usize field can be ignored without any compiler error, so a new fail-closed conflict category in check_fix must be wired into both exit gates by hand.
