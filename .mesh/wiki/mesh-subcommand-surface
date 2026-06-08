@@ -1,4 +1,6 @@
 plugins/wiki/skills/wiki/SKILL.md#L3-L117 rk64:1b267e6f3de7b54b
 packages/cli/src/commands/mesh/manage.rs rk64:c0f6bb76726a8d29
+plugins/wiki/skills/wiki/references/cli.md#L34-L118 rk64:cc459906ed1734a4
+packages/cli/src/main.rs#L188-L369 rk64:ff7cbda6a4fad7e1
 
-The wiki skill documents the three-verb mesh subcommand (show/add/remove) that is implemented in manage.rs; changes to the surface or command semantics must keep both in sync.
+The wiki mesh three-verb command surface (show/add/remove): its clap definition and dispatch in main.rs, its implementation in manage.rs, and its documentation in SKILL.md and the cli.md reference must all agree on verbs, flags, and semantics.

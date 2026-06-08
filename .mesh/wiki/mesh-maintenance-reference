@@ -1,4 +1,5 @@
 plugins/wiki/skills/wiki/references/maintenance.md#L7-L164 rk64:4bcc6b51addff942
 packages/cli/src/commands/mesh/manage.rs rk64:c0f6bb76726a8d29
+packages/cli/src/commands/mesh/store.rs#L186-L303 rk64:fe138813833014b7
 
 Maintenance guide documents the wiki mesh add/remove workflow; implementation changes to upsert/remove behavior must reflect in the documented maintenance procedures.
