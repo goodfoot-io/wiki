@@ -5,25 +5,6 @@ Single linear pass through `wiki/guides/manual-testing-procedure.md` against
 procedure and counter-intuitive behavior. Steps not listed here behaved exactly
 as documented.
 
-## Bugs / non-spec behavior
-
-### `wiki install` surface mismatches the procedure (Step 14)
-
-Procedure: "subcommands listing supported integration targets (e.g. `claude`,
-`gemini`). `wiki install <target>` writes the integration config".
-
-Actual:
-
-- Flag-based: `wiki install --codex` and `wiki install --claude`.
-- `--claude` is informational only (prints setup instructions; touches
-  nothing).
-- `gemini` is not a target.
-- Help text does mention `--codex` does network I/O and writes managed
-  files — that part is well-documented in `--help`.
-
-The procedure's example wording (`wiki install <target>`) is not a real
-invocation pattern.
-
 ## Counter-intuitive behavior
 
 ### `wiki "Authentication" -l 1 -o 1` returns silently empty (Step 6b)
@@ -84,4 +65,4 @@ still lists:
 These subcommands have been removed; the matrix row should be deleted, and
 the `Step` column for the rows below it should be renumbered to match the
 current section numbers (`wiki check --fix` mesh coverage is now Step 13,
-`install` Step 14, `--perf` Step 15).
+`--perf` Step 14).

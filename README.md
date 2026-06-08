@@ -4,7 +4,7 @@ A fast, Rust-powered wiki toolkit for local-first Markdown knowledge bases. This
 
 - **`@goodfoot/wiki`** — a standalone CLI for indexing, searching, linking, and rendering Markdown wikis
 - **Wiki Viewer** — a VS Code extension that renders wiki pages with live markdown-link navigation
-- **Agent plugins** — ready-to-install Claude Code and Codex plugins that teach coding agents to read and write the wiki
+- **Agent plugins** — a ready-to-install Claude Code plugin that teaches coding agents to read and write the wiki
 
 Documentation is stored as plain Markdown with relative-path links and optional frontmatter — nothing proprietary, no database you can't read.
 
@@ -38,54 +38,25 @@ wiki extract ...
 wiki summary "Authorization"
 wiki pin list
 wiki list
-
-# Run inside a git hook (indexes new/changed articles)
-wiki hook post-commit
-
-# Install the Codex integration (skill, PostToolUse hook, feature flag)
-wiki install --codex
 ```
 
-### Installing the Codex integration
+### Agent integration
 
-`wiki install --codex` downloads the latest plugin assets from
-[goodfoot-io/wiki](https://github.com/goodfoot-io/wiki) and installs them into
-your Codex home (resolved from `--codex-home`, `$CODEX_HOME`, or `~/.codex`). It
-installs:
+The wiki validates itself through the **Claude Code plugin** under
+[plugins/wiki/](./plugins/wiki/), whose PostToolUse hook shells out to
+`wiki check --fix` whenever an agent writes or edits a Markdown file. Install it
+via the Claude Code plugin marketplace.
 
-- The `wiki` skill under `$CODEX_HOME/skills/wiki/`
-- A managed `PostToolUse` hook group in `$CODEX_HOME/hooks.json` that runs
-  `wiki hook --codex`
-- `[features].codex_hooks = true` in `$CODEX_HOME/config.toml`
-
-Re-running the command updates the install in place: the managed skill
-directory is replaced atomically, the managed hook group is upserted without
-touching unrelated hook config, and `codex_hooks` is ensured. Backups of any
-changed files are written under `$CODEX_HOME/.wiki-install/backups/`.
-
-```bash
-wiki install --codex                        # install or update from main
-wiki install --codex --ref v1.0.2           # pin to a tag, branch, or SHA
-wiki install --codex --codex-home ./codex   # override the Codex home
-wiki install --codex --dry-run              # print planned changes, write nothing
-wiki install --codex --force                # overwrite unmanaged skill/hook conflicts
-wiki install --claude                       # print friendly Claude Code setup instructions
-```
-
-The command is fail-closed: if the download, archive validation, or existing
-`hooks.json`/`config.toml` parse fails, no files are written.
-
-Using Claude Code instead? Run `wiki install --claude` for a friendly,
-copy-pasteable guide to adding the wiki plugin marketplace. That mode is
-informational only — it never runs commands, fetches anything, or touches the
-filesystem; you stay in control.
+To keep the index synchronized outside an agent, copy the sample git hooks from
+[examples/githooks/](./examples/githooks/) into `.git/hooks/` — see
+[examples/githooks/README.md](./examples/githooks/README.md).
 
 ### Features
 
 - **Markdown link resolution** — relative-path links between wiki pages resolved against the linking file's directory
 - **FTS5 full-text search** — powered by an embedded SQLite (turso) index with BM25 ranking and snippet extraction
 - **Fragment links** — heading slugs are stable and addressable; `#heading` fragments survive rename
-- **Git-aware hooks** — `wiki hook` phases keep the index in lockstep with commits, merges, and rebases (WAL mode for concurrent access)
+- **Git-aware indexing** — the sample git hooks keep the index in lockstep with commits and merges (WAL mode for concurrent access)
 - **Frontmatter-driven** — title, aliases, tags, and summaries read from YAML frontmatter
 - **Syntax highlighting** — pure-Rust syntect + fancy-regex (no native C dependency)
 - **Fail-closed validation** — `wiki check` surfaces broken links and missing targets as errors
@@ -113,7 +84,7 @@ Install **Wiki Viewer** from the [VS Code Marketplace](https://marketplace.visua
 ├── plugins/
 │   └── wiki/           # Agent plugin: hooks + skills (see below)
 ├── examples/
-│   └── githooks/       # Sample post-commit / post-merge hooks for Claude, Codex, Gemini
+│   └── githooks/       # Sample post-commit / post-merge hooks for Claude, Gemini
 ├── docs/
 │   └── cross-compilation.md
 └── scripts/
@@ -124,14 +95,14 @@ Install **Wiki Viewer** from the [VS Code Marketplace](https://marketplace.visua
 
 The Rust CLI lives in `packages/cli/`; `packages/cli/package.json` is the single source of truth for the version (propagated by `scripts/sync-versions.sh`). The VS Code extension is a standard TypeScript package built with esbuild and packaged via `vsce`.
 
-## Agent plugin marketplaces
+## Agent plugin marketplace
 
-The `plugins/wiki/` directory is a shared plugin distributed through both the **Claude Code** and **Codex** plugin marketplaces. It provides:
+The `plugins/wiki/` directory is a plugin distributed through the **Claude Code** plugin marketplace. It provides:
 
-- **Hooks** — `post-commit` / `post-merge` handlers that keep the wiki index synchronized after agent-driven commits
+- **Hooks** — a `PostToolUse` hook that runs `wiki check --fix` after an agent writes or edits a Markdown file, keeping links and frontmatter valid
 - **Skills** — a `wiki` skill that teaches agents how to query and author wiki articles using the CLI, including markdown-link conventions and frontmatter rules
 
-Install via the marketplace integration in Claude Code or Codex, or copy `examples/githooks/*.sh` into `.git/hooks/` for a minimal manual setup. See [examples/githooks/README.md](./examples/githooks/README.md) for the manual install instructions.
+Install via the marketplace integration in Claude Code, or copy `examples/githooks/*.sh` into `.git/hooks/` for a minimal manual setup. See [examples/githooks/README.md](./examples/githooks/README.md) for the manual install instructions.
 
 ## Quick start (contributors)
 

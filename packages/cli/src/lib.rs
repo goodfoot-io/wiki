@@ -7,9 +7,6 @@
 //! Only items genuinely required by integration tests should be re-exported
 //! here. Do not leak internal helpers beyond what tests need.
 
-#[path = "commands/install.rs"]
-pub mod install;
-
 pub mod frontmatter;
 pub mod git;
 pub mod index;

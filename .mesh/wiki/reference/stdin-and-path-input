@@ -1,0 +1,4 @@
+wiki/reference/wiki-cli-advanced-usage.md#L33-L55 rk64:6d1e71fd8b08b013
+packages/cli/src/commands/search.rs#L61-L90 rk64:d51de129dae8d7df
+packages/cli/src/commands/summary.rs#L130-L158 rk64:8bf836f32d95d741
+

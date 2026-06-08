@@ -1,0 +1,6 @@
+README.md#L1-L106 rk64:798dbf6255535e10
+plugins/wiki/skills/wiki/references/cli.md#L59-L71 rk64:e700c64ec4d921ab
+packages/cli/logging.wiki.md#L65-L130 rk64:67fdafb8ff874494
+docs/manual-testing-notes.md#L1-L68 rk64:968a3af0964d4a84
+
+Documentation across README, CLI reference, logging wiki, and manual-testing notes describes the Codex install workflow that has been retired.

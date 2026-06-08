@@ -10,7 +10,6 @@ mod test_support;
 mod version;
 
 use std::io::{self, BufRead, IsTerminal};
-use std::path::PathBuf;
 use std::process;
 use std::time::Instant;
 
@@ -36,7 +35,7 @@ enum SourceArg {
     version = crate::version::VERSION,
     before_help = concat!("wiki ", env!("WIKI_VERSION"), "\n"),
     about = "wiki - Read and maintain wiki pages",
-    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, links, list, summary, refs, hook, install) are reserved and cannot be used as page titles.\n\nFile selection follows the current working directory; links, anchors, and mesh coverage resolve against the git repository root.",
+    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, links, list, summary, refs) are reserved and cannot be used as page titles.\n\nFile selection follows the current working directory; links, anchors, and mesh coverage resolve against the git repository root.",
     disable_help_subcommand = true,
     disable_version_flag = true,
 )]
@@ -124,12 +123,6 @@ enum Commands {
         print_applied: bool,
     },
 
-    /// Run `wiki check` on the written/edited file path from a PostToolUse
-    /// event and emit a systemMessage when validation errors remain.
-    ///
-    /// Use directly as the "command" value in a PostToolUse hook definition.
-    Hook,
-
     /// List all wiki pages with metadata (title, aliases, tags, file path).
     ///
     /// Optionally filter by tag.
@@ -157,33 +150,6 @@ enum Commands {
         /// Page title, alias, or file path; reads from stdin if omitted
         #[arg(value_name = "title|path")]
         title: Option<String>,
-    },
-
-    /// Install the wiki integration into an external tool's config home.
-    Install {
-        /// Install the Codex integration.
-        #[arg(long = "codex")]
-        codex: bool,
-
-        /// Print friendly Claude Code setup instructions (informational only).
-        #[arg(long = "claude")]
-        claude: bool,
-
-        /// Overwrite locally modified managed files after recording a backup.
-        #[arg(long = "force")]
-        force: bool,
-
-        /// Print the planned file changes without writing.
-        #[arg(long = "dry-run")]
-        dry_run: bool,
-
-        /// Override $CODEX_HOME and ~/.codex.
-        #[arg(long = "codex-home", value_name = "PATH")]
-        codex_home: Option<PathBuf>,
-
-        /// Git ref (branch, tag, or SHA) to install from.
-        #[arg(long = "ref", value_name = "REF", default_value = "main")]
-        git_ref: String,
     },
 }
 
@@ -321,11 +287,6 @@ fn run(
                 print_applied,
             )
         }
-        Some(Commands::Hook) => {
-            let lines = read_stdin_lines();
-            let input = lines.join("\n");
-            commands::hook_check::run(&input, &repo_root, source)
-        }
         Some(Commands::List { tag, limit, offset }) => {
             commands::list::run(&[], tag.as_deref(), limit, offset, json, &repo_root, source)
         }
@@ -337,21 +298,6 @@ fn run(
                 false,
             )
         }
-        Some(Commands::Install {
-            codex,
-            claude,
-            force,
-            dry_run,
-            codex_home,
-            git_ref,
-        }) => commands::install::run(
-            codex,
-            claude,
-            force,
-            dry_run,
-            codex_home.as_deref(),
-            &git_ref,
-        ),
         None => match query.as_deref() {
             Some(query) => commands::search::run(query, limit, offset, json, &repo_root, source),
             None => {
@@ -385,10 +331,8 @@ fn run(
 fn command_name(command: Option<&Commands>, query: Option<&str>) -> &'static str {
     match command {
         Some(Commands::Check { .. }) => "check",
-        Some(Commands::Hook) => "hook",
         Some(Commands::List { .. }) => "list",
         Some(Commands::Summary { .. }) => "summary",
-        Some(Commands::Install { .. }) => "install",
         None if query.is_some() => "search",
         None => "help",
     }

@@ -56,15 +56,6 @@ wiki check --fix --print-applied  # stdout = one repo-relative path per created/
 
 `--print-applied` is the pre-commit integration point: it lets the hook stage **exactly** the meshes this run created or renamed (`git add` each printed path) instead of a blanket `git add .mesh/`. Conflicts with `--fix-dry-run`. When a new slug path-collides with a pre-existing ancestor mesh, `--fix` renames the blocker to `<blocker>/<derived-leaf>` (or `<blocker>/index`), prints the blocker's new path for staging, and notes the rename on stderr (requires git-mesh ≥ 1.0.83).
 
-## Setup and integration
-
-```bash
-wiki install <tool>               # install the wiki integration into an external tool's config home
-wiki hook                         # PostToolUse hook entrypoint (reads event JSON from stdin)
-```
-
-`wiki hook` is wired through Claude Code's hooks configuration, not invoked by hand. It runs `wiki check` against the file the tool just edited and emits a `systemMessage` if validation fails.
-
 ## Global flags
 
 | Flag | Effect |

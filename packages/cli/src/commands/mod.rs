@@ -1,7 +1,5 @@
 pub mod check;
 pub mod check_fix;
-pub mod hook_check;
-pub mod install;
 pub mod list;
 pub mod mesh;
 pub(crate) mod mesh_coverage;

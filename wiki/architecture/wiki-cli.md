@@ -17,14 +17,14 @@ The [check command](/packages/cli/src/commands/check.rs#L28-L29) runs a full val
 
 ## PostToolUse Hook
 
-The [hook command](/packages/cli/src/commands/hook_check.rs#L16-L63) integrates the wiki with external tools like Claude Code. It processes `PostToolUse` JSON events from stdin: when a `.md` file inside the wiki directory is written or edited, it runs `wiki check` on that file and emits a JSON `systemMessage` envelope if validation errors remain, so the AI can address them immediately.
+Claude Code integration is owned by the [PostToolUse hook](/packages/claude-code-hooks/src/post-tool-use.ts), a TypeScript handler shipped with the Claude Code plugin rather than a CLI subcommand. When a `.md` file inside the wiki directory is written or edited, the hook shells out to `wiki check --fix` on that file and surfaces any remaining validation errors so the agent can address them immediately.
 
 ## Navigation and Discovery
 
 Several commands support navigating and searching the wiki from the command line:
 
 - **Search**: The [search command](/packages/cli/src/commands/search.rs) is the primary entrypoint for finding wiki content. It performs a weighted search that ranks exact title matches, repo-relative path matches, and full-text matches (BM25) in a single unified flow.
-- **Suggest**: The suggest command (used internally by the hook) finds the best matches for a query with a minimum score threshold, prioritizing titles and aliases.
+- **Suggest**: The suggest command (used internally by `check` to recommend fixes) finds the best matches for a query with a minimum score threshold, prioritizing titles and aliases.
 - **Summary**: The [summary command](/packages/cli/src/commands/summary.rs#L130-L130) outputs a page's frontmatter-defined summary along with a repo-relative path to its source file.
 
 ## Rendering

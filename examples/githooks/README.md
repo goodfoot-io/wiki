@@ -8,7 +8,6 @@ Example git hooks that use AI coding agents to automatically maintain wiki docum
 |----------|-----|----------|
 | **Gemini** | `gemini` | Built-in sandboxing via admin policy files; good for automated/CI use |
 | **Claude** | `claude` | Strong at nuanced prose and cross-reference analysis |
-| **Codex** | `codex` | Full-auto approval mode; good for unattended batch runs |
 
 ## Prerequisites
 
@@ -16,7 +15,6 @@ Example git hooks that use AI coding agents to automatically maintain wiki docum
 2. Your chosen AI CLI installed and authenticated:
    - Gemini: `npm install -g @google/gemini-cli` + API key configured
    - Claude: `npm install -g @anthropic-ai/claude-code` + API key configured
-   - Codex: `npm install -g @openai/codex` + API key configured
 3. Git repository with a `wiki/` directory containing markdown documentation
 
 ## Installation

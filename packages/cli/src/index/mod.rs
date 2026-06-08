@@ -92,7 +92,7 @@ const SUGGESTION_LIMIT: i64 = 3;
 /// Selects which git snapshot `WikiIndex` reads from.
 ///
 /// The variants are preserved verbatim from the pre-rewrite surface so
-/// `commands/{search,summary,check,check_fix,mesh/scaffold,list,hook_check,mod}.rs`
+/// `commands/{search,summary,check,check_fix,mesh/scaffold,list,mod}.rs`
 /// keep compiling unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocSource {

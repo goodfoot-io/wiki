@@ -62,7 +62,6 @@ Perf scope events measure execution time and record success/error status. They a
 | 272 | `"wiki {}"` (version) | Display CLI version |
 | 290 | JSON error object | JSON-formatted error output (when `--json` flag is set) |
 | 292 | `"{e:?}"` | Debug format error output (when not `--json`) |
-| 333 | `"error: one of --claude or --codex must be provided"` | Validation error for search command |
 | 372 | `"error: {error_message}"` | Generic error output |
 | 404-405 | `"\n---\n"` and content | Output markdown with separator |
 | 408 | Blank line | Output spacing |
@@ -147,22 +146,6 @@ Perf scope events measure execution time and record success/error status. They a
 | 399 | JSON diagnostics array | Structured JSON output of checks |
 | 405 | `"**{kind}** — `{file}:{line}`"` | Formatted diagnostic with location and message |
 | 414 | `"Fixed {count} file(s)."` | Summary of auto-fixes applied |
-
-### commands/install.rs
-
-| Line | Message | Purpose |
-|------|---------|---------|
-| 741 | `"wiki install: enabled [features].codex_hooks in {path}"` | Reports that the installer flipped `codex_hooks` from `false` to `true` in `$CODEX_HOME/config.toml` (see [ensure_codex_hooks_flag](./src/commands/install.rs#L679-L679)) |
-| [`print_install_header`](./src/commands/install.rs#L927-L927) | `"wiki install --codex"` banner + "Downloading from: …/Installing into: …" | Install-start header shown in both real-run and dry-run (dry-run appends "(preview — nothing will be downloaded or written)") |
-| [`print_planned_files`](./src/commands/install.rs#L946-L946) | Grouped "New files" / "Merged into existing files" sections with per-file explanations | Natural-language description of every file the installer touches; status suffixes (`new`/`updated`/`unchanged`) are appended on real runs |
-| [`print_summary`](./src/commands/install.rs#L991-L991) | "Backups written:" list + "Manifest: {path}" | Post-install tail listing any backups and the manifest path |
-| [`codex_extension_footer`](./src/commands/install.rs#L1024-L1024) | "VS Code extension:" + marketplace URLs | Trailing block printed on both real-run and dry-run pointing users at the companion extension |
-
-### commands/hook.rs
-
-| Line | Message | Purpose |
-|------|---------|---------|
-| 146 | JSON envelope | Structured JSON output for hook invocation |
 
 ## Log File Format
 

@@ -1,0 +1,5 @@
+wiki/architecture/wiki-mesh-integration.md#L16-L26 rk64:a971e62c99149067
+packages/cli/src/commands/mesh_coverage.rs#L55-L58 rk64:50ace3cd0e4ac39a
+packages/cli/src/commands/mesh_coverage.rs#L106-L116 rk64:cc82add2aac29d7d
+packages/cli/src/commands/mesh_coverage.rs#L147-L147 rk64:edc30e67a59f016d
+

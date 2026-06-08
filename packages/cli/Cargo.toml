@@ -19,9 +19,6 @@ tempfile = "3"
 rusqlite = { version = "0.32", features = ["bundled", "blob"] }
 walkdir = "2"
 sha2 = "0.10"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
-toml_edit = "0.22"
 fs4 = { version = "0.13", features = ["sync"] }
 anyhow = "1"
 indexmap = { version = "2", features = ["serde"] }
@@ -33,15 +30,6 @@ libc = "0.2"
 
 [build-dependencies]
 serde_json = "1"
-
-# Windows "Installer Detection" heuristically forces any executable whose name
-# contains `install`/`setup`/`update`/`patch` to require UAC elevation, so an
-# auto-named `install_integration-<hash>.exe` test binary fails to launch with
-# `os error 740`. Pin an explicit, token-free binary name while keeping the
-# descriptive source filename.
-[[test]]
-name = "hook_provisioning_integration"
-path = "tests/install_integration.rs"
 
 [dev-dependencies]
 assert_cmd = "2"

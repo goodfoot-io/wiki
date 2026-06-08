@@ -1,0 +1,6 @@
+packages/cli/src/main.rs#L89-L172 rk64:7f7d5bf701fec7be
+packages/cli/src/commands/mod.rs#L1-L7 rk64:828c3a64606786b7
+packages/cli/src/lib.rs#L10-L12 rk64:d30903f8194c4fae
+packages/cli/Cargo.toml#L1-L36 rk64:83d6c3e1877d10a7
+
+CLI Commands enum and module registration reflect the Codex install/hook command set that has been removed.
