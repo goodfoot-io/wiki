@@ -64,12 +64,14 @@ pub(crate) fn render_advisories(
                 let _ = writeln!(
                     out,
                     "Skipped mesh `{}` — slug path collides with existing mesh `{}` (page `{}`). \
-                     Prefer renaming this draft's slug so it no longer path-collides with `{}`, \
-                     then re-run `wiki check --fix`. Only if `{}` is itself stale should you \
-                     remove it — this DELETES its anchors and `why` and may raise a fresh \
-                     mesh_uncovered failure for whatever it covered:\n  \
+                     Create the coverage manually under a different, non-colliding slug \
+                     (anchor both the page and the code target):\n  \
+                     wiki mesh add <non-colliding-slug> {} <code-anchor> --why \"<rationale>\"\n  \
+                     Only if `{}` is itself stale should you remove it instead — this DELETES \
+                     its anchors and `why` and may raise a fresh mesh_uncovered failure for \
+                     whatever it covered:\n  \
                      wiki mesh remove {}",
-                    d.slug, existing, d.page, existing, existing, existing
+                    d.slug, existing, d.page, d.page, existing, existing
                 );
             }
         }
