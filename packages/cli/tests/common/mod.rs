@@ -2,6 +2,13 @@
 //!
 //! All helpers construct temporary git repositories using `std::process::Command::new("git")`
 //! — the production-side ban does not apply to test fixture code.
+//!
+//! This module is compiled into each integration-test binary that does `mod common;`.
+//! Each binary uses only a subset of these helpers, so an unused-in-this-crate item
+//! would otherwise trip `dead_code` per binary even though the suite as a whole uses
+//! them all. `FixtureRepo::dir` is an intentional RAII guard kept alive for the test's
+//! lifetime and never read directly.
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

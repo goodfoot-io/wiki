@@ -5,8 +5,6 @@ mod headings;
 mod index;
 mod parser;
 mod perf;
-#[cfg(test)]
-mod test_support;
 mod version;
 
 use std::io::{self, BufRead, IsTerminal};
