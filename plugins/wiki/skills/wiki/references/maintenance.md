@@ -6,21 +6,23 @@ Step-by-step instructions for identifying drifted wiki pages, updating them, and
 
 ## 1. Identify Drifted Anchors
 
+Run `wiki check` to surface stale mesh failures:
+
 ```bash
-git mesh stale
+wiki check
 ```
 
-- **No drifted anchors**: Run `wiki check` to confirm the wiki is clean, then stop.
-- **Drifted anchors found**: Continue to Step 2.
+- **No errors**: The wiki is clean; stop.
+- **Stale mesh failures found**: Continue to Step 2.
 
 ---
 
 ## 2. Prioritize
 
-Group drifted anchors by mesh. For each mesh, run:
+Group drifted anchors by mesh. For each mesh, inspect its anchors:
 
 ```bash
-git mesh <slug>
+wiki mesh show <slug>
 ```
 
 Review which wiki file and source file are anchored together. Pages whose anchors touch widely-used code or whose wikilinks are referenced from many places should be processed first.
@@ -32,7 +34,7 @@ Review which wiki file and source file are anchored together. Pages whose anchor
 ### 3.1 Get the Diff
 
 ```bash
-git mesh stale <slug>
+wiki mesh show <slug> --patch
 ```
 
 Read every drifted anchor's diff in full before making any changes. Understand all changes before deciding what prose to update.
@@ -63,19 +65,34 @@ After updating prose, check whether any relative markdown links on the page poin
 
 ### 3.5 Re-anchor
 
-After all prose updates for the page are complete, stage updated anchors for every fragment link that changed:
+After all prose updates for the page are complete, update anchors for every fragment link that changed.
+
+**Stale hash (content rewritten in place, range unchanged):** re-hash by upsert:
 
 ```bash
-git mesh add <slug> <wiki-file> <source-anchor>   # e.g. packages/cli/src/foo.rs#L10-L40
+wiki mesh add <slug> <source-anchor>   # e.g. packages/cli/src/foo.rs#L10-L40
 ```
 
-Then stage the updated `.mesh/` files and include them in the same commit:
+**Moved content (range changed):** remove the old anchor, add the new one:
 
 ```bash
-git add .mesh/
+wiki mesh remove <slug> <old-anchor>
+wiki mesh add <slug> <new-anchor>
 ```
 
-`.mesh/` files are ordinary tracked files. Stage them alongside your content changes and commit everything together — the pre-commit hook handles this automatically when committing via `git commit`, but running `git mesh add` manually requires staging by hand.
+**Deleted content:** remove the anchor and drop the fragment link from the wiki page:
+
+```bash
+wiki mesh remove <slug> <anchor>
+```
+
+`wiki mesh add` and `wiki mesh remove` write directly to the `.wiki/` store. Then stage the updated `.wiki/` files and include them in the same commit:
+
+```bash
+git add .wiki/
+```
+
+`.wiki/` files are ordinary tracked files. Stage them alongside your content changes and commit everything together — the pre-commit hook handles this automatically when committing via `git commit`, but running `wiki mesh` commands manually requires staging by hand.
 
 ---
 
@@ -87,17 +104,17 @@ After all prose edits:
 wiki check --fix --fix-dry-run  # preview which meshes will be created (no changes)
 ```
 
-`wiki check --fix` walks the corpus and creates a `git mesh` for every uncovered fragment link — anchors only, no why. It will also surface a `Skipped mesh \`<slug>\` — references missing path \`<path>\`.` advisory for any link whose target no longer exists on disk; fix the wiki link (or remove it if the target is intentionally gone) and rerun. When a new mesh's slug path-collides with a pre-existing ancestor mesh, `--fix` renames the blocker to `<blocker>/<derived-leaf>` (or `<blocker>/index`) so both can coexist and notes the rename (requires git-mesh ≥ 1.0.83). The pre-commit hook runs `wiki check --fix` automatically and stages the created meshes into the commit:
+`wiki check --fix` walks the corpus and creates a mesh for every uncovered fragment link — anchors only, no why. It will also surface a `Skipped mesh \`<slug>\` — references missing path \`<path>\`.` advisory for any link whose target no longer exists on disk; fix the wiki link (or remove it if the target is intentionally gone) and rerun. When a new mesh's slug path-collides with a pre-existing ancestor mesh, `--fix` renames the blocker to `<blocker>/<derived-leaf>` (or `<blocker>/index`) so both can coexist and notes the rename. The pre-commit hook runs `wiki check --fix` automatically and stages the created meshes into the commit:
 
 ```bash
 git commit -m "wiki: ..."
 ```
 
-If you want to add a `why` to a mesh for curation purposes, do so separately after committing:
+If you want to add a `why` to a mesh for curation purposes, use `wiki mesh add` with `--why`:
 
 ```bash
-git mesh why <slug> -m "Description of what this mesh covers."
-git add .mesh/
+wiki mesh add <slug> --why "Description of what this mesh covers."
+git add .wiki/
 git commit -m "wiki: add mesh why for <slug>"
 ```
 
@@ -144,4 +161,4 @@ Report:
 - **Pages updated** — pages where prose changed; one line per page describing what changed and why
 - **Re-pinned only** — pages where only line ranges were adjusted (no prose changes needed)
 - **Flagged (uncertain)** — entries where the diff was ambiguous; describe the judgment call made
-- **New meshes created** — meshes created by `wiki check --fix` (anchors only) for previously uncovered fragment links; note any where you subsequently added a `git mesh why`
+- **New meshes created** — meshes created by `wiki check --fix` (anchors only) for previously uncovered fragment links; note any where you subsequently added a `why` via `wiki mesh add <slug> --why "..."`

@@ -1,11 +1,11 @@
 ---
 name: wiki
-description: This skill should be used when the user asks to "search the wiki", "write a wiki page", "fix a wiki check failure", "resolve mesh_uncovered", "create mesh coverage", or mentions wiki frontmatter, fragment links, `wiki check`, `wiki check --fix`, or wiki/git-mesh integration.
+description: This skill should be used when the user asks to "search the wiki", "write a wiki page", "fix a wiki check failure", "resolve mesh_uncovered", "create mesh coverage", or mentions wiki frontmatter, fragment links, `wiki check`, `wiki check --fix`, or wiki/mesh integration.
 ---
 
 # Wiki
 
-A corpus of Markdown pages with relative-path links between pages and **fragment links** (with line ranges) into source code. The `wiki` CLI searches and validates them. `git mesh` keeps fragment links honest.
+A corpus of Markdown pages with relative-path links between pages and **fragment links** (with line ranges) into source code. The `wiki` CLI searches, validates, and reconciles them.
 
 ## Search
 
@@ -67,11 +67,10 @@ Diagnostics fall into three buckets:
 
 - **Frontmatter / link errors** — fix in the page.
 - **`mesh_uncovered`** — fragment link has no covering mesh. Fix below.
-- **`mesh_unavailable`** — `git-mesh` not on `PATH`; mesh check is skipped. Install `git-mesh` to restore it.
 
 ## The mesh-coverage contract (non-obvious)
 
-For every fragment link `path#L<start>-L<end>` in a wiki page, there must be a `git mesh` that anchors **both**:
+For every fragment link `path#L<start>-L<end>` in a wiki page, there must be a mesh (stored under `.wiki/`) that anchors **both**:
 
 1. the **code target** — at exactly `start-end`, *or* as a whole-file `0-0` anchor, **and**
 2. the **wiki page itself**.
@@ -86,7 +85,9 @@ git commit                       # pre-commit hook runs wiki check --fix, create
                                  # stages meshes automatically
 ```
 
-`wiki check --fix` walks the corpus and creates a `git mesh` for every uncovered fragment link (anchors only, no why) as part of its fix pass. The pre-commit hook runs `wiki check --fix --print-applied` automatically and stages exactly the meshes it creates or renames into the commit; use `--fix-dry-run` to preview what it will do before committing.
+`wiki check --fix` walks the corpus and creates a mesh for every uncovered fragment link (anchors only, no why) as part of its fix pass. The pre-commit hook runs `wiki check --fix --print-applied` automatically and stages exactly the meshes it creates or renames into the commit; use `--fix-dry-run` to preview what it will do before committing.
+
+When `--fix` cannot resolve a mesh-class failure automatically (ambiguous line-range drift, deleted content, moved content) it emits a skip line naming the exact `wiki mesh` command to run. That skip line is the operator's starting point — copy and run it, then re-run `wiki check`.
 
 ## Authoring workflow
 
@@ -96,8 +97,22 @@ git commit                       # pre-commit hook runs wiki check --fix, create
 4. Cite source code with **line-ranged** fragment links.
 5. `cd wiki && wiki check`. For `mesh_uncovered`: `wiki check --fix --fix-dry-run` (preview) → `git commit` (pre-commit hook runs `wiki check --fix` and stages meshes automatically).
 
+## Resolving skipped fixes
+
+`wiki check --fix` fail-closes on mesh-class failures it cannot repair automatically (ambiguous drift, moved content, deleted content, uncreatable meshes). For each skipped fix, its output names the exact `wiki mesh` command to run.
+
+| `wiki check` failure | Operator action |
+|---|---|
+| Frontmatter / collision / broken link / broken anchor | Plain text edit |
+| Moved content (ambiguous shift) | `wiki mesh remove <slug> <old-anchor>` then `wiki mesh add <slug> <file> <new-anchor>` |
+| Rewritten in place (stale hash) | Fix prose, then `wiki mesh add <slug> <file> <same-anchor>` (upsert re-hashes) |
+| Deleted content | `wiki mesh remove <slug> <anchor>`, then drop the fragment link |
+| `mesh_uncovered` Fix #4 failure | `wiki mesh add <slug> <file> <anchor>... --why "<description>"` |
+
+After running the indicated `wiki mesh` command(s), re-run `wiki check` to confirm the failure clears. See `references/cli.md` for the full `wiki mesh` verb reference.
+
 ## References
 
 - **`references/cli.md`** — full CLI surface (less-common subcommands and flags: `summary`, `links`, `refs`, `list`, `extract`, `hook`, `install`; `--fix`, `--fix-dry-run`, `--print-applied`, `--no-exit-code`, `--format json`, `--source`, `-l/-o`). **Use when** reaching past the day-to-day commands above.
-- **`references/maintenance.md`** — keeping a wiki current with `git mesh`: `git mesh stale` → re-anchor → `wiki check` → `wiki check --fix`, and writing a durable `why`. **Use when** anchors have drifted, when meshes go stale, or when curating wiki health.
+- **`references/maintenance.md`** — keeping a wiki current: inspect drift with `wiki mesh show`, re-anchor with `wiki mesh add`/`remove`, run `wiki check`, and curate `why` text. **Use when** anchors have drifted, when meshes go stale, or when curating wiki health.
 - **`references/git-hook-setup.md`** — single-invocation git hook: `pre-commit` runs `wiki check --fix --print-applied` to auto-fix drifted links/frontmatter and create mesh coverage in one pass, then re-stages all touched paths. **Use when** wiring wiki validation into a repo for the first time, or debugging why files were re-staged or meshes were auto-created.

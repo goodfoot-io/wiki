@@ -2,7 +2,7 @@
 
 **When to use this:** reaching past the day-to-day commands in `SKILL.md` — inspecting back-references, paginating search, validating specific files, machine-reading diagnostics, or wiring `wiki` into another tool.
 
-The day-to-day commands (`wiki [query]`, `wiki check`) are documented in `SKILL.md`; this file covers everything else. `wiki check --fix` repairs drifted links, anchors, and frontmatter in place, and also creates git meshes (anchors only, no why) for every uncovered fragment link. `--fix-dry-run` previews the plan without mutating anything; `--format json` emits structured diagnostics and is non-mutating.
+The day-to-day commands (`wiki [query]`, `wiki check`) are documented in `SKILL.md`; this file covers everything else. `wiki check --fix` repairs drifted links, anchors, and frontmatter in place, and also creates meshes (anchors only, no why) for every uncovered fragment link. `--fix-dry-run` previews the plan without mutating anything; `--format json` emits structured diagnostics and is non-mutating.
 
 ---
 
@@ -29,7 +29,7 @@ wiki check --format json          # structured diagnostics
 wiki check path/to/page.md        # validate specific globs only (resolved from CWD)
 ```
 
-File selection follows the current working directory: bare `wiki check` validates every `*.md` page beneath the CWD, and explicit globs resolve from the CWD. Link, anchor, `git check-ignore`, and git-mesh resolution stay anchored at the git repository root, so a subdirectory check produces the same diagnostics as an equivalent repo-relative glob run from the repo root.
+File selection follows the current working directory: bare `wiki check` validates every `*.md` page beneath the CWD, and explicit globs resolve from the CWD. Link, anchor, `git check-ignore`, and mesh resolution stay anchored at the git repository root, so a subdirectory check produces the same diagnostics as an equivalent repo-relative glob run from the repo root.
 
 `--format json` is supported on most subcommands and is the right choice for any script consuming wiki output.
 
@@ -47,14 +47,60 @@ wiki --source head     check      # latest commit (use in CI)
 
 ```bash
 wiki check --fix                  # repair drifted links/anchors/frontmatter AND create
-                                  # git meshes for uncovered fragment links; requires
+                                  # meshes for uncovered fragment links; requires
                                   # --source=worktree (rewrites files on disk)
 wiki check --fix --fix-dry-run    # preview created meshes + planned renames; no mutation
 wiki check --fix --print-applied  # stdout = one repo-relative path per created/renamed
                                   # mesh; advisories → stderr
 ```
 
-`--print-applied` is the pre-commit integration point: it lets the hook stage **exactly** the meshes this run created or renamed (`git add` each printed path) instead of a blanket `git add .mesh/`. Conflicts with `--fix-dry-run`. When a new slug path-collides with a pre-existing ancestor mesh, `--fix` renames the blocker to `<blocker>/<derived-leaf>` (or `<blocker>/index`), prints the blocker's new path for staging, and notes the rename on stderr (requires git-mesh ≥ 1.0.83).
+`--print-applied` is the pre-commit integration point: it lets the hook stage **exactly** the meshes this run created or renamed (`git add` each printed path) instead of a blanket `git add .mesh/`. Conflicts with `--fix-dry-run`. When a new slug path-collides with a pre-existing ancestor mesh, `--fix` renames the blocker to `<blocker>/<derived-leaf>` (or `<blocker>/index`), prints the blocker's new path for staging, and notes the rename on stderr.
+
+## Mesh management (`wiki mesh`)
+
+Inspect and reconcile `.wiki/` mesh coverage directly from the `wiki` CLI.
+
+### `wiki mesh show <slug> [--patch]`
+
+```bash
+wiki mesh show billing/checkout    # list anchors: path, line range, stored hash, fresh/stale
+wiki mesh show billing/checkout --patch  # also show a before/after diff for stale anchors
+```
+
+Prints each anchor's path, line range, stored rk64 hash, and whether it is fresh or stale (stale means the worktree content at that range no longer matches the stored hash). `--patch` adds a before/after diff for each stale anchor: the committed blob slice (from `HEAD`) versus the current worktree slice.
+
+### `wiki mesh add <slug> <anchor>... [--why <text>]`
+
+```bash
+# Create a new mesh (--why is required on first create)
+wiki mesh add billing/checkout \
+  wiki/checkout.md \
+  packages/api/charge.ts#L30-L76 \
+  --why "Checkout flow from wiki page to Stripe charge handler"
+
+# Extend an existing mesh (--why is optional; overwrites stored why if supplied)
+wiki mesh add billing/checkout packages/api/validate.ts#L1-L20
+
+# Re-hash a stale anchor (upsert on exact path#range identity)
+wiki mesh add billing/checkout packages/api/charge.ts#L30-L76
+```
+
+Anchors are specified as `path#Lstart-Lend` (line range) or a bare `path` (whole file, stored as the `0-0` sentinel). `add` upserts on exact `(path, start, end)` identity: it creates the mesh if it does not exist, appends a new anchor if the range is not present, or re-hashes an existing anchor if the range already exists.
+
+**`--why` is required when creating a new mesh** and is rejected as an error when the mesh does not yet exist and `--why` is absent. When the mesh already exists, `--why` is optional; if supplied it overwrites the stored rationale.
+
+**Fail-closed behavior:** `add` exits non-zero if the target file is missing, the specified line range is out-of-bounds, or the path is not a valid repo-relative path.
+
+### `wiki mesh remove <slug> [<anchor>]`
+
+```bash
+wiki mesh remove billing/checkout packages/api/old.ts#L5-L30   # remove one anchor
+wiki mesh remove billing/checkout   # remove the whole mesh (all anchors)
+```
+
+With an anchor argument, removes that single anchor from the mesh. If removing the anchor leaves the mesh empty, the mesh file is deleted. Without an anchor argument, removes the entire mesh file. Exits 0 even when the named anchor is not present (idempotent).
+
+---
 
 ## Global flags
 

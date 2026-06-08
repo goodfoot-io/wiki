@@ -1,6 +1,6 @@
 # Git Hook Setup
 
-A single pre-commit `wiki` concern: one `wiki check --fix` invocation auto-repairs drifted wiki links and creates git mesh coverage for uncovered fragment links, then stages all touched paths — all before the commit lands.
+A single pre-commit `wiki` concern: one `wiki check --fix` invocation auto-repairs drifted wiki links and creates mesh coverage for uncovered fragment links, then stages all touched paths — all before the commit lands.
 
 ---
 
@@ -11,9 +11,9 @@ Wiki validation runs as one sub-script (`pre-commit.wiki.sh`) with a single `wik
 | Error class | Handling | Action |
 |---|---|---|
 | Drifted links, anchors, frontmatter | **Auto-fixed, non-blocking** | `--fix` rewrites in place, re-stage |
-| `mesh_uncovered` (missing git mesh coverage) | **Best-effort, non-blocking** | Fix #4 inside `--fix` creates/renames meshes; `--print-applied` routes created paths to stdout for staging |
+| `mesh_uncovered` (missing mesh coverage) | **Best-effort, non-blocking** | Fix #4 inside `--fix` creates/renames meshes; `--print-applied` routes created paths to stdout for staging |
 
-**Why link repair and mesh coverage run together.** `wiki check --fix` handles both error classes in a single pass: the `--fix` pipeline repairs drifted links and anchors first, then creates git mesh coverage for any uncovered fragment links (Fix #4). `--print-applied` routes created/renamed mesh paths to stdout while all advisories and diagnostics go to stderr. `--no-exit-code` keeps the commit from being rejected for any error the tool already handled. Errors that `--fix` cannot resolve (a deleted target, an ambiguous rename) are reported on stderr but do not block — the hook is a local development guard, not the repository's hard commit gate.
+**Why link repair and mesh coverage run together.** `wiki check --fix` handles both error classes in a single pass: the `--fix` pipeline repairs drifted links and anchors first, then creates mesh coverage for any uncovered fragment links (Fix #4). `--print-applied` routes created/renamed mesh paths to stdout while all advisories and diagnostics go to stderr. `--no-exit-code` keeps the commit from being rejected for any error the tool already handled. Errors that `--fix` cannot resolve (a deleted target, an ambiguous rename) are reported on stderr but do not block — the hook is a local development guard, not the repository's hard commit gate.
 
 **Why `--source=worktree`.** `--fix` rewrites files on disk; it requires reading from the working tree, not the index or HEAD.
 
@@ -26,7 +26,7 @@ Wiki validation runs as one sub-script (`pre-commit.wiki.sh`) with a single `wik
 ```bash
 #!/bin/bash
 # Single wiki concern, single invocation:
-#   wiki check --fix creates/renames git meshes for uncovered fragment links and
+#   wiki check --fix creates/renames meshes for uncovered fragment links and
 #   auto-fixes drifted wiki links/anchors/frontmatter in the working tree.
 # --no-exit-code makes this best-effort: the hook never aborts a commit.
 # --print-applied routes created/renamed mesh paths to stdout; everything else
@@ -61,7 +61,7 @@ exit 0
 
 ### Flags — each is load-bearing
 
-- `--fix` rewrites drifted links and anchors in place **and** creates git mesh coverage for uncovered fragment links. Requires `--source=worktree` (you can only rewrite files read from the worktree, not the index or HEAD).
+- `--fix` rewrites drifted links and anchors in place **and** creates mesh coverage for uncovered fragment links. Requires `--source=worktree` (you can only rewrite files read from the worktree, not the index or HEAD).
 - `--print-applied` prints **one repo-relative path per mesh this run created or renamed** to stdout, and routes all advisories and rename notices to **stderr** (shown on the terminal). The hook stages **exactly** those paths — never a blanket `git add .mesh/` — so unrelated working-tree `.mesh/` edits are not swept into the commit.
 - `--no-exit-code` keeps the commit from being rejected — the hook repairs drift and creates coverage rather than blocking on them.
 
@@ -71,11 +71,9 @@ After `--fix` runs, the rewritten `.md` files are unstaged worktree changes; the
 
 ### Mesh coverage behavior
 
-`wiki check --fix` walks the whole corpus, builds its own coverage index, and creates a `git mesh` for every uncovered fragment link (anchors only, no why). It is idempotent — already-covered links are skipped — so it can run on every commit.
+`wiki check --fix` walks the whole corpus, builds its own coverage index, and creates a mesh for every uncovered fragment link (anchors only, no why). It is idempotent — already-covered links are skipped — so it can run on every commit.
 
 When a new slug path-collides with a pre-existing ancestor mesh, `--fix` renames the blocking mesh to `<blocker>/<derived-leaf>` (or `<blocker>/index`) so both can coexist, prints the renamed blocker's new path on stdout for staging, and notes the rename on stderr.
-
-> Mesh rename-on-collision requires **git-mesh ≥ 1.0.83** (earlier versions evaluated the prefix-collision guard against HEAD, so an uncommitted rename did not free the path within the same pre-commit run).
 
 Use `wiki check --fix --fix-dry-run` to preview created meshes and any planned renames without mutating `.mesh/` before committing.
 
