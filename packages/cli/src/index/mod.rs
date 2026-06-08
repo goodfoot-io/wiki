@@ -391,9 +391,8 @@ impl WikiIndex {
             .map_err(|e| miette::miette!("list_pages query: {e}"))?;
 
         let tag_lc = tag.map(|t| t.to_lowercase());
-        let split = |s: &str| -> Vec<String> {
-            s.split_whitespace().map(|t| t.to_string()).collect()
-        };
+        let split =
+            |s: &str| -> Vec<String> { s.split_whitespace().map(|t| t.to_string()).collect() };
 
         let mut out: Vec<PageRow> = Vec::new();
         let mut skipped: u64 = 0;
@@ -595,13 +594,21 @@ mod list_pages_tests {
         create_file(root, "fresh.md", &page("Fresh", "s", ""));
 
         let head = WikiIndex::prepare_for_source(root, DocSource::Head).unwrap();
-        let head_titles: Vec<String> =
-            head.list_pages(None, 0, None).unwrap().into_iter().map(|r| r.title).collect();
+        let head_titles: Vec<String> = head
+            .list_pages(None, 0, None)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.title)
+            .collect();
         assert_eq!(head_titles, vec!["Committed".to_string()]);
 
         let wt = WikiIndex::prepare_for_source(root, DocSource::WorkingTree).unwrap();
-        let wt_titles: Vec<String> =
-            wt.list_pages(None, 0, None).unwrap().into_iter().map(|r| r.title).collect();
+        let wt_titles: Vec<String> = wt
+            .list_pages(None, 0, None)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.title)
+            .collect();
         assert!(wt_titles.contains(&"Committed".to_string()));
         assert!(wt_titles.contains(&"Fresh".to_string()));
     }

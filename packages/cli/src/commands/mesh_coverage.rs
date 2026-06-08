@@ -40,8 +40,8 @@ impl MeshIndex {
             .iter()
             .filter(|((path, _, _), _)| paths_equal(path, code_path))
             .any(|((_, a_start, a_end), names)| {
-                let contains = (*a_start == 0 && *a_end == 0)
-                    || (*a_start <= start && end <= *a_end);
+                let contains =
+                    (*a_start == 0 && *a_end == 0) || (*a_start <= start && end <= *a_end);
                 contains && names.iter().any(&anchors_wiki)
             })
     }

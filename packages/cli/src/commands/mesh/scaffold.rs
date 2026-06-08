@@ -103,8 +103,8 @@ impl ParseErrorKind {
     }
 }
 
-use git_mesh_core::mesh_file::MeshFile;
 use git_mesh_core::AnchorExtent;
+use git_mesh_core::mesh_file::MeshFile;
 
 use super::augment::{AugmentedLink, augment};
 use super::draft::{self, MeshDraft};
@@ -620,9 +620,7 @@ pub(crate) fn cleanup_orphaned_meshes(
             // Explicit globs: must match at least one glob AND be under the
             // scan prefix (discovery requires both).
             crate::commands::path_under_prefix(path_rel, scope_prefix.as_deref())
-                && glob_set
-                    .as_ref()
-                    .is_some_and(|gs| gs.is_match(path_rel))
+                && glob_set.as_ref().is_some_and(|gs| gs.is_match(path_rel))
         }
     };
 
@@ -768,23 +766,31 @@ fn apply_drafts(
         // Build AnchorRecords from the draft's structured anchors.
         // For extension drafts all entries are code anchors; for new-mesh drafts
         // the first entry is the page section anchor. All are hashed the same way.
-        let anchor_records_result: Result<Vec<git_mesh_core::mesh_file::AnchorRecord>> =
-            draft.structured_anchors.iter().map(|a| {
+        let anchor_records_result: Result<Vec<git_mesh_core::mesh_file::AnchorRecord>> = draft
+            .structured_anchors
+            .iter()
+            .map(|a| {
                 let extent = if a.start_line == 0 && a.end_line == 0 {
                     AnchorExtent::WholeFile
                 } else {
-                    AnchorExtent::LineRange { start: a.start_line, end: a.end_line }
+                    AnchorExtent::LineRange {
+                        start: a.start_line,
+                        end: a.end_line,
+                    }
                 };
                 let content_hash = store::hash_anchor(repo_root, &a.path, extent)
                     .map_err(|e| miette::miette!("failed to hash anchor {}: {e}", a.path))?;
                 Ok(store::anchor_record(a.path.clone(), extent, content_hash))
-            }).collect();
+            })
+            .collect();
 
         let new_records = match anchor_records_result {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("wiki check --fix: could not create mesh `{slug}`: {e}");
-                failures.push(MeshFailure { slug: slug.to_string() });
+                failures.push(MeshFailure {
+                    slug: slug.to_string(),
+                });
                 continue;
             }
         };
@@ -807,20 +813,30 @@ fn apply_drafts(
                     }
                     existing
                 }
-                Ok(None) => MeshFile { anchors: new_records, why: String::new() },
+                Ok(None) => MeshFile {
+                    anchors: new_records,
+                    why: String::new(),
+                },
                 Err(e) => {
                     eprintln!("wiki check --fix: could not read mesh `{slug}` for extension: {e}");
-                    failures.push(MeshFailure { slug: slug.to_string() });
+                    failures.push(MeshFailure {
+                        slug: slug.to_string(),
+                    });
                     continue;
                 }
             }
         } else {
-            MeshFile { anchors: new_records, why: String::new() }
+            MeshFile {
+                anchors: new_records,
+                why: String::new(),
+            }
         };
 
         if let Err(e) = store::write(repo_root, slug, &mesh) {
             eprintln!("wiki check --fix: could not create mesh `{slug}`: {e}");
-            failures.push(MeshFailure { slug: slug.to_string() });
+            failures.push(MeshFailure {
+                slug: slug.to_string(),
+            });
             continue;
         }
 
@@ -975,8 +991,9 @@ fn coalesce_line_ranges(
     for path in &path_order {
         let mut ranges = by_path.remove(path).expect("path tracked in order");
         // Whole-file anchors are inert; never merge them.
-        let (whole_file, mut line_ranges): (Vec<_>, Vec<_>) =
-            ranges.drain(..).partition(|a| a.start_line == 0 && a.end_line == 0);
+        let (whole_file, mut line_ranges): (Vec<_>, Vec<_>) = ranges
+            .drain(..)
+            .partition(|a| a.start_line == 0 && a.end_line == 0);
         line_ranges.sort_by_key(|a| (a.start_line, a.end_line));
 
         let mut merged: Vec<draft::StructuredAnchor> = Vec::new();
@@ -1073,8 +1090,7 @@ fn build_meshes(
                     end_line: end,
                 });
             }
-            let (target_anchors, structured_targets) =
-                coalesce_line_ranges(structured_targets);
+            let (target_anchors, structured_targets) = coalesce_line_ranges(structured_targets);
             groups_storage.push((leader, key.0, key.1, target_anchors, structured_targets));
         }
         let groups: Vec<draft::SectionGroup<'_>> = groups_storage
@@ -1112,7 +1128,6 @@ fn build_meshes(
 
     consolidated
 }
-
 
 /// True if slugs `a` and `b` cannot both exist as nested mesh files: they are
 /// equal, or one is a strict segment-wise path prefix of the other.
@@ -1195,7 +1210,6 @@ fn ancestor_file_blocker(mesh_dir: &Path, slug: &str) -> Option<String> {
     }
     None
 }
-
 
 /// A rename of a blocker mesh that frees a slug path for a new draft.
 #[derive(Debug, Clone)]
@@ -1788,17 +1802,23 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         // Store a blocker mesh at slug "wiki/arch/scaff" under root/.wiki/.
-        super::store::write(root, "wiki/arch/scaff", &git_mesh_core::mesh_file::MeshFile {
-            anchors: vec![super::store::anchor_record(
-                "src/lib.rs".to_string(),
-                git_mesh_core::AnchorExtent::LineRange { start: 1, end: 1 },
-                "abc".to_string(),
-            )],
-            why: "why".to_string(),
-        }).unwrap();
+        super::store::write(
+            root,
+            "wiki/arch/scaff",
+            &git_mesh_core::mesh_file::MeshFile {
+                anchors: vec![super::store::anchor_record(
+                    "src/lib.rs".to_string(),
+                    git_mesh_core::AnchorExtent::LineRange { start: 1, end: 1 },
+                    "abc".to_string(),
+                )],
+                why: "why".to_string(),
+            },
+        )
+        .unwrap();
         let mesh_dir = super::store::wiki_dir(root);
         let nouns = std::collections::HashMap::new();
-        let plan = plan_blocker_rename(&mesh_dir, "wiki/arch/scaff/helper", "p.md", &nouns).unwrap();
+        let plan =
+            plan_blocker_rename(&mesh_dir, "wiki/arch/scaff/helper", "p.md", &nouns).unwrap();
         assert_eq!(plan.from, "wiki/arch/scaff");
         assert_eq!(plan.to, "wiki/arch/scaff/index");
         assert_eq!(plan.for_slug, "wiki/arch/scaff/helper");
@@ -2047,10 +2067,7 @@ mod tests {
         .collect();
         let exists = |slug: &str| existing.contains(slug);
         resolve_slug_collisions(&mut drafts, &titles, &exists);
-        assert_eq!(
-            drafts[0].slug,
-            "billing-service/checkout/charge-handler"
-        );
+        assert_eq!(drafts[0].slug, "billing-service/checkout/charge-handler");
     }
 
     #[test]
@@ -2312,14 +2329,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         // Meshes live under .wiki/ (the in-process store location).
-        super::store::write(root, "wiki-page", &git_mesh_core::mesh_file::MeshFile {
-            anchors: vec![super::store::anchor_record(
-                "wiki/page.md".to_string(),
-                git_mesh_core::AnchorExtent::LineRange { start: 1, end: 5 },
-                "abc".to_string(),
-            )],
-            why: String::new(),
-        }).unwrap();
+        super::store::write(
+            root,
+            "wiki-page",
+            &git_mesh_core::mesh_file::MeshFile {
+                anchors: vec![super::store::anchor_record(
+                    "wiki/page.md".to_string(),
+                    git_mesh_core::AnchorExtent::LineRange { start: 1, end: 5 },
+                    "abc".to_string(),
+                )],
+                why: String::new(),
+            },
+        )
+        .unwrap();
 
         // Page does NOT exist on disk — eligible for deletion.
         let result = cleanup_orphaned_meshes(root, root, &[], true).unwrap();
@@ -2332,14 +2354,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         // Curated mesh — has why after blank line.
-        super::store::write(root, "wiki-curated", &git_mesh_core::mesh_file::MeshFile {
-            anchors: vec![super::store::anchor_record(
-                "wiki/page.md".to_string(),
-                git_mesh_core::AnchorExtent::LineRange { start: 1, end: 5 },
-                "abc".to_string(),
-            )],
-            why: "Curated reason here.".to_string(),
-        }).unwrap();
+        super::store::write(
+            root,
+            "wiki-curated",
+            &git_mesh_core::mesh_file::MeshFile {
+                anchors: vec![super::store::anchor_record(
+                    "wiki/page.md".to_string(),
+                    git_mesh_core::AnchorExtent::LineRange { start: 1, end: 5 },
+                    "abc".to_string(),
+                )],
+                why: "Curated reason here.".to_string(),
+            },
+        )
+        .unwrap();
 
         // Page does NOT exist — but ineligible due to why.
         let result = cleanup_orphaned_meshes(root, root, &[], true).unwrap();
@@ -2356,21 +2383,26 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         // Multi-page mesh: two distinct .md paths, one gone.
-        super::store::write(root, "shared", &git_mesh_core::mesh_file::MeshFile {
-            anchors: vec![
-                super::store::anchor_record(
-                    "wiki/a.md".to_string(),
-                    git_mesh_core::AnchorExtent::LineRange { start: 1, end: 3 },
-                    "abc".to_string(),
-                ),
-                super::store::anchor_record(
-                    "wiki/b.md".to_string(),
-                    git_mesh_core::AnchorExtent::LineRange { start: 2, end: 4 },
-                    "def".to_string(),
-                ),
-            ],
-            why: String::new(),
-        }).unwrap();
+        super::store::write(
+            root,
+            "shared",
+            &git_mesh_core::mesh_file::MeshFile {
+                anchors: vec![
+                    super::store::anchor_record(
+                        "wiki/a.md".to_string(),
+                        git_mesh_core::AnchorExtent::LineRange { start: 1, end: 3 },
+                        "abc".to_string(),
+                    ),
+                    super::store::anchor_record(
+                        "wiki/b.md".to_string(),
+                        git_mesh_core::AnchorExtent::LineRange { start: 2, end: 4 },
+                        "def".to_string(),
+                    ),
+                ],
+                why: String::new(),
+            },
+        )
+        .unwrap();
         // wiki/a.md is absent; wiki/b.md present.
         std::fs::create_dir_all(root.join("wiki")).unwrap();
         std::fs::write(root.join("wiki/b.md"), "present\n").unwrap();
@@ -2391,14 +2423,19 @@ mod tests {
         // Scaffold mesh — page IS present on disk.
         std::fs::create_dir_all(root.join("wiki")).unwrap();
         std::fs::write(root.join("wiki/page.md"), "# Present\n").unwrap();
-        super::store::write(root, "wiki-page", &git_mesh_core::mesh_file::MeshFile {
-            anchors: vec![super::store::anchor_record(
-                "wiki/page.md".to_string(),
-                git_mesh_core::AnchorExtent::LineRange { start: 1, end: 3 },
-                "abc".to_string(),
-            )],
-            why: String::new(),
-        }).unwrap();
+        super::store::write(
+            root,
+            "wiki-page",
+            &git_mesh_core::mesh_file::MeshFile {
+                anchors: vec![super::store::anchor_record(
+                    "wiki/page.md".to_string(),
+                    git_mesh_core::AnchorExtent::LineRange { start: 1, end: 3 },
+                    "abc".to_string(),
+                )],
+                why: String::new(),
+            },
+        )
+        .unwrap();
 
         let result = cleanup_orphaned_meshes(root, root, &[], true).unwrap();
         assert!(result.planned_deletions.is_empty());
@@ -2410,14 +2447,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         // Hand-authored mesh with only non-.md anchors.
-        super::store::write(root, "hand-authored", &git_mesh_core::mesh_file::MeshFile {
-            anchors: vec![super::store::anchor_record(
-                "src/lib.rs".to_string(),
-                git_mesh_core::AnchorExtent::LineRange { start: 1, end: 5 },
-                "abc".to_string(),
-            )],
-            why: String::new(),
-        }).unwrap();
+        super::store::write(
+            root,
+            "hand-authored",
+            &git_mesh_core::mesh_file::MeshFile {
+                anchors: vec![super::store::anchor_record(
+                    "src/lib.rs".to_string(),
+                    git_mesh_core::AnchorExtent::LineRange { start: 1, end: 5 },
+                    "abc".to_string(),
+                )],
+                why: String::new(),
+            },
+        )
+        .unwrap();
 
         let result = cleanup_orphaned_meshes(root, root, &[], true).unwrap();
         assert!(result.planned_deletions.is_empty());

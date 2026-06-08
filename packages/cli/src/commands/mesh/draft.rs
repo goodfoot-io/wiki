@@ -303,11 +303,7 @@ mod tests {
         // `perf` is already in the subdir, so the qualifier copy is dropped;
         // other qualifiers are kept in order.
         assert_eq!(
-            build_slug_with_qualifiers(
-                "perf",
-                &["perf".to_string(), "extra".to_string()],
-                "leaf"
-            ),
+            build_slug_with_qualifiers("perf", &["perf".to_string(), "extra".to_string()], "leaf"),
             "perf/extra/leaf"
         );
     }

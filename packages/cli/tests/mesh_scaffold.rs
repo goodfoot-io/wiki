@@ -1304,7 +1304,11 @@ fn finding1_last_page_demoted_mesh_left_exit_0() {
     git(root, &["commit", "-q", "-m", "mesh"]);
 
     // Demote the ONLY page to plain markdown (remove frontmatter; file remains).
-    std::fs::write(root.join("wiki/page.md"), "# Plain markdown, no frontmatter\n").unwrap();
+    std::fs::write(
+        root.join("wiki/page.md"),
+        "# Plain markdown, no frontmatter\n",
+    )
+    .unwrap();
     git(root, &["add", "-A"]);
     git(root, &["commit", "-q", "-m", "demoted"]);
 
@@ -1466,7 +1470,13 @@ fn finding2_plain_glob_with_subdir_cwd_cleans_inscope_orphan() {
     // Scoped cleanup using a plain `*.md` glob from wiki/ cwd.
     let bin = env!("CARGO_BIN_EXE_wiki");
     let out = std::process::Command::new(bin)
-        .args(["check", "--fix", "--print-applied", "--no-exit-code", "*.md"])
+        .args([
+            "check",
+            "--fix",
+            "--print-applied",
+            "--no-exit-code",
+            "*.md",
+        ])
         .current_dir(root.join("wiki"))
         .output()
         .expect("run wiki check");

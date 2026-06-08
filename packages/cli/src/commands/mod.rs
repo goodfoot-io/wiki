@@ -727,9 +727,11 @@ mod tests {
     fn test_discover_no_md_files_exits_with_no_pages() {
         let repo = TestRepo::new();
         // No .md files at all — discover_files returns Ok(vec![]) for empty corpus.
-        let files =
-            discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).unwrap();
-        assert!(files.is_empty(), "expected empty vec for no wiki pages, got: {files:?}");
+        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).unwrap();
+        assert!(
+            files.is_empty(),
+            "expected empty vec for no wiki pages, got: {files:?}"
+        );
     }
 
     #[test]
@@ -738,9 +740,11 @@ mod tests {
         repo.create_file("wiki/.gitkeep", "");
         repo.create_file("wiki/plain.md", "# no frontmatter\n");
         // No wiki members — returns Ok(vec![]) not Err.
-        let files =
-            discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).unwrap();
-        assert!(files.is_empty(), "expected empty vec for plain md, got: {files:?}");
+        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).unwrap();
+        assert!(
+            files.is_empty(),
+            "expected empty vec for plain md, got: {files:?}"
+        );
     }
 
     #[test]
@@ -782,7 +786,10 @@ mod tests {
         // Zero matches returns Ok(vec![]) not Err.
         let files =
             discover_files(&globs, repo.path(), repo.path(), DocSource::WorkingTree).unwrap();
-        assert!(files.is_empty(), "expected empty vec for no-match glob, got: {files:?}");
+        assert!(
+            files.is_empty(),
+            "expected empty vec for no-match glob, got: {files:?}"
+        );
     }
 
     #[test]
