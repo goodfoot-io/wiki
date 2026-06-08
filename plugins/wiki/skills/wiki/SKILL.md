@@ -104,10 +104,10 @@ When `--fix` cannot resolve a mesh-class failure automatically (ambiguous line-r
 | `wiki check` failure | Operator action |
 |---|---|
 | Frontmatter / collision / broken link / broken anchor | Plain text edit |
-| Moved content (ambiguous shift) | `wiki mesh remove <slug> <old-anchor>` then `wiki mesh add <slug> <file> <new-anchor>` |
-| Rewritten in place (stale hash) | Fix prose, then `wiki mesh add <slug> <file> <same-anchor>` (upsert re-hashes) |
+| Moved content (ambiguous shift) | `wiki mesh add <slug> <new-anchor>` then `wiki mesh remove <slug> <old-anchor>` (add-then-remove keeps the mesh alive) |
+| Rewritten in place (stale hash) | Fix prose, then `wiki mesh add <slug> <same-anchor>` (upsert re-hashes) |
 | Deleted content | `wiki mesh remove <slug> <anchor>`, then drop the fragment link |
-| `mesh_uncovered` Fix #4 failure | `wiki mesh add <slug> <file> <anchor>... --why "<description>"` |
+| No coverage / `mesh_uncovered` Fix #4 | `wiki mesh add <slug> <wiki-file> <code-anchor> --why "<description>"` (one mesh must anchor BOTH the page and the code target) |
 
 After running the indicated `wiki mesh` command(s), re-run `wiki check` to confirm the failure clears. See `references/cli.md` for the full `wiki mesh` verb reference.
 

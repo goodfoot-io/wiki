@@ -34,30 +34,39 @@ pub(crate) fn render_advisories(
             DropReason::MissingPath { path } => {
                 let _ = writeln!(
                     out,
-                    "Skipped mesh `{}` — references missing path `{}` (page `{}`).",
-                    d.slug, path, d.page
+                    "Skipped mesh `{}` — references missing path `{}` (page `{}`). \
+                     Once the path exists, anchor BOTH the page and the code target:\n  \
+                     wiki mesh add {} {} {} --why \"<rationale>\"",
+                    d.slug, path, d.page, d.slug, d.page, path
                 );
             }
             DropReason::IgnoredPath { path } => {
                 let _ = writeln!(
                     out,
                     "Skipped gitignored anchor `{}` in mesh `{}` (page `{}`); \
-                     a path not tracked by git cannot be anchored.",
-                    path, d.slug, d.page
+                     a path not tracked by git cannot be anchored. Anchor a tracked \
+                     code target alongside the page:\n  \
+                     wiki mesh add {} {} <tracked-code-anchor> --why \"<rationale>\"",
+                    path, d.slug, d.page, d.slug, d.page
                 );
             }
             DropReason::InvalidAnchor { anchor, detail } => {
                 let _ = writeln!(
                     out,
-                    "Skipped mesh `{}` — invalid anchor `{}` ({}) (page `{}`).",
-                    d.slug, anchor, detail, d.page
+                    "Skipped mesh `{}` — invalid anchor `{}` ({}) (page `{}`). \
+                     Re-add with a valid in-bounds anchor covering BOTH the page and \
+                     the code target:\n  \
+                     wiki mesh add {} {} <valid-code-anchor> --why \"<rationale>\"",
+                    d.slug, anchor, detail, d.page, d.slug, d.page
                 );
             }
             DropReason::SlugPathCollision { existing } => {
                 let _ = writeln!(
                     out,
-                    "Skipped mesh `{}` — slug path collides with existing mesh `{}` (page `{}`).",
-                    d.slug, existing, d.page
+                    "Skipped mesh `{}` — slug path collides with existing mesh `{}` (page `{}`). \
+                     Remove or rename the colliding mesh, then re-run `wiki check --fix`:\n  \
+                     wiki mesh remove {}",
+                    d.slug, existing, d.page, existing
                 );
             }
         }
@@ -158,6 +167,63 @@ mod tests {
                 && out.contains("src/missing.rs")
                 && out.contains("wiki/page.md"),
             "missing-path advisory must name slug, path, page:\n{out}"
+        );
+        // F3: a runnable command anchoring BOTH the page and the code target.
+        assert!(
+            out.contains("wiki mesh add wiki/foo wiki/page.md src/missing.rs --why"),
+            "missing-path advisory must emit a runnable add command anchoring both:\n{out}"
+        );
+    }
+
+    #[test]
+    fn render_advisories_ignored_path_names_command() {
+        let mut out = String::new();
+        let dropped = vec![make_dropped(
+            "wiki/foo",
+            DropReason::IgnoredPath {
+                path: "target/gen.rs".to_string(),
+            },
+            "wiki/page.md",
+        )];
+        render_advisories(&mut out, &[], &dropped, true);
+        assert!(
+            out.contains("wiki mesh add wiki/foo wiki/page.md <tracked-code-anchor> --why"),
+            "ignored-path advisory must emit a runnable add command:\n{out}"
+        );
+    }
+
+    #[test]
+    fn render_advisories_invalid_anchor_names_command() {
+        let mut out = String::new();
+        let dropped = vec![make_dropped(
+            "wiki/foo",
+            DropReason::InvalidAnchor {
+                anchor: "src/a.rs#L9-L99".to_string(),
+                detail: "out of bounds".to_string(),
+            },
+            "wiki/page.md",
+        )];
+        render_advisories(&mut out, &[], &dropped, true);
+        assert!(
+            out.contains("wiki mesh add wiki/foo wiki/page.md <valid-code-anchor> --why"),
+            "invalid-anchor advisory must emit a runnable add command:\n{out}"
+        );
+    }
+
+    #[test]
+    fn render_advisories_slug_collision_names_command() {
+        let mut out = String::new();
+        let dropped = vec![make_dropped(
+            "wiki/foo/helper",
+            DropReason::SlugPathCollision {
+                existing: "wiki/foo".to_string(),
+            },
+            "wiki/page.md",
+        )];
+        render_advisories(&mut out, &[], &dropped, true);
+        assert!(
+            out.contains("wiki mesh remove wiki/foo"),
+            "slug-collision advisory must emit a runnable remove command:\n{out}"
         );
     }
 

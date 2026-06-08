@@ -19,7 +19,14 @@ use super::store::{self, UpsertOutcome};
 /// Called from `main::run` after `repo_root` is resolved. Returns an exit code
 /// compatible with the rest of the CLI (0 = success, 1 = logical failure such
 /// as "anchor not found", 2 = usage/IO error).
-pub(crate) fn run(command: MeshCommands, repo_root: &Path) -> Result<i32> {
+///
+/// `json` is the global `--format json` flag. The mesh subcommands emit only
+/// human-readable text; when JSON is requested we fail closed (F9) rather than
+/// hand a script unparseable output.
+pub(crate) fn run(command: MeshCommands, repo_root: &Path, json: bool) -> Result<i32> {
+    if json {
+        return Err(miette::miette!("wiki mesh does not support --format json"));
+    }
     match command {
         MeshCommands::Show { slug, patch } => show(&slug, patch, repo_root),
         MeshCommands::Add { slug, anchors, why } => add(&slug, &anchors, why.as_deref(), repo_root),
@@ -128,11 +135,25 @@ fn show(slug: &str, patch: bool, repo_root: &Path) -> Result<i32> {
                 read_committed_slice(repo_root, &anchor.path, anchor.start_line, anchor.end_line)?;
             let after =
                 read_worktree_slice(repo_root, &anchor.path, anchor.start_line, anchor.end_line)?;
+
+            // F10: the staleness verdict above compares the worktree hash to the
+            // stored hash, but the diff basis is HEAD. When HEAD already matches
+            // the worktree, the stored hash predates HEAD (or reflects staged
+            // content) and the diff would be empty/identical — note that.
+            if let CommittedSlice::Present(b) = &before
+                && after.as_deref() == Some(b.as_str())
+            {
+                println!(
+                    "  (stale vs stored hash; HEAD matches worktree — \
+                     stored hash predates HEAD or reflects staged content)"
+                );
+            }
+
             print_diff(
                 &anchor.path,
                 anchor.start_line,
                 anchor.end_line,
-                before.as_deref(),
+                &before,
                 after.as_deref(),
             );
         }
@@ -141,20 +162,47 @@ fn show(slug: &str, patch: bool, repo_root: &Path) -> Result<i32> {
     Ok(0)
 }
 
+/// The committed state of an anchor's path at `HEAD`, for `--patch` rendering.
+enum CommittedSlice {
+    /// The path exists in HEAD and its slice was read as UTF-8.
+    Present(String),
+    /// The path is not present in HEAD at all (a genuinely new file).
+    NotInHead,
+    /// The path IS in HEAD but its blob could not be read as UTF-8 text.
+    Unreadable,
+}
+
 /// Read the committed blob slice for a path+range via `git show HEAD:<path>`.
 ///
-/// Returns `None` when the path is not in HEAD (new file).
+/// Distinguishes "absent from HEAD" from "present but non-UTF-8/unreadable" so
+/// the diff renderer never paints an unreadable-but-existing file as a brand-new
+/// addition. [`read_blob_at`](crate::commands::check_fix::read_blob_at) collapses
+/// both into `Ok(None)`, so we probe HEAD existence separately with `git cat-file
+/// -e`.
 fn read_committed_slice(
     repo_root: &Path,
     path: &str,
     start: u32,
     end: u32,
-) -> Result<Option<String>> {
+) -> Result<CommittedSlice> {
     use crate::commands::check_fix::read_blob_at;
-    let Some(blob) = read_blob_at(repo_root, "HEAD", path)? else {
-        return Ok(None);
-    };
-    Ok(Some(slice_lines(&blob, start, end)))
+    if let Some(blob) = read_blob_at(repo_root, "HEAD", path)? {
+        return Ok(CommittedSlice::Present(slice_lines(&blob, start, end)));
+    }
+    // read_blob_at returned None: either the path is absent from HEAD, or its
+    // blob exists but is not valid UTF-8. Disambiguate via object existence.
+    let exists_in_head = std::process::Command::new("git")
+        .current_dir(repo_root)
+        .args(["cat-file", "-e", &format!("HEAD:{path}")])
+        .output()
+        .map_err(|e| miette::miette!("git cat-file failed: {e}"))?
+        .status
+        .success();
+    if exists_in_head {
+        Ok(CommittedSlice::Unreadable)
+    } else {
+        Ok(CommittedSlice::NotInHead)
+    }
 }
 
 /// Read the worktree file slice for a path+range.
@@ -192,7 +240,12 @@ fn slice_lines(content: &str, start: u32, end: u32) -> String {
 }
 
 /// Print a simple before/after diff to stdout.
-fn print_diff(path: &str, start: u32, end: u32, before: Option<&str>, after: Option<&str>) {
+///
+/// `before` carries the committed state distinctly: a genuinely absent-from-HEAD
+/// path renders as `(not in HEAD)` additions, whereas a path that IS in HEAD but
+/// is non-UTF-8/unreadable prints an explicit notice instead of a misleading
+/// all-additions diff.
+fn print_diff(path: &str, start: u32, end: u32, before: &CommittedSlice, after: Option<&str>) {
     let range = if start == 0 && end == 0 {
         "(whole file)".to_string()
     } else {
@@ -200,9 +253,20 @@ fn print_diff(path: &str, start: u32, end: u32, before: Option<&str>, after: Opt
     };
     println!("  --- a/{path} {range} (committed)");
     println!("  +++ b/{path} {range} (worktree)");
-    match (before, after) {
+
+    let before_text = match before {
+        CommittedSlice::Present(b) => Some(b.as_str()),
+        CommittedSlice::Unreadable => {
+            println!("  (committed content unavailable: non-UTF-8 or unreadable)");
+            return;
+        }
+        CommittedSlice::NotInHead => None,
+    };
+
+    match (before_text, after) {
         (None, None) => println!("  (neither committed nor worktree copy found)"),
         (None, Some(a)) => {
+            println!("  (not in HEAD)");
             for line in a.lines() {
                 println!("  +{line}");
             }
@@ -228,13 +292,31 @@ fn print_diff(path: &str, start: u32, end: u32, before: Option<&str>, after: Opt
 fn add(slug: &str, anchors: &[String], why: Option<&str>, repo_root: &Path) -> Result<i32> {
     validate_mesh_name(slug).map_err(|e| miette::miette!("invalid mesh slug `{slug}`: {e}"))?;
 
+    // F6: with no anchors, `--why` alone is a rationale-only curation update
+    // against an existing mesh. clap permits this form (anchors OR --why).
+    if anchors.is_empty() {
+        let outcome = store::upsert_anchors(repo_root, slug, why, &[])?;
+        debug_assert!(outcome.why_only);
+        match outcome.why_overwritten {
+            Some(prev) => eprintln!("updated rationale for mesh `{slug}` (was: \"{prev}\")"),
+            None => println!("updated rationale for mesh `{slug}`"),
+        }
+        return Ok(0);
+    }
+
+    // F5: parse all anchors first, then apply atomically. A malformed anchor here
+    // errors before any store write, so no partial mesh is left on disk.
+    let mut parsed = Vec::with_capacity(anchors.len());
     for anchor_str in anchors {
         let (path, extent) = parse_anchor(anchor_str)?;
+        let label = extent_label(&path, extent);
+        parsed.push((path, extent, label));
+    }
 
-        let outcome = store::upsert_anchor(repo_root, slug, why, &path, extent)?;
+    let outcome = store::upsert_anchors(repo_root, slug, why, &parsed)?;
 
-        let anchor_label = extent_label(&path, extent);
-        match outcome {
+    for (anchor_label, result) in &outcome.anchors {
+        match result {
             UpsertOutcome::Created => println!("created mesh `{slug}` with anchor {anchor_label}"),
             UpsertOutcome::Extended => {
                 println!("extended mesh `{slug}` with anchor {anchor_label}")
@@ -243,9 +325,11 @@ fn add(slug: &str, anchors: &[String], why: Option<&str>, repo_root: &Path) -> R
                 println!("refreshed anchor {anchor_label} in mesh `{slug}`")
             }
         }
+    }
 
-        // After first anchor creates the mesh, subsequent anchors in the same
-        // invocation no longer need --why (the mesh exists).
+    // F4: an overwrite of a curated rationale must never be silent.
+    if let Some(prev) = outcome.why_overwritten {
+        eprintln!("updated rationale for mesh `{slug}` (was: \"{prev}\")");
     }
 
     Ok(0)
@@ -279,20 +363,23 @@ fn remove(slug: &str, anchor: Option<&str>, repo_root: &Path) -> Result<i32> {
                 extent_label(&path, extent)
             );
         } else {
+            // F8: remove is idempotent — a missing anchor/mesh is a no-op, not an
+            // error. The add-then-remove reconciliation sequence (F2) relies on
+            // this so re-running it stays exit 0.
             eprintln!(
-                "error: anchor {} not found in mesh `{slug}`",
+                "nothing to remove: anchor {} not present in mesh `{slug}`",
                 extent_label(&path, extent)
             );
-            return Ok(1);
         }
     } else {
         // Remove the whole mesh.
-        if !store::exists(repo_root, slug) {
-            eprintln!("error: mesh `{slug}` not found");
-            return Ok(1);
+        if store::exists(repo_root, slug) {
+            store::delete(repo_root, slug)?;
+            println!("deleted mesh `{slug}`");
+        } else {
+            // F8: idempotent — a missing mesh is a no-op.
+            eprintln!("nothing to remove: mesh `{slug}` not present");
         }
-        store::delete(repo_root, slug)?;
-        println!("deleted mesh `{slug}`");
     }
 
     Ok(0)

@@ -73,11 +73,11 @@ After all prose updates for the page are complete, update anchors for every frag
 wiki mesh add <slug> <source-anchor>   # e.g. packages/cli/src/foo.rs#L10-L40
 ```
 
-**Moved content (range changed):** remove the old anchor, add the new one:
+**Moved content (range changed):** add the new anchor first, then remove the old one. Add-then-remove keeps the mesh alive throughout, so the new anchor never needs a fresh `--why` and a single-anchor mesh does not lose its rationale to an empty-mesh deletion:
 
 ```bash
-wiki mesh remove <slug> <old-anchor>
 wiki mesh add <slug> <new-anchor>
+wiki mesh remove <slug> <old-anchor>
 ```
 
 **Deleted content:** remove the anchor and drop the fragment link from the wiki page:
@@ -110,13 +110,15 @@ wiki check --fix --fix-dry-run  # preview which meshes will be created (no chang
 git commit -m "wiki: ..."
 ```
 
-If you want to add a `why` to a mesh for curation purposes, use `wiki mesh add` with `--why`:
+If you want to add or revise a `why` for curation purposes, use the anchor-less `wiki mesh add` form (the mesh must already exist):
 
 ```bash
 wiki mesh add <slug> --why "Description of what this mesh covers."
 git add .wiki/
 git commit -m "wiki: add mesh why for <slug>"
 ```
+
+Replacing an existing non-empty rationale is supported but never silent: `wiki mesh add` prints `updated rationale for mesh \`<slug>\` (was: "…")` to stderr naming the previous value, so a curated rationale is never clobbered without notice.
 
 ---
 

@@ -1319,9 +1319,10 @@ pub fn run_fix_pass(
             kind: FixKind::MeshAnchorShift,
             reason: format!(
                 "anchor {anchor_label} in mesh {} found in {} candidate locations — \
-                 remove the stale anchor then re-add at the correct location:\n  \
-                 wiki mesh remove {} {anchor_arg}\n  \
-                 wiki mesh add {} <new-anchor>",
+                 add the anchor at the correct location, then remove the stale one \
+                 (add-then-remove keeps the mesh alive so its rationale survives):\n  \
+                 wiki mesh add {} <new-anchor>\n  \
+                 wiki mesh remove {} {anchor_arg}",
                 c.mesh_name, c.candidate_count, c.mesh_name, c.mesh_name
             ),
         });
@@ -1403,8 +1404,9 @@ pub fn run_fix_pass(
                     line: link.source_line,
                     kind: FixKind::MeshAnchorShift,
                     reason: format!(
-                        "no mesh coverage for {target_anchor}; create coverage with:\n  \
-                         wiki mesh add <slug> {target_anchor} --why \"<rationale>\""
+                        "no mesh coverage for {target_anchor}; one mesh must anchor BOTH the \
+                         wiki page and the code target — create coverage with:\n  \
+                         wiki mesh add <slug> {file_rel} {target_anchor} --why \"<rationale>\""
                     ),
                 });
                 continue;

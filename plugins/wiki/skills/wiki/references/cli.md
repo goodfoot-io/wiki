@@ -31,7 +31,7 @@ wiki check path/to/page.md        # validate specific globs only (resolved from 
 
 File selection follows the current working directory: bare `wiki check` validates every `*.md` page beneath the CWD, and explicit globs resolve from the CWD. Link, anchor, `git check-ignore`, and mesh resolution stay anchored at the git repository root, so a subdirectory check produces the same diagnostics as an equivalent repo-relative glob run from the repo root.
 
-`--format json` is supported on most subcommands and is the right choice for any script consuming wiki output.
+`--format json` is supported on most subcommands and is the right choice for any script consuming wiki output. The `wiki mesh` subcommands are the exception: they emit human-readable text only and reject `--format json` with a non-zero exit (`wiki mesh does not support --format json`).
 
 ## Document source
 
@@ -67,27 +67,34 @@ wiki mesh show billing/checkout    # list anchors: path, line range, stored hash
 wiki mesh show billing/checkout --patch  # also show a before/after diff for stale anchors
 ```
 
-Prints each anchor's path, line range, stored rk64 hash, and whether it is fresh or stale (stale means the worktree content at that range no longer matches the stored hash). `--patch` adds a before/after diff for each stale anchor: the committed blob slice (from `HEAD`) versus the current worktree slice.
+Prints each anchor's path, line range, stored rk64 hash, and whether it is fresh or stale (stale means the worktree content at that range no longer matches the stored hash). `--patch` adds a before/after diff for each stale anchor: the committed blob slice (from `HEAD`) versus the current worktree slice. When the committed copy cannot be reconstructed, the diff labels it explicitly rather than misrepresenting it: `(not in HEAD)` for a genuinely new file, or `(committed content unavailable: non-UTF-8 or unreadable)` when the path is in HEAD but its blob is not valid UTF-8. When an anchor is stale but `HEAD` already matches the worktree (the stored hash predates HEAD or reflects staged content), the diff prints a clarifying note instead of an empty patch.
 
 ### `wiki mesh add <slug> <anchor>... [--why <text>]`
 
 ```bash
-# Create a new mesh (--why is required on first create)
+# Create a new mesh (--why is required on first create).
+# Coverage requires ONE mesh to anchor BOTH the wiki page and the code target,
+# so create both anchors together:
 wiki mesh add billing/checkout \
   wiki/checkout.md \
   packages/api/charge.ts#L30-L76 \
   --why "Checkout flow from wiki page to Stripe charge handler"
 
-# Extend an existing mesh (--why is optional; overwrites stored why if supplied)
+# Extend an existing mesh (--why is optional)
 wiki mesh add billing/checkout packages/api/validate.ts#L1-L20
 
 # Re-hash a stale anchor (upsert on exact path#range identity)
 wiki mesh add billing/checkout packages/api/charge.ts#L30-L76
+
+# Update the rationale only (no anchor): valid against an EXISTING mesh
+wiki mesh add billing/checkout --why "Revised: now also covers refund path"
 ```
 
-Anchors are specified as `path#Lstart-Lend` (line range) or a bare `path` (whole file, stored as the `0-0` sentinel). `add` upserts on exact `(path, start, end)` identity: it creates the mesh if it does not exist, appends a new anchor if the range is not present, or re-hashes an existing anchor if the range already exists.
+Anchors are specified as `path#Lstart-Lend` (line range) or a bare `path` (whole file, stored as the `0-0` sentinel). `add` upserts on exact `(path, start, end)` identity: it creates the mesh if it does not exist, appends a new anchor if the range is not present, or re-hashes an existing anchor if the range already exists. A batch `add` is atomic: every anchor is validated (bounds + file existence) before any write, so a single bad anchor leaves the store untouched.
 
-**`--why` is required when creating a new mesh** and is rejected as an error when the mesh does not yet exist and `--why` is absent. When the mesh already exists, `--why` is optional; if supplied it overwrites the stored rationale.
+**At least one anchor OR `--why` must be supplied.** The anchor-less form (`wiki mesh add <slug> --why "…"`) is a rationale-only update and requires the mesh to already exist (it errors otherwise — there is nothing to curate).
+
+**`--why` is required when creating a new mesh** and is rejected as an error when the mesh does not yet exist and `--why` is absent. When the mesh already exists, `--why` is optional; if supplied it overwrites the stored rationale. Overwriting is never silent: when `--why` replaces a non-empty existing rationale, `add` prints `updated rationale for mesh \`<slug>\` (was: "…")` to stderr naming the previous value. Omitting `--why` preserves the stored rationale.
 
 **Fail-closed behavior:** `add` exits non-zero if the target file is missing, the specified line range is out-of-bounds, or the path is not a valid repo-relative path.
 
@@ -98,7 +105,7 @@ wiki mesh remove billing/checkout packages/api/old.ts#L5-L30   # remove one anch
 wiki mesh remove billing/checkout   # remove the whole mesh (all anchors)
 ```
 
-With an anchor argument, removes that single anchor from the mesh. If removing the anchor leaves the mesh empty, the mesh file is deleted. Without an anchor argument, removes the entire mesh file. Exits 0 even when the named anchor is not present (idempotent).
+With an anchor argument, removes that single anchor from the mesh. If removing the anchor leaves the mesh empty, the mesh file is deleted. Without an anchor argument, removes the entire mesh file. `remove` is idempotent: a missing anchor or a missing mesh prints a `nothing to remove` notice to stderr and exits 0. This is what makes the reconciliation sequence `wiki mesh add <new>` then `wiki mesh remove <stale>` safe to re-run.
 
 ---
 
@@ -108,7 +115,7 @@ With an anchor argument, removes that single anchor from the mesh. If removing t
 |---|---|
 | `-v`, `--version` | Print the CLI version. |
 | `--perf` | Emit per-event timings to stderr (also: `WIKI_PERF=1`). |
-| `--format json` | Structured output (subcommand-dependent). |
+| `--format json` | Structured output (subcommand-dependent; rejected by `wiki mesh`). |
 | `--source <s>` | `worktree` (default) / `index` / `head`. |
 | `-l <N>` / `-o <N>` | Search result limit / offset. |
 

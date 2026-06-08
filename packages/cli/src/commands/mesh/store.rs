@@ -184,7 +184,7 @@ pub(crate) fn anchor_record(
 }
 
 /// The outcome of [`upsert_anchor`]: distinguishes first-create from extend/refresh.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum UpsertOutcome {
     /// A new mesh file was created with this anchor as its sole entry.
     Created,
@@ -195,22 +195,27 @@ pub(crate) enum UpsertOutcome {
     Refreshed,
 }
 
+/// The result of applying one or more anchors / a rationale update to a mesh.
+///
+/// `why_overwritten` carries the *previous* non-empty rationale when `--why`
+/// replaced an existing curated rationale, so the caller can surface an explicit
+/// notice rather than silently clobbering it (F4). It is `None` when no overwrite
+/// occurred (mesh created, `--why` omitted, or the new rationale is identical).
+#[derive(Debug)]
+pub(crate) struct ApplyOutcome {
+    /// Per-anchor outcome, in the same order as the input anchors.
+    pub(crate) anchors: Vec<(String, UpsertOutcome)>,
+    /// Previous rationale, when `--why` overwrote a non-empty existing one.
+    pub(crate) why_overwritten: Option<String>,
+    /// True when this invocation only updated the rationale (no anchors).
+    pub(crate) why_only: bool,
+}
+
 /// Insert or update a single anchor in the named mesh.
 ///
-/// Loads the mesh (or starts an empty one), recomputes the rk64 hash via
-/// [`hash_anchor`], then either replaces the [`AnchorRecord`] whose
-/// `(path, start_line, end_line)` triple matches or appends a new one, and
-/// writes the mesh back to disk.
-///
-/// `why` handling:
-/// - When the mesh does not yet exist `why` **must** be `Some(..)` — the
-///   function fails closed otherwise (a mesh without a rationale is not
-///   allowed, matching the `git mesh why` contract).
-/// - When the mesh already exists the stored `why` is preserved; `why =
-///   Some(..)` overwrites it.
-///
-/// The `extent` bounds are validated before any write: an out-of-bounds
-/// line range (end > line count in the worktree file) returns an error.
+/// Thin convenience wrapper over [`upsert_anchors`] for the one-anchor case
+/// (preserves the `why`/bounds/upsert semantics documented there).
+#[cfg(test)]
 pub(crate) fn upsert_anchor(
     repo_root: &Path,
     slug: &str,
@@ -218,70 +223,140 @@ pub(crate) fn upsert_anchor(
     path: &str,
     extent: AnchorExtent,
 ) -> Result<UpsertOutcome> {
-    // Bounds check for line ranges before reading/modifying the mesh.
-    if let AnchorExtent::LineRange { start, end } = extent {
-        let abs = repo_root.join(path);
-        let content = fs::read_to_string(&abs)
-            .map_err(|e| miette::miette!("failed to read {}: {e}", abs.display()))?;
-        let line_count = content.lines().count() as u32;
-        if end > line_count {
+    let label = match extent {
+        AnchorExtent::WholeFile => path.to_string(),
+        AnchorExtent::LineRange { start, end } => format!("{path}#L{start}-L{end}"),
+    };
+    let outcome = upsert_anchors(repo_root, slug, why, &[(path.to_string(), extent, label)])?;
+    Ok(outcome.anchors[0].1)
+}
+
+/// Atomically upsert a batch of anchors (and/or a rationale) into one mesh.
+///
+/// Every anchor is parsed, bounds-checked, and hashed BEFORE any write, so a
+/// single malformed/out-of-bounds anchor leaves the store untouched (F5: no
+/// partial state). The label paired with each outcome is the caller-supplied
+/// human label for that anchor.
+///
+/// `why` handling (F4/F6):
+/// - When the mesh does not exist, `why` **must** be `Some(..)` (fail closed),
+///   and at least one anchor is required (there is nothing to anchor otherwise).
+/// - An empty `anchors` slice is a rationale-only update: the mesh must already
+///   exist and `why` must be `Some(..)`; otherwise it is an error.
+/// - When `why = Some(new)` replaces an existing non-empty rationale that
+///   differs, the previous rationale is returned in
+///   [`ApplyOutcome::why_overwritten`] so the caller can warn.
+pub(crate) fn upsert_anchors(
+    repo_root: &Path,
+    slug: &str,
+    why: Option<&str>,
+    anchors: &[(String, AnchorExtent, String)],
+) -> Result<ApplyOutcome> {
+    let existing = read_one(repo_root, slug)?;
+
+    // Rationale-only update (no anchors): mesh must exist; --why required.
+    if anchors.is_empty() {
+        let Some(mut mesh) = existing else {
             return Err(miette::miette!(
-                "anchor `{path}#L{start}-L{end}` is out of bounds: file has {line_count} line(s)"
+                "mesh `{slug}` does not exist; nothing to curate \
+                 (provide at least one anchor to create it)"
             ));
-        }
+        };
+        let new_why = why.ok_or_else(|| {
+            miette::miette!(
+                "mesh `{slug}` already exists; provide an anchor to extend it \
+                 or --why <text> to update its rationale"
+            )
+        })?;
+        let prev = mesh.why.clone();
+        let why_overwritten = (!prev.is_empty() && prev != new_why).then_some(prev);
+        mesh.why = new_why.to_string();
+        write(repo_root, slug, &mesh)?;
+        return Ok(ApplyOutcome {
+            anchors: Vec::new(),
+            why_overwritten,
+            why_only: true,
+        });
     }
 
-    let existing = read_one(repo_root, slug)?;
-    let outcome;
-    let mesh_why = match &existing {
+    // Determine the rationale up front so a missing --why on create fails before
+    // any bounds work or writes.
+    let (mesh_why, why_overwritten) = match &existing {
         None => {
-            // New mesh: why is required.
             let w = why.ok_or_else(|| {
                 miette::miette!(
                     "mesh `{slug}` does not exist; --why <text> is required when creating a new mesh"
                 )
             })?;
-            outcome = UpsertOutcome::Created;
-            w.to_string()
+            (w.to_string(), None)
         }
-        Some(existing_mesh) => {
-            // Existing mesh: preserve why unless overridden.
-            outcome = UpsertOutcome::Extended; // may be updated below
-            why.map(|w| w.to_string())
-                .unwrap_or_else(|| existing_mesh.why.clone())
-        }
+        Some(existing_mesh) => match why {
+            Some(w) => {
+                let prev = existing_mesh.why.clone();
+                let overwritten = (!prev.is_empty() && prev != w).then_some(prev);
+                (w.to_string(), overwritten)
+            }
+            None => (existing_mesh.why.clone(), None),
+        },
     };
 
-    let content_hash = hash_anchor(repo_root, path, extent)?;
-    let record = anchor_record(path.to_string(), extent, content_hash);
+    // Phase 1: validate + hash every anchor. Any failure aborts before writing.
+    let mut records: Vec<(AnchorRecord, String)> = Vec::with_capacity(anchors.len());
+    for (path, extent, label) in anchors {
+        if let AnchorExtent::LineRange { start, end } = *extent {
+            let abs = repo_root.join(path);
+            let content = fs::read_to_string(&abs)
+                .map_err(|e| miette::miette!("failed to read {}: {e}", abs.display()))?;
+            let line_count = content.lines().count() as u32;
+            if end > line_count {
+                return Err(miette::miette!(
+                    "anchor `{path}#L{start}-L{end}` is out of bounds: file has {line_count} line(s)"
+                ));
+            }
+        }
+        let content_hash = hash_anchor(repo_root, path, *extent)?;
+        let record = anchor_record(path.clone(), *extent, content_hash);
+        records.push((record, label.clone()));
+    }
 
-    let (start_line, end_line) = (record.start_line, record.end_line);
-
+    // Phase 2: apply all validated records to an in-memory mesh, then write once.
+    let mesh_created = existing.is_none();
     let mut mesh = existing.unwrap_or_else(|| MeshFile {
         anchors: Vec::new(),
         why: String::new(),
     });
     mesh.why = mesh_why;
 
-    // Upsert: find an existing anchor with the same (path, start, end) triple.
-    let pos = mesh
-        .anchors
-        .iter()
-        .position(|a| a.path == path && a.start_line == start_line && a.end_line == end_line);
-
-    let outcome = match pos {
-        Some(i) => {
-            mesh.anchors[i] = record;
-            UpsertOutcome::Refreshed
-        }
-        None => {
-            mesh.anchors.push(record);
-            outcome
-        }
-    };
+    let mut outcomes = Vec::with_capacity(records.len());
+    for (record, label) in records {
+        let pos = mesh.anchors.iter().position(|a| {
+            a.path == record.path
+                && a.start_line == record.start_line
+                && a.end_line == record.end_line
+        });
+        let outcome = match pos {
+            Some(i) => {
+                mesh.anchors[i] = record;
+                UpsertOutcome::Refreshed
+            }
+            None => {
+                mesh.anchors.push(record);
+                if mesh_created && outcomes.is_empty() {
+                    UpsertOutcome::Created
+                } else {
+                    UpsertOutcome::Extended
+                }
+            }
+        };
+        outcomes.push((label, outcome));
+    }
 
     write(repo_root, slug, &mesh)?;
-    Ok(outcome)
+    Ok(ApplyOutcome {
+        anchors: outcomes,
+        why_overwritten,
+        why_only: false,
+    })
 }
 
 /// Remove a single anchor from the named mesh.

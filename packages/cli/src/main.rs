@@ -187,16 +187,21 @@ enum MeshCommands {
     ///
     /// `<anchor>` must be `path#Lstart-Lend` or bare `path` (whole file).
     /// When the mesh does not yet exist, `--why` is required. When the mesh
-    /// already exists, `--why` is optional (overwrites the stored rationale
-    /// if supplied).
+    /// already exists, `--why` is optional and overwrites the stored rationale
+    /// (printing an explicit notice naming the previous rationale).
+    ///
+    /// At least one `<anchor>` OR `--why` must be given. The anchor-less form
+    /// (`wiki mesh add <slug> --why "…"`) is a rationale-only update against an
+    /// existing mesh.
     Add {
         /// The mesh slug (e.g. `auth/login-flow`)
         #[arg(value_name = "slug")]
         slug: String,
         /// Anchor(s): `path#Lstart-Lend` or bare `path` (whole file)
-        #[arg(value_name = "anchor", required = true)]
+        #[arg(value_name = "anchor", required_unless_present = "why")]
         anchors: Vec<String>,
-        /// Rationale text (required when creating a new mesh)
+        /// Rationale text (required when creating a new mesh; updates the
+        /// rationale when supplied for an existing mesh)
         #[arg(long = "why", value_name = "text")]
         why: Option<String>,
     },
@@ -361,7 +366,7 @@ fn run(
                 false,
             )
         }
-        Some(Commands::Mesh { command }) => commands::mesh::manage::run(command, &repo_root),
+        Some(Commands::Mesh { command }) => commands::mesh::manage::run(command, &repo_root, json),
         None => match query.as_deref() {
             Some(query) => commands::search::run(query, limit, offset, json, &repo_root, source),
             None => {
