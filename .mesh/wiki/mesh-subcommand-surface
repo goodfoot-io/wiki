@@ -1,0 +1,4 @@
+plugins/wiki/skills/wiki/SKILL.md#L3-L117 rk64:59e363814a9e431a
+packages/cli/src/commands/mesh/manage.rs rk64:755a41e657df49ac
+
+The wiki skill documents the three-verb mesh subcommand (show/add/remove) that is implemented in manage.rs; changes to the surface or command semantics must keep both in sync.

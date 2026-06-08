@@ -1,0 +1,4 @@
+packages/cli/src/commands/mesh/mod.rs#L1-L6 rk64:52a186b7e8cdccab
+packages/cli/src/commands/mesh/manage.rs#L1-L50 rk64:924bf6743bf2699f
+
+The mesh module hierarchy exports manage and store as public interfaces; manage.rs orchestrates the public API (show/add/remove) and store.rs provides the underlying upsert/remove operations, so module structure changes must keep the internal organization aligned.
