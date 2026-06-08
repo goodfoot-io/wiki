@@ -64,8 +64,7 @@ pub(crate) fn read_all(repo_root: &Path) -> Result<Vec<(String, MeshFile)>> {
 
     let mut out = Vec::new();
     for entry in WalkDir::new(&root).sort_by_file_name() {
-        let entry = entry
-            .map_err(|e| miette::miette!("failed to walk {}: {e}", root.display()))?;
+        let entry = entry.map_err(|e| miette::miette!("failed to walk {}: {e}", root.display()))?;
         if !entry.file_type().is_file() {
             continue;
         }
@@ -155,14 +154,10 @@ pub(crate) fn delete(repo_root: &Path, slug: &str) -> Result<()> {
 /// (16 hex digits, no `rk64:` prefix). rk64 is a non-cryptographic identity —
 /// sound here because wiki anchors track documentation links, where a rare
 /// wrong/missed match is self-correcting, not a data-integrity event.
-pub(crate) fn hash_anchor(
-    repo_root: &Path,
-    path: &str,
-    extent: AnchorExtent,
-) -> Result<String> {
+pub(crate) fn hash_anchor(repo_root: &Path, path: &str, extent: AnchorExtent) -> Result<String> {
     let abs = repo_root.join(path);
-    let bytes = fs::read(&abs)
-        .map_err(|e| miette::miette!("failed to read {}: {e}", abs.display()))?;
+    let bytes =
+        fs::read(&abs).map_err(|e| miette::miette!("failed to read {}: {e}", abs.display()))?;
     Ok(rk64_to_hex(cheap_fingerprint_with_extent(&bytes, &extent)))
 }
 
@@ -170,7 +165,11 @@ pub(crate) fn hash_anchor(
 ///
 /// The algorithm is fixed to [`RK64_ALGORITHM`]. Whole-file anchors use the
 /// `start_line == 0 && end_line == 0` sentinel.
-pub(crate) fn anchor_record(path: String, extent: AnchorExtent, content_hash: String) -> AnchorRecord {
+pub(crate) fn anchor_record(
+    path: String,
+    extent: AnchorExtent,
+    content_hash: String,
+) -> AnchorRecord {
     let (start_line, end_line) = match extent {
         AnchorExtent::WholeFile => (0, 0),
         AnchorExtent::LineRange { start, end } => (start, end),
@@ -182,6 +181,141 @@ pub(crate) fn anchor_record(path: String, extent: AnchorExtent, content_hash: St
         algorithm: RK64_ALGORITHM.to_string(),
         content_hash,
     }
+}
+
+/// The outcome of [`upsert_anchor`]: distinguishes first-create from extend/refresh.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum UpsertOutcome {
+    /// A new mesh file was created with this anchor as its sole entry.
+    Created,
+    /// The anchor was added to an existing mesh that did not contain it.
+    Extended,
+    /// An existing anchor with the same `(path, start, end)` triple had its
+    /// hash refreshed in place (no duplicate was added).
+    Refreshed,
+}
+
+/// Insert or update a single anchor in the named mesh.
+///
+/// Loads the mesh (or starts an empty one), recomputes the rk64 hash via
+/// [`hash_anchor`], then either replaces the [`AnchorRecord`] whose
+/// `(path, start_line, end_line)` triple matches or appends a new one, and
+/// writes the mesh back to disk.
+///
+/// `why` handling:
+/// - When the mesh does not yet exist `why` **must** be `Some(..)` — the
+///   function fails closed otherwise (a mesh without a rationale is not
+///   allowed, matching the `git mesh why` contract).
+/// - When the mesh already exists the stored `why` is preserved; `why =
+///   Some(..)` overwrites it.
+///
+/// The `extent` bounds are validated before any write: an out-of-bounds
+/// line range (end > line count in the worktree file) returns an error.
+pub(crate) fn upsert_anchor(
+    repo_root: &Path,
+    slug: &str,
+    why: Option<&str>,
+    path: &str,
+    extent: AnchorExtent,
+) -> Result<UpsertOutcome> {
+    // Bounds check for line ranges before reading/modifying the mesh.
+    if let AnchorExtent::LineRange { start, end } = extent {
+        let abs = repo_root.join(path);
+        let content = fs::read_to_string(&abs)
+            .map_err(|e| miette::miette!("failed to read {}: {e}", abs.display()))?;
+        let line_count = content.lines().count() as u32;
+        if end > line_count {
+            return Err(miette::miette!(
+                "anchor `{path}#L{start}-L{end}` is out of bounds: file has {line_count} line(s)"
+            ));
+        }
+    }
+
+    let existing = read_one(repo_root, slug)?;
+    let outcome;
+    let mesh_why = match &existing {
+        None => {
+            // New mesh: why is required.
+            let w = why.ok_or_else(|| {
+                miette::miette!(
+                    "mesh `{slug}` does not exist; --why <text> is required when creating a new mesh"
+                )
+            })?;
+            outcome = UpsertOutcome::Created;
+            w.to_string()
+        }
+        Some(existing_mesh) => {
+            // Existing mesh: preserve why unless overridden.
+            outcome = UpsertOutcome::Extended; // may be updated below
+            why.map(|w| w.to_string())
+                .unwrap_or_else(|| existing_mesh.why.clone())
+        }
+    };
+
+    let content_hash = hash_anchor(repo_root, path, extent)?;
+    let record = anchor_record(path.to_string(), extent, content_hash);
+
+    let (start_line, end_line) = (record.start_line, record.end_line);
+
+    let mut mesh = existing.unwrap_or_else(|| MeshFile {
+        anchors: Vec::new(),
+        why: String::new(),
+    });
+    mesh.why = mesh_why;
+
+    // Upsert: find an existing anchor with the same (path, start, end) triple.
+    let pos = mesh
+        .anchors
+        .iter()
+        .position(|a| a.path == path && a.start_line == start_line && a.end_line == end_line);
+
+    let outcome = match pos {
+        Some(i) => {
+            mesh.anchors[i] = record;
+            UpsertOutcome::Refreshed
+        }
+        None => {
+            mesh.anchors.push(record);
+            outcome
+        }
+    };
+
+    write(repo_root, slug, &mesh)?;
+    Ok(outcome)
+}
+
+/// Remove a single anchor from the named mesh.
+///
+/// Finds the [`AnchorRecord`] matching `(path, start_line, end_line)` and
+/// removes it. If the mesh becomes empty after removal the mesh file is
+/// deleted. Returns `true` when an anchor was removed, `false` when no
+/// matching anchor or mesh was found.
+pub(crate) fn remove_anchor(
+    repo_root: &Path,
+    slug: &str,
+    path: &str,
+    start: u32,
+    end: u32,
+) -> Result<bool> {
+    let Some(mut mesh) = read_one(repo_root, slug)? else {
+        return Ok(false);
+    };
+
+    let before = mesh.anchors.len();
+    mesh.anchors
+        .retain(|a| !(a.path == path && a.start_line == start && a.end_line == end));
+
+    if mesh.anchors.len() == before {
+        // No anchor matched.
+        return Ok(false);
+    }
+
+    if mesh.anchors.is_empty() {
+        delete(repo_root, slug)?;
+    } else {
+        write(repo_root, slug, &mesh)?;
+    }
+    Ok(true)
 }
 
 /// Relocate an anchor in place within the `.wiki/<slug>` mesh file.
@@ -211,9 +345,11 @@ pub(crate) fn relocate_anchor(
         return Ok(false);
     };
 
-    let Some(anchor) = mesh.anchors.iter_mut().find(|a| {
-        a.path == old_path && a.start_line == old_start && a.end_line == old_end
-    }) else {
+    let Some(anchor) = mesh
+        .anchors
+        .iter_mut()
+        .find(|a| a.path == old_path && a.start_line == old_start && a.end_line == old_end)
+    else {
         return Ok(false);
     };
 
@@ -320,7 +456,10 @@ mod tests {
         let all = read_all(root).unwrap();
         let slugs: Vec<&str> = all.iter().map(|(s, _)| s.as_str()).collect();
         assert!(slugs.contains(&"top"), "missing top slug: {slugs:?}");
-        assert!(slugs.contains(&"wiki/foo/bar"), "missing nested slug: {slugs:?}");
+        assert!(
+            slugs.contains(&"wiki/foo/bar"),
+            "missing nested slug: {slugs:?}"
+        );
         assert_eq!(all.len(), 2);
     }
 
@@ -344,7 +483,10 @@ mod tests {
         fs::write(root.join("file.txt"), content).unwrap();
 
         let got = hash_anchor(root, "file.txt", AnchorExtent::WholeFile).unwrap();
-        let expected = rk64_to_hex(cheap_fingerprint_with_extent(content, &AnchorExtent::WholeFile));
+        let expected = rk64_to_hex(cheap_fingerprint_with_extent(
+            content,
+            &AnchorExtent::WholeFile,
+        ));
         assert_eq!(got, expected);
     }
 
@@ -378,7 +520,11 @@ mod tests {
         // perf log coexist under `.wiki/` but must never be parsed as meshes —
         // even though they are not dotfiles and the DB is binary.
         let wiki = wiki_dir(root);
-        fs::write(wiki.join("wiki-index.sqlite"), b"SQLite format 3\x00\xff\xfe").unwrap();
+        fs::write(
+            wiki.join("wiki-index.sqlite"),
+            b"SQLite format 3\x00\xff\xfe",
+        )
+        .unwrap();
         fs::write(wiki.join("wiki-index.sqlite-wal"), b"\x00\x01wal").unwrap();
         fs::write(wiki.join("wiki-index.sqlite-shm"), b"\x00\x01shm").unwrap();
         fs::write(wiki.join("wiki-refresh.lock"), b"").unwrap();
@@ -447,7 +593,12 @@ mod tests {
 
         // Seed source + mesh anchoring line 1.
         fs::write(root.join("code.rs"), b"fn a() {}\n").unwrap();
-        let h1 = hash_anchor(root, "code.rs", AnchorExtent::LineRange { start: 1, end: 1 }).unwrap();
+        let h1 = hash_anchor(
+            root,
+            "code.rs",
+            AnchorExtent::LineRange { start: 1, end: 1 },
+        )
+        .unwrap();
         write(
             root,
             "m",
@@ -472,7 +623,12 @@ mod tests {
         assert_eq!(mesh.anchors.len(), 1, "must relocate in place, not append");
         let a = &mesh.anchors[0];
         assert_eq!((a.start_line, a.end_line), (2, 2));
-        let expected = hash_anchor(root, "code.rs", AnchorExtent::LineRange { start: 2, end: 2 }).unwrap();
+        let expected = hash_anchor(
+            root,
+            "code.rs",
+            AnchorExtent::LineRange { start: 2, end: 2 },
+        )
+        .unwrap();
         assert_eq!(a.content_hash, expected, "hash must match the NEW range");
     }
 
@@ -527,5 +683,169 @@ mod tests {
         let rec = anchor_record("p".to_string(), AnchorExtent::WholeFile, "h".to_string());
         assert_eq!((rec.start_line, rec.end_line), (0, 0));
         assert_eq!(rec.algorithm, "rk64");
+    }
+
+    // ── upsert_anchor tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn upsert_anchor_creates_new_mesh_with_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.rs"), b"fn main() {}\n").unwrap();
+
+        let outcome = upsert_anchor(
+            root,
+            "my/slug",
+            Some("The auth subsystem."),
+            "a.rs",
+            AnchorExtent::WholeFile,
+        )
+        .unwrap();
+        assert_eq!(outcome, UpsertOutcome::Created);
+
+        let mesh = read_one(root, "my/slug").unwrap().unwrap();
+        assert_eq!(mesh.why, "The auth subsystem.");
+        assert_eq!(mesh.anchors.len(), 1);
+        assert_eq!(mesh.anchors[0].path, "a.rs");
+    }
+
+    #[test]
+    fn upsert_anchor_extends_existing_mesh() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.rs"), b"fn a() {}\n").unwrap();
+        fs::write(root.join("b.rs"), b"fn b() {}\n").unwrap();
+
+        upsert_anchor(root, "sl", Some("Why."), "a.rs", AnchorExtent::WholeFile).unwrap();
+        let outcome = upsert_anchor(root, "sl", None, "b.rs", AnchorExtent::WholeFile).unwrap();
+        assert_eq!(outcome, UpsertOutcome::Extended);
+
+        let mesh = read_one(root, "sl").unwrap().unwrap();
+        assert_eq!(mesh.anchors.len(), 2);
+        // why preserved.
+        assert_eq!(mesh.why, "Why.");
+    }
+
+    #[test]
+    fn upsert_anchor_refreshes_existing_anchor_no_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.rs"), b"fn a() {}\nfn b() {}\nfn c() {}\n").unwrap();
+
+        upsert_anchor(
+            root,
+            "sl",
+            Some("Why."),
+            "a.rs",
+            AnchorExtent::LineRange { start: 1, end: 2 },
+        )
+        .unwrap();
+
+        // Rewrite the file (content changes, range unchanged).
+        fs::write(root.join("a.rs"), b"fn x() {}\nfn y() {}\nfn z() {}\n").unwrap();
+
+        let outcome = upsert_anchor(
+            root,
+            "sl",
+            None,
+            "a.rs",
+            AnchorExtent::LineRange { start: 1, end: 2 },
+        )
+        .unwrap();
+        assert_eq!(outcome, UpsertOutcome::Refreshed);
+
+        let mesh = read_one(root, "sl").unwrap().unwrap();
+        assert_eq!(mesh.anchors.len(), 1, "must refresh in place, not append");
+        let expected_hash =
+            hash_anchor(root, "a.rs", AnchorExtent::LineRange { start: 1, end: 2 }).unwrap();
+        assert_eq!(mesh.anchors[0].content_hash, expected_hash);
+    }
+
+    #[test]
+    fn upsert_anchor_fails_closed_without_why_on_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.rs"), b"fn a() {}\n").unwrap();
+
+        let result = upsert_anchor(root, "sl", None, "a.rs", AnchorExtent::WholeFile);
+        assert!(
+            result.is_err(),
+            "must fail closed when why is absent on first create"
+        );
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(msg.contains("--why"), "error must mention --why: {msg}");
+    }
+
+    #[test]
+    fn upsert_anchor_rejects_out_of_bounds_line_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // File has 3 lines.
+        fs::write(root.join("a.rs"), b"fn a() {}\nfn b() {}\nfn c() {}\n").unwrap();
+
+        let result = upsert_anchor(
+            root,
+            "sl",
+            Some("Why."),
+            "a.rs",
+            AnchorExtent::LineRange { start: 2, end: 5 }, // out of bounds
+        );
+        assert!(result.is_err(), "must fail closed on out-of-bounds range");
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("out of bounds"),
+            "error must say out of bounds: {msg}"
+        );
+    }
+
+    // ── remove_anchor tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn remove_anchor_drops_one_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.rs"), b"x\n").unwrap();
+        fs::write(root.join("b.rs"), b"y\n").unwrap();
+
+        upsert_anchor(root, "sl", Some("Why."), "a.rs", AnchorExtent::WholeFile).unwrap();
+        upsert_anchor(root, "sl", None, "b.rs", AnchorExtent::WholeFile).unwrap();
+
+        let removed = remove_anchor(root, "sl", "a.rs", 0, 0).unwrap();
+        assert!(removed);
+
+        let mesh = read_one(root, "sl").unwrap().unwrap();
+        assert_eq!(mesh.anchors.len(), 1);
+        assert_eq!(mesh.anchors[0].path, "b.rs");
+    }
+
+    #[test]
+    fn remove_anchor_deletes_mesh_file_when_last_anchor_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.rs"), b"x\n").unwrap();
+
+        upsert_anchor(root, "sl", Some("Why."), "a.rs", AnchorExtent::WholeFile).unwrap();
+        assert!(exists(root, "sl"));
+
+        let removed = remove_anchor(root, "sl", "a.rs", 0, 0).unwrap();
+        assert!(removed);
+        assert!(!exists(root, "sl"), "mesh file must be deleted when empty");
+    }
+
+    #[test]
+    fn remove_anchor_returns_false_for_no_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.rs"), b"x\n").unwrap();
+
+        upsert_anchor(root, "sl", Some("Why."), "a.rs", AnchorExtent::WholeFile).unwrap();
+
+        // Wrong anchor (line range instead of whole file).
+        let removed = remove_anchor(root, "sl", "a.rs", 1, 1).unwrap();
+        assert!(!removed, "must return false for a non-matching anchor");
+
+        // Missing mesh.
+        let removed = remove_anchor(root, "no-such-slug", "a.rs", 0, 0).unwrap();
+        assert!(!removed, "must return false for a missing mesh");
     }
 }

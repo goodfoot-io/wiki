@@ -692,7 +692,7 @@ fn find_baseline_with_slug(
 
 /// Read `git show <sha>:<path>` as a UTF-8 string. Returns `Ok(None)` on any
 /// git error or non-UTF-8 blob.
-fn read_blob_at(repo_root: &Path, sha: &str, path: &str) -> Result<Option<String>> {
+pub(crate) fn read_blob_at(repo_root: &Path, sha: &str, path: &str) -> Result<Option<String>> {
     let output = Command::new("git")
         .current_dir(repo_root)
         .args(["show", &format!("{sha}:{path}")])
@@ -795,11 +795,11 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<MeshFollowOutcome> {
     // (a file with K anchors is read once, not K times), so `LineIndex` and the
     // content hashes are computed over a single owned buffer per path.
     let mut file_bytes: HashMap<String, Vec<u8>> = HashMap::new();
-    for path in change_set
-        .iter()
-        .cloned()
-        .chain(meshes.iter().flat_map(|(_, m)| m.anchors.iter().map(|a| a.path.clone())))
-    {
+    for path in change_set.iter().cloned().chain(
+        meshes
+            .iter()
+            .flat_map(|(_, m)| m.anchors.iter().map(|a| a.path.clone())),
+    ) {
         file_bytes
             .entry(path.clone())
             .or_insert_with(|| std::fs::read(repo_root.join(&path)).unwrap_or_default());
@@ -1288,7 +1288,12 @@ pub fn run_fix_pass(
         .map(|p| {
             (
                 (p.old_path.clone(), p.old_start, p.old_end),
-                (p.mesh_name.clone(), p.new_path.clone(), p.new_start, p.new_end),
+                (
+                    p.mesh_name.clone(),
+                    p.new_path.clone(),
+                    p.new_start,
+                    p.new_end,
+                ),
             )
         })
         .collect();
@@ -1302,14 +1307,22 @@ pub fn run_fix_pass(
         } else {
             format!("{}#L{}-L{}", c.path.display(), c.start, c.end)
         };
+        // Build the anchor arg in the on-disk form expected by `wiki mesh`.
+        let anchor_arg = if c.start == 0 && c.end == 0 {
+            c.path.display().to_string()
+        } else {
+            format!("{}#L{}-L{}", c.path.display(), c.start, c.end)
+        };
         skipped.push(SkippedFix {
             file: format!(".wiki/{}", c.mesh_name),
             line: 0,
             kind: FixKind::MeshAnchorShift,
             reason: format!(
-                "anchor {anchor_label} in mesh {}: content found in {} candidate \
-                 locations — not rewriting, resolve manually",
-                c.mesh_name, c.candidate_count
+                "anchor {anchor_label} in mesh {} found in {} candidate locations — \
+                 remove the stale anchor then re-add at the correct location:\n  \
+                 wiki mesh remove {} {anchor_arg}\n  \
+                 wiki mesh add {} <new-anchor>",
+                c.mesh_name, c.candidate_count, c.mesh_name, c.mesh_name
             ),
         });
     }
@@ -1369,8 +1382,9 @@ pub fn run_fix_pass(
             // as MOVED. Only attempt to rewrite links whose (target, start, end)
             // triple matches a MOVED plan — even if the range is still technically
             // within bounds (the mesh has shifted to a new position).
-            let Some((slug, new_path, new_start, new_end)) =
-                eligible.get(&(resolved.clone(), old_start, old_end)).cloned()
+            let Some((slug, new_path, new_start, new_end)) = eligible
+                .get(&(resolved.clone(), old_start, old_end))
+                .cloned()
             else {
                 continue;
             };
@@ -1383,11 +1397,15 @@ pub fn run_fix_pass(
 
             if !is_mesh_covered {
                 // No mesh covers (wiki, target) together — this is Fix #4 territory (deferred).
+                let target_anchor = format!("{}#L{}-L{}", resolved.display(), old_start, old_end);
                 skipped.push(SkippedFix {
                     file: file_rel.clone(),
                     line: link.source_line,
                     kind: FixKind::MeshAnchorShift,
-                    reason: "no mesh coverage; manual review required".to_string(),
+                    reason: format!(
+                        "no mesh coverage for {target_anchor}; create coverage with:\n  \
+                         wiki mesh add <slug> {target_anchor} --why \"<rationale>\""
+                    ),
                 });
                 continue;
             }
@@ -1447,8 +1465,14 @@ pub fn run_fix_pass(
             if !dry_run {
                 let new_rel = new_path.to_string_lossy().into_owned();
                 store::relocate_anchor(
-                    repo_root, &slug, &resolved.to_string_lossy(), old_start, old_end,
-                    &new_rel, new_start, new_end,
+                    repo_root,
+                    &slug,
+                    &resolved.to_string_lossy(),
+                    old_start,
+                    old_end,
+                    &new_rel,
+                    new_start,
+                    new_end,
                 )?;
             }
         }
@@ -1668,9 +1692,8 @@ pub fn run_fix_pass(
     // Runs AFTER creation so the two halves never interfere.
     // Scoped to the same scan_root + globs used for discovery so a subtree
     // invocation only touches orphans whose sole .md anchor is within scope.
-    let cleanup = super::mesh::scaffold::cleanup_orphaned_meshes(
-        repo_root, scan_root, globs, dry_run,
-    )?;
+    let cleanup =
+        super::mesh::scaffold::cleanup_orphaned_meshes(repo_root, scan_root, globs, dry_run)?;
     mesh.deleted.extend(cleanup.deleted);
     mesh.planned_deletions.extend(cleanup.planned_deletions);
     if !cleanup.advisories.is_empty() {
@@ -1866,8 +1889,8 @@ mod tests {
     #[allow(dead_code)]
     fn setup_stale_mesh_repo() -> (TestRepo, String) {
         use crate::commands::mesh::store;
-        use git_mesh_core::mesh_file::MeshFile;
         use git_mesh_core::AnchorExtent;
+        use git_mesh_core::mesh_file::MeshFile;
 
         let repo = TestRepo::new();
 
@@ -1884,7 +1907,10 @@ mod tests {
 
         // Write the mesh file.
         let anchor = store::anchor_record("src/lib.rs".to_string(), extent, hash.clone());
-        let mesh = MeshFile { anchors: vec![anchor], why: String::new() };
+        let mesh = MeshFile {
+            anchors: vec![anchor],
+            why: String::new(),
+        };
         store::write(repo.path(), "myslug", &mesh).unwrap();
         repo.commit("add mesh");
 

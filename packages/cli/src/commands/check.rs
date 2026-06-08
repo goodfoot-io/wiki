@@ -238,17 +238,19 @@ pub fn run(
 
     // ── Fix pass ──────────────────────────────────────────────────────────────
     if fix {
-        let plan = match check_fix::run_fix_pass(&files, repo_root, scan_root, globs, source, fix_dry_run) {
-            Ok(p) => p,
-            Err(e) => {
-                if json {
-                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
-                } else {
-                    eprintln!("error: {e}");
+        let plan =
+            match check_fix::run_fix_pass(&files, repo_root, scan_root, globs, source, fix_dry_run)
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    if json {
+                        eprintln!("{}", serde_json::json!({"error": e.to_string()}));
+                    } else {
+                        eprintln!("error: {e}");
+                    }
+                    return Ok(2);
                 }
-                return Ok(2);
-            }
-        };
+            };
 
         if fix_dry_run {
             // `--print-applied` conflicts with `--fix-dry-run`, so stdout is
@@ -437,7 +439,9 @@ pub fn collect_with_source(
     // pages found" rather than an empty diagnostic list with exit 0.
     let files = discover_files(globs, repo_root, repo_root, source)?;
     if files.is_empty() {
-        return Err(miette::miette!("no wiki pages found (no .md files matched)"));
+        return Err(miette::miette!(
+            "no wiki pages found (no .md files matched)"
+        ));
     }
     let files = filter_files_for_source(files, repo_root, source)?;
     let index_files = if globs.is_empty() {
@@ -790,7 +794,6 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-
     }
 
     fn make_wiki_page(title: &str, body: &str) -> String {
@@ -1615,8 +1618,13 @@ mod tests {
         // The conflict is carried in the FixPlan; assert it surfaces a skip and
         // counts the conflict.
         let plan = check_fix::run_fix_pass(
-            &discover_files(&[], repo.path(), repo.path(), crate::index::DocSource::WorkingTree)
-                .unwrap(),
+            &discover_files(
+                &[],
+                repo.path(),
+                repo.path(),
+                crate::index::DocSource::WorkingTree,
+            )
+            .unwrap(),
             repo.path(),
             repo.path(),
             &[],
@@ -1626,10 +1634,12 @@ mod tests {
         .expect("fix pass");
         assert_eq!(plan.mesh_conflicts, 1, "expected one conflict recorded");
         assert!(
-            plan.skipped.iter().any(|s| s
-                .reason
-                .contains("candidate locations — not rewriting, resolve manually")),
-            "expected an actionable conflict skip message, got: {:?}",
+            plan.skipped
+                .iter()
+                .any(|s| s.reason.contains("candidate locations")
+                    && s.reason.contains("wiki mesh remove")
+                    && s.reason.contains("wiki mesh add")),
+            "expected an actionable conflict skip message with wiki mesh commands, got: {:?}",
             plan.skipped
         );
 
@@ -2143,7 +2153,7 @@ mod tests {
             root,
             false,
             crate::index::DocSource::Index,
-            true,  // fix
+            true, // fix
             false,
             false,
         )

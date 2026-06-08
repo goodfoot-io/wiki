@@ -151,6 +151,69 @@ enum Commands {
         #[arg(value_name = "title|path")]
         title: Option<String>,
     },
+
+    /// Inspect and manage `.wiki/` mesh anchors.
+    ///
+    /// Provides three verbs for in-process mesh reconciliation so that any
+    /// `wiki check` failure can be resolved without the `git mesh` binary.
+    ///
+    ///   wiki mesh show <slug> [--patch]   — inspect anchors; diff on --patch
+    ///   wiki mesh add  <slug> <anchor>... — upsert anchor(s) into a mesh
+    ///   wiki mesh remove <slug> [anchor]  — drop an anchor or the whole mesh
+    Mesh {
+        #[command(subcommand)]
+        command: MeshCommands,
+    },
+}
+
+/// Subcommands for `wiki mesh`.
+#[derive(Debug, Subcommand)]
+enum MeshCommands {
+    /// Show the anchors in a mesh, optionally with a before/after diff.
+    ///
+    /// Prints each anchor's path, line range, stored hash, and fresh/stale
+    /// status (by recomputing the rk64 fingerprint against the worktree).
+    /// With `--patch`, also shows the diff between the committed blob slice
+    /// and the current worktree slice for each stale anchor.
+    Show {
+        /// The mesh slug (e.g. `auth/login-flow`)
+        #[arg(value_name = "slug")]
+        slug: String,
+        /// Show a before/after diff for stale anchors (committed vs worktree)
+        #[arg(long = "patch")]
+        patch: bool,
+    },
+    /// Upsert an anchor into a mesh (create the mesh if it does not exist).
+    ///
+    /// `<anchor>` must be `path#Lstart-Lend` or bare `path` (whole file).
+    /// When the mesh does not yet exist, `--why` is required. When the mesh
+    /// already exists, `--why` is optional (overwrites the stored rationale
+    /// if supplied).
+    Add {
+        /// The mesh slug (e.g. `auth/login-flow`)
+        #[arg(value_name = "slug")]
+        slug: String,
+        /// Anchor(s): `path#Lstart-Lend` or bare `path` (whole file)
+        #[arg(value_name = "anchor", required = true)]
+        anchors: Vec<String>,
+        /// Rationale text (required when creating a new mesh)
+        #[arg(long = "why", value_name = "text")]
+        why: Option<String>,
+    },
+    /// Remove an anchor from a mesh, or the whole mesh if no anchor is given.
+    ///
+    /// When an `<anchor>` argument is supplied, only that anchor is removed
+    /// and the mesh file is deleted when the last anchor is dropped. When no
+    /// `<anchor>` is supplied, the entire mesh file is deleted.
+    Remove {
+        /// The mesh slug (e.g. `auth/login-flow`)
+        #[arg(value_name = "slug")]
+        slug: String,
+        /// Anchor to remove: `path#Lstart-Lend` or bare `path` (whole file).
+        /// Omit to remove the entire mesh.
+        #[arg(value_name = "anchor")]
+        anchor: Option<String>,
+    },
 }
 
 /// Read all non-empty trimmed lines from stdin, if stdin is not an interactive terminal.
@@ -298,6 +361,7 @@ fn run(
                 false,
             )
         }
+        Some(Commands::Mesh { command }) => commands::mesh::manage::run(command, &repo_root),
         None => match query.as_deref() {
             Some(query) => commands::search::run(query, limit, offset, json, &repo_root, source),
             None => {
@@ -333,6 +397,7 @@ fn command_name(command: Option<&Commands>, query: Option<&str>) -> &'static str
         Some(Commands::Check { .. }) => "check",
         Some(Commands::List { .. }) => "list",
         Some(Commands::Summary { .. }) => "summary",
+        Some(Commands::Mesh { .. }) => "mesh",
         None if query.is_some() => "search",
         None => "help",
     }
