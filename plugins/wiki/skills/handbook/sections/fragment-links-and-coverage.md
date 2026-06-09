@@ -8,7 +8,7 @@ The retry loop lives in [client.ts](../packages/api/client.ts#L88-L120).
 
 Whole-file links (`[client.ts](../packages/api/client.ts)`) are valid but discouraged: coverage falls back to the `0-0` sentinel and you lose line-level drift signal. Use a range whenever the cited thing has one.
 
-Path resolution is the same as page links: bare/`./`/`../` = page dir, leading `/` = repo root, `http(s)` = unvalidated and uncovered.
+Path resolution follows the page-link rules in `./writing-a-page.md` (`http(s)` links are unvalidated and uncovered).
 
 ## Fragment link discipline
 

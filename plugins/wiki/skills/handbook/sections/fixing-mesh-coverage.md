@@ -28,10 +28,3 @@ When a new slug path-collides with a pre-existing ancestor mesh, `--fix` renames
 ## When `--fix` can't
 
 `--fix` is best-effort and fail-closes on what it can't safely resolve: a missing target path, an ambiguous line-range shift, deleted or moved content, a slug it can't create. It emits a **skip line naming the exact `wiki mesh` command to run**. That line is your starting point — go to `./resolving-skipped-fixes.md`.
-
-To curate (add/revise a `why`) on an existing mesh:
-
-```bash
-wiki mesh add <slug> --why "What this mesh covers."   # mesh must already exist
-git add .wiki/
-```

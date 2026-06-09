@@ -24,7 +24,7 @@ Bare `wiki check` validates every page beneath the CWD; explicit globs resolve f
 
 ```bash
 wiki check --no-exit-code   # report-only; exits 0 even with errors
-wiki check --format json    # structured diagnostics (for scripts). NOTE: wiki mesh rejects --format json
+wiki check --format json    # structured diagnostics (for scripts)
 wiki --source index check   # validate staged content (pre-commit); also: worktree (default), head (CI)
 ```
 
