@@ -73,6 +73,11 @@ impl FixtureRepo {
         git(&self.root, &["mv", from, to]);
     }
 
+    /// Run `git rm` to delete a file from the index and the worktree.
+    pub fn git_rm(&self, rel_path: &str) {
+        git(&self.root, &["rm", "-q", rel_path]);
+    }
+
     /// Append a path to `.gitignore` (creating it if necessary) and stage it.
     pub fn ignore(&self, pattern: &str) {
         let gi = self.root.join(".gitignore");

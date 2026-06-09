@@ -172,11 +172,8 @@ pub fn pass_worktree(
 
         let rel_str = rel.to_string_lossy().to_string();
         let prior: Option<String> = tx
-            .query_row(
-                "SELECT oid FROM paths WHERE path_rel = ?1 AND source = ?2",
-                params![rel_str, source_id(Source::Worktree)],
-                |r| r.get(0),
-            )
+            .prepare_cached("SELECT oid FROM paths WHERE path_rel = ?1 AND source = ?2")?
+            .query_row(params![rel_str, source_id(Source::Worktree)], |r| r.get(0))
             .ok();
         if prior.as_deref() != Some(oid.0.as_str()) {
             deltas.push(PassDelta {

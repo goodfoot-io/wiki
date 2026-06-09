@@ -5,7 +5,7 @@
 //! `fts` synchronized so an FTS row dies the moment the corresponding
 //! `blobs.refcount` hits zero.
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub const SCHEMA_V1: &str = r#"
 CREATE TABLE state (
@@ -81,6 +81,11 @@ pub fn bootstrap(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
          PRAGMA mmap_size=268435456;",
     )?;
 
+    // The refresh hot loop runs ~10 distinct statements through
+    // `prepare_cached`; rusqlite's default LRU capacity is 16 and evictions
+    // re-prepare silently, so keep generous headroom.
+    conn.set_prepared_statement_cache_capacity(32);
+
     // Detect whether the schema has been applied.
     let state_exists: bool = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='state'",
@@ -118,6 +123,11 @@ pub fn bootstrap(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
 
 /// External-content sync triggers. Kept separate from `SCHEMA_V1` so the
 /// bootstrap path can rerun them defensively after schema upgrades.
+///
+/// `blobs_au` is scoped to the indexed content columns: blob content is
+/// immutable per OID, so the only UPDATEs `blobs` ever sees are refcount
+/// bumps — and an unscoped trigger would re-tokenize the full document
+/// into FTS on every one of them (3× the corpus per cold refresh).
 pub const FTS_TRIGGERS: &str = r#"
 CREATE TRIGGER blobs_ai AFTER INSERT ON blobs BEGIN
   INSERT INTO fts(rowid, title, aliases_text, tags_text, keywords_text, summary, body)
@@ -129,7 +139,8 @@ CREATE TRIGGER blobs_ad AFTER DELETE ON blobs BEGIN
   VALUES ('delete', old.rowid, old.title, old.aliases_text, old.tags_text, old.keywords_text, old.summary, old.body);
 END;
 
-CREATE TRIGGER blobs_au AFTER UPDATE ON blobs BEGIN
+CREATE TRIGGER blobs_au
+AFTER UPDATE OF title, aliases_text, tags_text, keywords_text, summary, body ON blobs BEGIN
   INSERT INTO fts(fts, rowid, title, aliases_text, tags_text, keywords_text, summary, body)
   VALUES ('delete', old.rowid, old.title, old.aliases_text, old.tags_text, old.keywords_text, old.summary, old.body);
   INSERT INTO fts(rowid, title, aliases_text, tags_text, keywords_text, summary, body)
@@ -156,7 +167,6 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         assert_eq!(version, SCHEMA_VERSION);
-        assert_eq!(version, 1);
 
         // FTS triggers exist.
         let trigger_count: i64 = conn

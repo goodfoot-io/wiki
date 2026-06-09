@@ -38,7 +38,12 @@ pub fn pass_tree(
     let old_tree_obj = repo.find_tree(old_tree_id).ok();
 
     let mut opts = gix::diff::Options::default();
-    opts.track_rewrites(Some(gix::diff::Rewrites::default()));
+    // Rename tracking only pays off against a real prior tree. The
+    // first-run diff against the empty tree is all additions — there are
+    // no deletions to pair renames with, so skip the rewrite matcher.
+    if last_head_tree_oid.is_some() {
+        opts.track_rewrites(Some(gix::diff::Rewrites::default()));
+    }
 
     let changes = repo
         .diff_tree_to_tree(old_tree_obj.as_ref(), Some(&new_tree), opts)

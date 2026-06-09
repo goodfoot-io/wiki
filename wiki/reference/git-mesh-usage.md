@@ -41,7 +41,7 @@ The line range token (`start-end`) is parsed for format validation only; range f
 
 ### `git-mesh add <name> <anchor>...` *(generated, not invoked)*
 
-**Where:** [`render.rs`](/packages/cli/src/commands/mesh/render.rs#L137-L146)
+**Where:** [`render.rs`](/packages/cli/src/commands/mesh/render.rs#L151-L160)
 
 **Invoked by:** [`wiki check --fix`](/packages/cli/src/commands/mesh/scaffold.rs#L159-L200) — creates meshes directly, does **not** shell out to `git-mesh`.
 

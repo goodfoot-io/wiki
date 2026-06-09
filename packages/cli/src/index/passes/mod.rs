@@ -5,7 +5,7 @@
 //! them with strict later-source-wins ordering, applies refcount-driven
 //! blob bookkeeping, and re-tokenizes only on actual content changes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -124,7 +124,9 @@ pub fn refresh(
     };
 
     // Pass 1: Tree (committed snapshot).
-    let tree_deltas = tree::pass_tree(repo, prior_head_tree_oid)?;
+    let tree_deltas = crate::perf::scope_result("index.pass_tree", serde_json::json!({}), || {
+        tree::pass_tree(repo, prior_head_tree_oid)
+    })?;
 
     // Pass 2: Index file.
     let prior_index_checksum_arr: [u8; 20] = if prior_index_checksum.len() == 20 {
@@ -134,19 +136,25 @@ pub fn refresh(
     } else {
         [0u8; 20]
     };
-    let index_deltas = index_file::pass_index(dot_git, &prior_index_checksum_arr, &tx)?;
+    let index_deltas =
+        crate::perf::scope_result("index.pass_index", serde_json::json!({}), || {
+            index_file::pass_index(dot_git, &prior_index_checksum_arr, &tx)
+        })?;
 
     // Pass 3: Worktree.
     let mut pass3_full_rescans: u64 = 0;
     let mut pass3_dir_walks: u64 = 0;
-    let worktree_deltas = worktree::pass_worktree(
-        repo,
-        repo_root,
-        &tx,
-        hostile_fs,
-        &mut pass3_full_rescans,
-        &mut pass3_dir_walks,
-    )?;
+    let worktree_deltas =
+        crate::perf::scope_result("index.pass_worktree", serde_json::json!({}), || {
+            worktree::pass_worktree(
+                repo,
+                repo_root,
+                &tx,
+                hostile_fs,
+                &mut pass3_full_rescans,
+                &mut pass3_dir_walks,
+            )
+        })?;
 
     // Merge deltas in strict order Tree -> Index -> Worktree.
     // For each (source, path) we want the final OID assignment to obey
@@ -160,29 +168,51 @@ pub fn refresh(
     let deltas_applied = all_deltas.len();
     let mut fts_retokenizations: u64 = 0;
 
+    // Per-refresh blob-identity caches. `wiki_oids` mirrors the `blobs`
+    // table (seeded once, maintained as deltas apply) so the apply loop
+    // never round-trips a COUNT per delta. `non_wiki_oids` remembers blobs
+    // that failed `parse_blob` so a non-wiki blob is read and parsed at
+    // most once per refresh — not once per source that mentions it.
+    let mut blob_cache = BlobCache {
+        wiki_oids: {
+            let mut stmt = tx.prepare_cached("SELECT oid FROM blobs")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<HashSet<_>>>()?
+        },
+        non_wiki_oids: HashSet::new(),
+    };
+
     // Apply each delta.
-    for delta in &all_deltas {
-        match &delta.action {
-            DeltaAction::Add { oid } => {
-                apply_add(
-                    repo,
-                    repo_root,
-                    &tx,
-                    &delta.path,
-                    delta.source,
-                    oid,
-                    &mut fts_retokenizations,
-                )?;
+    crate::perf::scope_result(
+        "index.apply_deltas",
+        serde_json::json!({ "deltas": deltas_applied }),
+        || -> Result<()> {
+            for delta in &all_deltas {
+                match &delta.action {
+                    DeltaAction::Add { oid } => {
+                        apply_add(
+                            repo,
+                            repo_root,
+                            &tx,
+                            &delta.path,
+                            delta.source,
+                            oid,
+                            &mut fts_retokenizations,
+                            &mut blob_cache,
+                        )?;
+                    }
+                    DeltaAction::Remove => {
+                        apply_remove(&tx, &delta.path, delta.source, &mut blob_cache)?;
+                    }
+                    DeltaAction::Rename { from, oid } => {
+                        // A rename keeps refcount > 0 — the path swap is row-level.
+                        apply_rename(&tx, from, &delta.path, delta.source, oid)?;
+                    }
+                }
             }
-            DeltaAction::Remove => {
-                apply_remove(&tx, &delta.path, delta.source)?;
-            }
-            DeltaAction::Rename { from, oid } => {
-                // A rename keeps refcount > 0 — the path swap is row-level.
-                apply_rename(&tx, from, &delta.path, delta.source, oid)?;
-            }
-        }
-    }
+            Ok(())
+        },
+    )?;
 
     // Update state row. Compute new head_tree_oid from HEAD (or empty).
     let new_head_tree = repo
@@ -239,7 +269,7 @@ pub fn refresh(
         });
     }
 
-    tx.commit()?;
+    crate::perf::scope_result("index.commit", serde_json::json!({}), || tx.commit())?;
 
     Ok(RefreshOutcome {
         deltas_applied,
@@ -250,6 +280,17 @@ pub fn refresh(
     })
 }
 
+/// Per-refresh cache of blob identity, maintained alongside the `blobs`
+/// table so the apply loop never issues a per-delta existence COUNT and
+/// never parses the same non-wiki blob more than once.
+struct BlobCache {
+    /// OIDs currently present in `blobs` (i.e. parsed as wiki pages).
+    wiki_oids: HashSet<String>,
+    /// OIDs whose bytes failed `parse_blob` during this refresh.
+    non_wiki_oids: HashSet<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn apply_add(
     repo: &gix::Repository,
     repo_root: &Path,
@@ -258,38 +299,39 @@ fn apply_add(
     source: Source,
     oid: &BlobOid,
     fts_retokenizations: &mut u64,
+    blob_cache: &mut BlobCache,
 ) -> Result<()> {
     // Look up any existing path row at (path_rel, source).
     let path_str = path_rel.to_string_lossy().to_string();
     let existing_oid: Option<String> = tx
-        .query_row(
-            "SELECT oid FROM paths WHERE path_rel = ?1 AND source = ?2",
-            params![path_str, source_id(source)],
-            |r| r.get(0),
-        )
+        .prepare_cached("SELECT oid FROM paths WHERE path_rel = ?1 AND source = ?2")?
+        .query_row(params![path_str, source_id(source)], |r| r.get(0))
         .ok();
 
     // Ensure the blob exists in the `blobs` table. If not, parse the
     // bytes; non-wiki blobs cause us to skip the path row entirely.
-    if !blob_exists(tx, oid)? {
-        let bytes = read_blob_bytes(repo, repo_root, source, path_rel, oid)?;
-        let Some(fields) = parse_blob(&bytes) else {
+    let known_non_wiki = blob_cache.non_wiki_oids.contains(&oid.0);
+    if known_non_wiki || !blob_cache.wiki_oids.contains(&oid.0) {
+        let fields = if known_non_wiki {
+            None
+        } else {
+            let bytes = read_blob_bytes(repo, repo_root, source, path_rel, oid)?;
+            parse_blob(&bytes)
+        };
+        let Some(fields) = fields else {
             // Not a wiki page; skip recording this path entirely. If a
             // stale row existed at this (path, source), drop it.
+            blob_cache.non_wiki_oids.insert(oid.0.clone());
             if let Some(prev) = existing_oid.as_ref() {
-                tx.execute(
-                    "DELETE FROM paths WHERE path_rel = ?1 AND source = ?2",
-                    params![path_str, source_id(source)],
-                )?;
-                decrement_blob(tx, &BlobOid(prev.clone()))?;
+                tx.prepare_cached("DELETE FROM paths WHERE path_rel = ?1 AND source = ?2")?
+                    .execute(params![path_str, source_id(source)])?;
+                decrement_blob(tx, &BlobOid(prev.clone()), blob_cache)?;
             }
             return Ok(());
         };
         insert_blob(tx, oid, &fields)?;
+        blob_cache.wiki_oids.insert(oid.0.clone());
         *fts_retokenizations += 1;
-    } else {
-        // Blob already known to be a wiki page; still need to verify the
-        // bytes parse — but that's a one-shot per OID, so trust the row.
     }
 
     match existing_oid {
@@ -298,23 +340,21 @@ fn apply_add(
         }
         Some(prev) => {
             // Path's OID changed within the same source.
-            tx.execute(
-                "UPDATE paths SET oid = ?1 WHERE path_rel = ?2 AND source = ?3",
-                params![oid.0, path_str, source_id(source)],
-            )?;
+            tx.prepare_cached("UPDATE paths SET oid = ?1 WHERE path_rel = ?2 AND source = ?3")?
+                .execute(params![oid.0, path_str, source_id(source)])?;
             increment_blob(tx, oid)?;
-            decrement_blob(tx, &BlobOid(prev))?;
+            decrement_blob(tx, &BlobOid(prev), blob_cache)?;
         }
         None => {
             let parent = path_rel
                 .parent()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
-            tx.execute(
+            tx.prepare_cached(
                 "INSERT INTO paths (path_rel, source, oid, parent_dir)
                  VALUES (?1, ?2, ?3, ?4)",
-                params![path_str, source_id(source), oid.0, parent],
-            )?;
+            )?
+            .execute(params![path_str, source_id(source), oid.0, parent])?;
             increment_blob(tx, oid)?;
         }
     }
@@ -322,21 +362,21 @@ fn apply_add(
     Ok(())
 }
 
-fn apply_remove(tx: &rusqlite::Transaction, path_rel: &Path, source: Source) -> Result<()> {
+fn apply_remove(
+    tx: &rusqlite::Transaction,
+    path_rel: &Path,
+    source: Source,
+    blob_cache: &mut BlobCache,
+) -> Result<()> {
     let path_str = path_rel.to_string_lossy().to_string();
     let prev: Option<String> = tx
-        .query_row(
-            "SELECT oid FROM paths WHERE path_rel = ?1 AND source = ?2",
-            params![path_str, source_id(source)],
-            |r| r.get(0),
-        )
+        .prepare_cached("SELECT oid FROM paths WHERE path_rel = ?1 AND source = ?2")?
+        .query_row(params![path_str, source_id(source)], |r| r.get(0))
         .ok();
     if let Some(prev) = prev {
-        tx.execute(
-            "DELETE FROM paths WHERE path_rel = ?1 AND source = ?2",
-            params![path_str, source_id(source)],
-        )?;
-        decrement_blob(tx, &BlobOid(prev))?;
+        tx.prepare_cached("DELETE FROM paths WHERE path_rel = ?1 AND source = ?2")?
+            .execute(params![path_str, source_id(source)])?;
+        decrement_blob(tx, &BlobOid(prev), blob_cache)?;
     }
     Ok(())
 }
@@ -355,63 +395,56 @@ fn apply_rename(
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
     // Delete the old row.
-    tx.execute(
-        "DELETE FROM paths WHERE path_rel = ?1 AND source = ?2",
-        params![from_str, source_id(source)],
-    )?;
+    tx.prepare_cached("DELETE FROM paths WHERE path_rel = ?1 AND source = ?2")?
+        .execute(params![from_str, source_id(source)])?;
     // Upsert the new row at the same OID — refcount unchanged because
     // we did not bump on either side.
-    tx.execute(
+    tx.prepare_cached(
         "INSERT OR REPLACE INTO paths (path_rel, source, oid, parent_dir)
          VALUES (?1, ?2, ?3, ?4)",
-        params![to_str, source_id(source), oid.0, parent],
-    )?;
+    )?
+    .execute(params![to_str, source_id(source), oid.0, parent])?;
     Ok(())
 }
 
-fn blob_exists(tx: &rusqlite::Transaction, oid: &BlobOid) -> Result<bool> {
-    let n: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM blobs WHERE oid = ?1",
-        params![oid.0],
-        |r| r.get(0),
-    )?;
-    Ok(n > 0)
-}
-
 fn insert_blob(tx: &rusqlite::Transaction, oid: &BlobOid, fields: &WikiBlobFields) -> Result<()> {
-    tx.execute(
+    tx.prepare_cached(
         "INSERT INTO blobs (oid, refcount, title, summary, body, aliases_text, tags_text, keywords_text)
          VALUES (?1, 0, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            oid.0,
-            fields.title,
-            fields.summary,
-            fields.body,
-            fields.aliases_text,
-            fields.tags_text,
-            fields.keywords_text,
-        ],
-    )?;
+    )?
+    .execute(params![
+        oid.0,
+        fields.title,
+        fields.summary,
+        fields.body,
+        fields.aliases_text,
+        fields.tags_text,
+        fields.keywords_text,
+    ])?;
     Ok(())
 }
 
 fn increment_blob(tx: &rusqlite::Transaction, oid: &BlobOid) -> Result<()> {
-    tx.execute(
-        "UPDATE blobs SET refcount = refcount + 1 WHERE oid = ?1",
-        params![oid.0],
-    )?;
+    tx.prepare_cached("UPDATE blobs SET refcount = refcount + 1 WHERE oid = ?1")?
+        .execute(params![oid.0])?;
     Ok(())
 }
 
-fn decrement_blob(tx: &rusqlite::Transaction, oid: &BlobOid) -> Result<()> {
-    tx.execute(
-        "UPDATE blobs SET refcount = refcount - 1 WHERE oid = ?1",
-        params![oid.0],
-    )?;
-    tx.execute(
-        "DELETE FROM blobs WHERE oid = ?1 AND refcount <= 0",
-        params![oid.0],
-    )?;
+fn decrement_blob(
+    tx: &rusqlite::Transaction,
+    oid: &BlobOid,
+    blob_cache: &mut BlobCache,
+) -> Result<()> {
+    tx.prepare_cached("UPDATE blobs SET refcount = refcount - 1 WHERE oid = ?1")?
+        .execute(params![oid.0])?;
+    let deleted = tx
+        .prepare_cached("DELETE FROM blobs WHERE oid = ?1 AND refcount <= 0")?
+        .execute(params![oid.0])?;
+    if deleted > 0 {
+        // The blob row is gone; a later delta re-adding this OID must
+        // re-insert it, so the cache may no longer claim it exists.
+        blob_cache.wiki_oids.remove(&oid.0);
+    }
     Ok(())
 }
 

@@ -54,11 +54,8 @@ pub fn pass_index(
 
         let on_disk_oid = entry.id.to_hex().to_string();
         let prior: Option<String> = tx
-            .query_row(
-                "SELECT oid FROM paths WHERE path_rel = ?1 AND source = ?2",
-                params![path_str, source_id(Source::Index)],
-                |r| r.get(0),
-            )
+            .prepare_cached("SELECT oid FROM paths WHERE path_rel = ?1 AND source = ?2")?
+            .query_row(params![path_str, source_id(Source::Index)], |r| r.get(0))
             .ok();
         if prior.as_deref() != Some(on_disk_oid.as_str()) {
             deltas.push(PassDelta {

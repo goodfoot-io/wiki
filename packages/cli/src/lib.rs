@@ -10,3 +10,8 @@
 pub mod frontmatter;
 pub mod git;
 pub mod index;
+// The command-lifecycle half of `perf` (init/finish/spans) is only called
+// from the binary's main; the lib target needs the module solely for the
+// scope events inside `index`.
+#[allow(dead_code)]
+mod perf;

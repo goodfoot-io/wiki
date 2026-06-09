@@ -17,40 +17,32 @@ The perf module writes to: `$WIKI_DIR/wiki.log` (default: `./wiki/wiki.log`). Ea
 
 Perf scope events measure execution time and record success/error status. They are organized by module below.
 
-### Index Initialization and Management
+### Command Lifecycle
 
 | Location | Scope Name | Measures | Metadata |
 |----------|-----------|----------|----------|
-| packages/wiki/src/index.rs:126 | `index.prepare` | Total time to prepare wiki index (open DB, bootstrap schema, verify integrity, sync) | Empty object |
-| packages/wiki/src/index.rs:136 | `index.open_database` | Time to connect to SQLite database | `db_path` (database file location) |
-| packages/wiki/src/index.rs:159 | `index.bootstrap_schema` | Time to create or verify database schema | Empty object |
-| packages/wiki/src/index.rs:165 | `index.verify_integrity` | Time to run database integrity checks | Empty object |
-| packages/wiki/src/index.rs:171 | `index.sync` | Time to synchronize wiki files with database index | Empty object |
+| [main.rs](./src/main.rs#L327-L330) | `command.<name>` | Total wall time of the command (stderr span only; not written to `wiki.log`) | — |
 
-### Index Syncing and Updates
+### Index Refresh
+
+These scopes cover the cold-cache path: when the stat-only freshness gate misses, [`WikiIndex::prepare_for_source`](./src/index/mod.rs#L348-L368) opens the repository and drives the three-pass refresh.
 
 | Location | Scope Name | Measures | Metadata |
 |----------|-----------|----------|----------|
-| packages/wiki/src/index.rs:375 | `index.discover_files` | Time to scan filesystem for wiki markdown files | Empty object |
-| packages/wiki/src/index.rs:379 | `index.load_existing_documents` | Time to query database for currently indexed documents | Empty object |
-| packages/wiki/src/index.rs:502 | `index.validate_lookup_collisions` | Time to detect duplicate lookup keys and title conflicts | `pending_documents` (new/modified docs), `changed_or_new` (count), `stale_paths` (deleted docs) |
-| packages/wiki/src/index.rs:525 | `index.begin_transaction` | Time to start database transaction | Empty object |
-| packages/wiki/src/index.rs:728 | `index.commit_transaction` | Time to commit database transaction | Empty object |
-
-### Query Operations
-
-| Location | Scope Name | Measures | Metadata |
-|----------|-----------|----------|----------|
-| packages/wiki/src/index.rs:843 | `index.resolve_page` | Time to look up a page by title or path | `input` (search term), `input_kind` ("path" or "lookup") |
-| packages/wiki/src/index.rs:937 | `index.search` | Time to execute full-text search query | `query` (FTS query string), `limit` (max results), `min_score` (relevance threshold), `broad` (broad search mode) |
-| packages/wiki/src/index.rs:1041 | `index.list_pages` | Time to list all or tagged pages | `tag` (filter tag, or null for all) |
-| packages/wiki/src/index.rs:1149 | `index.extract_pages` | Time to retrieve multiple pages by title | `title_count` (number of titles) |
+| [index/mod.rs](./src/index/mod.rs#L353-L356) | `index.gix_open` | Time to open the gix repository for a refresh | Empty object |
+| [index/mod.rs](./src/index/mod.rs#L357-L366) | `index.refresh` | Total three-pass refresh including delta apply and commit | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L126-L129) | `index.pass_tree` | Pass 1: diff `HEAD^{tree}` against the previously indexed tree | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L139-L142) | `index.pass_index` | Pass 2: git index entry scan | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L147-L157) | `index.pass_worktree` | Pass 3: worktree walk, read + hash of candidate markdown | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L185-L213) | `index.apply_deltas` | Applying all merged deltas (blob parse, FTS insert, paths/refcount bookkeeping) | `deltas` (count) |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L272-L272) | `index.commit` | SQLite transaction commit | Empty object |
 
 ### File Discovery
 
 | Location | Scope Name | Measures | Metadata |
 |----------|-----------|----------|----------|
-| packages/wiki/src/commands/mod.rs:131 | `discover_files` | Time to resolve glob patterns and find wiki markdown files | `globs` (array of glob patterns) |
+| [commands/mod.rs](./src/commands/mod.rs#L199-L266) | `discover_files` | Time to resolve glob patterns and find wiki markdown files | `globs` (array of glob patterns) |
+| [commands/mod.rs](./src/commands/mod.rs#L253-L260) | `discover_files_result` | Zero-duration marker carrying the discovered-file count | `count` |
 
 ## Direct Output Points (println! and eprintln!)
 

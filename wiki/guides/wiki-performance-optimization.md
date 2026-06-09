@@ -27,7 +27,13 @@ The [WikiIndex refresh](/packages/cli/src/index/passes/mod.rs) detects changes i
 
 Full-text search is [built into the SQLite schema](/packages/cli/src/index/schema.rs) as an external-content FTS5 virtual table over `blobs`. There is no deferred or separate search index — every blob inserted into `blobs` is tokenized into `fts` by the bootstrap triggers, so search is always live.
 
-### 5. Weighted Search Ranking
+### 5. Refcount-Silent FTS Triggers
+
+The `blobs` table is reference-counted: one row per unique blob, with `paths` rows from up to three sources (committed tree, git index, worktree) pointing at it. The [FTS sync triggers](/packages/cli/src/index/schema.rs) are scoped to the indexed content columns (`AFTER UPDATE OF title, …, body`), so refcount bumps — the only UPDATEs the table ever sees, since blob content is immutable per OID — never re-tokenize the document. Before this scoping, a cold index build re-tokenized the whole corpus once per source.
+
+A per-refresh blob cache in the [delta apply loop](/packages/cli/src/index/passes/mod.rs) complements this: blob existence is tracked in memory rather than queried per delta, and a non-wiki blob is read and parsed at most once per refresh, no matter how many sources mention it.
+
+### 6. Weighted Search Ranking
 
 To keep search performance high while improving relevance, [weighted search ranking](/packages/cli/src/index/search.rs) combines exact title and alias matches, path-fragment lookups, and a BM25 column cascade over `title`, `aliases_text`, `tags_text`, `keywords_text`, `summary`, and `body`. Each pass is optimized separately (B-tree lookups for titles and paths before falling back to BM25), ensuring that common navigational searches are nearly instantaneous.
 

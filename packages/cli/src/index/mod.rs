@@ -52,6 +52,23 @@ pub(crate) fn find_dot_git(start: &Path) -> Option<PathBuf> {
     }
 }
 
+/// True for [`schema::bootstrap`] errors that mean the cache DB should be
+/// deleted and rebuilt: a schema-version mismatch (`InvalidQuery`, the
+/// sentinel `bootstrap` returns for it) or a corrupt file (`NotADatabase`).
+fn rebuildable_bootstrap_error(e: &rusqlite::Error) -> bool {
+    matches!(e, rusqlite::Error::InvalidQuery)
+        || matches!(
+            e,
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error {
+                    code: rusqlite::ffi::ErrorCode::NotADatabase,
+                    ..
+                },
+                _,
+            )
+        )
+}
+
 /// The `.wiki/` directory anchored at the repo root, where the index cache DB
 /// and its sidecar files live alongside the mesh store.
 pub(crate) fn wiki_dir(repo_root: &Path) -> PathBuf {
@@ -268,13 +285,39 @@ impl WikiIndex {
         std::fs::create_dir_all(&wiki)
             .map_err(|e| miette::miette!("failed to create {}: {e}", wiki.display()))?;
         let db_path = index_db_path(repo_root);
-        let conn = Connection::open_with_flags(
-            &db_path,
-            OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_READ_WRITE,
-        )
-        .map_err(|e| miette::miette!("failed to open wiki index at {}: {e}", db_path.display()))?;
+        let open = || {
+            Connection::open_with_flags(
+                &db_path,
+                OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_READ_WRITE,
+            )
+            .map_err(|e| miette::miette!("failed to open wiki index at {}: {e}", db_path.display()))
+        };
+        let mut conn = open()?;
 
-        schema::bootstrap(&conn).map_err(|e| miette::miette!("schema bootstrap failed: {e}"))?;
+        if let Err(e) = schema::bootstrap(&conn) {
+            // A schema-version mismatch (InvalidQuery) means the cache was
+            // written by a different CLI version; NotADatabase means the
+            // file is corrupt. Either way the DB is purely derived data, so
+            // discard and rebuild it rather than failing the command. Two
+            // racing processes may both take this path — POSIX unlink keeps
+            // each working on its own inode, so the worst case is one
+            // redundant rebuild, never a corrupt result.
+            if rebuildable_bootstrap_error(&e) {
+                drop(conn);
+                // Sidecars first, DB file last: a crash mid-deletion must
+                // not leave an old WAL behind for a fresh DB to replay.
+                for suffix in ["-shm", "-wal", ""] {
+                    let mut p = db_path.clone().into_os_string();
+                    p.push(suffix);
+                    let _ = std::fs::remove_file(PathBuf::from(p));
+                }
+                conn = open()?;
+                schema::bootstrap(&conn)
+                    .map_err(|e| miette::miette!("schema bootstrap failed after rebuild: {e}"))?;
+            } else {
+                return Err(miette::miette!("schema bootstrap failed: {e}"));
+            }
+        }
 
         let fs_class = forced_fs_class.unwrap_or_else(|| fs_class::detect(&dot_git));
 
@@ -307,15 +350,19 @@ impl WikiIndex {
             return Ok(index);
         }
 
-        let repo = gix::open(&index.repo_root)
-            .map_err(|e| miette::miette!("gix::open({}) failed: {e}", index.repo_root.display()))?;
-        let outcome = passes::refresh(
-            &repo,
-            &index.repo_root,
-            &index.dot_git,
-            &mut index.conn,
-            fs_class,
-        )
+        let repo = crate::perf::scope_result("index.gix_open", serde_json::json!({}), || {
+            gix::open(&index.repo_root).map_err(Box::new)
+        })
+        .map_err(|e| miette::miette!("gix::open({}) failed: {e}", index.repo_root.display()))?;
+        let outcome = crate::perf::scope_result("index.refresh", serde_json::json!({}), || {
+            passes::refresh(
+                &repo,
+                &index.repo_root,
+                &index.dot_git,
+                &mut index.conn,
+                fs_class,
+            )
+        })
         .map_err(|e| miette::miette!("refresh failed: {e}"))?;
         if !outcome.cas_lost {
             index.last_stats = IndexStats {

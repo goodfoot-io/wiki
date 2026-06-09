@@ -56,7 +56,7 @@ When multiple inputs are provided via stdin, the exit code reflects the worst re
 
 ## Targeting Specific Files
 
-All commands accept explicit glob patterns instead of scanning [`WIKI_DIR`](/packages/cli/src/main.rs#L113-L115):
+All commands accept explicit glob patterns instead of scanning [`WIKI_DIR`](/packages/cli/src/main.rs#L111-L113):
 
 ```bash
 wiki check wiki/some-section/**/*.md
@@ -64,7 +64,7 @@ wiki check wiki/some-section/**/*.md
 
 ## JSON Output
 
-Every command accepts [`--format json`](/packages/cli/src/main.rs#L47-L49) for scripting:
+Every command accepts [`--format json`](/packages/cli/src/main.rs#L45-L47) for scripting:
 
 ```bash
 wiki check --format json
