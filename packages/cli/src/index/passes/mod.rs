@@ -42,8 +42,10 @@ pub enum DeltaAction {
     Add { oid: BlobOid },
     /// Path is no longer present in this source.
     Remove,
-    /// Pass 1 rewrite — a rename inside the tree. `from` is the previous
-    /// path; the new path is the delta's `path`.
+    /// Pass 1 pure rename — same blob OID at a new path. `from` is the
+    /// previous path; the new path is the delta's `path`. Rewrites that
+    /// also change content are decomposed into `Remove` + `Add` instead,
+    /// since the blob row does not carry over.
     Rename { from: PathBuf, oid: BlobOid },
 }
 
@@ -205,7 +207,8 @@ pub fn refresh(
                         apply_remove(&tx, &delta.path, delta.source, &mut blob_cache)?;
                     }
                     DeltaAction::Rename { from, oid } => {
-                        // A rename keeps refcount > 0 — the path swap is row-level.
+                        // A pure rename keeps the OID and refcount — the
+                        // path swap is row-level.
                         apply_rename(&tx, from, &delta.path, delta.source, oid)?;
                     }
                 }

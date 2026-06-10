@@ -116,6 +116,22 @@ fn read_head_oid(dot_git: &Path) -> Option<String> {
     }
 }
 
+/// Return the last 20 bytes of `.git/index` (the SHA-1 trailer git writes).
+fn read_index_trailer(index_path: &Path) -> Option<[u8; 20]> {
+    let meta = fs::metadata(index_path).ok()?;
+    let len = meta.len();
+    if len < 20 {
+        return None;
+    }
+    let mut file = fs::File::open(index_path).ok()?;
+    // Seek to end-20.
+    use std::io::Seek;
+    file.seek(std::io::SeekFrom::Start(len - 20)).ok()?;
+    let mut buf = [0u8; 20];
+    file.read_exact(&mut buf).ok()?;
+    Some(buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,20 +189,4 @@ mod tests {
         fs::write(dot_git.join("HEAD"), format!("{oid}\n")).unwrap();
         assert_eq!(read_head_oid(dot_git), Some(oid.to_string()));
     }
-}
-
-/// Return the last 20 bytes of `.git/index` (the SHA-1 trailer git writes).
-fn read_index_trailer(index_path: &Path) -> Option<[u8; 20]> {
-    let meta = fs::metadata(index_path).ok()?;
-    let len = meta.len();
-    if len < 20 {
-        return None;
-    }
-    let mut file = fs::File::open(index_path).ok()?;
-    // Seek to end-20.
-    use std::io::Seek;
-    file.seek(std::io::SeekFrom::Start(len - 20)).ok()?;
-    let mut buf = [0u8; 20];
-    file.read_exact(&mut buf).ok()?;
-    Some(buf)
 }

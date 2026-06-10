@@ -91,23 +91,64 @@ pub fn pass_tree(
             }
             gix::object::tree::diff::ChangeDetached::Rewrite {
                 source_location,
+                source_id,
                 location,
                 id,
                 ..
             } => {
                 let from = bstring_to_path(&source_location);
                 let to = bstring_to_path(&location);
-                if !is_markdown(&to) && !is_markdown(&from) {
-                    continue;
+                match (is_markdown(&from), is_markdown(&to)) {
+                    // Pure rename: the blob row and refcount carry over
+                    // unchanged, so `apply_rename`'s row-level path swap
+                    // is sound and avoids a retokenization.
+                    (true, true) if source_id == id => {
+                        out.push(PassDelta {
+                            path: to,
+                            source: Source::Tree,
+                            action: DeltaAction::Rename {
+                                from,
+                                oid: BlobOid(id.to_hex().to_string()),
+                            },
+                        });
+                    }
+                    // Rename + edit: the new OID needs a `blobs` row and
+                    // the old one needs releasing, so decompose into
+                    // Remove + Add for full blob bookkeeping.
+                    (true, true) => {
+                        out.push(PassDelta {
+                            path: from,
+                            source: Source::Tree,
+                            action: DeltaAction::Remove,
+                        });
+                        out.push(PassDelta {
+                            path: to,
+                            source: Source::Tree,
+                            action: DeltaAction::Add {
+                                oid: BlobOid(id.to_hex().to_string()),
+                            },
+                        });
+                    }
+                    // Renamed out of the wiki.
+                    (true, false) => {
+                        out.push(PassDelta {
+                            path: from,
+                            source: Source::Tree,
+                            action: DeltaAction::Remove,
+                        });
+                    }
+                    // Renamed into the wiki.
+                    (false, true) => {
+                        out.push(PassDelta {
+                            path: to,
+                            source: Source::Tree,
+                            action: DeltaAction::Add {
+                                oid: BlobOid(id.to_hex().to_string()),
+                            },
+                        });
+                    }
+                    (false, false) => {}
                 }
-                out.push(PassDelta {
-                    path: to,
-                    source: Source::Tree,
-                    action: DeltaAction::Rename {
-                        from,
-                        oid: BlobOid(id.to_hex().to_string()),
-                    },
-                });
             }
         }
     }

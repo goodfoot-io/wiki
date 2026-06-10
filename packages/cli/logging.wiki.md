@@ -31,11 +31,11 @@ These scopes cover the cold-cache path: when the stat-only freshness gate misses
 |----------|-----------|----------|----------|
 | [index/mod.rs](./src/index/mod.rs#L353-L356) | `index.gix_open` | Time to open the gix repository for a refresh | Empty object |
 | [index/mod.rs](./src/index/mod.rs#L357-L366) | `index.refresh` | Total three-pass refresh including delta apply and commit | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L126-L129) | `index.pass_tree` | Pass 1: diff `HEAD^{tree}` against the previously indexed tree | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L139-L142) | `index.pass_index` | Pass 2: git index entry scan | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L147-L157) | `index.pass_worktree` | Pass 3: worktree walk, read + hash of candidate markdown | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L128-L131) | `index.pass_tree` | Pass 1: diff `HEAD^{tree}` against the previously indexed tree | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L141-L144) | `index.pass_index` | Pass 2: git index entry scan | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L149-L159) | `index.pass_worktree` | Pass 3: worktree walk, read + hash of candidate markdown | Empty object |
 | [index/passes/mod.rs](./src/index/passes/mod.rs#L185-L213) | `index.apply_deltas` | Applying all merged deltas (blob parse, FTS insert, paths/refcount bookkeeping) | `deltas` (count) |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L272-L272) | `index.commit` | SQLite transaction commit | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L275-L275) | `index.commit` | SQLite transaction commit | Empty object |
 
 ### File Discovery
 
