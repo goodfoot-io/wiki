@@ -39,7 +39,13 @@ pub struct PassDelta {
 #[derive(Debug, Clone)]
 pub enum DeltaAction {
     /// Path is present with the given blob OID.
-    Add { oid: BlobOid },
+    Add {
+        oid: BlobOid,
+        /// File mtime at the moment of hashing, stored in
+        /// `paths.stat_mtime_ns` so the next refresh can detect
+        /// in-place content edits inside clean directories.
+        stat_mtime_ns: Option<i64>,
+    },
     /// Path is no longer present in this source.
     Remove,
     /// Pass 1 pure rename — same blob OID at a new path. `from` is the
@@ -191,7 +197,7 @@ pub fn refresh(
         || -> Result<()> {
             for delta in &all_deltas {
                 match &delta.action {
-                    DeltaAction::Add { oid } => {
+                    DeltaAction::Add { oid, stat_mtime_ns } => {
                         apply_add(
                             repo,
                             repo_root,
@@ -199,6 +205,7 @@ pub fn refresh(
                             &delta.path,
                             delta.source,
                             oid,
+                            *stat_mtime_ns,
                             &mut fts_retokenizations,
                             &mut blob_cache,
                         )?;
@@ -225,6 +232,7 @@ pub fn refresh(
                                 &delta.path,
                                 delta.source,
                                 oid,
+                                None,
                                 &mut fts_retokenizations,
                                 &mut blob_cache,
                             )?;
@@ -320,6 +328,7 @@ fn apply_add(
     path_rel: &Path,
     source: Source,
     oid: &BlobOid,
+    stat_mtime_ns: Option<i64>,
     fts_retokenizations: &mut u64,
     blob_cache: &mut BlobCache,
 ) -> Result<()> {
@@ -358,12 +367,22 @@ fn apply_add(
 
     match existing_oid {
         Some(prev) if prev == oid.0 => {
-            // No-op: same path, same OID.
+            // Same OID — still update stat_mtime_ns if the caller
+            // provided one (e.g. a Worktree pass backfill).
+            if let Some(mtime) = stat_mtime_ns {
+                tx.prepare_cached(
+                    "UPDATE paths SET stat_mtime_ns = ?1 WHERE path_rel = ?2 AND source = ?3",
+                )?
+                .execute(params![mtime, path_str, source_id(source)])?;
+            }
         }
         Some(prev) => {
             // Path's OID changed within the same source.
-            tx.prepare_cached("UPDATE paths SET oid = ?1 WHERE path_rel = ?2 AND source = ?3")?
-                .execute(params![oid.0, path_str, source_id(source)])?;
+            tx.prepare_cached(
+                "UPDATE paths SET oid = ?1, stat_mtime_ns = ?2
+                 WHERE path_rel = ?3 AND source = ?4",
+            )?
+            .execute(params![oid.0, stat_mtime_ns, path_str, source_id(source)])?;
             increment_blob(tx, oid)?;
             decrement_blob(tx, &BlobOid(prev), blob_cache)?;
         }
@@ -373,10 +392,16 @@ fn apply_add(
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
             tx.prepare_cached(
-                "INSERT INTO paths (path_rel, source, oid, parent_dir)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO paths (path_rel, source, oid, parent_dir, stat_mtime_ns)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
             )?
-            .execute(params![path_str, source_id(source), oid.0, parent])?;
+            .execute(params![
+                path_str,
+                source_id(source),
+                oid.0,
+                parent,
+                stat_mtime_ns
+            ])?;
             increment_blob(tx, oid)?;
         }
     }

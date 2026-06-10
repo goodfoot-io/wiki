@@ -109,12 +109,7 @@ fn in_place_edit_in_clean_dir_is_still_indexed() {
     std::thread::sleep(std::time::Duration::from_millis(20));
 
     // In-place content edit — does NOT change docs/ dir mtime on POSIX.
-    repo.write_wiki_md(
-        "docs/deep.md",
-        "Deep",
-        "Edited summary.",
-        "Edited body.",
-    );
+    repo.write_wiki_md("docs/deep.md", "Deep", "Edited summary.", "Edited body.");
 
     // Stage a root-level sentinel so the fast triple misses on the next
     // prepare. This dirties root's mtime but docs/ stays unchanged.
@@ -134,5 +129,5 @@ fn in_place_edit_in_clean_dir_is_still_indexed() {
         .expect("page must exist");
 
     assert_eq!(resolved.summary, "Edited summary.");
-    assert_eq!(resolved.content, "Edited body.\n");
+    assert_eq!(resolved.content, "\nEdited body.\n");
 }

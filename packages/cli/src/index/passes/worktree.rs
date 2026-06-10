@@ -63,6 +63,21 @@ pub fn pass_worktree(
         }
     }
 
+    // Snapshot per-file mtimes from the prior refresh. A file inside a
+    // dir-mtime-clean directory may still have been edited in-place (POSIX
+    // dir mtime only changes on entry add/remove/rename). We compare the
+    // on-disk file mtime against this map to decide whether the file truly
+    // needs re-hashing.
+    let prior_file_mtimes: HashMap<PathBuf, Option<i64>> = {
+        let mut stmt = tx.prepare("SELECT path_rel, stat_mtime_ns FROM paths WHERE source = ?1")?;
+        let rows = stmt.query_map(params![source_id(Source::Worktree)], |row| {
+            let p: String = row.get(0)?;
+            let m: Option<i64> = row.get(1)?;
+            Ok((PathBuf::from(p), m))
+        })?;
+        rows.collect::<rusqlite::Result<HashMap<_, _>>>()?
+    };
+
     // Build an excludes stack so we can prune ignored directories cheaply.
     let index = repo
         .index_or_empty()
@@ -126,7 +141,7 @@ pub fn pass_worktree(
         if entry.file_type().is_dir() {
             // Always count and decide cleanliness for every directory we
             // descend into (including the repo root, rel == "").
-            let dir_mtime_ns = dir_mtime_ns(path);
+            let dir_mtime_ns = mtime_ns(path);
             let prior = prior_dir_mtimes.get(&rel).copied();
             let is_clean =
                 !is_hostile && dir_mtime_ns.is_some() && prior.is_some() && prior == dir_mtime_ns;
@@ -155,11 +170,20 @@ pub fn pass_worktree(
         if !is_markdown(&rel) {
             continue;
         }
-        // Skip files inside a clean directory — their parent's mtime
-        // signalled the rows on disk are unchanged since last refresh.
+        // For files inside a clean directory (parent mtime unchanged),
+        // check the per-file mtime: on POSIX, dir mtime only changes on
+        // entry add/remove/rename, so an in-place content edit leaves
+        // the dir mtime alone. If the file's mtime matches the stored
+        // value, the file is truly unchanged and can be skipped.
         let parent = rel.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         if clean_dirs.contains(&parent) {
-            continue;
+            let cur = mtime_ns(path);
+            if cur.is_some() && prior_file_mtimes.get(&rel).copied().flatten() == cur {
+                // File truly unchanged — carry forward.
+                seen_paths.insert(rel.clone());
+                continue;
+            }
+            // File mtime changed or unknown — fall through to re-hash.
         }
 
         seen_paths.insert(rel.clone());
@@ -170,6 +194,7 @@ pub fn pass_worktree(
         };
         let oid = compute_blob_oid(&bytes);
 
+        let cur_mtime = mtime_ns(path);
         let rel_str = rel.to_string_lossy().to_string();
         let prior: Option<String> = tx
             .prepare_cached("SELECT oid FROM paths WHERE path_rel = ?1 AND source = ?2")?
@@ -181,8 +206,16 @@ pub fn pass_worktree(
                 source: Source::Worktree,
                 action: DeltaAction::Add {
                     oid: BlobOid(oid.0),
+                    stat_mtime_ns: cur_mtime,
                 },
             });
+        } else if let Some(mtime) = cur_mtime {
+            // OID unchanged but stat_mtime_ns may be stale (backfill
+            // from a prior version that didn't store it, or clock skew).
+            tx.execute(
+                "UPDATE paths SET stat_mtime_ns = ?1 WHERE path_rel = ?2 AND source = ?3",
+                params![mtime, rel_str, source_id(Source::Worktree)],
+            )?;
         }
     }
 
@@ -219,7 +252,7 @@ pub fn pass_worktree(
     Ok(deltas)
 }
 
-fn dir_mtime_ns(p: &Path) -> Option<i64> {
+fn mtime_ns(p: &Path) -> Option<i64> {
     let meta = std::fs::metadata(p).ok()?;
     let mtime = meta.modified().ok()?;
     let dur = mtime.duration_since(UNIX_EPOCH).ok()?;

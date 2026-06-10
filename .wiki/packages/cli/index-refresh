@@ -1,9 +1,8 @@
 packages/cli/logging.wiki.md#L26-L38 rk64:b128a798cd41e672
 packages/cli/src/index/mod.rs#L348-L368 rk64:e4af708ad253f1d7
-packages/cli/src/index/passes/mod.rs#L128-L131 rk64:e29989191982b0be
-packages/cli/src/index/passes/mod.rs#L141-L144 rk64:90bd61bedd45f421
-packages/cli/src/index/passes/mod.rs#L149-L159 rk64:91081757431f56fb
+packages/cli/src/index/passes/mod.rs#L134-L137 rk64:e29989191982b0be
+packages/cli/src/index/passes/mod.rs#L147-L150 rk64:90bd61bedd45f421
+packages/cli/src/index/passes/mod.rs#L155-L165 rk64:91081757431f56fb
 packages/cli/src/index/passes/mod.rs#L185-L213 rk64:109ae70a9ec14c89
-packages/cli/src/index/passes/mod.rs#L275-L275 rk64:e93bcc7c5dcc693e
-packages/cli/src/index/passes/mod.rs#L294-L294 rk64:e93bcc7c5dcc693e
+packages/cli/src/index/passes/mod.rs#L282-L282 rk64:e93bcc7c5dcc693e
 
