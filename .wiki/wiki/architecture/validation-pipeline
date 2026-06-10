@@ -2,4 +2,5 @@ wiki/architecture/wiki-cli.md#L14-L16 rk64:a9d7a003af869c03
 packages/cli/src/commands/check.rs#L28-L29 rk64:bd07b750d06e644b
 packages/cli/src/frontmatter.rs#L55-L55 rk64:4f9a5fa9c95be53a
 packages/cli/src/commands/check.rs#L59-L60 rk64:14e58518d234dfa6
+packages/cli/src/commands/check.rs#L102-L103 rk64:14e58518d234dfa6
 
