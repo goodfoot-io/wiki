@@ -21,7 +21,7 @@ Perf scope events measure execution time and record success/error status. They a
 
 | Location | Scope Name | Measures | Metadata |
 |----------|-----------|----------|----------|
-| [main.rs](./src/main.rs#L327-L330) | `command.<name>` | Total wall time of the command (stderr span only; not written to `wiki.log`) | — |
+| [main.rs](./src/main.rs#L328-L331) | `command.<name>` | Total wall time of the command (stderr span only; not written to `wiki.log`) | — |
 
 ### Index Refresh
 

@@ -116,7 +116,8 @@ enum Commands {
         #[arg(
             long = "print-applied",
             requires = "fix",
-            conflicts_with = "fix_dry_run"
+            conflicts_with = "fix_dry_run",
+            conflicts_with = "format"
         )]
         print_applied: bool,
     },
