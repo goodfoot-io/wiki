@@ -4,7 +4,7 @@ use miette::Result;
 use serde::Serialize;
 
 use crate::commands::discover_files;
-use crate::frontmatter::{Frontmatter, build_index, parse_frontmatter, parse_title};
+use crate::frontmatter::{Frontmatter, build_index, parse_frontmatter};
 use crate::git::resolve_ref;
 use crate::headings::{extract_headings, resolve_heading};
 use crate::index::DocSource;
@@ -510,7 +510,17 @@ fn collect_for_files(
     // ── Parse frontmatter for all pages ──────────────────────────────────────
     let mut pages: Vec<(PathBuf, Frontmatter)> = Vec::new();
 
-    for path in index_files {
+    // Iterate the union of index_files (collision context) and files (scoped
+    // diagnostics). Files that are only in index_files contribute to the
+    // collision pool without producing diagnostics. Files only in files
+    // (glob-selected pages that bypass membership filtering) get diagnostics
+    // and, if valid, join the collision pool. Avoid double-parsing paths that
+    // are in both sets.
+    let mut seen: std::collections::HashSet<&PathBuf> = std::collections::HashSet::new();
+    for path in index_files.iter().chain(files.iter()) {
+        if !seen.insert(path) {
+            continue;
+        }
         let in_scope = files_set.contains(path);
         let content = match read_via_source(path, repo_root, source) {
             Ok(c) => c,
@@ -544,7 +554,6 @@ fn collect_for_files(
                 }
             }
             Err(e) => {
-                let _ = parse_title(&content);
                 if in_scope {
                     diagnostics.push(CheckDiagnostic {
                         kind: "frontmatter".into(),
@@ -888,7 +897,8 @@ mod tests {
         repo.create_file("wiki/page.md", "# Just a heading\n\nNo frontmatter.");
         repo.commit("add page");
 
-        // File has no frontmatter → not a wiki member → not discovered → exit 2
+        // File has no frontmatter fence → not a wiki candidate → not discovered
+        // → empty corpus → exit 2.
         let code = run(
             &[],
             false,

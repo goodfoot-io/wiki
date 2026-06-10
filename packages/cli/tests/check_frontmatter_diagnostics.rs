@@ -122,7 +122,7 @@ fn walk_discovered_invalid_tags_emits_diagnostic() {
     );
     let has_tags_error = frontmatter_errors
         .iter()
-        .any(|e| e["message"].as_str().map_or(false, |m| m.contains("tags")));
+        .any(|e| e["message"].as_str().is_some_and(|m| m.contains("tags")));
     assert!(
         has_tags_error,
         "expected 'tags' diagnostic, got errors: {frontmatter_errors:?}"
@@ -181,18 +181,28 @@ fn walk_discovered_yaml_parse_error_emits_diagnostic() {
     );
 }
 
-/// A walk-discovered page with no frontmatter at all (`---` fence absent) must
-/// produce a frontmatter diagnostic saying to add one.
+/// A glob-selected page with no frontmatter at all (`---` fence absent) must
+/// produce a frontmatter diagnostic saying to add one. Files without a fence
+/// are not auto-discovered by the default walk (plain .md files like README
+/// are not wiki candidates), but explicit glob selection signifies user intent
+/// to check this file.
 #[test]
-fn walk_discovered_no_frontmatter_emits_diagnostic() {
+fn glob_selected_no_frontmatter_emits_diagnostic() {
     let repo = TestRepo::new();
-    repo.create_file("wiki/plain.md", "# Just a heading\n\nNo frontmatter here.\n");
+    // Place outside the default scan root so it's only reachable via glob.
+    repo.create_file("drafts/plain.md", "# Just a heading\n\nNo frontmatter here.\n");
+    // Also create a valid wiki page so the walk doesn't produce "no wiki pages found".
+    repo.create_file(
+        "wiki/valid.md",
+        &page_with_title_summary("Valid Page", "A valid wiki page for corpus membership."),
+    );
     repo.commit("init");
 
-    let out = repo.run_check(&[]);
+    let out = repo.run_check(&["drafts/*.md"]);
     assert!(
         !out.status.success(),
-        "walk-discovered page with no frontmatter must exit non-zero"
+        "glob-selected page with no frontmatter must exit non-zero, got: {}",
+        String::from_utf8_lossy(&out.stdout)
     );
 
     let errors = TestRepo::parse_errors(&out);
@@ -204,6 +214,37 @@ fn walk_discovered_no_frontmatter_emits_diagnostic() {
         !frontmatter_errors.is_empty(),
         "must have at least one frontmatter diagnostic, got: {}",
         String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// A file with no `---` frontmatter fence is a plain markdown file, not a wiki
+/// candidate. The default walk must not flag it — it was never trying to be a
+/// wiki page.
+#[test]
+fn walk_does_not_discover_plain_md_without_fence() {
+    let repo = TestRepo::new();
+    repo.create_file("wiki/plain.md", "# Just a heading\n\nNo frontmatter here.\n");
+    // Add a valid wiki page so the check doesn't exit 2 with "no wiki pages found".
+    repo.create_file(
+        "wiki/valid.md",
+        &page_with_title_summary("Valid Page", "A valid wiki page for corpus membership."),
+    );
+    repo.commit("init");
+
+    let out = repo.run_check(&[]);
+    assert!(
+        out.status.success(),
+        "plain .md files without --- fence must not produce diagnostics"
+    );
+
+    let errors = TestRepo::parse_errors(&out);
+    let frontmatter_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| e["kind"].as_str() == Some("frontmatter"))
+        .collect();
+    assert!(
+        frontmatter_errors.is_empty(),
+        "must have no frontmatter diagnostics for plain .md, got: {frontmatter_errors:?}"
     );
 }
 
@@ -243,7 +284,7 @@ fn glob_selected_invalid_tags_emits_diagnostic() {
     );
     let has_tags_error = frontmatter_errors
         .iter()
-        .any(|e| e["message"].as_str().map_or(false, |m| m.contains("tags")));
+        .any(|e| e["message"].as_str().is_some_and(|m| m.contains("tags")));
     assert!(
         has_tags_error,
         "expected 'tags' diagnostic for glob-selected file, got errors: {frontmatter_errors:?}"

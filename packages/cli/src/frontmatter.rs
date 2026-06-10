@@ -73,23 +73,32 @@ pub struct Frontmatter {
 
 // ── Parsing ───────────────────────────────────────────────────────────────────
 
-/// Returns `true` iff `content` has a YAML frontmatter block with both a
-/// non-empty `title:` and a non-empty `summary:` field. Errors are treated as
-/// non-membership.
-pub fn is_wiki_member(content: &str, path: &Path) -> bool {
-    matches!(parse_frontmatter(content, path), Ok(Some(_)))
-}
-
-/// Extract only the title from frontmatter, without full validation.
-///
-/// Returns `None` if there is no frontmatter block, the YAML is unparseable,
-/// or the title field is absent, empty, or not a string.
-pub fn parse_title(content: &str) -> Option<String> {
-    let yaml = extract_yaml_block(content)?;
-    let raw: RawFrontmatter = serde_yaml::from_str(yaml).ok()?;
-    match raw.title? {
-        serde_yaml::Value::String(s) if !s.is_empty() => Some(s),
-        _ => None,
+/// Returns `true` if `content` is a wiki-page candidate: it has a `---`
+/// frontmatter fence whose YAML contains `title` or `summary` keys, or whose
+/// YAML is unparseable (possibly a broken wiki page). Files with no fence, or
+/// with a fence containing only non-wiki keys (`name`, `description`, `paths`,
+/// etc.), are not wiki candidates.
+pub fn has_wiki_frontmatter(content: &str) -> bool {
+    let content = content.trim_start_matches('\n');
+    if !content.starts_with("---") {
+        return false;
+    }
+    // The opening "---" must be on its own line.
+    let after = &content["---".len()..];
+    if !after.is_empty() && !after.starts_with('\n') && !after.starts_with("\r\n") {
+        return false;
+    }
+    // Extract the YAML block. If there's no closing fence, the YAML is
+    // unparseable — treat it as a wiki candidate so the diagnostic loop
+    // reports the missing fence.
+    let Some(yaml) = extract_yaml_block(content) else {
+        return true;
+    };
+    // Parseable YAML: include only if it has wiki-specific keys.  Skill files
+    // (name/description) and config files (paths) are not wiki pages.
+    match serde_yaml::from_str::<serde_yaml::Value>(yaml) {
+        Ok(value) => value.get("title").is_some() || value.get("summary").is_some(),
+        Err(_) => true, // Broken YAML — might be a malformed wiki page
     }
 }
 

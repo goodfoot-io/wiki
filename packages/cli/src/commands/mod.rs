@@ -336,9 +336,12 @@ fn discover_default_files(
                     if !p.ends_with(".md") || is_fixture_path(p) || !path_under_prefix(p, prefix) {
                         return false;
                     }
+                    // Include .md files with a frontmatter fence — even if the
+                    // YAML is malformed, they are trying to be wiki pages and
+                    // callers like check/collect will emit diagnostics for errors.
                     match source.read(repo_root, p) {
                         Ok(Some(content)) => {
-                            crate::frontmatter::is_wiki_member(&content, Path::new(p))
+                            crate::frontmatter::has_wiki_frontmatter(&content)
                         }
                         _ => false,
                     }
@@ -366,7 +369,7 @@ fn discover_default_files(
         let path = repo_root.join(&path_rel);
         if path.is_file()
             && let Ok(content) = std::fs::read_to_string(&path)
-            && crate::frontmatter::is_wiki_member(&content, &path)
+            && crate::frontmatter::has_wiki_frontmatter(&content)
         {
             files.push(path);
         }
@@ -438,10 +441,13 @@ fn discover_files_by_walk(globs: &[String], base_dir: &Path) -> Result<Vec<PathB
 
     for path in candidates {
         // For explicit globs, include all .md matches (membership is checked
-        // by callers like check/collect). For default walks, filter by content.
+        // by callers like check/collect). For default walks, require a
+        // frontmatter fence so plain .md files (README, CHANGELOG, etc.) are
+        // excluded, but pages with malformed YAML still reach the diagnostic
+        // loop.
         if globs.is_empty() {
             if let Ok(content) = std::fs::read_to_string(&path)
-                && crate::frontmatter::is_wiki_member(&content, &path)
+                && crate::frontmatter::has_wiki_frontmatter(&content)
             {
                 files.push(path);
             }
@@ -739,7 +745,7 @@ mod tests {
         let repo = TestRepo::new();
         repo.create_file("wiki/.gitkeep", "");
         repo.create_file("wiki/plain.md", "# no frontmatter\n");
-        // No wiki members — returns Ok(vec![]) not Err.
+        // No frontmatter fence → not a wiki candidate → returns Ok(vec![]) not Err.
         let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).unwrap();
         assert!(
             files.is_empty(),
@@ -768,6 +774,8 @@ mod tests {
         repo.create_file("src/component/ordinary.md", "# ordinary\n");
         let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree)
             .expect("discover");
+        // Only files with a frontmatter fence are discovered. `ordinary.md`
+        // has no fence and is excluded.
         assert_eq!(files.len(), 2);
         let paths: Vec<_> = files
             .into_iter()
