@@ -527,3 +527,71 @@ fn decrement_blob(
 /// for Group C's incremental pass cache).
 #[allow(dead_code)]
 pub(crate) type SeenPaths = HashMap<PathBuf, (Source, BlobOid)>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::blob::compute_blob_oid;
+    use std::process::Command;
+
+    /// `read_blob_bytes` for `Source::Worktree` re-reads the file from
+    /// disk — the bytes it returns may not match the OID computed during
+    /// Pass 3's hashing step. This test demonstrates that TOCTOU window:
+    /// when the file changes between the pass-3 read and `apply_add`,
+    /// the stored blob content diverges from its claimed OID.
+    ///
+    /// This test MUST FAIL against the unfixed code.
+    #[test]
+    fn worktree_read_blob_bytes_toctou_window() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+
+        // Initialize a real git repository so gix::open succeeds.
+        let status = Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(root)
+            .status()
+            .expect("git init");
+        assert!(status.success(), "git init failed");
+
+        let repo = gix::open(root).expect("gix open");
+
+        let rel = std::path::Path::new("page.md");
+
+        // Write wiki content A and compute its OID.
+        let content_a = b"---\ntitle: Original\nsummary: Original content.\n---\n\nBody original.\n";
+        std::fs::write(root.join(rel), content_a).expect("write A");
+        let oid_a = compute_blob_oid(content_a);
+
+        // First read: file matches the OID.
+        let bytes1 =
+            read_blob_bytes(&repo, root, Source::Worktree, rel, &oid_a).expect("read 1");
+        assert_eq!(
+            compute_blob_oid(&bytes1).0, oid_a.0,
+            "bytes from first read must match the given OID"
+        );
+
+        // Simulate a concurrent writer: change the file between the
+        // pass-3 read and the apply_add read.
+        let content_b =
+            b"---\ntitle: Modified\nsummary: Modified content.\n---\n\nBody modified.\n";
+        std::fs::write(root.join(rel), content_b).expect("write B");
+
+        // Second read uses the SAME oid_a (as apply_add would), but the
+        // file now contains content_b.
+        let bytes2 =
+            read_blob_bytes(&repo, root, Source::Worktree, rel, &oid_a).expect("read 2");
+
+        // The returned bytes do NOT match the OID they were stored under.
+        // This is the TOCTOU bug — the stored blob content diverges from
+        // its claimed identity.
+        assert_eq!(
+            compute_blob_oid(&bytes2).0,
+            oid_a.0,
+            "TOCTOU: read_blob_bytes for Worktree returns bytes whose OID ({}) \
+             does not match the OID computed by pass_worktree ({})",
+            compute_blob_oid(&bytes2).0,
+            oid_a.0,
+        );
+    }
+}
