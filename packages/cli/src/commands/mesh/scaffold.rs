@@ -1862,6 +1862,45 @@ mod tests {
     }
 
     #[test]
+    fn run_blocker_rename_preserves_from_on_write_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Create a mesh at the `from` slug.
+        let mesh = git_mesh_core::mesh_file::MeshFile {
+            anchors: vec![],
+            why: "curated why".to_string(),
+        };
+        super::store::write(root, "wiki/a/file", &mesh).unwrap();
+        // Create the target parent directory and make it read-only so that
+        // NamedTempFile::new_in(parent) fails when store::write tries to
+        // create a temp file there.
+        let to_parent = super::store::wiki_dir(root).join("wiki/a/dir");
+        std::fs::create_dir_all(&to_parent).unwrap();
+        let mut perms = std::fs::metadata(&to_parent).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&to_parent, perms).unwrap();
+        let plan = PlannedRename {
+            from: "wiki/a/file".to_string(),
+            to: "wiki/a/dir/file".to_string(),
+            for_slug: "wiki/a/dir".to_string(),
+            page: "p.md".to_string(),
+        };
+        let mesh_dir = super::store::wiki_dir(root);
+        assert!(
+            !run_blocker_rename(root, &mesh_dir, &plan),
+            "rename should fail when target parent is read-only"
+        );
+        // Bug: the original mesh was deleted before the write attempt and is
+        // never restored. This assertion FAILS against current code.
+        let restored = super::store::read_one(root, "wiki/a/file").unwrap();
+        assert!(
+            restored.is_some(),
+            "original mesh must survive a failed blocker rename"
+        );
+        assert_eq!(restored.unwrap().why, "curated why");
+    }
+
+    #[test]
     fn parse_frontmatter_extracts_title_and_summary() {
         let c = "---\ntitle: Hello World\nsummary: A page summary.\n---\nbody";
         assert_eq!(
