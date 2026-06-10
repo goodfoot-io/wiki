@@ -8,5 +8,9 @@ packages/cli/src/index/passes/mod.rs#L281-L281 rk64:e93bcc7c5dcc693e
 packages/cli/src/index/passes/mod.rs#L282-L282 rk64:e93bcc7c5dcc693e
 packages/cli/src/index/passes/mod.rs#L302-L302 rk64:e93bcc7c5dcc693e
 packages/cli/src/index/passes/mod.rs#L315-L315 rk64:e93bcc7c5dcc693e
-
+packages/cli/src/index/passes/mod.rs#L141-L143 rk64:b7a1daf2ca235e7b
+packages/cli/src/index/passes/mod.rs#L154-L156 rk64:61114511f205abd4
+packages/cli/src/index/passes/mod.rs#L162-L171 rk64:0b800e1da57b71ea
+packages/cli/src/index/passes/mod.rs#L200-L253 rk64:2cedd53b8124ccc8
+packages/cli/src/index/passes/mod.rs#L322-L322 rk64:e93bcc7c5dcc693e
 
