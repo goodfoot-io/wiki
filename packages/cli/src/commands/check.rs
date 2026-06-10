@@ -2185,4 +2185,51 @@ mod tests {
         .expect("run");
         assert_eq!(code, 2, "empty corpus must exit 2 in non-fix mode");
     }
+
+    /// Reproduction: a percent-encoded href like `./my%20file.md` must resolve to
+    /// the on-disk file `my file.md` without emitting `broken_link`.
+    #[test]
+    fn percent_encoded_href_to_existing_file_resolves() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        // Create the target file with a space in its name.
+        repo.create_file("wiki/my file.md", &make_wiki_page("My File", "Content.\n"));
+        // Source page links with a percent-encoded href.
+        repo.create_file(
+            "wiki/source.md",
+            &make_wiki_page("Source", "See [file](./my%20file.md)."),
+        );
+        repo.commit("add pages");
+
+        let diags = collect(&[], repo.path()).expect("collect");
+        assert!(
+            diags.iter().all(|d| d.kind != "broken_link"),
+            "percent-encoded href to existing file must not emit broken_link: {diags:?}"
+        );
+    }
+
+    /// Reproduction: a percent-encoded heading anchor like `#caf%C3%A9` must
+    /// resolve to the heading `## Café` without emitting `broken_anchor`.
+    #[test]
+    fn percent_encoded_heading_anchor_resolves() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        // Target page with a non-ASCII heading.
+        repo.create_file(
+            "wiki/target.md",
+            &make_wiki_page("Target", "## Café\n\nbody\n"),
+        );
+        // Source page links with a percent-encoded anchor.
+        repo.create_file(
+            "wiki/source.md",
+            &make_wiki_page("Source", "See [cafe](target.md#caf%C3%A9)."),
+        );
+        repo.commit("add pages");
+
+        let diags = collect(&[], repo.path()).expect("collect");
+        assert!(
+            diags.iter().all(|d| d.kind != "broken_anchor"),
+            "percent-encoded heading anchor must resolve: {diags:?}"
+        );
+    }
 }
