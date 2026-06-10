@@ -62,7 +62,7 @@ USER node
 
 # Install Rust toolchain for the node user
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-ENV PATH=$PATH:/home/node/.cargo/bin
+ENV PATH=/home/node/.cargo/bin:$PATH
 
 # Configure Yarn to use workspace-local directories
 ENV YARN_CACHE_FOLDER=/home/node/wiki/.yarn/cache

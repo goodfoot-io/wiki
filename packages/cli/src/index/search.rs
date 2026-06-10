@@ -56,18 +56,17 @@ pub fn search_weighted(
     let mut seen: HashSet<String> = HashSet::new(); // dedupe by blob OID
     let mut out: Vec<SearchResult> = Vec::new();
 
-    // (1) Exact title / full-alias match (case-insensitive), filtered to
+    // (1) Exact title / token-wise alias match (case-insensitive), filtered to
     // the requested DocSource.
     let q_lower = query.to_lowercase();
     {
         let mut stmt = conn.prepare(
             "SELECT b.oid, b.title, b.summary, p.path_rel
              FROM blobs b
-             JOIN paths p ON p.oid = b.oid AND p.source = ?2
-             WHERE lower(b.title) = ?1
-                OR lower(b.aliases_text) = ?1",
+             JOIN paths p ON p.oid = b.oid AND p.source = ?1
+             WHERE lower(b.title) = ?2",
         )?;
-        let rows = stmt.query_map(params![q_lower, src], |r| {
+        let rows = stmt.query_map(params![src, q_lower], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -85,6 +84,46 @@ pub fn search_weighted(
                     alias: None,
                     snippets: Vec::new(),
                 });
+            }
+        }
+    }
+
+    // (1b) Token-wise alias match (case-insensitive): split aliases_text on
+    // whitespace/comma and compare each token individually, replicating the
+    // approach in resolve_page at L246-L252.
+    {
+        let mut stmt = conn.prepare(
+            "SELECT b.oid, b.title, b.summary, p.path_rel, b.aliases_text
+             FROM blobs b
+             JOIN paths p ON p.oid = b.oid AND p.source = ?1
+             WHERE b.aliases_text != ''",
+        )?;
+        let rows = stmt.query_map(params![src], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?;
+        for row in rows {
+            let (oid, title, summary, path, aliases) = row?;
+            let needle = q_lower.as_str();
+            for a in aliases.split(|c: char| c.is_whitespace() || c == ',') {
+                let a = a.trim();
+                if !a.is_empty() && a.eq_ignore_ascii_case(needle) {
+                    if seen.insert(oid) {
+                        out.push(SearchResult {
+                            title,
+                            file: path,
+                            summary,
+                            alias: None,
+                            snippets: Vec::new(),
+                        });
+                    }
+                    break;
+                }
             }
         }
     }
