@@ -570,8 +570,8 @@ fn read_head_blob_inner(
                 continue;
             }
             found = true;
+            let kind = entry.mode().kind();
             if is_last {
-                let kind = entry.mode().kind();
                 if matches!(kind, gix::object::tree::EntryKind::Link) {
                     // Resolve symlink within the same source.
                     let object = repo
@@ -604,8 +604,12 @@ fn read_head_blob_inner(
                     .into_diagnostic()
                     .wrap_err_with(|| format!("blob '{path_rel}' is not valid UTF-8"))?;
                 return Ok(Some(content));
-            } else {
+            } else if matches!(kind, gix::object::tree::EntryKind::Tree) {
                 current_tree_id = entry.object_id();
+            } else {
+                // Blob, symlink, or commit at a non-terminal position:
+                // the path resolves through a non-directory — unresolvable.
+                return Ok(None);
             }
             break;
         }
