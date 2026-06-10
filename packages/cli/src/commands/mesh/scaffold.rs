@@ -1235,15 +1235,16 @@ pub(crate) struct PlannedRename {
 /// scaffold pipeline already derived for that page section (looked up in
 /// `section_noun` keyed by `(page, start, end)`).
 ///
-/// Returns the chosen mesh-dir-relative target `B/<leaf>`. Falls back to
-/// `B/index` (then `B/index-2`, … capped at 99) when the leaf is empty, equals
-/// `B`'s last segment, or `B/<leaf>` would itself collide.
+/// Returns `Some(target)` with the chosen mesh-dir-relative target `B/<leaf>`.
+/// Falls back to `B/index` (then `B/index-2`, … capped at 99) when the leaf
+/// is empty, equals `B`'s last segment, or `B/<leaf>` would itself collide.
+/// Returns `None` when all 99 numeric index slots are occupied.
 fn derive_rename_target(
     mesh_dir: &Path,
     blocker: &str,
     wiki_anchors: &[(String, u32, u32)],
     section_noun: &std::collections::HashMap<(String, u32, u32), String>,
-) -> String {
+) -> Option<String> {
     let blocker_last = blocker.rsplit('/').next().unwrap_or(blocker);
 
     let leaf: Option<String> = if wiki_anchors.len() == 1 {
@@ -1261,22 +1262,22 @@ fn derive_rename_target(
     {
         let cand = format!("{blocker}/{leaf}");
         if !mesh_dir.join(&cand).is_file() && !mesh_fs_prefix_collision(mesh_dir, &cand) {
-            return cand;
+            return Some(cand);
         }
     }
 
     // Numeric `index` fallback.
     let base = format!("{blocker}/index");
     if !mesh_dir.join(&base).is_file() && !mesh_fs_prefix_collision(mesh_dir, &base) {
-        return base;
+        return Some(base);
     }
     for n in 2..=99 {
         let cand = format!("{blocker}/index-{n}");
         if !mesh_dir.join(&cand).is_file() && !mesh_fs_prefix_collision(mesh_dir, &cand) {
-            return cand;
+            return Some(cand);
         }
     }
-    base
+    if !mesh_dir.join(&base).is_file() { Some(base) } else { None }
 }
 
 /// Plan a blocker rename for `slug` whose creation is blocked by a strict
@@ -1307,7 +1308,7 @@ fn plan_blocker_rename(
         }
         out
     };
-    let target = derive_rename_target(mesh_dir, &blocker, &wiki_anchors, section_noun);
+    let target = derive_rename_target(mesh_dir, &blocker, &wiki_anchors, section_noun)?;
     Some(PlannedRename {
         from: blocker,
         to: target,
@@ -1763,7 +1764,7 @@ mod tests {
             &[("wiki/arch/page.md".to_string(), 5, 12)],
             &nouns,
         );
-        assert_eq!(target, "wiki/arch/scaff/helper");
+        assert_eq!(target, Some("wiki/arch/scaff/helper".to_string()));
     }
 
     #[test]
@@ -1773,7 +1774,7 @@ mod tests {
         let nouns = std::collections::HashMap::new();
         assert_eq!(
             derive_rename_target(md, "wiki/b", &[], &nouns),
-            "wiki/b/index"
+            Some("wiki/b/index".to_string())
         );
     }
 
@@ -1791,7 +1792,7 @@ mod tests {
             ],
             &nouns,
         );
-        assert_eq!(target, "wiki/b/index");
+        assert_eq!(target, Some("wiki/b/index".to_string()));
     }
 
     #[test]
@@ -1803,7 +1804,7 @@ mod tests {
         let nouns = std::collections::HashMap::new();
         assert_eq!(
             derive_rename_target(md, "wiki/b", &[], &nouns),
-            "wiki/b/index-2"
+            Some("wiki/b/index-2".to_string())
         );
     }
 
@@ -1815,7 +1816,7 @@ mod tests {
         nouns.insert(("p.md".to_string(), 1, 1), "scaff".to_string());
         // Leaf would equal blocker's last segment `scaff` → use `index`.
         let target = derive_rename_target(md, "wiki/scaff", &[("p.md".to_string(), 1, 1)], &nouns);
-        assert_eq!(target, "wiki/scaff/index");
+        assert_eq!(target, Some("wiki/scaff/index".to_string()));
     }
 
     #[test]
@@ -1830,14 +1831,12 @@ mod tests {
         }
         let nouns = std::collections::HashMap::new();
         let result = derive_rename_target(md, "wiki/b", &[], &nouns);
-        // Every slot is occupied, so `derive_rename_target` MUST NOT return a
-        // path that already exists. With the bug, it returns `wiki/b/index`
-        // (already present) because `index` was checked on line 1264, the
-        // 2..=99 loop exited without finding a free slot, and line 1273
-        // unconditionally returns `base` without re-checking.
+        // All 99 numeric index slots are occupied — the function must return
+        // `None` so the caller (plan_blocker_rename) propagates it as a
+        // fail-open drop-with-advisory.
         assert!(
-            !md.join(&result).is_file(),
-            "returned path `{result}` already exists — all 99 index slots are occupied"
+            result.is_none(),
+            "expected None when all 99 index slots are occupied, got `{result:?}`"
         );
     }
 
