@@ -543,6 +543,18 @@ impl WikiIndex {
         Ok((blob_count as usize, path_count as usize))
     }
 
+    /// Count `dir_mtimes` rows.
+    /// Test-only diagnostic used by `tests/index_hostile_dir_mtimes.rs` and
+    /// `tests/index_dir_mtimes_prune.rs`.
+    #[allow(dead_code)]
+    pub fn debug_dir_mtimes_count(&self) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM dir_mtimes", [], |r| r.get(0))
+            .map_err(|e| miette::miette!("dir_mtimes count: {e}"))?;
+        Ok(count as usize)
+    }
+
     /// Return diagnostic counters accumulated during the last refresh.
     ///
     /// Exposed for `index_hostile_fs` (asserts `pass3_full_rescans > 0`) and
