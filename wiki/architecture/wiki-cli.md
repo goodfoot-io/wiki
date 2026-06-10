@@ -9,7 +9,7 @@ The wiki CLI validates and maintains fragment links between wiki pages and sourc
 
 ## Fragment Link Parsing
 
-The [parser](/packages/cli/src/parser.rs#L6-L12) extracts fragment links from markdown content: [fragment links](/packages/cli/src/parser.rs#L213-L213) (`[label](path#sha-L10-L20)`). The parser operates on [scrubbed content](/packages/cli/src/parser.rs#L79-L79) — code blocks, inline code, and HTML comments are blanked out before extraction to avoid false matches.
+The [parser](/packages/cli/src/parser.rs#L6-L12) extracts fragment links from markdown content: [fragment links](/packages/cli/src/parser.rs#L224-L224) (`[label](path#sha-L10-L20)`). The parser operates on [scrubbed content](/packages/cli/src/parser.rs#L79-L79) — code blocks, inline code, and HTML comments are blanked out before extraction to avoid false matches.
 
 ## Validation Pipeline
 

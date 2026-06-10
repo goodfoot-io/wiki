@@ -23,6 +23,7 @@ fn second_process_returns_without_waiting_on_lock() {
     let lock_path = wiki_dir.join("wiki-refresh.lock");
     let lock_file = OpenOptions::new()
         .create(true)
+        .truncate(true)
         .write(true)
         .open(&lock_path)
         .expect("open lock file");

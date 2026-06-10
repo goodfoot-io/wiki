@@ -51,11 +51,11 @@ fn only_full_wiki_pages_appear_in_results() {
         "expected 'Full Page' in results, got: {titles:?}"
     );
     assert!(
-        !titles.iter().any(|t| *t == "Title Only"),
+        !titles.contains(&"Title Only"),
         "title-only file must not appear in results, got: {titles:?}"
     );
     assert!(
-        !titles.iter().any(|t| *t == "Summary Only"),
+        !titles.contains(&"Summary Only"),
         "summary-only file must not appear in results, got: {titles:?}"
     );
 }

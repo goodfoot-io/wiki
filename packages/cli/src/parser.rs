@@ -153,9 +153,20 @@ pub(crate) fn scrub_non_content(content: &str) -> String {
             // Do NOT treat triple+ backticks as inline code (those are fences handled above)
             if tick_count < 3 {
                 let closing = vec![b'`'; tick_count];
-                // Search for matching closing backticks (not crossing a newline for single backtick)
                 let search_start = i + tick_count;
-                if let Some(rel) = find_bytes(&bytes[search_start..], &closing) {
+                // For single backticks, bound the closing search at the next blank
+                // line (paragraph boundary). CommonMark code spans cannot cross
+                // paragraph boundaries.
+                let search_range = if tick_count == 1 {
+                    let after = &bytes[search_start..];
+                    match find_bytes(after, b"\n\n") {
+                        Some(blank) => &after[..blank],
+                        None => after,
+                    }
+                } else {
+                    &bytes[search_start..]
+                };
+                if let Some(rel) = find_bytes(search_range, &closing) {
                     let end = search_start + rel + tick_count;
                     // Blank the content INSIDE the backticks, but keep the backticks
                     // themselves so they are part of the parsed link text.
