@@ -453,8 +453,14 @@ pub(crate) fn create_mesh_coverage(
     // Empty when there were no internal fragment links at all OR when every
     // section already has its links anchored by an existing mesh.
     if all_inputs.is_empty() || consolidated.is_empty() {
+        // Blocker renames were already performed on disk by the slug-collision
+        // retain pass above; record them as applied so the caller stages them.
+        let applied: Vec<String> = planned_renames
+            .iter()
+            .map(|r| rel_mesh_path(&r.to))
+            .collect();
         return Ok(MeshCoverageOutcome {
-            applied: Vec::new(),
+            applied,
             failures: Vec::new(),
             advisories,
             planned: Vec::new(),
