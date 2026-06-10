@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use crate::parser::scrub_non_content;
+
 // ── Public types ──────────────────────────────────────────────────────────────
 
 /// A parsed heading from a markdown file.
@@ -53,7 +55,12 @@ pub fn extract_headings(content: &str) -> Vec<Heading> {
     let mut slug_counts: HashMap<String, usize> = HashMap::new();
     let mut headings = Vec::new();
 
-    for (line_idx, line) in content.lines().enumerate() {
+    // Scrub code fences, HTML comments, and inline code before heading
+    // extraction so that `# text` lines inside non-content regions are not
+    // falsely recognized as headings.
+    let scrubbed = scrub_non_content(content);
+
+    for (line_idx, line) in scrubbed.lines().enumerate() {
         let line_num = line_idx + 1;
         let Some((level, text)) = parse_heading_line(line) else {
             continue;
