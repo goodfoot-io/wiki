@@ -35,7 +35,7 @@ These scopes cover the cold-cache path: when the stat-only freshness gate misses
 | [index/passes/mod.rs](./src/index/passes/mod.rs#L141-L144) | `index.pass_index` | Pass 2: git index entry scan | Empty object |
 | [index/passes/mod.rs](./src/index/passes/mod.rs#L149-L159) | `index.pass_worktree` | Pass 3: worktree walk, read + hash of candidate markdown | Empty object |
 | [index/passes/mod.rs](./src/index/passes/mod.rs#L185-L213) | `index.apply_deltas` | Applying all merged deltas (blob parse, FTS insert, paths/refcount bookkeeping) | `deltas` (count) |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L275-L275) | `index.commit` | SQLite transaction commit | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L294-L294) | `index.commit` | SQLite transaction commit | Empty object |
 
 ### File Discovery
 

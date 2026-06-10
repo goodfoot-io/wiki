@@ -207,9 +207,28 @@ pub fn refresh(
                         apply_remove(&tx, &delta.path, delta.source, &mut blob_cache)?;
                     }
                     DeltaAction::Rename { from, oid } => {
-                        // A pure rename keeps the OID and refcount — the
-                        // path swap is row-level.
-                        apply_rename(&tx, from, &delta.path, delta.source, oid)?;
+                        if blob_cache.wiki_oids.contains(&oid.0) {
+                            // A pure rename keeps the OID and refcount — the
+                            // path swap is row-level.
+                            apply_rename(&tx, from, &delta.path, delta.source, oid)?;
+                        } else {
+                            // The blob OID is either non-wiki content (no
+                            // `blobs` row exists and apply_add will skip it)
+                            // or an as-yet unseen wiki blob whose `blobs`
+                            // row must be created first. Decompose into
+                            // Remove + Add for full bookkeeping.
+                            apply_remove(&tx, from, delta.source, &mut blob_cache)?;
+                            apply_add(
+                                repo,
+                                repo_root,
+                                &tx,
+                                &delta.path,
+                                delta.source,
+                                oid,
+                                &mut fts_retokenizations,
+                                &mut blob_cache,
+                            )?;
+                        }
                     }
                 }
             }
