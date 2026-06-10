@@ -5,4 +5,8 @@ packages/cli/src/index/passes/mod.rs#L147-L150 rk64:90bd61bedd45f421
 packages/cli/src/index/passes/mod.rs#L155-L165 rk64:91081757431f56fb
 packages/cli/src/index/passes/mod.rs#L185-L213 rk64:109ae70a9ec14c89
 packages/cli/src/index/passes/mod.rs#L282-L282 rk64:e93bcc7c5dcc693e
+packages/cli/src/index/passes/mod.rs#L129-L132 rk64:938624d076548459
+packages/cli/src/index/passes/mod.rs#L142-L145 rk64:d6b2969c3e30acce
+packages/cli/src/index/passes/mod.rs#L150-L160 rk64:617049468bb19aed
+packages/cli/src/index/passes/mod.rs#L281-L281 rk64:5f85ce54d98377fb
 

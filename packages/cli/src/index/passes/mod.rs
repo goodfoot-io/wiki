@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use rusqlite::{Connection, params};
 
+use crate::index::freshness;
 use crate::index::ingest::{WikiBlobFields, parse_blob};
 use crate::index::{BlobOid, HostileFs, Source};
 
@@ -271,18 +272,23 @@ pub fn refresh(
         Err(_) => vec![0u8; 20],
     };
 
+    // Compute the worktree freshness signal from the current on-disk state
+    // so fast_gate can detect worktree-only changes without opening gix.
+    let new_worktree_generation = freshness::compute_worktree_dir_hash(repo_root);
+
     // Compare-and-swap on the prior generation. If another writer
     // committed between our state read and this UPDATE, zero rows match
     // and we must roll back — the loser does not bump any freshness
     // signal and the caller continues to serve the prior snapshot.
     let updated = tx.execute(
         "UPDATE state SET head_oid = ?1, head_tree_oid = ?2, index_checksum = ?3,
-                          generation = generation + 1
-         WHERE id = 1 AND generation = ?4",
+                          worktree_generation = ?4, generation = generation + 1
+         WHERE id = 1 AND generation = ?5",
         params![
             new_head_oid,
             new_head_tree,
             new_index_checksum,
+            new_worktree_generation,
             prior_generation
         ],
     )?;

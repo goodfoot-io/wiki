@@ -59,6 +59,15 @@ pub fn fast_gate(
         return Ok(None);
     }
 
+    // Worktree leg of the triple: hash directory + markdown-file mtimes on
+    // disk and compare against the stored generation. Directory mtimes catch
+    // file creation and deletion; file mtimes catch in-place edits (which do
+    // not update the parent directory's mtime on Linux).
+    let current_worktree_hash = compute_worktree_dir_hash(repo_root);
+    if state_generation != current_worktree_hash {
+        return Ok(None);
+    }
+
     // Also require state to be non-empty (a fresh DB has empty head_oid + zero
     // checksum). If everything is zero, force a refresh.
     if state_head.is_empty() {
@@ -130,6 +139,66 @@ fn read_index_trailer(index_path: &Path) -> Option<[u8; 20]> {
     let mut buf = [0u8; 20];
     file.read_exact(&mut buf).ok()?;
     Some(buf)
+}
+
+/// Compute a 64-bit hash over every directory's and markdown file's
+/// (repo-relative path, mtime_ns) pair. Directory mtimes catch file creation
+/// and deletion; file mtimes catch in-place edits (which do not update the
+/// parent directory's mtime on Linux).
+///
+/// The walk excludes `.git` and returns a deterministic hash suitable for
+/// comparing against a stored `worktree_generation` value.
+pub(crate) fn compute_worktree_dir_hash(repo_root: &Path) -> i64 {
+    use std::hash::{Hash, Hasher};
+
+    // Collect (rel_path, mtime_ns) for every directory and markdown file
+    // under repo_root.
+    let mut pairs: Vec<(std::path::PathBuf, i64)> = Vec::new();
+    for entry in walkdir::WalkDir::new(repo_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| e.file_name() != ".git")
+    {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let rel = match entry.path().strip_prefix(repo_root) {
+            Ok(r) => r.to_path_buf(),
+            Err(_) => continue,
+        };
+        let mtime_ns = match std::fs::metadata(entry.path())
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as i64)
+        {
+            Some(m) => m,
+            None => continue,
+        };
+
+        if entry.file_type().is_dir() || (entry.file_type().is_file() && is_markdown(&rel)) {
+            pairs.push((rel, mtime_ns));
+        }
+    }
+
+    // Sort for deterministic ordering independent of filesystem readdir order.
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for (path, mtime) in &pairs {
+        path.hash(&mut hasher);
+        mtime.hash(&mut hasher);
+    }
+    hasher.finish() as i64
+}
+
+/// True when `path` has a `.md` extension (case-insensitive).
+fn is_markdown(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("md"))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
