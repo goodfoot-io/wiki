@@ -463,6 +463,40 @@ fn anchor_of(href: &str) -> Option<&str> {
     href.find('#').map(|i| &href[i + 1..])
 }
 
+/// Percent-decode a URL-encoded string.
+///
+/// Replaces `%XX` hex-encoded bytes with the corresponding byte value and
+/// interprets the result as UTF-8. Returns the original string on decode or
+/// UTF-8 failure — a partially-decodable href keeps its literal form.
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut result: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = hex_val(bytes[i + 1]);
+            let lo = hex_val(bytes[i + 2]);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                result.push(hi << 4 | lo);
+                i += 3;
+                continue;
+            }
+        }
+        result.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(result).unwrap_or_else(|_| input.to_string())
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn collect_for_files(
     files: &[PathBuf],
     index_files: &[PathBuf],
@@ -557,7 +591,8 @@ fn collect_for_files(
                 continue;
             }
 
-            let resolved = crate::commands::resolve_link_path(&link.path, path, repo_root);
+            let decoded_path = percent_decode(&link.path);
+            let resolved = crate::commands::resolve_link_path(&decoded_path, path, repo_root);
             let abs = repo_root.join(&resolved);
 
             // Try to read the target. Directories are valid link targets.
@@ -646,7 +681,8 @@ fn collect_for_files(
             {
                 // Non-line-range anchor: validate as heading slug.
                 let headings = extract_headings(tc);
-                if !resolve_heading(anchor, &headings) {
+                let decoded_anchor = percent_decode(anchor);
+                if !resolve_heading(&decoded_anchor, &headings) {
                     diagnostics.push(CheckDiagnostic {
                         kind: "broken_anchor".into(),
                         file: path.display().to_string(),
