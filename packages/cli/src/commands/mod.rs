@@ -75,6 +75,14 @@ pub fn normalize_repo_relative_path(input: &str, repo_root: &Path) -> String {
 /// Resolve a fragment link path relative to the file it was found in,
 /// then return it relative to the repository root.
 pub fn resolve_link_path(link_path: &str, source_file: &Path, repo_root: &Path) -> PathBuf {
+    // Same-page anchor (empty path): the target is the source file itself.
+    if link_path.is_empty() {
+        return source_file
+            .strip_prefix(repo_root)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|_| source_file.to_path_buf());
+    }
+
     // A genuine filesystem-absolute path that falls under repo_root is
     // stripped to repo-relative. This must be checked before the leading-
     // slash rule below: on POSIX an absolute path *also* starts with `/`,
