@@ -920,6 +920,28 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// Reproduction: when a path resolves through a blob entry (e.g.,
+    /// `a.md/sub` where `a.md` is a blob, not a tree), the walk loop sets
+    /// `current_tree_id` to the blob's id and the next iteration's
+    /// `try_into_tree` fails with an error.  It must return `Ok(None)`
+    /// instead — the same graceful "not found" behavior the index-source
+    /// twin gives for unresolvable paths.
+    ///
+    /// MUST FAIL against the current unfixed code.
+    #[test]
+    fn read_head_blob_returns_none_for_path_through_blob() {
+        let repo = TestRepo::new();
+        repo.create_file("a.md", "content\n");
+        repo.commit("initial");
+
+        let result = read_head_blob(repo.path(), "a.md/sub")
+            .expect("read_head_blob must not error for blob-through-tree path");
+        assert!(
+            result.is_none(),
+            "path through a blob must return None, got: {result:?}"
+        );
+    }
+
     #[test]
     fn has_index_entry_true_for_staged() {
         let repo = TestRepo::new();
