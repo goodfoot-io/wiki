@@ -283,6 +283,7 @@ pub fn resolve_page(
          FROM blobs b
          JOIN paths p ON p.oid = b.oid AND p.source = ?2
          WHERE lower(b.title) = ?1
+         ORDER BY b.rowid
          LIMIT 1",
     )?;
     let row: Option<(i64, String, String, String, String)> = stmt
@@ -351,12 +352,12 @@ pub fn resolve_page(
         let mut stmt = conn.prepare(
             "SELECT b.rowid, b.title, b.summary, b.body, p.path_rel
              FROM paths p JOIN blobs b ON b.oid = p.oid
-             WHERE (p.path_rel = ?1 OR p.path_rel LIKE ?2) AND p.source = ?3
+             WHERE (p.path_rel = ?1 OR instr(p.path_rel, ?2) > 0) AND p.source = ?3
+             ORDER BY p.path_rel
              LIMIT 1",
         )?;
-        let pat = format!("%{input}%");
         let row: Option<(i64, String, String, String, String)> = stmt
-            .query_row(params![input, pat, src], |r| {
+            .query_row(params![input, input, src], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, String>(1)?,
