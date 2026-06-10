@@ -1881,6 +1881,50 @@ mod tests {
         );
     }
 
+    /// Two-layer chained rename (A→B staged, B→C worktree) must resolve to the
+    /// terminal destination C, not to Ambiguous([B, C]).
+    #[test]
+    fn chained_rename_resolves_to_terminal_destination() {
+        let repo = TestRepo::new();
+
+        // Write and commit a.rs.
+        repo.write("src/a.rs", "content\n");
+        repo.commit("add a.rs");
+
+        // Layer 2 (index↔HEAD): stage rename a.rs → b.rs.
+        repo.git(&["mv", "src/a.rs", "src/b.rs"]);
+
+        // Layer 1 (worktree↔index): worktree rename b.rs → c.rs via intent-to-add.
+        let worktree_b = repo.path().join("src/b.rs");
+        let worktree_c = repo.path().join("src/c.rs");
+        fs::rename(&worktree_b, &worktree_c).expect("rename b.rs -> c.rs");
+        // Intent-to-add c.rs so git diff (worktree↔index) sees the rename.
+        repo.git(&["add", "-N", "src/c.rs"]);
+
+        // Build the rename map — this exercises the chain resolution loop.
+        let mut map = RenameMap::build(repo.path()).expect("build rename map");
+
+        // a.rs should resolve to the terminal destination c.rs, not Ambiguous.
+        match map.successor(Path::new("src/a.rs")) {
+            SuccessorResult::Unique(p) => {
+                assert_eq!(
+                    p, PathBuf::from("src/c.rs"),
+                    "chained rename A→B→C must resolve to terminal C"
+                );
+            }
+            SuccessorResult::Ambiguous(dests) => {
+                panic!(
+                    "expected Unique(src/c.rs) but got Ambiguous({:?}) — \
+                     chain loop is appending instead of replacing intermediate destinations",
+                    dests
+                );
+            }
+            other => {
+                panic!("expected Unique, got {:?}", other);
+            }
+        }
+    }
+
     // ── mesh staleness fixture (shared with phase-2 move/conflict tests) ─────
 
     /// Build a git repo with a `.wiki/` mesh whose anchor points at `src/lib.rs`
