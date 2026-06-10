@@ -62,6 +62,7 @@ pub fn pass_tree(
                     source: Source::Tree,
                     action: DeltaAction::Add {
                         oid: BlobOid(id.to_hex().to_string()),
+                        blob_bytes: None,
                         stat_mtime_ns: None,
                     },
                 });
@@ -87,6 +88,7 @@ pub fn pass_tree(
                     source: Source::Tree,
                     action: DeltaAction::Add {
                         oid: BlobOid(id.to_hex().to_string()),
+                        blob_bytes: None,
                         stat_mtime_ns: None,
                     },
                 });
@@ -128,6 +130,7 @@ pub fn pass_tree(
                             source: Source::Tree,
                             action: DeltaAction::Add {
                                 oid: BlobOid(id.to_hex().to_string()),
+                                blob_bytes: None,
                                 stat_mtime_ns: None,
                             },
                         });
@@ -147,6 +150,7 @@ pub fn pass_tree(
                             source: Source::Tree,
                             action: DeltaAction::Add {
                                 oid: BlobOid(id.to_hex().to_string()),
+                                blob_bytes: None,
                                 stat_mtime_ns: None,
                             },
                         });

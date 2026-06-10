@@ -76,6 +76,7 @@ pub fn pass_index(
                 source: Source::Index,
                 action: DeltaAction::Add {
                     oid: BlobOid(on_disk_oid),
+                    blob_bytes: None,
                     stat_mtime_ns: None,
                 },
             });

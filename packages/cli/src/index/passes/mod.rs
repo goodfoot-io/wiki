@@ -42,6 +42,11 @@ pub enum DeltaAction {
     /// Path is present with the given blob OID.
     Add {
         oid: BlobOid,
+        /// Bytes read during the pass, for sources where the pass
+        /// reads file content itself (e.g. Worktree). When `Some`,
+        /// `apply_add` uses these instead of re-reading from disk,
+        /// eliminating the TOCTOU window between hash and apply.
+        blob_bytes: Option<Vec<u8>>,
         /// File mtime at the moment of hashing, stored in
         /// `paths.stat_mtime_ns` so the next refresh can detect
         /// in-place content edits inside clean directories.
@@ -198,7 +203,7 @@ pub fn refresh(
         || -> Result<()> {
             for delta in &all_deltas {
                 match &delta.action {
-                    DeltaAction::Add { oid, stat_mtime_ns } => {
+                    DeltaAction::Add { oid, blob_bytes, stat_mtime_ns } => {
                         apply_add(
                             repo,
                             repo_root,
@@ -206,6 +211,7 @@ pub fn refresh(
                             &delta.path,
                             delta.source,
                             oid,
+                            blob_bytes.as_deref(),
                             *stat_mtime_ns,
                             &mut fts_retokenizations,
                             &mut blob_cache,
@@ -240,6 +246,7 @@ pub fn refresh(
                                 &delta.path,
                                 delta.source,
                                 oid,
+                                None,
                                 None,
                                 &mut fts_retokenizations,
                                 &mut blob_cache,
@@ -341,6 +348,7 @@ fn apply_add(
     path_rel: &Path,
     source: Source,
     oid: &BlobOid,
+    blob_bytes: Option<&[u8]>,
     stat_mtime_ns: Option<i64>,
     fts_retokenizations: &mut u64,
     blob_cache: &mut BlobCache,
@@ -359,7 +367,10 @@ fn apply_add(
         let fields = if known_non_wiki {
             None
         } else {
-            let bytes = read_blob_bytes(repo, repo_root, source, path_rel, oid)?;
+            let bytes: Vec<u8> = match blob_bytes {
+                Some(b) => b.to_vec(),
+                None => read_blob_bytes(repo, repo_root, source, path_rel, oid)?,
+            };
             parse_blob(&bytes)
         };
         let Some(fields) = fields else {
@@ -534,15 +545,13 @@ mod tests {
     use crate::index::blob::compute_blob_oid;
     use std::process::Command;
 
-    /// `read_blob_bytes` for `Source::Worktree` re-reads the file from
-    /// disk — the bytes it returns may not match the OID computed during
-    /// Pass 3's hashing step. This test demonstrates that TOCTOU window:
-    /// when the file changes between the pass-3 read and `apply_add`,
-    /// the stored blob content diverges from its claimed OID.
-    ///
-    /// This test MUST FAIL against the unfixed code.
+    /// After the fix, `apply_add` for `Source::Worktree` uses the bytes
+    /// carried through `PassDelta::Add::blob_bytes` instead of re-reading
+    /// from disk. This test verifies that the TOCTOU window is eliminated:
+    /// even when the file changes on disk between the pass-3 read and the
+    /// apply step, the blob is stored with the original content.
     #[test]
-    fn worktree_read_blob_bytes_toctou_window() {
+    fn worktree_apply_add_uses_carried_bytes() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let root = dir.path();
 
@@ -555,7 +564,6 @@ mod tests {
         assert!(status.success(), "git init failed");
 
         let repo = gix::open(root).expect("gix open");
-
         let rel = std::path::Path::new("page.md");
 
         // Write wiki content A and compute its OID.
@@ -563,35 +571,70 @@ mod tests {
         std::fs::write(root.join(rel), content_a).expect("write A");
         let oid_a = compute_blob_oid(content_a);
 
-        // First read: file matches the OID.
-        let bytes1 =
-            read_blob_bytes(&repo, root, Source::Worktree, rel, &oid_a).expect("read 1");
-        assert_eq!(
-            compute_blob_oid(&bytes1).0, oid_a.0,
-            "bytes from first read must match the given OID"
-        );
-
         // Simulate a concurrent writer: change the file between the
-        // pass-3 read and the apply_add read.
+        // pass-3 read and the apply_add call.
         let content_b =
             b"---\ntitle: Modified\nsummary: Modified content.\n---\n\nBody modified.\n";
         std::fs::write(root.join(rel), content_b).expect("write B");
 
-        // Second read uses the SAME oid_a (as apply_add would), but the
-        // file now contains content_b.
-        let bytes2 =
-            read_blob_bytes(&repo, root, Source::Worktree, rel, &oid_a).expect("read 2");
+        // Set up an in-memory SQLite database with the wiki schema.
+        let mut conn = rusqlite::Connection::open_in_memory().expect("sqlite memory");
+        crate::index::schema::bootstrap(&conn).expect("bootstrap");
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .expect("tx");
 
-        // The returned bytes do NOT match the OID they were stored under.
-        // This is the TOCTOU bug — the stored blob content diverges from
-        // its claimed identity.
+        let mut fts_retokenizations = 0u64;
+        let mut blob_cache = BlobCache {
+            wiki_oids: HashSet::new(),
+            non_wiki_oids: HashSet::new(),
+        };
+
+        // Call apply_add with the carried bytes from content_a, as would
+        // happen after the fix. The file on disk now contains content_b,
+        // but apply_add must use content_a's bytes.
+        apply_add(
+            &repo,
+            root,
+            &tx,
+            rel,
+            Source::Worktree,
+            &oid_a,
+            Some(content_a.as_ref()),
+            None,
+            &mut fts_retokenizations,
+            &mut blob_cache,
+        )
+        .expect("apply_add");
+
+        // Verify that the blob was inserted with content_a's fields,
+        // not content_b's — confirming the carried bytes were used.
+        let (title, summary): (String, String) = tx
+            .query_row(
+                "SELECT title, summary FROM blobs WHERE oid = ?1",
+                params![oid_a.0],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query blob");
         assert_eq!(
-            compute_blob_oid(&bytes2).0,
-            oid_a.0,
-            "TOCTOU: read_blob_bytes for Worktree returns bytes whose OID ({}) \
-             does not match the OID computed by pass_worktree ({})",
-            compute_blob_oid(&bytes2).0,
-            oid_a.0,
+            title, "Original",
+            "title must be from content_a, not the modified file"
         );
+        assert_eq!(
+            summary, "Original content.",
+            "summary must be from content_a, not the modified file"
+        );
+
+        // Verify the path row was created.
+        let path_count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM paths WHERE path_rel = ?1 AND source = ?2",
+                params![rel.to_string_lossy().to_string(), source_id(Source::Worktree)],
+                |row| row.get(0),
+            )
+            .expect("query paths");
+        assert_eq!(path_count, 1, "path row must exist for the worktree entry");
+
+        tx.commit().expect("commit");
     }
 }

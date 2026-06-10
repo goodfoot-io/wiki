@@ -209,6 +209,7 @@ pub fn pass_worktree(
                 source: Source::Worktree,
                 action: DeltaAction::Add {
                     oid: BlobOid(oid.0),
+                    blob_bytes: Some(bytes),
                     stat_mtime_ns: cur_mtime,
                 },
             });
