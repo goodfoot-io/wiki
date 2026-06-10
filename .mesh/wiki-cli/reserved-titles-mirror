@@ -1,0 +1,4 @@
+packages/cli/src/frontmatter.rs#L45-L48 rk64:90162b71ea64c86f
+packages/cli/src/main.rs#L36-L36 rk64:fb4bca23a0a7fc56
+
+The RESERVED_TITLES constant in frontmatter.rs and the long_about help text in main.rs must agree on which CLI command names (check, list, summary, mesh) are reserved and cannot be used as page titles.
