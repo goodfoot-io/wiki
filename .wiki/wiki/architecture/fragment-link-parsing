@@ -1,5 +1,5 @@
 wiki/architecture/wiki-cli.md#L10-L12 rk64:11b9807ab2d24f5a
 packages/cli/src/parser.rs#L6-L12 rk64:b76fbea44656a0a3
 packages/cli/src/parser.rs#L79-L79 rk64:659e84dcc414fdd0
-packages/cli/src/parser.rs#L213-L213 rk64:3b22335d823f27b3
+packages/cli/src/parser.rs#L224-L224 rk64:3b22335d823f27b3
 
