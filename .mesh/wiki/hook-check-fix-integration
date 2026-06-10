@@ -1,4 +1,0 @@
-plugins/wiki/skills/wiki/references/git-hook-setup.md#L3-L78 rk64:694eaa459ffb7fa5
-packages/cli/src/commands/check.rs#L1636-L1642 rk64:e53d585494a7dbfc
-
-Git hook setup document describes the wiki check --fix behavior and command strings that operators run; the check test validates exact error messages and command suggestions must match the documentation.
