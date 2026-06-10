@@ -33,7 +33,7 @@ enum SourceArg {
     version = crate::version::VERSION,
     before_help = concat!("wiki ", env!("WIKI_VERSION"), "\n"),
     about = "wiki - Read and maintain wiki pages",
-    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, links, list, summary, refs) are reserved and cannot be used as page titles.\n\nFile selection follows the current working directory; links, anchors, and mesh coverage resolve against the git repository root.",
+    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, list, summary, mesh) are reserved and cannot be used as page titles.\n\nFile selection follows the current working directory; links, anchors, and mesh coverage resolve against the git repository root.",
     disable_help_subcommand = true,
     disable_version_flag = true,
 )]
