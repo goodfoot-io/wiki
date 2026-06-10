@@ -13,7 +13,7 @@ The [parser](/packages/cli/src/parser.rs#L6-L12) extracts fragment links from ma
 
 ## Validation Pipeline
 
-The [check command](/packages/cli/src/commands/check.rs#L59-L60) runs a full validation pass: [frontmatter parsing](/packages/cli/src/frontmatter.rs#L55-L55), title/alias collision detection, wikilink resolution, and fragment link verification (file existence and line range bounds at the pinned SHA). With `--fix`, unpinned fragment links are pinned automatically rather than reported as errors — already-pinned links are never touched.
+The [check command](/packages/cli/src/commands/check.rs#L102-L103) runs a full validation pass: [frontmatter parsing](/packages/cli/src/frontmatter.rs#L55-L55), title/alias collision detection, wikilink resolution, and fragment link verification (file existence and line range bounds at the pinned SHA). With `--fix`, unpinned fragment links are pinned automatically rather than reported as errors — already-pinned links are never touched.
 
 ## PostToolUse Hook
 

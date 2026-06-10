@@ -1,3 +1,5 @@
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use miette::Result;
@@ -5,8 +7,9 @@ use serde::Serialize;
 
 use crate::commands::discover_files;
 use crate::frontmatter::{Frontmatter, build_index, parse_frontmatter};
+use crate::git::GitReader;
 use crate::git::resolve_ref;
-use crate::headings::{extract_headings, resolve_heading};
+use crate::headings::{extract_headings, resolve_heading, Heading};
 use crate::index::DocSource;
 use crate::parser::{LinkKind, parse_fragment_links};
 
@@ -19,14 +22,26 @@ use super::mesh_coverage;
 /// For `WorkingTree` this delegates to `std::path::Path::is_dir`.  For
 /// `Index`/`Head` it checks whether any tracked path has the directory as a
 /// prefix, because git does not store directory entries as blobs.
-fn source_aware_is_dir(repo_root: &Path, source: DocSource, rel_path: &Path) -> bool {
+fn source_aware_is_dir(
+    repo_root: &Path,
+    source: DocSource,
+    rel_path: &Path,
+    git_reader: Option<&GitReader>,
+) -> bool {
     match source {
         DocSource::WorkingTree => repo_root.join(rel_path).is_dir(),
         DocSource::Index | DocSource::Head => {
             let prefix = format!("{}/", rel_path.to_string_lossy().trim_end_matches('/'));
-            let paths = match source.list_paths(repo_root) {
-                Ok(p) => p,
-                Err(_) => return false,
+            let paths = if let Some(gr) = git_reader {
+                match gr.list_paths(source) {
+                    Ok(p) => p,
+                    Err(_) => return false,
+                }
+            } else {
+                match source.list_paths(repo_root) {
+                    Ok(p) => p,
+                    Err(_) => return false,
+                }
             };
             paths.iter().any(|p| p.starts_with(&prefix))
         }
@@ -37,16 +52,39 @@ fn source_aware_is_dir(repo_root: &Path, source: DocSource, rel_path: &Path) -> 
 ///
 /// For `WorkingTree` this delegates to `std::path::Path::exists`.  For
 /// `Index`/`Head` it checks the git blob store via the index or HEAD tree.
-fn source_aware_exists(repo_root: &Path, source: DocSource, rel_path: &str) -> bool {
+fn source_aware_exists(
+    repo_root: &Path,
+    source: DocSource,
+    rel_path: &str,
+    git_reader: Option<&GitReader>,
+) -> bool {
     match source {
         DocSource::WorkingTree => repo_root.join(rel_path).exists(),
-        DocSource::Index => crate::git::has_index_entry(repo_root, rel_path).unwrap_or(false),
-        DocSource::Head => crate::git::has_head_entry(repo_root, rel_path).unwrap_or(false),
+        DocSource::Index | DocSource::Head => {
+            if let Some(gr) = git_reader {
+                gr.has_entry(source, rel_path).unwrap_or(false)
+            } else {
+                match source {
+                    DocSource::Index => {
+                        crate::git::has_index_entry(repo_root, rel_path).unwrap_or(false)
+                    }
+                    DocSource::Head => {
+                        crate::git::has_head_entry(repo_root, rel_path).unwrap_or(false)
+                    }
+                    _ => false,
+                }
+            }
+        }
     }
 }
 
 /// Read `path` from the chosen `DocSource`.
-fn read_via_source(path: &Path, repo_root: &Path, source: DocSource) -> std::io::Result<String> {
+fn read_via_source(
+    path: &Path,
+    repo_root: &Path,
+    source: DocSource,
+    git_reader: Option<&GitReader>,
+) -> std::io::Result<String> {
     match source {
         DocSource::WorkingTree => std::fs::read_to_string(path),
         DocSource::Index | DocSource::Head => {
@@ -54,7 +92,12 @@ fn read_via_source(path: &Path, repo_root: &Path, source: DocSource) -> std::io:
                 .strip_prefix(repo_root)
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| path.to_string_lossy().into_owned());
-            match source.read(repo_root, &path_rel) {
+            let result = if let Some(gr) = git_reader {
+                gr.read_blob(source, &path_rel)
+            } else {
+                source.read(repo_root, &path_rel)
+            };
+            match result {
                 Ok(Some(s)) => Ok(s),
                 Ok(None) => Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
@@ -71,12 +114,16 @@ fn filter_files_for_source(
     files: Vec<PathBuf>,
     repo_root: &Path,
     source: DocSource,
+    git_reader: Option<&GitReader>,
 ) -> Result<Vec<PathBuf>> {
     if matches!(source, DocSource::WorkingTree) {
         return Ok(files);
     }
-    let listed: std::collections::HashSet<String> =
-        source.list_paths(repo_root)?.into_iter().collect();
+    let listed: std::collections::HashSet<String> = if let Some(gr) = git_reader {
+        gr.list_paths(source)?.into_iter().collect()
+    } else {
+        source.list_paths(repo_root)?.into_iter().collect()
+    };
     Ok(files
         .into_iter()
         .filter(|p| {
@@ -175,8 +222,29 @@ pub fn run(
     // discover_files returns Ok(vec![]) for an empty corpus, which is fine in
     // both modes; real infrastructure failures propagate as Err and fail
     // closed.
-    let index_files = match discover_files(&[], repo_root, repo_root, source) {
-        Ok(f) => match filter_files_for_source(f, repo_root, source) {
+
+    // Open the git repository once when reading from Index or Head so that
+    // the same `gix::Repository` handle is reused for all blob reads, path
+    // listings, and existence checks in a single run.
+    let git_reader = match source {
+        DocSource::Index | DocSource::Head => {
+            match GitReader::open(repo_root) {
+                Ok(gr) => Some(gr),
+                Err(e) => {
+                    if json {
+                        eprintln!("{}", serde_json::json!({"error": e.to_string()}));
+                    } else {
+                        eprintln!("error: {e}");
+                    }
+                    return Ok(2);
+                }
+            }
+        }
+        DocSource::WorkingTree => None,
+    };
+
+    let index_files = match discover_files(&[], repo_root, repo_root, source, git_reader.as_ref()) {
+        Ok(f) => match filter_files_for_source(f, repo_root, source, git_reader.as_ref()) {
             Ok(f) => f,
             Err(e) => {
                 if json {
@@ -218,7 +286,7 @@ pub fn run(
             .cloned()
             .collect::<Vec<_>>()
     } else {
-        let raw = match discover_files(globs, scan_root, repo_root, source) {
+        let raw = match discover_files(globs, scan_root, repo_root, source, git_reader.as_ref()) {
             Ok(f) => f,
             Err(e) => {
                 if json {
@@ -229,7 +297,7 @@ pub fn run(
                 return Ok(2);
             }
         };
-        match filter_files_for_source(raw, repo_root, source) {
+        match filter_files_for_source(raw, repo_root, source, git_reader.as_ref()) {
             Ok(f) => f,
             Err(e) => {
                 if json {
@@ -256,7 +324,7 @@ pub fn run(
         return Ok(2);
     }
 
-    let diagnostics = match collect_for_files(&files, &index_files, repo_root, source) {
+    let diagnostics = match collect_for_files(&files, &index_files, repo_root, source, git_reader.as_ref()) {
         Ok(d) => d,
         Err(e) => {
             if json {
@@ -396,7 +464,7 @@ pub fn run(
 
         // Non-dry-run: re-collect and emit post-fix diagnostics. A mesh that
         // failed/dropped resurfaces here as a residual `mesh_uncovered`.
-        let post_diagnostics = match collect_for_files(&files, &index_files, repo_root, source) {
+        let post_diagnostics = match collect_for_files(&files, &index_files, repo_root, source, git_reader.as_ref()) {
             Ok(d) => d,
             Err(e) => {
                 if json {
@@ -469,20 +537,27 @@ pub fn collect_with_source(
     // narrower working directory.  discover_files returns Ok(vec![]) for an
     // empty corpus; propagate that as an error so the caller sees "no wiki
     // pages found" rather than an empty diagnostic list with exit 0.
-    let files = discover_files(globs, repo_root, repo_root, source)?;
+
+    // Open the git repository once when reading from Index or Head.
+    let git_reader = match source {
+        DocSource::Index | DocSource::Head => Some(GitReader::open(repo_root)?),
+        DocSource::WorkingTree => None,
+    };
+
+    let files = discover_files(globs, repo_root, repo_root, source, git_reader.as_ref())?;
     if files.is_empty() {
         return Err(miette::miette!(
             "no wiki pages found (no .md files matched)"
         ));
     }
-    let files = filter_files_for_source(files, repo_root, source)?;
+    let files = filter_files_for_source(files, repo_root, source, git_reader.as_ref())?;
     let index_files = if globs.is_empty() {
         files.clone()
     } else {
-        let raw = discover_files(&[], repo_root, repo_root, source)?;
-        filter_files_for_source(raw, repo_root, source)?
+        let raw = discover_files(&[], repo_root, repo_root, source, git_reader.as_ref())?;
+        filter_files_for_source(raw, repo_root, source, git_reader.as_ref())?
     };
-    collect_for_files(&files, &index_files, repo_root, source)
+    collect_for_files(&files, &index_files, repo_root, source, git_reader.as_ref())
 }
 
 /// Extract the anchor portion (after `#`) from a markdown link href, if present.
@@ -529,11 +604,20 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
+/// Cached content and parsed data for a single link target file.
+#[allow(dead_code)]
+struct CachedTarget {
+    content: String,
+    line_count: u32,
+    headings: Vec<Heading>,
+}
+
 fn collect_for_files(
     files: &[PathBuf],
     index_files: &[PathBuf],
     repo_root: &Path,
     source: DocSource,
+    git_reader: Option<&GitReader>,
 ) -> Result<Vec<CheckDiagnostic>> {
     let mut diagnostics: Vec<CheckDiagnostic> = Vec::new();
 
@@ -554,7 +638,7 @@ fn collect_for_files(
             continue;
         }
         let in_scope = files_set.contains(path);
-        let content = match read_via_source(path, repo_root, source) {
+        let content = match read_via_source(path, repo_root, source, git_reader) {
             Ok(c) => c,
             Err(e) => {
                 if in_scope {
@@ -616,8 +700,9 @@ fn collect_for_files(
     }
 
     // ── Validate links in all in-scope files ─────────────────────────────────
+    let mut target_cache: HashMap<PathBuf, CachedTarget> = HashMap::new();
     for path in files {
-        let content = match read_via_source(path, repo_root, source) {
+        let content = match read_via_source(path, repo_root, source, git_reader) {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -650,48 +735,63 @@ fn collect_for_files(
             let abs = repo_root.join(&resolved);
 
             // Try to read the target. Directories are valid link targets.
-            let ref_content = match read_via_source(&abs, repo_root, source) {
-                Ok(c) => Some(c),
-                Err(_) => {
-                    if source_aware_is_dir(repo_root, source, &resolved) {
-                        None
-                    } else {
-                        // Missing file diagnostic with bare-path hint.
-                        let first = Path::new(&link.path).components().next();
-                        let is_explicit = matches!(
-                            first,
-                            Some(std::path::Component::CurDir)
-                                | Some(std::path::Component::ParentDir)
-                        );
-                        let is_bare = !link.path.starts_with('/') && !is_explicit;
-
-                        let message = if is_bare {
-                            if source_aware_exists(repo_root, source, &link.path) {
-                                format!(
-                                    "File `{}` not found at page-relative path.\n\
-                                     If you meant a repo-relative path, use `/{}` instead.",
-                                    link.path, link.path
-                                )
+            // Cache target content + computed data to avoid re-reading and
+            // re-parsing the same file when multiple links reference it.
+            let cached = match target_cache.entry(abs.clone()) {
+                Entry::Occupied(o) => Some(o.into_mut()),
+                Entry::Vacant(v) => {
+                    match read_via_source(&abs, repo_root, source, git_reader) {
+                        Ok(c) => {
+                            let headings = extract_headings(&c);
+                            let line_count = c.lines().count() as u32;
+                            Some(v.insert(CachedTarget {
+                                content: c,
+                                line_count,
+                                headings,
+                            }))
+                        }
+                        Err(_) => {
+                            if source_aware_is_dir(repo_root, source, &resolved, git_reader) {
+                                None
                             } else {
-                                format!("File `{}` not found.", link.path)
+                                // Missing file diagnostic with bare-path hint.
+                                let first = Path::new(&link.path).components().next();
+                                let is_explicit = matches!(
+                                    first,
+                                    Some(std::path::Component::CurDir)
+                                        | Some(std::path::Component::ParentDir)
+                                );
+                                let is_bare = !link.path.starts_with('/') && !is_explicit;
+
+                                let message = if is_bare {
+                                    if source_aware_exists(repo_root, source, &link.path, git_reader) {
+                                        format!(
+                                            "File `{}` not found at page-relative path.\n\
+                                             If you meant a repo-relative path, use `/{}` instead.",
+                                            link.path, link.path
+                                        )
+                                    } else {
+                                        format!("File `{}` not found.", link.path)
+                                    }
+                                } else {
+                                    format!("File `{}` not found.", link.path)
+                                };
+                                diagnostics.push(CheckDiagnostic {
+                                    kind: "broken_link".into(),
+                                    file: path.display().to_string(),
+                                    line: link.source_line,
+                                    message,
+                                });
+                                continue;
                             }
-                        } else {
-                            format!("File `{}` not found.", link.path)
-                        };
-                        diagnostics.push(CheckDiagnostic {
-                            kind: "broken_link".into(),
-                            file: path.display().to_string(),
-                            line: link.source_line,
-                            message,
-                        });
-                        continue;
+                        }
                     }
                 }
             };
 
             // Anchor validation: line range OR heading slug.
             if let Some(start) = link.start_line {
-                if let Some(ref tc) = ref_content {
+                if let Some(ref cached) = cached {
                     if start == 0 {
                         diagnostics.push(CheckDiagnostic {
                             kind: "broken_anchor".into(),
@@ -703,7 +803,7 @@ fn collect_for_files(
                             ),
                         });
                     } else {
-                        let line_count = tc.lines().count() as u32;
+                        let line_count = cached.line_count;
                         let end = link.end_line.unwrap_or(start);
                         if start > line_count || end > line_count {
                             diagnostics.push(CheckDiagnostic {
@@ -730,12 +830,11 @@ fn collect_for_files(
                 }
             } else if let Some(anchor) = anchor_of(&link.original_href)
                 && !anchor.is_empty()
-                && let Some(ref tc) = ref_content
+                && let Some(ref cached) = cached
             {
                 // Non-line-range anchor: validate as heading slug.
-                let headings = extract_headings(tc);
                 let decoded_anchor = percent_decode(anchor);
-                if !resolve_heading(&decoded_anchor, &headings) {
+                if !resolve_heading(&decoded_anchor, &cached.headings) {
                     diagnostics.push(CheckDiagnostic {
                         kind: "broken_anchor".into(),
                         file: path.display().to_string(),
@@ -1749,6 +1848,7 @@ mod tests {
                 repo.path(),
                 repo.path(),
                 crate::index::DocSource::WorkingTree,
+                None,
             )
             .unwrap(),
             repo.path(),

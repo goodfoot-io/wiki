@@ -14,6 +14,7 @@ use serde_json::json;
 
 #[cfg(test)]
 use crate::frontmatter::Frontmatter;
+use crate::git::GitReader;
 use crate::git::repo_inventory;
 use crate::index::DocSource;
 use crate::perf;
@@ -203,6 +204,7 @@ pub fn discover_files(
     scan_root: &Path,
     repo_root: &Path,
     source: DocSource,
+    git_reader: Option<&GitReader>,
 ) -> Result<Vec<PathBuf>> {
     perf::scope_result(
         "discover_files",
@@ -221,7 +223,7 @@ pub fn discover_files(
             let mut files = match source {
                 DocSource::Index | DocSource::Head => {
                     if globs.is_empty() {
-                        discover_default_files(repo_root, &walk_root, prefix.as_deref(), source)?
+                        discover_default_files(repo_root, &walk_root, prefix.as_deref(), source, git_reader)?
                     } else {
                         // For non-worktree sources we must never read the
                         // worktree filesystem to satisfy a glob.  Filter the
@@ -232,12 +234,13 @@ pub fn discover_files(
                             repo_root,
                             prefix.as_deref(),
                             source,
+                            git_reader,
                         )?
                     }
                 }
                 DocSource::WorkingTree => {
                     let initial = if globs.is_empty() {
-                        discover_default_files(repo_root, &walk_root, prefix.as_deref(), source)?
+                        discover_default_files(repo_root, &walk_root, prefix.as_deref(), source, git_reader)?
                     } else {
                         Vec::new()
                     };
@@ -329,6 +332,7 @@ fn discover_default_files(
     walk_root: &Path,
     prefix: Option<&Path>,
     source: DocSource,
+    git_reader: Option<&GitReader>,
 ) -> Result<Vec<PathBuf>> {
     // For non-worktree sources, seed from the source's own path list so that
     // files absent from the worktree (deleted locally but present in HEAD or
@@ -337,7 +341,11 @@ fn discover_default_files(
     // relative path list.
     match source {
         DocSource::Index | DocSource::Head => {
-            let all_paths = source.list_paths(repo_root)?;
+            let all_paths = if let Some(gr) = git_reader {
+                gr.list_paths(source)?
+            } else {
+                source.list_paths(repo_root)?
+            };
             let files: Vec<PathBuf> = all_paths
                 .into_iter()
                 .filter(|p| {
@@ -347,10 +355,13 @@ fn discover_default_files(
                     // Include .md files with a frontmatter fence — even if the
                     // YAML is malformed, they are trying to be wiki pages and
                     // callers like check/collect will emit diagnostics for errors.
-                    match source.read(repo_root, p) {
-                        Ok(Some(content)) => {
-                            crate::frontmatter::has_wiki_frontmatter(&content)
-                        }
+                    let content = if let Some(gr) = git_reader {
+                        gr.read_blob(source, p)
+                    } else {
+                        source.read(repo_root, p)
+                    };
+                    match content {
+                        Ok(Some(c)) => crate::frontmatter::has_wiki_frontmatter(&c),
                         _ => false,
                     }
                 })
@@ -404,6 +415,7 @@ fn discover_files_by_glob_in_source(
     repo_root: &Path,
     prefix: Option<&Path>,
     source: DocSource,
+    git_reader: Option<&GitReader>,
 ) -> Result<Vec<PathBuf>> {
     let mut glob_builder = globset::GlobSetBuilder::new();
     for glob in globs {
@@ -418,8 +430,13 @@ fn discover_files_by_glob_in_source(
         .into_diagnostic()
         .wrap_err("failed to build glob set")?;
 
+    let all_paths = if let Some(gr) = git_reader {
+        gr.list_paths(source)?
+    } else {
+        source.list_paths(repo_root)?
+    };
     let mut files = Vec::new();
-    for path_rel in source.list_paths(repo_root)? {
+    for path_rel in all_paths {
         if !path_rel.ends_with(".md") {
             continue;
         }
@@ -741,7 +758,7 @@ mod tests {
     fn test_discover_no_md_files_exits_with_no_pages() {
         let repo = TestRepo::new();
         // No .md files at all — discover_files returns Ok(vec![]) for empty corpus.
-        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).unwrap();
+        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree, None).unwrap();
         assert!(
             files.is_empty(),
             "expected empty vec for no wiki pages, got: {files:?}"
@@ -754,7 +771,7 @@ mod tests {
         repo.create_file("wiki/.gitkeep", "");
         repo.create_file("wiki/plain.md", "# no frontmatter\n");
         // No frontmatter fence → not a wiki candidate → returns Ok(vec![]) not Err.
-        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree).unwrap();
+        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree, None).unwrap();
         assert!(
             files.is_empty(),
             "expected empty vec for plain md, got: {files:?}"
@@ -765,7 +782,7 @@ mod tests {
     fn test_discover_finds_md_files_with_frontmatter() {
         let repo = TestRepo::new();
         repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
-        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree)
+        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree, None)
             .expect("discover");
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("page.md"));
@@ -780,7 +797,7 @@ mod tests {
             "---\ntitle: Docs\nsummary: Component docs.\n---\n",
         );
         repo.create_file("src/component/ordinary.md", "# ordinary\n");
-        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree)
+        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree, None)
             .expect("discover");
         // Only files with a frontmatter fence are discovered. `ordinary.md`
         // has no fence and is excluded.
@@ -801,7 +818,7 @@ mod tests {
         let globs = vec!["wiki/nonexistent/**/*.md".to_string()];
         // Zero matches returns Ok(vec![]) not Err.
         let files =
-            discover_files(&globs, repo.path(), repo.path(), DocSource::WorkingTree).unwrap();
+            discover_files(&globs, repo.path(), repo.path(), DocSource::WorkingTree, None).unwrap();
         assert!(
             files.is_empty(),
             "expected empty vec for no-match glob, got: {files:?}"
@@ -813,7 +830,7 @@ mod tests {
         let repo = TestRepo::new();
         repo.create_file("docs/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
         let globs = vec!["docs/**/*.md".to_string()];
-        let files = discover_files(&globs, repo.path(), repo.path(), DocSource::WorkingTree)
+        let files = discover_files(&globs, repo.path(), repo.path(), DocSource::WorkingTree, None)
             .expect("explicit glob should succeed");
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("page.md"));
@@ -824,7 +841,7 @@ mod tests {
         let repo = TestRepo::new();
         repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
         let globs = vec!["./wiki/page.md".to_string()];
-        let files = discover_files(&globs, repo.path(), repo.path(), DocSource::WorkingTree)
+        let files = discover_files(&globs, repo.path(), repo.path(), DocSource::WorkingTree, None)
             .expect("discover");
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("wiki/page.md"));
@@ -841,7 +858,7 @@ mod tests {
         );
         // Gitignore the directory — discover_files must not return files from it.
         repo.create_file(".gitignore", "ignored-dir/\n");
-        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree)
+        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree, None)
             .expect("discover");
         let paths: Vec<_> = files
             .iter()
@@ -869,7 +886,7 @@ mod tests {
         );
         // Gitignore the worktrees directory (as this repo does in production).
         repo.create_file(".gitignore", ".worktrees\n");
-        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree)
+        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree, None)
             .expect("discover");
         let paths: Vec<_> = files
             .iter()
@@ -907,7 +924,7 @@ mod tests {
         repo.git(&["add", "-A"]);
 
         let inventory_files =
-            discover_default_files(repo.path(), repo.path(), None, DocSource::WorkingTree)
+            discover_default_files(repo.path(), repo.path(), None, DocSource::WorkingTree, None)
                 .expect("inventory discover");
         let walk_files = discover_files_by_walk(&[], repo.path()).expect("walk discover");
 

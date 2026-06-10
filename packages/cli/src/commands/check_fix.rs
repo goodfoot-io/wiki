@@ -1,4 +1,5 @@
 use std::cmp::Reverse;
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -13,7 +14,7 @@ use git_mesh_core::{
 use crate::commands::mesh::store;
 use crate::commands::mesh_coverage::build_mesh_index;
 use crate::frontmatter::parse_frontmatter;
-use crate::headings::{extract_headings, github_slug, resolve_heading};
+use crate::headings::{extract_headings, github_slug, resolve_heading, Heading};
 use crate::index::DocSource;
 use crate::parser::{LinkKind, parse_fragment_links};
 
@@ -1126,6 +1127,9 @@ pub fn run_fix_pass(
     // canonical destination so the alias entry can be retired without
     // breaking inbound links.
 
+    // Cache: target path → parsed headings, avoids re-parsing the same target
+    // file when multiple broken anchors in one source file reference it.
+    let mut headings_cache_f3: HashMap<PathBuf, Vec<Heading>> = HashMap::new();
     for file in files {
         // Use the in-memory patched content if Fix #1 rewrote this file.
         let content = if let Some(patched) = patches.get(file) {
@@ -1181,10 +1185,15 @@ pub fn run_fix_pass(
                 }
             };
 
-            let headings = extract_headings(&target_content);
+            // Use cached headings when available to avoid re-parsing the same
+            // target file across multiple links.
+            let headings: &[Heading] = match headings_cache_f3.entry(target_abs.clone()) {
+                Entry::Occupied(o) => &*o.into_mut(),
+                Entry::Vacant(v) => &*v.insert(extract_headings(&target_content)),
+            };
 
             // If anchor resolves correctly, nothing to do.
-            if resolve_heading(anchor, &headings) {
+            if resolve_heading(anchor, headings) {
                 continue;
             }
 
@@ -1206,7 +1215,7 @@ pub fn run_fix_pass(
             // Resolve the canonical heading slug via the documented fallback
             // chain: title-slug → first H1 → first heading.
             let title_slug = github_slug(&fm.title);
-            let title_match = resolve_heading(&title_slug, &headings);
+            let title_match = resolve_heading(&title_slug, headings);
 
             let (canonical, source_label) = if title_match {
                 (title_slug.clone(), "title")
@@ -1508,6 +1517,9 @@ pub fn run_fix_pass(
     // then check the current (worktree) content for a singleton replacement at
     // the same position. If found, rewrite the anchor.
 
+    // Cache: target path → parsed headings, avoids re-parsing the same target
+    // file when multiple broken anchors in one source file reference it.
+    let mut headings_cache_f5: HashMap<PathBuf, Vec<Heading>> = HashMap::new();
     // Cache: rel_path → HEAD content
     let mut head_cache: HashMap<String, Option<String>> = HashMap::new();
 
@@ -1566,10 +1578,15 @@ pub fn run_fix_pass(
                 }
             };
 
-            let current_headings = extract_headings(&current_target);
+            // Use cached headings when available to avoid re-parsing the same
+            // target file across multiple links.
+            let current_headings: &[Heading] = match headings_cache_f5.entry(target_abs.clone()) {
+                Entry::Occupied(o) => &*o.into_mut(),
+                Entry::Vacant(v) => &*v.insert(extract_headings(&current_target)),
+            };
 
             // If anchor already resolves in current content, nothing to do.
-            if resolve_heading(anchor, &current_headings) {
+            if resolve_heading(anchor, current_headings) {
                 continue;
             }
 

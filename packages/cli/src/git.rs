@@ -12,6 +12,8 @@ use std::process::{Command, Stdio};
 use gix::bstr::{BStr, ByteSlice};
 use miette::{IntoDiagnostic, Result, WrapErr, miette};
 
+use crate::index::DocSource;
+
 /// Git-side accelerator configuration that can improve status and inventory
 /// queries without changing correctness semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -652,6 +654,93 @@ pub fn index_revision_signal(repo: &Path) -> Result<String> {
         miette!("git index has no checksum — cannot derive cache-revision signal")
     })?;
     Ok(checksum.to_hex().to_string())
+}
+
+// ─── GitReader ─────────────────────────────────────────────────────────────────
+
+/// Opens a gix repository once and reuses it for multiple operations.
+///
+/// Used by the check codepath under `--source=index|head` to avoid
+/// opening the repository on every blob read and path-list query.
+pub struct GitReader {
+    repo: gix::Repository,
+}
+
+#[allow(dead_code)]
+impl GitReader {
+    /// Open the git repository at `repo_root`.
+    pub fn open(repo_root: &Path) -> Result<Self> {
+        let repo = open_repo(repo_root)?;
+        Ok(GitReader { repo })
+    }
+
+    /// Read the blob content for `path_rel` from the given `source`.
+    ///
+    /// For `Index` this reads from the git index; for `Head` from the HEAD tree.
+    /// Returns `Err` on infrastructure failures, `Ok(None)` when the path is absent,
+    /// and `Ok(Some(content))` on success.
+    pub fn read_blob(&self, source: DocSource, path_rel: &str) -> Result<Option<String>> {
+        match source {
+            DocSource::Index => read_index_blob_inner(&self.repo, path_rel, 0),
+            DocSource::Head => read_head_blob_inner(&self.repo, path_rel, 0),
+            DocSource::WorkingTree => {
+                unreachable!("GitReader is not used with WorkingTree")
+            }
+        }
+    }
+
+    /// Return `true` when `path_rel` exists in the given `source`.
+    pub fn has_entry(&self, source: DocSource, path_rel: &str) -> Result<bool> {
+        match source {
+            DocSource::Index => {
+                let index = open_persisted_index(&self.repo)?;
+                Ok(index
+                    .entry_by_path(gix::bstr::BStr::new(path_rel.as_bytes()))
+                    .is_some())
+            }
+            DocSource::Head => {
+                Ok(read_head_blob_inner(&self.repo, path_rel, 0)?.is_some())
+            }
+            DocSource::WorkingTree => {
+                unreachable!("GitReader is not used with WorkingTree")
+            }
+        }
+    }
+
+    /// Return all repo-relative paths tracked in the given `source`.
+    pub fn list_paths(&self, source: DocSource) -> Result<Vec<String>> {
+        match source {
+            DocSource::Index => {
+                let index = open_persisted_index(&self.repo)?;
+                let mut paths = Vec::new();
+                for entry in index.entries() {
+                    paths.push(utf8_repo_path(
+                        entry.path(&index),
+                        "git index path is not valid UTF-8",
+                    )?);
+                }
+                paths.sort();
+                paths.dedup();
+                Ok(paths)
+            }
+            DocSource::Head => {
+                let root_tree_id = head_root_tree_id(&self.repo)?;
+                let mut paths = Vec::new();
+                for_each_tree_entry_recursive(
+                    &self.repo,
+                    root_tree_id,
+                    &mut String::new(),
+                    &mut paths,
+                )?;
+                paths.sort();
+                paths.dedup();
+                Ok(paths)
+            }
+            DocSource::WorkingTree => {
+                unreachable!("GitReader is not used with WorkingTree")
+            }
+        }
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

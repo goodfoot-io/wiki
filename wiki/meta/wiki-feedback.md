@@ -16,7 +16,7 @@ For the canonical map of documentation and automation files that should be check
 
 ## Bug Reports
 
-- **[`wiki check`](/packages/cli/src/commands/check.rs#L247-L314) scanned git worktree directories** — `globwalk` (used internally for file discovery) uses `walkdir::WalkDir`, which does not honour `.gitignore`. Directories like `.worktrees/` that are gitignored were traversed, causing title-collision errors from duplicate pages in worktrees. Fixed in `packages/wiki` by replacing `globwalk` with [`ignore::WalkBuilder`](/packages/cli/src/commands/mod.rs#L381-L386) + [`globset::GlobSet`](/packages/cli/src/commands/mod.rs#L364-L376), which respects `.gitignore` during traversal.
+- **[`wiki check`](/packages/cli/src/commands/check.rs#L247-L314) scanned git worktree directories** — `globwalk` (used internally for file discovery) uses `walkdir::WalkDir`, which does not honour `.gitignore`. Directories like `.worktrees/` that are gitignored were traversed, causing title-collision errors from duplicate pages in worktrees. Fixed in `packages/wiki` by replacing `globwalk` with [`ignore::WalkBuilder`](/packages/cli/src/commands/mod.rs#L392-L397) + [`globset::GlobSet`](/packages/cli/src/commands/mod.rs#L375-L387), which respects `.gitignore` during traversal.
 
 ## Observations
 
