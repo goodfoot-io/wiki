@@ -2278,4 +2278,75 @@ mod tests {
             "percent-encoded heading anchor must resolve: {diags:?}"
         );
     }
+
+    /// Reproduction: suffix salvage gap between scaffold and coverage checker.
+    ///
+    /// When a fragment link resolves to a non-existent path whose suffix
+    /// exists in the repo, scaffold applies `locate_existing_suffix` and
+    /// creates a mesh for the found file. But `collect_mesh_diagnostics`
+    /// does not apply suffix salvage, so it resolves only through
+    /// `resolve_link_path` and checks coverage against the unsalvaged
+    /// (non-existent) path — even when a mesh covering the suffix path
+    /// is present. This prevents `check --fix` from converging: the fix
+    /// pass creates a mesh for the suffix path, but the post-fix coverage
+    /// check still reports `mesh_uncovered`.
+    ///
+    /// THIS TEST FAILS against the current unfixed code. When suffix
+    /// salvage is added to `collect_mesh_diagnostics`, the mesh covering
+    /// `src/code.rs` should satisfy coverage for the link, and this
+    /// assertion should pass.
+    #[test]
+    fn mesh_uncovered_suffix_salvage_gap() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+
+        // The actual file exists at `src/code.rs`.
+        repo.create_file("src/code.rs", "fn a() {}\n");
+
+        // Wiki page links to a non-existent nested path whose suffix
+        // (`src/code.rs`) exists.  `resolve_link_path` resolves the bare
+        // path `deep/path/src/code.rs` relative to `wiki/` and produces
+        // `wiki/deep/path/src/code.rs`.  Scaffold's `locate_existing_suffix`
+        // would peel back directory components to find `src/code.rs`, but
+        // `collect_mesh_diagnostics` only calls `resolve_link_path`.
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page(
+                "Page",
+                "See [code](deep/path/src/code.rs#L1-L1).",
+            ),
+        );
+        repo.commit("add files");
+
+        // Seed a mesh that covers the suffix path + wiki page — exactly
+        // what scaffold would create after applying locate_existing_suffix.
+        let mesh = make_mesh(vec![
+            make_anchor("src/code.rs", 1, 1),
+            make_anchor("wiki/page.md", 1, 1),
+        ]);
+        store::write(repo.path(), "suffix-salvage-mesh", &mesh)
+            .expect("store::write");
+
+        let diagnostics = collect(&[], repo.path()).expect("collect");
+        let mesh_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.kind == "mesh_uncovered")
+            .collect();
+
+        // If suffix salvage were applied in collect_mesh_diagnostics, the
+        // link would resolve to `src/code.rs` and the seeded mesh would
+        // satisfy coverage.  Currently the coverage checker only calls
+        // `resolve_link_path` (no suffix matching), so `mesh_uncovered`
+        // fires even though a covering mesh exists for the suffix path.
+        //
+        // THIS ASSERTION FAILS against the current unfixed code.  When
+        // suffix salvage is added to the coverage checker, this assertion
+        // will pass.
+        assert!(
+            mesh_diags.is_empty(),
+            "expected NO mesh_uncovered with suffix-matching mesh present, \
+             got {} mesh_uncovered: {diagnostics:?}",
+            mesh_diags.len(),
+        );
+    }
 }
