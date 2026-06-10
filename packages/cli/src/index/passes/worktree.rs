@@ -161,7 +161,9 @@ pub fn pass_worktree(
                 clean_dirs.insert(rel.clone());
             } else {
                 *pass3_dir_walks += 1;
-                if let Some(m) = dir_mtime_ns {
+                if !is_hostile
+                    && let Some(m) = dir_mtime_ns
+                {
                     new_dir_mtimes.push((rel.clone(), m));
                 }
             }
@@ -241,13 +243,35 @@ pub fn pass_worktree(
     }
 
     // Record dirty-dir mtimes for next refresh.
-    for (rel, m) in new_dir_mtimes {
+    for (rel, m) in &new_dir_mtimes {
         let p = rel.to_string_lossy().to_string();
         tx.execute(
             "INSERT INTO dir_mtimes (path, mtime_ns) VALUES (?1, ?2)
              ON CONFLICT(path) DO UPDATE SET mtime_ns = excluded.mtime_ns",
             params![p, m],
         )?;
+    }
+
+    // Prune stale dir_mtimes rows for directories that no longer exist.
+    // On hostile FS, clear all rows — they are never consulted anyway.
+    if is_hostile {
+        tx.execute("DELETE FROM dir_mtimes", [])?;
+    } else {
+        let walked_dirs: HashSet<PathBuf> = clean_dirs
+            .iter()
+            .cloned()
+            .chain(new_dir_mtimes.iter().map(|(p, _)| p.clone()))
+            .collect();
+        let mut del = tx.prepare_cached("DELETE FROM dir_mtimes WHERE path = ?1")?;
+        let mut stmt = tx.prepare("SELECT path FROM dir_mtimes")?;
+        let rows: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for path in rows {
+            if !walked_dirs.contains(Path::new(&path)) {
+                del.execute(params![path])?;
+            }
+        }
     }
 
     Ok(deltas)
