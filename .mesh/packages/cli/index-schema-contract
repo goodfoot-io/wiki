@@ -3,5 +3,6 @@ packages/cli/tests/index_schema_rebuild.rs rk64:90c8689df8b82ab0
 packages/cli/tests/index_blob_readd.rs rk64:3651c9f8c47bdf33
 packages/cli/tests/index_rename_edit.rs rk64:b9feacf0e4b329f0
 packages/cli/src/index/passes/mod.rs#L8-L457 rk64:56f91cb308afb53d
+packages/cli/logging.wiki.md rk64:398c2317ec7eb2a8
 
 Index cache DB schema contract enforced by the three-pass refresh implementation and validated by integration tests that prove blob refcount and FTS sync correctness.
