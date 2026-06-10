@@ -519,4 +519,48 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].path, "real.rs");
     }
+
+    #[test]
+    fn test_unpaired_backtick_does_not_scrub_links_across_paragraphs() {
+        // An unpaired backtick in paragraph 1 must NOT scrub links in paragraph 2
+        // (separated by blank lines), even when a backtick appears in paragraph 3.
+        let content = "Para with `unpaired\n\
+                       \n\
+                       [BrokenLink](missing.md)\n\
+                       \n\
+                       Para with another ` backtick\n";
+        let links = parse_fragment_links(content);
+        assert_eq!(
+            links.len(),
+            1,
+            "link in its own paragraph must not be scrubbed by an unpaired backtick two paragraphs away"
+        );
+        assert_eq!(links[0].path, "missing.md");
+    }
+
+    #[test]
+    fn test_paired_backtick_still_scrubs_within_same_paragraph() {
+        // A properly paired backtick in the SAME paragraph must still scrub the link inside it.
+        let content = "Same para `code [Hidden](hidden.md) code` still same para\n";
+        let links = parse_fragment_links(content);
+        assert_eq!(
+            links.len(),
+            0,
+            "link inside paired backtick code span must be scrubbed"
+        );
+    }
+
+    #[test]
+    fn test_truly_unpaired_backtick_does_not_scrub_same_paragraph_link() {
+        // When there is NO closing backtick anywhere, the backtick is literal text,
+        // not a code span. The link in the same paragraph must be extracted.
+        let content = "Para with truly `unpaired and [Link](found.md) no closing\n";
+        let links = parse_fragment_links(content);
+        assert_eq!(
+            links.len(),
+            1,
+            "link in same paragraph as truly unpaired backtick must be extracted (backtick is literal text)"
+        );
+        assert_eq!(links[0].path, "found.md");
+    }
 }
