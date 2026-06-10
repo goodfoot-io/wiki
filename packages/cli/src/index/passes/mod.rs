@@ -218,7 +218,14 @@ pub fn refresh(
                         if blob_cache.wiki_oids.contains(&oid.0) {
                             // A pure rename keeps the OID and refcount — the
                             // path swap is row-level.
-                            apply_rename(&tx, from, &delta.path, delta.source, oid)?;
+                            apply_rename(
+                                &tx,
+                                from,
+                                &delta.path,
+                                delta.source,
+                                oid,
+                                &mut blob_cache,
+                            )?;
                         } else {
                             // The blob OID is either non-wiki content (no
                             // `blobs` row exists and apply_add will skip it)
@@ -440,6 +447,7 @@ fn apply_rename(
     to: &Path,
     source: Source,
     oid: &BlobOid,
+    blob_cache: &mut BlobCache,
 ) -> Result<()> {
     let from_str = from.to_string_lossy().to_string();
     let to_str = to.to_string_lossy().to_string();
@@ -447,13 +455,27 @@ fn apply_rename(
         .parent()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
-    // Delete the old row.
+    // Delete the old row — a pure rename keeps the OID and refcount, so
+    // no decrement here.
     tx.prepare_cached("DELETE FROM paths WHERE path_rel = ?1 AND source = ?2")?
         .execute(params![from_str, source_id(source)])?;
-    // Upsert the new row at the same OID — refcount unchanged because
-    // we did not bump on either side.
+    // If a row already exists at the destination (from prior-state skew
+    // or case-colliding tree entries), explicitly delete it and release
+    // its blob refcount.  Must happen before the INSERT so the FK check
+    // on the new row does not see a dangling reference.
+    let existing: Option<String> = tx
+        .prepare_cached("SELECT oid FROM paths WHERE path_rel = ?1 AND source = ?2")?
+        .query_map(params![to_str, source_id(source)], |r| r.get(0))?
+        .next()
+        .transpose()?;
+    if let Some(ref prev_oid) = existing {
+        tx.prepare_cached("DELETE FROM paths WHERE path_rel = ?1 AND source = ?2")?
+            .execute(params![to_str, source_id(source)])?;
+        decrement_blob(tx, &BlobOid(prev_oid.clone()), blob_cache)?;
+    }
+    // Insert the new row.
     tx.prepare_cached(
-        "INSERT OR REPLACE INTO paths (path_rel, source, oid, parent_dir)
+        "INSERT INTO paths (path_rel, source, oid, parent_dir)
          VALUES (?1, ?2, ?3, ?4)",
     )?
     .execute(params![to_str, source_id(source), oid.0, parent])?;
