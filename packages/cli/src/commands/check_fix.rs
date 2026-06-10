@@ -154,11 +154,18 @@ impl RenameMap {
                     if let Some(further) = map.get(dest).cloned() {
                         for f in further {
                             let entry = map.entry(key.clone()).or_default();
-                            // Replace dest with f if dest is not the final destination.
                             if !entry.contains(&f) {
                                 entry.push(f);
                                 changed = true;
                             }
+                        }
+                        // Remove the intermediate dest — it chains further so
+                        // it is not a terminal destination.
+                        let entry = map.entry(key.clone()).or_default();
+                        let before = entry.len();
+                        entry.retain(|d| d != dest);
+                        if entry.len() != before {
+                            changed = true;
                         }
                     }
                 }
