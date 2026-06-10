@@ -125,7 +125,7 @@ fn show(slug: &str, patch: bool, repo_root: &Path) -> Result<i32> {
             "  {} {}  stored={}  {}",
             anchor.path,
             range_label,
-            &anchor.content_hash[..8.min(anchor.content_hash.len())],
+            &anchor.content_hash.chars().take(8).collect::<String>(),
             freshness
         );
 
