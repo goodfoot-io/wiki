@@ -363,4 +363,34 @@ mod tests {
     fn paths_equal_ignores_leading_dotslash() {
         assert!(paths_equal(Path::new("./foo/bar"), Path::new("foo/bar")));
     }
+
+    /// Reproduction for exact-vs-containment anchor filtering disagreement.
+    ///
+    /// `is_covered` uses containment (`a_start <= start && end <= a_end`) so a
+    /// narrow range inside a broader anchor is considered covered. But
+    /// `mesh_contains_anchor` checks only the **exact** `(path, start, end)`
+    /// triple. When `apply_section_extension` calls `mesh_contains_anchor` to
+    /// decide whether to filter a code anchor from an extension draft, a
+    /// contained range (e.g. L5-L10 inside existing L5-L20) passes through
+    /// unfiltered → `wiki check --fix` re-appends it → `check` still sees it
+    /// as covered → permanent oscillation once range coalescing re-merges.
+    ///
+    /// This test **fails** until `mesh_contains_anchor` (or its call site in
+    /// `apply_section_extension`) adopts containment semantics.
+    #[test]
+    fn mesh_contains_anchor_uses_containment_not_exact_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let mesh = make_mesh(vec![make_anchor("src/code.rs", 5, 20)]);
+        store::write(dir.path(), "test-mesh", &mesh).unwrap();
+
+        let idx = build_index_from_store(&dir);
+
+        // Under containment semantics, L5-L10 is inside L5-L20 so
+        // mesh_contains_anchor should return true. It currently returns false
+        // (exact-match only).
+        assert!(
+            idx.mesh_contains_anchor("test-mesh", Path::new("src/code.rs"), 5, 10),
+            "mesh_contains_anchor must use containment: (5,10) is inside existing anchor (5,20)"
+        );
+    }
 }
