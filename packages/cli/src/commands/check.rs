@@ -1252,6 +1252,42 @@ mod tests {
         );
     }
 
+    /// `--source=head` consults the working tree via `abs.is_dir()` when
+    /// `read_via_source` fails on a directory target, producing a false
+    /// `broken_link` diagnostic for directories that exist at HEAD but were
+    /// deleted from the worktree.
+    ///
+    /// MUST FAIL against the current unfixed code.  See hypothesis H1 in
+    /// the card: `abs.is_dir()` at line 611 always checks the filesystem,
+    /// ignoring the `--source` mode.
+    #[test]
+    fn source_head_does_not_emit_broken_link_for_committed_directory() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+        // A wiki page that links to a directory.
+        repo.create_file(
+            "wiki/source.md",
+            &make_wiki_page("Source", "See [docs](./docs/)."),
+        );
+        // A file inside the directory so git tracks it.
+        repo.create_file(
+            "wiki/docs/readme.md",
+            &make_wiki_page("Docs", "Documentation."),
+        );
+        repo.commit("add pages and docs directory");
+
+        // Delete the directory from the worktree.
+        fs::remove_dir_all(repo.path().join("wiki/docs")).expect("remove docs dir");
+
+        // Validate against HEAD — the directory exists at HEAD, so link is valid.
+        let diags = collect_with_source(&[], repo.path(), crate::index::DocSource::Head)
+            .expect("collect");
+        assert!(
+            diags.iter().all(|d| d.kind != "broken_link"),
+            "link to directory at HEAD must not emit broken_link: {diags:?}"
+        );
+    }
+
     // ── Fix pass integration tests (all #[ignore] until fix logic is implemented) ──
 
     /// Fix 1: when a link target was renamed in git, --fix rewrites the path.
@@ -2361,6 +2397,50 @@ mod tests {
             "expected NO mesh_uncovered with suffix-matching mesh present, \
              got {} mesh_uncovered: {diagnostics:?}",
             mesh_diags.len(),
+        );
+    }
+
+    /// Reproduction: when `--source=head` is used and a bare-path link target
+    /// exists at HEAD but not in the worktree, the repo-relative path hint
+    /// ("If you meant a repo-relative path") must still appear because the file
+    /// IS present in the source being validated.
+    ///
+    /// At line 625, `repo_relative_abs.exists()` consults the worktree
+    /// regardless of `--source`, so under `--source=head` a file deleted from
+    /// the worktree produces a generic "File not found" message instead of the
+    /// repo-relative hint.
+    ///
+    /// MUST FAIL against the current unfixed code: the assertion that the
+    /// hint message IS present will fail because the worktree check returns
+    /// false for the deleted file.
+    #[test]
+    fn source_head_bare_path_hint_uses_head_not_worktree() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+
+        // Wiki page with a bare-path link: `[utils](src/utils.rs)` resolves
+        // page-relative to `wiki/src/utils.rs`, which doesn't exist at HEAD.
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "See [utils](src/utils.rs)."),
+        );
+        // Repo-relative `src/utils.rs` exists at HEAD.
+        repo.create_file("src/utils.rs", "fn util() {}\n");
+        repo.commit("add page and src/utils.rs");
+
+        // Delete src/utils.rs from the worktree — it still exists at HEAD.
+        std::fs::remove_file(repo.path().join("src/utils.rs")).expect("remove file");
+
+        let diags =
+            collect_with_source(&[], repo.path(), crate::index::DocSource::Head).expect("collect");
+
+        let bl: Vec<_> = diags.iter().filter(|d| d.kind == "broken_link").collect();
+        assert_eq!(bl.len(), 1, "expected exactly one broken_link: {diags:?}");
+        assert!(
+            bl[0].message.contains("If you meant a repo-relative path"),
+            "expected hint about repo-relative path under --source=head (file exists at HEAD), \
+             got: {}",
+            bl[0].message
         );
     }
 }
