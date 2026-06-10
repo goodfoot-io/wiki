@@ -5,6 +5,7 @@ use crate::commands::resolve_link_path;
 use crate::parser::{LinkKind, parse_fragment_links};
 
 use super::check::CheckDiagnostic;
+use super::mesh::scaffold::locate_existing_suffix;
 use super::mesh::store;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -135,6 +136,17 @@ pub(super) fn collect_mesh_diagnostics(
             };
             let end = link.end_line.unwrap_or(start);
             let target = resolve_link_path(&link.path, wiki_path, repo_root);
+
+            // Apply locate_existing_suffix salvage to match the same path
+            // resolution that scaffold uses: when the resolved path doesn't
+            // exist on disk, peel back directory components to find an
+            // existing file whose suffix matches (e.g. the link path
+            // `deep/path/src/code.rs` resolves to `src/code.rs`).
+            let target = {
+                let target_str = target.to_string_lossy().replace('\\', "/");
+                locate_existing_suffix(&target_str, repo_root)
+                    .map_or(target, PathBuf::from)
+            };
 
             // Skip if target is a directory (consistent with the missing_file check)
             let abs_target = repo_root.join(&target);

@@ -11,6 +11,7 @@ use crate::index::DocSource;
 use crate::parser::{LinkKind, parse_fragment_links};
 
 use super::check_fix;
+use super::mesh::scaffold::locate_existing_suffix;
 use super::mesh_coverage;
 
 /// Read `path` from the chosen `DocSource`.
@@ -602,6 +603,19 @@ fn collect_for_files(
 
             let decoded_path = percent_decode(&link.path);
             let resolved = crate::commands::resolve_link_path(&decoded_path, path, repo_root);
+            // Apply suffix salvage for fragment links with a line range —
+            // scaffold only processes these (it skips links without line
+            // numbers), so the salvage is only needed where scaffold and the
+            // coverage checker must agree. Bare image paths resolve
+            // page-relative by design and salvage would subvert the
+            // page-relative vs repo-relative diagnostic.
+            let resolved = if link.start_line.is_some() {
+                let resolved_str = resolved.to_string_lossy().replace('\\', "/");
+                locate_existing_suffix(&resolved_str, repo_root)
+                    .map_or(resolved, PathBuf::from)
+            } else {
+                resolved
+            };
             let abs = repo_root.join(&resolved);
 
             // Try to read the target. Directories are valid link targets.

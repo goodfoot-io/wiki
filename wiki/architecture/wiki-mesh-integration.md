@@ -21,7 +21,7 @@ wiki check wiki/architecture/*.md
 wiki check "packages/auth/**/*.md"
 ```
 
-Extends the existing `wiki check` validation pass with a [mesh coverage check](/packages/cli/src/commands/mesh_coverage.rs#L55-L58). For each internal fragment link with a line range, it [runs `git mesh list`](/packages/cli/src/commands/mesh_coverage.rs#L147-L147) `<path>#L<s>-L<e> --porcelain` and verifies that at least one returned mesh also anchors the wiki file containing the link. Any uncovered link is reported as an error ([non-zero exit](/packages/cli/src/commands/mesh_coverage.rs#L106-L116)).
+Extends the existing `wiki check` validation pass with a [mesh coverage check](/packages/cli/src/commands/mesh_coverage.rs#L56-L59). For each internal fragment link with a line range, it [runs `git mesh list`](/packages/cli/src/commands/mesh_coverage.rs#L159-L159) `<path>#L<s>-L<e> --porcelain` and verifies that at least one returned mesh also anchors the wiki file containing the link. Any uncovered link is reported as an error ([non-zero exit](/packages/cli/src/commands/mesh_coverage.rs#L107-L117)).
 
 Mesh coverage is always on; `git mesh` must be installed or `wiki check` fails fast. Glob targeting follows the same rules as bare `wiki check`: a markdown file is treated as a wiki page only when its frontmatter has both a non-empty `title` and `summary`; omitting globs walks all `.md` files under `$WIKI_DIR` (defaulting to `wiki`) applying that filter.
 

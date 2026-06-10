@@ -1627,7 +1627,15 @@ fn count_lines(content: &str) -> u64 {
     n
 }
 
-fn locate_existing_suffix(rel_path: &str, repo_root: &Path) -> Option<String> {
+pub(crate) fn locate_existing_suffix(rel_path: &str, repo_root: &Path) -> Option<String> {
+    // If the path is an absolute path that resolves entirely outside the
+    // repo, do not attempt suffix matching — a coincidental in-repo suffix
+    // (e.g. `src/lib.rs`) would produce the wrong file.
+    let p = Path::new(rel_path);
+    if p.is_absolute() && !p.starts_with(repo_root) {
+        return None;
+    }
+
     if repo_root.join(rel_path).exists() {
         return Some(rel_path.to_string());
     }
