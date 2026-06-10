@@ -14,6 +14,37 @@ use super::check_fix;
 use super::mesh::scaffold::locate_existing_suffix;
 use super::mesh_coverage;
 
+/// Return `true` when `rel_path` exists as a directory in `source`.
+///
+/// For `WorkingTree` this delegates to `std::path::Path::is_dir`.  For
+/// `Index`/`Head` it checks whether any tracked path has the directory as a
+/// prefix, because git does not store directory entries as blobs.
+fn source_aware_is_dir(repo_root: &Path, source: DocSource, rel_path: &Path) -> bool {
+    match source {
+        DocSource::WorkingTree => repo_root.join(rel_path).is_dir(),
+        DocSource::Index | DocSource::Head => {
+            let prefix = format!("{}/", rel_path.to_string_lossy().trim_end_matches('/'));
+            let paths = match source.list_paths(repo_root) {
+                Ok(p) => p,
+                Err(_) => return false,
+            };
+            paths.iter().any(|p| p.starts_with(&prefix))
+        }
+    }
+}
+
+/// Return `true` when `rel_path` exists in `source`.
+///
+/// For `WorkingTree` this delegates to `std::path::Path::exists`.  For
+/// `Index`/`Head` it checks the git blob store via the index or HEAD tree.
+fn source_aware_exists(repo_root: &Path, source: DocSource, rel_path: &str) -> bool {
+    match source {
+        DocSource::WorkingTree => repo_root.join(rel_path).exists(),
+        DocSource::Index => crate::git::has_index_entry(repo_root, rel_path).unwrap_or(false),
+        DocSource::Head => crate::git::has_head_entry(repo_root, rel_path).unwrap_or(false),
+    }
+}
+
 /// Read `path` from the chosen `DocSource`.
 fn read_via_source(path: &Path, repo_root: &Path, source: DocSource) -> std::io::Result<String> {
     match source {
@@ -622,7 +653,7 @@ fn collect_for_files(
             let ref_content = match read_via_source(&abs, repo_root, source) {
                 Ok(c) => Some(c),
                 Err(_) => {
-                    if abs.is_dir() {
+                    if source_aware_is_dir(repo_root, source, &resolved) {
                         None
                     } else {
                         // Missing file diagnostic with bare-path hint.
@@ -635,8 +666,7 @@ fn collect_for_files(
                         let is_bare = !link.path.starts_with('/') && !is_explicit;
 
                         let message = if is_bare {
-                            let repo_relative_abs = repo_root.join(&link.path);
-                            if repo_relative_abs.exists() {
+                            if source_aware_exists(repo_root, source, &link.path) {
                                 format!(
                                     "File `{}` not found at page-relative path.\n\
                                      If you meant a repo-relative path, use `/{}` instead.",

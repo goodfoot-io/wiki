@@ -619,7 +619,6 @@ fn read_head_blob_inner(
 /// Return `true` if `path_rel` has an entry in the git index.
 ///
 /// Fails closed when `.git/index` is absent — see `open_persisted_index`.
-#[allow(dead_code)]
 pub fn has_index_entry(repo: &Path, path_rel: &str) -> Result<bool> {
     let repo = open_repo(repo)?;
     let index = open_persisted_index(&repo)?;
@@ -629,7 +628,6 @@ pub fn has_index_entry(repo: &Path, path_rel: &str) -> Result<bool> {
 }
 
 /// Return `true` if `path_rel` exists in the `HEAD` tree.
-#[allow(dead_code)]
 pub fn has_head_entry(repo: &Path, path_rel: &str) -> Result<bool> {
     Ok(read_head_blob(repo, path_rel)?.is_some())
 }
