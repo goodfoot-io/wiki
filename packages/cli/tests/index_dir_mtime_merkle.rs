@@ -76,3 +76,63 @@ fn warm_refresh_walks_only_changed_dir() {
     // And pass3_full_rescans must stay at 0 — we forced HostileFs::No.
     assert_eq!(stats.pass3_full_rescans, 0);
 }
+
+/// In-place content edit inside a directory whose mtime does not change
+/// (POSIX dir mtime only changes on entry add/remove/rename, not on
+/// content edits) must still be picked up by the next refresh.
+///
+/// Reproduces the bug where `warm_refresh_walks_only_changed_dir` passes
+/// but the edited page's content is stale because its parent directory
+/// was wrongly classified as clean.
+#[test]
+fn in_place_edit_in_clean_dir_is_still_indexed() {
+    let repo = FixtureRepo::new();
+
+    repo.write_wiki_md(
+        "docs/deep.md",
+        "Deep",
+        "Original summary.",
+        "Original body.",
+    );
+    repo.git_add(".");
+    repo.git_commit("initial");
+
+    // Cold prepare under HostileFs::No so dir_mtimes are recorded.
+    let _cold = WikiIndex::prepare_with_fs_class(
+        repo.root.as_path(),
+        DocSource::WorkingTree,
+        HostileFs::No,
+    )
+    .expect("cold prepare");
+
+    // Ensure a distinct file mtime (FS granularity safety).
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    // In-place content edit — does NOT change docs/ dir mtime on POSIX.
+    repo.write_wiki_md(
+        "docs/deep.md",
+        "Deep",
+        "Edited summary.",
+        "Edited body.",
+    );
+
+    // Stage a root-level sentinel so the fast triple misses on the next
+    // prepare. This dirties root's mtime but docs/ stays unchanged.
+    repo.write_file("sentinel.txt", "1");
+    repo.git_add("sentinel.txt");
+
+    let warm = WikiIndex::prepare_with_fs_class(
+        repo.root.as_path(),
+        DocSource::WorkingTree,
+        HostileFs::No,
+    )
+    .expect("warm prepare");
+
+    let resolved = warm
+        .resolve_page("Deep")
+        .expect("resolve_page")
+        .expect("page must exist");
+
+    assert_eq!(resolved.summary, "Edited summary.");
+    assert_eq!(resolved.content, "Edited body.\n");
+}
