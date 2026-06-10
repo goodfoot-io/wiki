@@ -239,6 +239,47 @@ mod tests {
         assert_eq!(headings[0].text, "Valid Heading");
     }
 
+    #[test]
+    fn test_extract_ignores_headings_inside_fenced_code_blocks() {
+        // Headings inside fenced code blocks (```) must not be extracted.
+        // Reproduces: headings inside fenced code blocks falsely resolve
+        // fragment links and shift slug numbering.
+        let content = "\
+## Real
+
+```bash
+# install deps
+npm install
+```
+
+## Also Real
+";
+        let headings = extract_headings(content);
+        assert_eq!(headings.len(), 2, "only real headings, not code-fence ones");
+        assert_eq!(headings[0].text, "Real");
+        assert_eq!(headings[0].slug, "real");
+        assert_eq!(headings[1].text, "Also Real");
+        assert_eq!(headings[1].slug, "also-real");
+    }
+
+    #[test]
+    fn test_extract_ignores_headings_inside_html_comments() {
+        // Headings inside HTML comments must not be extracted.
+        let content = "\
+## Real
+
+<!--
+# install deps
+-->
+
+## Also Real
+";
+        let headings = extract_headings(content);
+        assert_eq!(headings.len(), 2, "only real headings, not HTML-comment ones");
+        assert_eq!(headings[0].text, "Real");
+        assert_eq!(headings[1].text, "Also Real");
+    }
+
     // ── Duplicate suffix tests ────────────────────────────────────────────────
 
     #[test]
