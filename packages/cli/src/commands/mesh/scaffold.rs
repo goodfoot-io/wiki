@@ -1819,6 +1819,29 @@ mod tests {
     }
 
     #[test]
+    fn derive_rename_target_exhausted_slots_returns_occupied_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let md = tmp.path();
+        std::fs::create_dir_all(md.join("wiki/b")).unwrap();
+        // Fill all 99 numeric index slots: index, index-2 .. index-99.
+        std::fs::write(md.join("wiki/b/index"), "x").unwrap();
+        for n in 2..=99 {
+            std::fs::write(md.join(format!("wiki/b/index-{n}")), "x").unwrap();
+        }
+        let nouns = std::collections::HashMap::new();
+        let result = derive_rename_target(md, "wiki/b", &[], &nouns);
+        // Every slot is occupied, so `derive_rename_target` MUST NOT return a
+        // path that already exists. With the bug, it returns `wiki/b/index`
+        // (already present) because `index` was checked on line 1264, the
+        // 2..=99 loop exited without finding a free slot, and line 1273
+        // unconditionally returns `base` without re-checking.
+        assert!(
+            !md.join(&result).is_file(),
+            "returned path `{result}` already exists — all 99 index slots are occupied"
+        );
+    }
+
+    #[test]
     fn plan_blocker_rename_ok_for_ancestor_file() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
