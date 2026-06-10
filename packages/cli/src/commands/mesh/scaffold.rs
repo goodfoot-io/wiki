@@ -1336,10 +1336,17 @@ fn run_blocker_rename(repo_root: &Path, _mesh_dir: &Path, plan: &PlannedRename) 
     if store::delete(repo_root, &plan.from).is_err() {
         return false;
     }
-    // Write to the new location. If it fails, we cannot restore the old file
-    // here without risking data loss on a partial write; fail open so the
-    // caller drops the draft with an advisory.
+    // Write to the new location. If it fails, attempt to restore the original
+    // mesh at `plan.from`. `store::write` is atomic (temp file + persist), so
+    // the mesh content is intact in memory and can be safely re-written.
     if store::write(repo_root, &plan.to, &mesh).is_err() {
+        // Rollback: restore the original mesh at its old location.
+        if let Err(e) = store::write(repo_root, &plan.from, &mesh) {
+            eprintln!(
+                "failed to restore original mesh `{}` after write to `{}` failed: {e}",
+                plan.from, plan.to,
+            );
+        }
         return false;
     }
     true
