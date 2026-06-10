@@ -488,6 +488,38 @@ mod tests {
         assert!(matches!(err, FrontmatterError::ReservedTitle { .. }));
     }
 
+    /// Reproduction: RESERVED_TITLES must match the actual CLI subcommands.
+    ///
+    /// `mesh` is a real subcommand but is missing from the set;
+    /// `pin`, `stale`, `links`, `print` are dead entries that should be removed.
+    #[test]
+    fn test_reserved_titles_matches_cli_surface() {
+        let reserved: std::collections::BTreeSet<&str> =
+            RESERVED_TITLES.iter().copied().collect();
+
+        // mesh is a real subcommand — must be reserved
+        assert!(
+            reserved.contains("mesh"),
+            "mesh is a CLI subcommand but is missing from RESERVED_TITLES"
+        );
+
+        // Dead entries that no longer correspond to any subcommand
+        for dead in &["pin", "stale", "links", "print"] {
+            assert!(
+                !reserved.contains(dead),
+                "'{dead}' is not a CLI subcommand but is still in RESERVED_TITLES"
+            );
+        }
+
+        // Exact set must be the current subcommand names
+        let expected: std::collections::BTreeSet<&str> =
+            ["check", "list", "summary", "mesh"].into_iter().collect();
+        assert_eq!(
+            reserved, expected,
+            "RESERVED_TITLES drifted from the CLI command surface"
+        );
+    }
+
     // ── Index and collision tests ─────────────────────────────────────────────
 
     #[test]
