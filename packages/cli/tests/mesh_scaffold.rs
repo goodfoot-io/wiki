@@ -803,6 +803,80 @@ fn renames_blocker_and_keeps_others() {
     );
 }
 
+/// When a blocker rename is performed but every draft that triggered it is
+/// dropped by a later pass (missing-path, invalid-anchor), the renamed path
+/// must still appear in `--print-applied`.  The early return for an empty
+/// consolidated list at L455-L464 must build `applied` from `planned_renames`
+/// instead of returning `Vec::new()`.
+#[test]
+fn rename_applied_when_every_draft_dropped_after_rename() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("wiki/arch/scaff")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("wiki/arch/scaff/page.md"),
+        "---\ntitle: Scaff Page\nsummary: Colliding page.\n---\n\n\
+         ## Helper\n\nSee [missing](../../../src/missing.rs#L1-L2) here.\n",
+    )
+    .unwrap();
+
+    git(root, &["init", "-q", "-b", "main"]);
+
+    // Seed the pre-existing blocker mesh at .wiki/wiki/arch/scaff.
+    let blocker_mesh = MeshFile {
+        anchors: vec![AnchorRecord {
+            path: "src/lib.rs".to_string(),
+            start_line: 1,
+            end_line: 1,
+            algorithm: "sha256".to_string(),
+            content_hash: "deadbeef".to_string(),
+        }],
+        why: String::new(),
+    };
+    let blocker_before = blocker_mesh.serialize();
+    std::fs::create_dir_all(root.join(".wiki/wiki/arch")).unwrap();
+    std::fs::write(root.join(".wiki/wiki/arch/scaff"), &blocker_before).unwrap();
+
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "init"]);
+
+    // --no-exit-code keeps the run alive past the unresolvable broken-link
+    // and mesh_uncovered diagnostics so the mesh-coverage engine can run.
+    let output = check_fix_print_applied(&root.join("wiki"), true);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "must exit 0 despite the slug-path collision and missing fragment-link target; stderr=\n{stderr}"
+    );
+
+    // The performed-rename advisory is on stderr.
+    assert!(
+        stderr.contains(
+            "Renamed mesh `wiki/arch/scaff` -> `wiki/arch/scaff/index` to free path for `wiki/arch/scaff/scaff-page/helper`"
+        ),
+        "expected the blocker-rename advisory on stderr; stderr=\n{stderr}"
+    );
+
+    // The blocker's content is preserved byte-equivalent at its new path.
+    let renamed = root.join(".wiki/wiki/arch/scaff/index");
+    assert!(
+        renamed.is_file(),
+        ".wiki/wiki/arch/scaff/index must exist (renamed blocker)"
+    );
+    assert_eq!(std::fs::read_to_string(&renamed).unwrap(), blocker_before);
+
+    // The renamed-blocker NEW path MUST appear in the applied stage list even
+    // though the draft that triggered the rename was dropped — the rename was
+    // already performed on disk.
+    let applied: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert!(
+        applied.contains(&".wiki/wiki/arch/scaff/index"),
+        "renamed-blocker NEW path must be in the applied stage list even when draft is dropped; stdout=\n{stdout}"
+    );
+}
+
 /// `--fix-dry-run` reports the planned blocker rename and mutates nothing.
 #[test]
 fn fix_dry_run_reports_planned_rename_without_mutating() {
