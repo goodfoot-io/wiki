@@ -2,4 +2,6 @@ wiki/meta/wiki-feedback.md#L17-L19 rk64:e5fc3ed5dfc3a71e
 packages/cli/src/commands/check.rs#L247-L314 rk64:a0a6c8e6e5ce4f6b
 packages/cli/src/commands/mod.rs#L359-L371 rk64:e3f012904edf4930
 packages/cli/src/commands/mod.rs#L376-L381 rk64:77fb4a5e3d542cc4
+packages/cli/src/commands/mod.rs#L364-L376 rk64:cda0c370f9c1988d
+packages/cli/src/commands/mod.rs#L381-L386 rk64:adda13f8fe500b01
 

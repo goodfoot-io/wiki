@@ -1,3 +1,4 @@
 wiki/architecture/wiki-mesh-integration.md#L94-L96 rk64:259d43ef214cbdb6
 packages/cli/src/commands/mod.rs#L141-L183 rk64:4b27396c70f902ce
+packages/cli/src/commands/mod.rs#L149-L191 rk64:4b27396c70f902ce
 
