@@ -1,4 +1,4 @@
 packages/cli/src/index/lock.rs#L17-L29 rk64:d8eb3fcc6ee78810
-packages/cli/tests/index_concurrent.rs#L4-L31 rk64:6af914fadd0de2ec
+packages/cli/tests/index_concurrent.rs#L4-L32 rk64:78bdc4c0c6fc6f05
 
 index_concurrent.rs hardcodes the refresh-lock path (.wiki/wiki-refresh.lock) to hold it externally and prove a second process serves without blocking. This path must match the one lock.rs#try_acquire actually locks. If lock.rs changes the filename or directory, the test would create a stale file at the old path while the binary locks elsewhere — the non-blocking assertions still pass, so the drift is silent (false confidence), not caught.

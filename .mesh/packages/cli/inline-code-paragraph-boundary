@@ -1,0 +1,4 @@
+packages/cli/src/parser.rs#L146-L171 rk64:180c70643515c1d1
+packages/cli/src/parser.rs#L523-L565 rk64:1fe5559c79961110
+
+Inline-code backtick scrubber in scrub_non_content() must bound its closing-backtick search at the next blank line (paragraph boundary). Single-backtick code spans cannot cross paragraph boundaries per CommonMark. The three tests verify: cross-paragraph links survive an unpaired backtick, paired backticks still scrub within the same paragraph, and a truly unpaired backtick (no closing match anywhere) is literal text. Changing the search boundary logic without updating the tests would leave the behavior unverified.
