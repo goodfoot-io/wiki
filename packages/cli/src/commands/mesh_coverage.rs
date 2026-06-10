@@ -57,8 +57,15 @@ impl MeshIndex {
         names.iter().min().map(String::as_str)
     }
 
-    /// Whether `mesh` anchors the exact `(path, start, end)` triple, or the
-    /// whole-file `(path, 0, 0)` sentinel that covers any range.
+    /// Whether `mesh` contains an anchor on `path` whose range contains
+    /// `(start, end)`, i.e. containment semantics (`anchor.start <= start &&
+    /// end <= anchor.end`), or the whole-file `(path, 0, 0)` sentinel that
+    /// covers any range.
+    ///
+    /// Using containment (rather than exact-range matching) keeps
+    /// `apply_section_extension` from re-appending a code anchor that is
+    /// already covered by a broader existing anchor — which would otherwise
+    /// oscillate once post-pass coalescing re-merges the ranges.
     pub(crate) fn mesh_contains_anchor(
         &self,
         mesh: &str,
@@ -66,13 +73,14 @@ impl MeshIndex {
         start: u32,
         end: u32,
     ) -> bool {
-        let candidates: &[(PathBuf, u32, u32)] =
-            &[(path.to_path_buf(), start, end), (path.to_path_buf(), 0, 0)];
-        candidates
+        self.by_anchor
             .iter()
-            .filter_map(|k| self.by_anchor.get(k))
-            .flatten()
-            .any(|name| name == mesh)
+            .filter(|((ap, _, _), _)| paths_equal(ap, path))
+            .any(|((_, a_start, a_end), names)| {
+                let contains = (*a_start == 0 && *a_end == 0)
+                    || (*a_start <= start && end <= *a_end);
+                contains && names.iter().any(|n| n == mesh)
+            })
     }
 }
 
