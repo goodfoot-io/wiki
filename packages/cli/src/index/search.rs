@@ -119,6 +119,10 @@ pub fn search_weighted(
         }
     }
 
+    // Snapshot phase 1-2 OIDs before the FTS LIMIT-cap iteration so we
+    // can compute the true uncapped total below.
+    let pre_fts_seen: Vec<String> = seen.iter().cloned().collect();
+
     // (3) BM25-weighted FTS scan with the field weight tuple from CARD.md:
     // (title:5, aliases:4, tags:3, keywords:3, summary:2, body:1). FTS5
     // bm25() returns negative scores; smaller (more negative) = better, so
@@ -174,7 +178,48 @@ pub fn search_weighted(
         }
     }
 
-    let total = out.len();
+    // Compute the true uncapped total match count.
+    // The FTS query above uses a performance LIMIT cap, but callers
+    // (e.g. commands/search.rs) expect the real total.
+    let total = if !fts_query.is_empty() {
+        let true_fts_total: i64 = conn.query_row(
+            "SELECT COUNT(*)
+             FROM fts
+             JOIN blobs b ON b.rowid = fts.rowid
+             JOIN paths p ON p.oid = b.oid AND p.source = ?2
+             WHERE fts MATCH ?1",
+            params![fts_query, src],
+            |r| r.get(0),
+        )?;
+
+        if pre_fts_seen.is_empty() {
+            true_fts_total as usize
+        } else {
+            // Pre-FTS matches (exact title / path) may also match the FTS
+            // query.  Count OIDs seen before FTS that do NOT match the FTS
+            // expression and add them to the FTS total.
+            let mut extra: usize = 0;
+            for oid in &pre_fts_seen {
+                let in_fts: bool = conn
+                    .query_row(
+                        "SELECT 1
+                         FROM fts
+                         JOIN blobs b ON b.rowid = fts.rowid AND b.oid = ?1
+                         WHERE fts MATCH ?2
+                         LIMIT 1",
+                        params![oid, fts_query],
+                        |_| Ok(()),
+                    )
+                    .is_ok();
+                if !in_fts {
+                    extra += 1;
+                }
+            }
+            (true_fts_total as usize) + extra
+        }
+    } else {
+        out.len()
+    };
     let paged: Vec<SearchResult> = out.into_iter().skip(offset).take(limit).collect();
     Ok((paged, total))
 }
