@@ -50,16 +50,20 @@ pub fn pass_worktree(
     // their `seen_paths` entries (for clean dirs) and reconcile vanished
     // paths (for dirty dirs) without re-querying per file.
     let mut paths_by_parent: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    let mut prior_oids: HashMap<PathBuf, String> = HashMap::new();
     {
-        let mut stmt = tx.prepare("SELECT path_rel, parent_dir FROM paths WHERE source = ?1")?;
+        let mut stmt =
+            tx.prepare("SELECT path_rel, parent_dir, oid FROM paths WHERE source = ?1")?;
         let rows = stmt.query_map(params![source_id(Source::Worktree)], |row| {
             let p: String = row.get(0)?;
             let d: String = row.get(1)?;
-            Ok((PathBuf::from(p), PathBuf::from(d)))
+            let o: String = row.get(2)?;
+            Ok((PathBuf::from(p), PathBuf::from(d), o))
         })?;
         for r in rows {
-            let (path, parent) = r?;
-            paths_by_parent.entry(parent).or_default().push(path);
+            let (path, parent, oid) = r?;
+            paths_by_parent.entry(parent).or_default().push(path.clone());
+            prior_oids.insert(path, oid);
         }
     }
 
@@ -196,11 +200,8 @@ pub fn pass_worktree(
 
         let cur_mtime = mtime_ns(path);
         let rel_str = rel.to_string_lossy().to_string();
-        let prior: Option<String> = tx
-            .prepare_cached("SELECT oid FROM paths WHERE path_rel = ?1 AND source = ?2")?
-            .query_row(params![rel_str, source_id(Source::Worktree)], |r| r.get(0))
-            .ok();
-        if prior.as_deref() != Some(oid.0.as_str()) {
+        let prior = prior_oids.get(&rel).map(|s| s.as_str());
+        if prior != Some(oid.0.as_str()) {
             deltas.push(PassDelta {
                 path: rel,
                 source: Source::Worktree,

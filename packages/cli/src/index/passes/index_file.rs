@@ -1,7 +1,7 @@
 //! Pass 2 — `gix::index::File::at` entry iteration. Pread-mode reading
 //! (NOT mmap) avoids SIGBUS on a concurrent index rewrite.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -40,24 +40,37 @@ pub fn pass_index(
         return Ok(Vec::new());
     }
 
+    // Batch-load all Source::Index path→oid mappings before the entry loop.
+    // This replaces the per-file point query that was inside the loop with a
+    // single query whose result set also feeds the removal reconciliation below.
+    let mut prior_oids: HashMap<PathBuf, String> = HashMap::new();
+    {
+        let mut stmt = tx.prepare("SELECT path_rel, oid FROM paths WHERE source = ?1")?;
+        let rows = stmt.query_map(params![source_id(Source::Index)], |row| {
+            let p: String = row.get(0)?;
+            let o: String = row.get(1)?;
+            Ok((PathBuf::from(p), o))
+        })?;
+        for r in rows {
+            let (path, oid) = r?;
+            prior_oids.insert(path, oid);
+        }
+    }
+
     let mut on_disk: HashSet<PathBuf> = HashSet::new();
     let mut deltas = Vec::new();
 
     for entry in file.entries() {
         let p = entry.path(&file);
-        let path_str = p.to_string();
-        let path = PathBuf::from(&path_str);
+        let path = PathBuf::from(p.to_string());
         if !is_markdown(&path) {
             continue;
         }
         on_disk.insert(path.clone());
 
         let on_disk_oid = entry.id.to_hex().to_string();
-        let prior: Option<String> = tx
-            .prepare_cached("SELECT oid FROM paths WHERE path_rel = ?1 AND source = ?2")?
-            .query_row(params![path_str, source_id(Source::Index)], |r| r.get(0))
-            .ok();
-        if prior.as_deref() != Some(on_disk_oid.as_str()) {
+        let prior = prior_oids.get(&path).map(|s| s.as_str());
+        if prior != Some(on_disk_oid.as_str()) {
             deltas.push(PassDelta {
                 path,
                 source: Source::Index,
@@ -69,16 +82,11 @@ pub fn pass_index(
         }
     }
 
-    // Removals: paths that exist in the DB as Source::Index but not in the
-    // current index file.
-    let mut stmt = tx.prepare("SELECT path_rel FROM paths WHERE source = ?1")?;
-    let rows: Vec<String> = stmt
-        .query_map(params![source_id(Source::Index)], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for row in rows {
-        if !on_disk.contains(&PathBuf::from(&row)) {
+    // Removals: DB paths not present in the current index file.
+    for path in prior_oids.keys() {
+        if !on_disk.contains(path) {
             deltas.push(PassDelta {
-                path: PathBuf::from(row),
+                path: path.clone(),
                 source: Source::Index,
                 action: DeltaAction::Remove,
             });
