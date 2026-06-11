@@ -19,7 +19,7 @@ function qpLog() {
 }
 
 /** Item returned by `wiki list --format json`. */
-interface WikiListItem {
+export interface WikiListItem {
   title: string;
   aliases: string[];
   tags: string[];
@@ -35,9 +35,9 @@ interface WikiSearchItem {
   snippets: Array<{ line: number; text: string }>;
 }
 
-type WikiQuickPickItem = vscode.QuickPickItem & { file: string };
+export type WikiQuickPickItem = vscode.QuickPickItem & { file: string };
 
-function toListQuickPickItem(item: WikiListItem): WikiQuickPickItem {
+export function toListQuickPickItem(item: WikiListItem): WikiQuickPickItem {
   return {
     label: item.title,
     detail: item.summary,
@@ -56,7 +56,7 @@ function toSearchQuickPickItem(item: WikiSearchItem): WikiQuickPickItem {
   };
 }
 
-function workspaceRoot(): string | undefined {
+export function workspaceRoot(): string | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 
@@ -105,7 +105,7 @@ async function searchPages(binaryPath: string, query: string, signal: AbortSigna
   }
 }
 
-async function openWikiFile(file: string): Promise<void> {
+export async function openWikiFile(file: string): Promise<void> {
   const uri = vscode.Uri.file(file);
   await vscode.commands.executeCommand('vscode.openWith', uri, 'wiki.viewer');
 }
