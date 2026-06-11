@@ -41,44 +41,48 @@ export function activate(context: vscode.ExtensionContext): void {
   // ---------------------------------------------------------------------------
   context.subscriptions.push(
     vscode.workspace.onDidRenameFiles(async (event) => {
-      const aggregate = new vscode.WorkspaceEdit();
-      let hasEdits = false;
+      try {
+        const aggregate = new vscode.WorkspaceEdit();
+        let hasEdits = false;
 
-      /**
-       * Merge a partial WorkspaceEdit into the aggregate.
-       *
-       * @param partial - A WorkspaceEdit from a single buildFileMoveEdit call.
-       */
-      const mergeEdits = (partial: vscode.WorkspaceEdit): void => {
-        for (const [uri, edits] of partial.entries()) {
-          for (const e of edits) {
-            aggregate.replace(uri, e.range, e.newText);
-            hasEdits = true;
+        /**
+         * Merge a partial WorkspaceEdit into the aggregate.
+         *
+         * @param partial - A WorkspaceEdit from a single buildFileMoveEdit call.
+         */
+        const mergeEdits = (partial: vscode.WorkspaceEdit): void => {
+          for (const [uri, edits] of partial.entries()) {
+            for (const e of edits) {
+              aggregate.replace(uri, e.range, e.newText);
+              hasEdits = true;
+            }
+          }
+        };
+
+        for (const rename of event.files) {
+          if (rename.oldUri.fsPath.endsWith('.md')) {
+            // Single .md file rename — existing behavior.
+            mergeEdits(await languageFeatures.buildFileMoveEdit(rename.oldUri.fsPath, rename.newUri.fsPath));
+            continue;
+          }
+
+          // Check for a directory rename — enumerate .md files within it.
+          let newStat: vscode.FileStat;
+          try {
+            newStat = await vscode.workspace.fs.stat(rename.newUri);
+          } catch {
+            continue;
+          }
+          if ((newStat.type & vscode.FileType.Directory) !== 0) {
+            mergeEdits(await languageFeatures.buildDirectoryMoveEdit(rename.oldUri.fsPath, rename.newUri.fsPath));
           }
         }
-      };
 
-      for (const rename of event.files) {
-        if (rename.oldUri.fsPath.endsWith('.md')) {
-          // Single .md file rename — existing behavior.
-          mergeEdits(await languageFeatures.buildFileMoveEdit(rename.oldUri.fsPath, rename.newUri.fsPath));
-          continue;
+        if (hasEdits) {
+          await vscode.workspace.applyEdit(aggregate);
         }
-
-        // Check for a directory rename — enumerate .md files within it.
-        let newStat: vscode.FileStat;
-        try {
-          newStat = await vscode.workspace.fs.stat(rename.newUri);
-        } catch {
-          continue;
-        }
-        if ((newStat.type & vscode.FileType.Directory) !== 0) {
-          mergeEdits(await languageFeatures.buildDirectoryMoveEdit(rename.oldUri.fsPath, rename.newUri.fsPath));
-        }
-      }
-
-      if (hasEdits) {
-        await vscode.workspace.applyEdit(aggregate);
+      } catch (error) {
+        log.error('onDidRenameFiles handler: %s', formatLogError(error));
       }
     })
   );

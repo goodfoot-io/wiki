@@ -137,84 +137,88 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     });
 
     const messageDisposable = webviewPanel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
-      switch (message.type) {
-        case 'ready': {
-          // Render the page first, unconditionally — the binary is not needed
-          // for rendering, which is purely in-process.
-          const savedScrollY = this._context.workspaceState.get<number>(scrollKey);
-          await this._renderPage(webviewPanel.webview, document.uri, webviewPanel, savedScrollY);
+      try {
+        switch (message.type) {
+          case 'ready': {
+            // Render the page first, unconditionally — the binary is not needed
+            // for rendering, which is purely in-process.
+            const savedScrollY = this._context.workspaceState.get<number>(scrollKey);
+            await this._renderPage(webviewPanel.webview, document.uri, webviewPanel, savedScrollY);
 
-          // Then initialize the binary as a non-blocking follow-up. If the
-          // binary fails to install, post a non-replacing warning — never an
-          // error that replaces the rendered page.
-          this._binaryManager.ready().then(
-            () => {
-              // Binary ready — no additional action needed for rendering
-            },
-            (error) => {
-              this._postMessage(webviewPanel.webview, {
-                type: 'showWarning',
-                message: `Wiki CLI unavailable: ${this._binaryManager.formatFailure(error)}`
-              });
-            }
-          );
-          break;
-        }
-
-        case 'navigate': {
-          // The href is a plain markdown link target (e.g. "../foo.md",
-          // "wiki/index.md", "wiki/index.md#section"). Resolve it relative
-          // to the linking document's directory — standard markdown semantics.
-          await this._navigate(webviewPanel.webview, document.uri, message.href, message.split);
-          break;
-        }
-
-        case 'requestFileInfo': {
-          await this._sendFileInfo(webviewPanel.webview, document.uri, message.href);
-          break;
-        }
-
-        case 'openInEditor': {
-          const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
-          await vscode.commands.executeCommand('wiki.openInEditor', document.uri, { viewColumn, preview: false });
-          break;
-        }
-
-        case 'openFile': {
-          try {
-            const fileUri = vscode.Uri.parse(message.uri);
-            if (await this.isWikiFile(fileUri)) {
-              const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
-              await vscode.commands.executeCommand('wiki.openInEditor', fileUri, { viewColumn, preview: false });
-            } else {
-              const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
-              await vscode.window.showTextDocument(fileUri, { viewColumn, preview: false });
-            }
-          } catch (err) {
-            editorLog().error('Failed to open file URI %s: %s', message.uri, formatLogError(err));
+            // Then initialize the binary as a non-blocking follow-up. If the
+            // binary fails to install, post a non-replacing warning — never an
+            // error that replaces the rendered page.
+            this._binaryManager.ready().then(
+              () => {
+                // Binary ready — no additional action needed for rendering
+              },
+              (error) => {
+                this._postMessage(webviewPanel.webview, {
+                  type: 'showWarning',
+                  message: `Wiki CLI unavailable: ${this._binaryManager.formatFailure(error)}`
+                });
+              }
+            );
+            break;
           }
-          break;
-        }
 
-        case 'openExternal': {
-          void vscode.env.openExternal(vscode.Uri.parse(message.uri));
-          break;
-        }
+          case 'navigate': {
+            // The href is a plain markdown link target (e.g. "../foo.md",
+            // "wiki/index.md", "wiki/index.md#section"). Resolve it relative
+            // to the linking document's directory — standard markdown semantics.
+            await this._navigate(webviewPanel.webview, document.uri, message.href, message.split);
+            break;
+          }
 
-        case 'openSearch': {
-          await vscode.commands.executeCommand('wiki.search');
-          break;
-        }
+          case 'requestFileInfo': {
+            await this._sendFileInfo(webviewPanel.webview, document.uri, message.href);
+            break;
+          }
 
-        case 'scrollPosition': {
-          void this._context.workspaceState.update(scrollKey, message.y);
-          break;
-        }
+          case 'openInEditor': {
+            const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
+            await vscode.commands.executeCommand('wiki.openInEditor', document.uri, { viewColumn, preview: false });
+            break;
+          }
 
-        default: {
-          const _exhaustive: never = message;
-          editorLog().warn('Unhandled webview message: %j', _exhaustive);
+          case 'openFile': {
+            try {
+              const fileUri = vscode.Uri.parse(message.uri);
+              if (await this.isWikiFile(fileUri)) {
+                const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
+                await vscode.commands.executeCommand('wiki.openInEditor', fileUri, { viewColumn, preview: false });
+              } else {
+                const viewColumn = message.split ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
+                await vscode.window.showTextDocument(fileUri, { viewColumn, preview: false });
+              }
+            } catch (err) {
+              editorLog().error('Failed to open file URI %s: %s', message.uri, formatLogError(err));
+            }
+            break;
+          }
+
+          case 'openExternal': {
+            void vscode.env.openExternal(vscode.Uri.parse(message.uri));
+            break;
+          }
+
+          case 'openSearch': {
+            await vscode.commands.executeCommand('wiki.search');
+            break;
+          }
+
+          case 'scrollPosition': {
+            void this._context.workspaceState.update(scrollKey, message.y);
+            break;
+          }
+
+          default: {
+            const _exhaustive: never = message;
+            editorLog().warn('Unhandled webview message: %j', _exhaustive);
+          }
         }
+      } catch (error) {
+        editorLog().error('onDidReceiveMessage handler: %s', formatLogError(error));
       }
     });
 
