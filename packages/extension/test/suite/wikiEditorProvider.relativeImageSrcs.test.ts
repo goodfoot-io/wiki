@@ -216,18 +216,36 @@ describe('WikiEditorProvider — relative image srcs', () => {
           `HTML excerpt: ${html.slice(0, 500)}`
       );
 
-      // Every img src must be a webview resource URI (not a bare relative path)
-      const nonWebviewSrcs = imgSrcs.filter((src) => !src.startsWith('vscode-webview-resource://'));
+      // Every img src must have been rewritten by asWebviewUri — it must not
+      // still be the bare relative path from the markdown source. VS Code
+      // rewrites webview-bound URIs to either vscode-webview-resource://
+      // (older) or https://file%2B.vscode-resource.vscode-cdn.net/...
+      // (current). Both are valid; the key invariant is that the raw relative
+      // path "./diagram.png" no longer appears as the src attribute.
+      const rawSrcs = imgSrcs.filter((src) => src === './diagram.png');
       assert.strictEqual(
-        nonWebviewSrcs.length,
+        rawSrcs.length,
         0,
-        `BUG REPRODUCED: ${nonWebviewSrcs.length} image src(s) were NOT rewritten to ` +
-          `vscode-webview-resource:// URIs.\n\n` +
-          `Unrewritten srcs: ${JSON.stringify(nonWebviewSrcs)}\n\n` +
+        `BUG REPRODUCED: ${rawSrcs.length} image src(s) still contain the raw ` +
+          `relative path (not rewritten by asWebviewUri).\n\n` +
+          `Unrewritten srcs: ${JSON.stringify(rawSrcs)}\n\n` +
+          `All img srcs: ${JSON.stringify(imgSrcs)}\n\n` +
           `Expected every <img src> to be a webview resource URI, but no ` +
           `asWebviewUri rewrite exists in the _renderPage pipeline. ` +
           `The HTML from MarkdownRenderer.render() is posted to the webview ` +
           `verbatim at WikiEditorProvider.ts:339-342.\n\n` +
+          `HTML excerpt: ${html.slice(0, 300)}`
+      );
+      // Additionally, at least one img src must contain "vscode-resource" —
+      // the substring common to both vscode-webview-resource:// (older VS
+      // Code) and https://file%2B.vscode-resource.vscode-cdn.net/...
+      // (current VS Code) — proving the rewrite actually ran.
+      const rewrittenSrcs = imgSrcs.filter((src) => src.includes('vscode-resource'));
+      assert.ok(
+        rewrittenSrcs.length > 0,
+        `Expected at least one img src to be rewritten by asWebviewUri (containing ` +
+          `"vscode-resource"), but no src does.\n` +
+          `All img srcs: ${JSON.stringify(imgSrcs)}\n\n` +
           `HTML excerpt: ${html.slice(0, 300)}`
       );
     } finally {

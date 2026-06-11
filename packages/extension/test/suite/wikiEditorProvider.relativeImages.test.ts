@@ -196,7 +196,7 @@ describe('WikiEditorProvider — relative images cannot load', () => {
         // (i.e., it was rewritten via asWebviewUri). Against unfixed code,
         // the src will be a raw relative path like "./diagram.png" — no
         // vscode-webview-resource:// prefix anywhere in the HTML.
-        const hasRewrittenSrc = /vscode-webview-resource:\/\//.test(html);
+        const hasRewrittenSrc = html.includes('vscode-resource');
         assert.strictEqual(
           hasRewrittenSrc,
           true,

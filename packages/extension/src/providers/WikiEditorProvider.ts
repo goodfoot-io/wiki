@@ -113,11 +113,13 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
 
     webviewPanel.iconPath = new vscode.ThemeIcon('library');
 
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     webviewPanel.webview.options = {
       enableScripts: true,
       localResourceRoots: [
         vscode.Uri.joinPath(this._extensionUri, 'dist'),
-        vscode.Uri.joinPath(this._extensionUri, 'media')
+        vscode.Uri.joinPath(this._extensionUri, 'media'),
+        ...(workspaceFolder != null ? [workspaceFolder.uri] : [])
       ]
     };
 
@@ -336,7 +338,25 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     }
 
     await Promise.resolve(); // yield: render runs off the read, not synchronously after it
-    const html = render(text);
+    let html = render(text);
+
+    // Rewrite relative image srcs to vscode-webview-resource:// URIs so the
+    // webview can load workspace images. Only rewrite srcs that are not
+    // already absolute URLs, data URIs, or webview resource URIs.
+    html = html.replace(/(<img\b[^>]*?src\s*=\s*")([^"]+)("[^>]*>)/gi, (_match, prefix, src, suffix) => {
+      if (
+        src.startsWith('http://') ||
+        src.startsWith('https://') ||
+        src.startsWith('data:') ||
+        src.startsWith('vscode-webview-resource://') ||
+        src.startsWith('file:///')
+      ) {
+        return _match;
+      }
+      const resolvedUri = vscode.Uri.joinPath(uri, '..', src);
+      const webviewUri = webview.asWebviewUri(resolvedUri);
+      return `${prefix}${webviewUri}${suffix}`;
+    });
 
     const updateMessage: HostMessage = { type: 'updateContent', html, scrollY };
     this._postMessage(webview, updateMessage);
