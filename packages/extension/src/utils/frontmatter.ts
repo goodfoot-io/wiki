@@ -169,6 +169,35 @@ function collectBlockScalar(lines: string[], startIdx: number, style: '|' | '>')
   return collected.join('\n');
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Find the byte offset of the start of a `---` close fence within `text`,
+ * starting the search at `startPos`.  Handles both LF (`\n`) and CRLF (`\r\n`)
+ * line endings by computing byte offsets directly from the original string.
+ *
+ * Mirrors the Rust CLI's `find_close_fence` (frontmatter.rs:280-303): only an
+ * *exact* `---` line (with optional trailing `\r`) is accepted — `----`,
+ * `---extra`, and `--- ` are correctly rejected.
+ *
+ * @param text - The raw file content to search within.
+ * @param startPos - The byte offset at which to start the search.
+ * @returns Offset of the `---` close fence, or -1 when no exact match is found.
+ */
+function findCloseFence(text: string, startPos: number): number {
+  let offset = startPos;
+  while (offset < text.length) {
+    const newlineIdx = text.indexOf('\n', offset);
+    if (newlineIdx < 0) return -1;
+    // The line content excludes the \n and any \r right before it.
+    const lineEnd = newlineIdx > offset && text[newlineIdx - 1] === '\r' ? newlineIdx - 1 : newlineIdx;
+    const lineContent = text.slice(offset, lineEnd);
+    if (lineContent === '---') return offset;
+    offset = newlineIdx + 1;
+  }
+  return -1;
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
@@ -180,14 +209,30 @@ function collectBlockScalar(lines: string[], startIdx: number, style: '|' | '>')
  * - Plain scalars: inline comments (` #…`) are stripped
  * - Block/folded scalars (`|`/`>`): continuation lines are collected and joined
  *
+ * Accepts both LF (`---\n`) and CRLF (`---\r\n`) opening fences, and locates
+ * the closing fence via exact `---` line matching (rejecting `----`, `---text`,
+ * `--- `).
+ *
  * @param text - Raw file contents.
  * @returns Parsed frontmatter info (empty when no frontmatter is present).
  */
 export function parseFrontmatter(text: string): FrontmatterInfo {
-  if (!text.startsWith('---\n')) return {};
-  const end = text.indexOf('\n---', 4);
+  // Opening fence: must start with --- followed by \n or \r\n.
+  if (!text.startsWith('---')) return {};
+  const afterDash = text[3];
+  if (afterDash === '\r') {
+    // CRLF: ---\r\n
+    if (text[4] !== '\n') return {};
+  } else if (afterDash !== '\n') {
+    return {};
+  }
+
+  const startOffset = afterDash === '\r' ? 5 : 4;
+  const end = findCloseFence(text, startOffset);
   if (end < 0) return {};
-  const block = text.slice(4, end);
+
+  // Normalise CRLF to LF so the rest of the parser is line-ending agnostic.
+  const block = text.slice(startOffset, end).replace(/\r\n/g, '\n');
   const lines = block.split('\n');
   const info: FrontmatterInfo = {};
 
@@ -264,10 +309,28 @@ export function hasWikiFrontmatter(info: FrontmatterInfo | null): boolean {
 export function extractFirstHeading(text: string): string | undefined {
   // Search only the non-frontmatter portion to avoid treating `title:` as a heading.
   let body = text;
-  if (text.startsWith('---\n')) {
-    const end = text.indexOf('\n---', 4);
-    if (end >= 0) {
-      body = text.slice(end + 4);
+  if (text.startsWith('---')) {
+    const afterDash = text[3];
+    let startOffset: number;
+    if (afterDash === '\r' && text[4] === '\n') {
+      startOffset = 5;
+    } else if (afterDash === '\n') {
+      startOffset = 4;
+    } else {
+      startOffset = -1;
+    }
+    if (startOffset > 0) {
+      const end = findCloseFence(text, startOffset);
+      if (end >= 0) {
+        const afterClose = end + 3;
+        if (text[afterClose] === '\r') {
+          body = text.slice(afterClose + 2);
+        } else if (text[afterClose] === '\n') {
+          body = text.slice(afterClose + 1);
+        } else {
+          body = text.slice(afterClose);
+        }
+      }
     }
   }
 

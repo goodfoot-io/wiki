@@ -23,6 +23,9 @@ import { extractFirstHeading, hasWikiFrontmatter, parseFrontmatter } from '../..
 /**
  * Build a CRLF-delimited frontmatter block. Converts LF in `body` to CRLF
  * and wraps with CRLF fence markers.
+ *
+ * @param body - The frontmatter body content with LF line endings.
+ * @returns The complete frontmatter block with CRLF line endings.
  */
 function fmCRLF(body: string): string {
   return `---\r\n${body.replace(/\n/g, '\r\n')}\r\n---\r\n`;

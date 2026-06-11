@@ -13,6 +13,7 @@
 import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { readFrontmatter } from '../utils/frontmatter.js';
 import { runWikiCommand } from '../utils/wikiBinary.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
 
@@ -29,53 +30,11 @@ interface CheckOutput {
   errors: CheckDiag[];
 }
 
-/** Frontmatter fields used for wiki-aware affordances. */
-interface FrontmatterInfo {
-  title?: string;
-  summary?: string;
-}
-
 /**
  * Match a standard markdown link `[label](href)` on a single line. The
  * regex skips images (`![...](...)`).
  */
 const MARKDOWN_LINK_RE = /(?<!!)\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
-
-/**
- * Parse `---\nkey: value\n---` YAML frontmatter to extract title/summary.
- * Only string scalars are supported; quoted forms are unwrapped.
- *
- * @param text - Raw file contents.
- * @returns Parsed frontmatter info (empty when no frontmatter is present).
- */
-function parseFrontmatter(text: string): FrontmatterInfo {
-  if (!text.startsWith('---\n')) return {};
-  const end = text.indexOf('\n---', 4);
-  if (end < 0) return {};
-  const block = text.slice(4, end);
-  const info: FrontmatterInfo = {};
-  for (const line of block.split('\n')) {
-    const m = line.match(/^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$/);
-    if (m == null) continue;
-    const key = m[1]!;
-    let value = m[2]!.trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1);
-    }
-    if (key === 'title') info.title = value;
-    if (key === 'summary') info.summary = value;
-  }
-  return info;
-}
-
-async function readFrontmatter(absPath: string): Promise<FrontmatterInfo | null> {
-  try {
-    const text = await readFile(absPath, 'utf8');
-    return parseFrontmatter(text);
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Resolve a markdown link href to an absolute filesystem path, relative to
