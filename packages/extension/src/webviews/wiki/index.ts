@@ -13,7 +13,16 @@ import { getScrollY, patch, scrollTo } from './content.js';
 import { renderDiagrams } from './diagrams.js';
 import { onHostMessage, post } from './messaging.js';
 import { mount as mountToolbar } from './toolbar.js';
-import { hideTooltip, initTooltip, showFileTooltip } from './tooltip.js';
+import {
+  clearHoverState,
+  getHoverTimer,
+  getPendingHover,
+  hideTooltip,
+  initTooltip,
+  setHoverTimer,
+  setPendingHover,
+  showFileTooltip
+} from './tooltip.js';
 import type { HostMessage } from './types.js';
 import '@vscode-elements/elements/dist/vscode-progress-ring/index.js';
 
@@ -46,26 +55,22 @@ function isInternalLink(href: string): boolean {
 // Delegated link hover — shows file-path tooltip after 250 ms
 // ---------------------------------------------------------------------------
 
-let hoverTimer: ReturnType<typeof setTimeout> | null = null;
-
-/**
- * The anchor + href the user is currently hovering and for which a
- * `requestFileInfo` is in flight. The host's `fileInfo` reply is matched
- * against this; stale replies (href no longer pending) are ignored.
- */
-let pendingHover: { anchor: HTMLElement; href: string } | null = null;
+/* hoverTimer and pendingHover live in tooltip.ts; access via getter/setters. */
 
 document.addEventListener('mouseover', (e: MouseEvent) => {
   const anchor = (e.target as Element).closest('a');
   if (anchor == null) return;
   const href = anchor.getAttribute('href');
   if (href == null) return;
-  if (hoverTimer != null) clearTimeout(hoverTimer);
+  const timer = getHoverTimer();
+  if (timer != null) clearTimeout(timer);
   if (isInternalLink(href)) {
-    hoverTimer = setTimeout(() => {
-      pendingHover = { anchor: anchor as HTMLElement, href };
-      post({ type: 'requestFileInfo', href });
-    }, 250);
+    setHoverTimer(
+      setTimeout(() => {
+        setPendingHover({ anchor: anchor as HTMLElement, href });
+        post({ type: 'requestFileInfo', href });
+      }, 250)
+    );
   }
 });
 
@@ -75,12 +80,7 @@ document.addEventListener('mouseout', (e: MouseEvent) => {
   if (anchor.contains(e.relatedTarget as Node | null)) return;
   const href = anchor.getAttribute('href');
   if (href == null || !isInternalLink(href)) return;
-  if (hoverTimer != null) {
-    clearTimeout(hoverTimer);
-    hoverTimer = null;
-  }
-  pendingHover = null;
-  hideTooltip();
+  clearHoverState();
 });
 
 // ---------------------------------------------------------------------------
@@ -116,6 +116,7 @@ document.addEventListener('click', (e: MouseEvent) => {
 let scrollSaveTimeout: ReturnType<typeof setTimeout> | null = null;
 window.addEventListener('scroll', () => {
   if (scrollSaveTimeout != null) clearTimeout(scrollSaveTimeout);
+  hideTooltip();
   scrollSaveTimeout = setTimeout(() => {
     post({ type: 'scrollPosition', y: getScrollY() });
   }, 200);
@@ -136,7 +137,7 @@ onHostMessage((message: HostMessage) => {
       if (errorEl != null) {
         errorEl.style.display = 'none';
       }
-      hideTooltip();
+      clearHoverState();
       patch(message.html);
       void renderDiagrams();
       if (message.scrollY != null) {
@@ -161,8 +162,9 @@ onHostMessage((message: HostMessage) => {
     case 'fileInfo': {
       // Ignore stale replies: only show when this href is still the pending
       // hover target (the user may have moved off the link meanwhile).
-      if (pendingHover != null && pendingHover.href === message.href) {
-        showFileTooltip(pendingHover.anchor, {
+      const pending = getPendingHover();
+      if (pending != null && pending.href === message.href) {
+        showFileTooltip(pending.anchor, {
           relPath: message.relPath,
           title: message.title,
           summary: message.summary

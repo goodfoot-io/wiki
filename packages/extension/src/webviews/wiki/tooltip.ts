@@ -159,6 +159,62 @@ export function hideTooltip(): void {
   tooltipEl?.classList.remove('wiki-tooltip--visible');
 }
 
+// ---------------------------------------------------------------------------
+// Hover state management — shared with the entry-point module
+// ---------------------------------------------------------------------------
+
+/** Timer handle for the delayed-hover trigger. */
+let hoverTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Anchor + href the user is hovering while a fileInfo request is in flight. */
+let pendingHover: { anchor: HTMLElement; href: string } | null = null;
+
+/**
+ * Return the current hover-timer handle.
+ * @returns The timer handle, or null when no timer is running.
+ */
+export function getHoverTimer(): ReturnType<typeof setTimeout> | null {
+  return hoverTimer;
+}
+
+/**
+ * Replace the hover-timer handle.
+ * @param val - The new timer handle, or null to clear.
+ */
+export function setHoverTimer(val: ReturnType<typeof setTimeout> | null): void {
+  hoverTimer = val;
+}
+
+/**
+ * Return the current pending-hover anchor and href.
+ * @returns The pending anchor/href pair, or null when no hover is pending.
+ */
+export function getPendingHover(): { anchor: HTMLElement; href: string } | null {
+  return pendingHover;
+}
+
+/**
+ * Replace the pending-hover anchor and href.
+ * @param val - The new pending anchor/href pair, or null to clear.
+ */
+export function setPendingHover(val: { anchor: HTMLElement; href: string } | null): void {
+  pendingHover = val;
+}
+
+/**
+ * Cancel any pending hover timer, clear pending hover state, and hide the
+ * tooltip. Called from `updateContent` and `mouseout` in the entry point so
+ * that stale hover state does not reference a morphdom-detached anchor.
+ */
+export function clearHoverState(): void {
+  if (hoverTimer != null) {
+    clearTimeout(hoverTimer);
+    hoverTimer = null;
+  }
+  pendingHover = null;
+  hideTooltip();
+}
+
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
