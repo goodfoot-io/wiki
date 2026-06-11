@@ -338,7 +338,7 @@ fn best_effort_creates_others_logs_one_failure() {
     }
     // The failure is logged on stderr.
     assert!(
-        stderr.contains("could not create mesh"),
+        stderr.contains("Skipped mesh"),
         "expected a logged mesh-creation failure on stderr; stderr=\n{stderr}"
     );
 

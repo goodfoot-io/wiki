@@ -1993,13 +1993,15 @@ mod tests {
 
         // Create a mesh that anchors both the code block and the wiki page.
         let code_extent = AnchorExtent::LineRange { start: 1, end: 3 };
+        let mut content_cache = store::FileContentCache::new();
         let code_hash =
-            store::hash_anchor(repo.path(), "src/lib.rs", code_extent).unwrap();
+            store::hash_anchor(repo.path(), "src/lib.rs", code_extent, &mut content_cache).unwrap();
         let code_anchor =
             store::anchor_record("src/lib.rs".to_string(), code_extent, code_hash);
         let wiki_extent = AnchorExtent::LineRange { start: 1, end: 3 };
+        let mut content_cache = store::FileContentCache::new();
         let wiki_hash =
-            store::hash_anchor(repo.path(), "wiki/page.md", wiki_extent).unwrap();
+            store::hash_anchor(repo.path(), "wiki/page.md", wiki_extent, &mut content_cache).unwrap();
         let wiki_anchor =
             store::anchor_record("wiki/page.md".to_string(), wiki_extent, wiki_hash);
         let mesh = MeshFile {
@@ -2015,13 +2017,9 @@ mod tests {
         // Leave uncommitted — dirty working tree ensures `plan_mesh_follows`
         // detects the drift (the `tree_unchanged` sqlite-gate is absent).
 
-        // Build the MeshIndex from the committed `.wiki/` files.
-        let mesh_index = build_mesh_index(repo.path(), &[])
-            .expect("build_mesh_index")
-            .expect("always Some");
-
         let wiki_abs = repo.path().join("wiki/page.md");
         let lib_abs = repo.path().join("src/lib.rs");
+        let mut content_cache = ContentCache::new();
         let plan = run_fix_pass(
             &[wiki_abs, lib_abs],
             repo.path(),
@@ -2029,7 +2027,7 @@ mod tests {
             &[],
             crate::index::DocSource::WorkingTree,
             /* dry_run */ true,
-            Some(&mesh_index),
+            &mut content_cache,
         )
         .expect("fix pass");
 
