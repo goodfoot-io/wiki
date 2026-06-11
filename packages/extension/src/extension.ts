@@ -125,10 +125,15 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.registerCommand(
       'wiki.openInEditor',
-      (uri: vscode.Uri, options?: vscode.TextDocumentShowOptions | vscode.ViewColumn) => {
+      (uri?: vscode.Uri, options?: vscode.TextDocumentShowOptions | vscode.ViewColumn) => {
+        const resolvedUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+        if (!resolvedUri) {
+          void vscode.window.showInformationMessage('Open a wiki file first to use this command.');
+          return;
+        }
         const showOptions: vscode.TextDocumentShowOptions =
           typeof options === 'number' ? { viewColumn: options, preview: false } : (options ?? { preview: false });
-        return vscode.window.showTextDocument(uri, showOptions);
+        return vscode.window.showTextDocument(resolvedUri, showOptions);
       }
     )
   );
