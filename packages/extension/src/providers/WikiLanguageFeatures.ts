@@ -410,6 +410,39 @@ export class WikiLanguageFeatures {
     return edit;
   }
 
+  /**
+   * Build a WorkspaceEdit that rewrites incoming links to every `.md` file
+   * inside a renamed directory.
+   *
+   * Enumerates `.md` files under `newDirPath` and calls
+   * {@link buildFileMoveEdit} for each, substituting the old directory prefix
+   * for the new one. When a directory is renamed in the VS Code explorer the
+   * `onDidRenameFiles` event delivers a single event for the directory URI;
+   * this method bridges that event to the per-file rewriter.
+   *
+   * @param oldDirPath - Absolute path of the directory before the rename.
+   * @param newDirPath - Absolute path of the directory after the rename.
+   * @returns A WorkspaceEdit that rewrites every link targeting a file inside the renamed directory.
+   */
+  async buildDirectoryMoveEdit(oldDirPath: string, newDirPath: string): Promise<vscode.WorkspaceEdit> {
+    const edit = new vscode.WorkspaceEdit();
+    const mdFiles = await vscode.workspace.findFiles(
+      new vscode.RelativePattern(vscode.Uri.file(newDirPath), '**/*.md'),
+      '**/node_modules/**'
+    );
+    for (const fileUri of mdFiles) {
+      const relPath = path.relative(newDirPath, fileUri.fsPath);
+      const oldPath = path.join(oldDirPath, relPath);
+      const partial = await this.buildFileMoveEdit(oldPath, fileUri.fsPath);
+      for (const [uri, edits] of partial.entries()) {
+        for (const e of edits) {
+          edit.replace(uri, e.range, e.newText);
+        }
+      }
+    }
+    return edit;
+  }
+
   private _registerRenameProvider(): vscode.Disposable {
     return vscode.languages.registerRenameProvider([{ language: 'markdown' }], {
       prepareRename: (document: vscode.TextDocument, position: vscode.Position): vscode.Range | undefined => {
