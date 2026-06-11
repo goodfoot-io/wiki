@@ -17,7 +17,7 @@ See [Wiki Mesh Integration](../architecture/wiki-mesh-integration.md) for the de
 
 **Where:** [`mesh_coverage.rs`](/packages/cli/src/commands/mesh_coverage.rs#L180-L182)
 
-**Invoked by:** [`wiki check`](/packages/cli/src/commands/check.rs#L247-L314)
+**Invoked by:** [`wiki check`](/packages/cli/src/commands/check.rs#L286-L353)
 
 **Purpose:** Query all mesh subsystems that include a given file anchor. Used to determine whether a fragment link (`path#Lstart-Lend`) in a wiki article has a covering mesh that also anchors the wiki file itself.
 
@@ -35,7 +35,7 @@ Sentinel `no meshes` (no tabs) when no meshes cover the anchor.
 
 The line range token (`start-end`) is parsed for format validation only; range filtering is applied server-side by `git-mesh`. The range values themselves are not used by the wiki application.
 
-**Coverage rule** ([`is_covered`](/packages/cli/src/commands/mesh_coverage.rs#L126-L134)): A fragment link is covered iff at least one mesh `M` exists such that `M` anchors the code file region **and** `M` also has the wiki file as an anchor.
+**Coverage rule** ([`is_covered`](/packages/cli/src/commands/mesh_coverage.rs#L22-L46)): A fragment link is covered iff at least one mesh `M` exists such that `M` anchors the code file region **and** `M` also has the wiki file as an anchor.
 
 ---
 

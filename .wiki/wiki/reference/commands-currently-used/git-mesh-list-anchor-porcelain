@@ -3,5 +3,5 @@ packages/cli/src/commands/mesh_coverage.rs#L132-L140 rk64:d9870d7175856293
 packages/cli/src/commands/mesh_coverage.rs#L142-L150 rk64:690431840911cb94
 packages/cli/src/commands/mesh_coverage.rs#L183-L185 rk64:829547959020cd0a
 packages/cli/src/commands/mesh_coverage.rs#L235-L276 rk64:82e3e3f4b7ed15d5
-packages/cli/src/commands/check.rs#L247-L314 rk64:fafef24a70882b48
+packages/cli/src/commands/check.rs#L286-L353 rk64:fafef24a70882b48
 

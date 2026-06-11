@@ -11,4 +11,6 @@ packages/cli/src/commands/mesh_coverage.rs#L187-L189 rk64:104e65360ea52133
 packages/cli/src/commands/mesh_coverage.rs#L235-L276 rk64:0dc90204e43f7eef
 packages/cli/src/commands/mesh_coverage.rs#L180-L182 rk64:104e65360ea52133
 packages/cli/src/commands/mesh_coverage.rs#L228-L269 rk64:0dc90204e43f7eef
+packages/cli/src/commands/mesh_coverage.rs#L22-L46 rk64:1b90c93046be44d4
+packages/cli/src/commands/check.rs#L286-L353 rk64:fafef24a70882b48
 

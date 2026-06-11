@@ -1,3 +1,4 @@
 wiki/architecture/wiki-mesh-integration.md#L28-L36 rk64:232cb5fb17594996
 packages/cli/src/commands/mesh/scaffold.rs#L165-L172 rk64:2c354101113538f3
+packages/cli/src/commands/mesh/scaffold.rs#L153-L160 rk64:83f3a961e7a24892
 

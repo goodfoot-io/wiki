@@ -1,4 +1,5 @@
 wiki/reference/git-mesh-usage.md#L52-L60 rk64:19b83dd7960db3fb
 packages/cli/src/commands/mesh/render.rs#L147-L147 rk64:01c905f6d1461b11
 packages/cli/src/commands/mesh/scaffold.rs#L159-L200 rk64:2a33d82e5f340125
+packages/cli/src/commands/mesh/scaffold.rs#L160-L201 rk64:11b5f6217b3840b3
 
