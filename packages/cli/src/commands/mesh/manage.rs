@@ -97,6 +97,7 @@ fn show(slug: &str, patch: bool, repo_root: &Path) -> Result<i32> {
     println!("why:  {}", mesh.why);
     println!();
 
+    let mut cache = store::FileContentCache::new();
     for anchor in &mesh.anchors {
         let extent = if anchor.start_line == 0 && anchor.end_line == 0 {
             AnchorExtent::WholeFile
@@ -114,7 +115,7 @@ fn show(slug: &str, patch: bool, repo_root: &Path) -> Result<i32> {
         };
 
         // Recompute the current hash to detect freshness.
-        let current_hash = store::hash_anchor(repo_root, &anchor.path, extent);
+        let current_hash = store::hash_anchor(repo_root, &anchor.path, extent, &mut cache);
         let freshness = match &current_hash {
             Ok(h) if h == &anchor.content_hash => "fresh",
             Ok(_) => "STALE",

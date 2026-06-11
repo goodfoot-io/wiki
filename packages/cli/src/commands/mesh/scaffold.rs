@@ -392,6 +392,11 @@ pub(crate) fn create_mesh_coverage(
         draft.structured_anchors.len() > code_start
     });
 
+    // Per-run file-content cache shared between validation (bounds checking)
+    // and hashing (apply_drafts). A file referenced by K anchors across drafts
+    // is read once — not up to 2K times.
+    let mut content_cache = store::FileContentCache::new();
+
     consolidated.retain(|draft| {
         let code_start = code_anchor_start(draft);
         // Check every code anchor (skip the page section anchor on new drafts).
@@ -419,7 +424,9 @@ pub(crate) fn create_mesh_coverage(
             // link (a fixable wiki condition), NOT a hard build failure: drop
             // it with a named advisory so the link resurfaces as a residual
             // `mesh_uncovered` on the post-fix recheck rather than aborting.
-            if let Some(detail) = invalid_anchor_detail(repo_root, anchor, source, &source_paths) {
+            if let Some(detail) =
+                invalid_anchor_detail(repo_root, anchor, source, &source_paths, &mut content_cache)
+            {
                 dropped_meshes.push(DroppedMesh {
                     slug: draft.slug.clone(),
                     reason: DropReason::InvalidAnchor {
@@ -511,7 +518,7 @@ pub(crate) fn create_mesh_coverage(
         .iter()
         .map(|r| rel_mesh_path(&r.to))
         .collect();
-    let (draft_applied, failures) = apply_drafts(&consolidated, repo_root, &mesh_dir);
+    let (draft_applied, failures) = apply_drafts(&consolidated, repo_root, &mesh_dir, &mut content_cache);
     applied.extend(draft_applied);
 
     Ok(MeshCoverageOutcome {
@@ -763,6 +770,9 @@ pub(crate) fn cleanup_orphaned_meshes(
 /// the new code anchors are merged into the existing mesh (or a fresh one if
 /// the slug doesn't exist yet).
 ///
+/// `cache` avoids re-reading the same target file when multiple anchors across
+/// drafts reference it — each file is read once for hashing, not once per anchor.
+///
 /// Best-effort: every draft is attempted. A write error is recorded as a
 /// per-draft [`MeshFailure`] and the loop continues. Returns the repo-relative
 /// `.wiki/<slug>` paths that were created and the failures.
@@ -770,6 +780,7 @@ fn apply_drafts(
     drafts: &[MeshDraft],
     repo_root: &Path,
     mesh_dir: &Path,
+    cache: &mut store::FileContentCache,
 ) -> (Vec<String>, Vec<MeshFailure>) {
     let mut applied: Vec<String> = Vec::new();
     let mut failures: Vec<MeshFailure> = Vec::new();
@@ -795,7 +806,7 @@ fn apply_drafts(
                         end: a.end_line,
                     }
                 };
-                let content_hash = store::hash_anchor(repo_root, &a.path, extent)
+                let content_hash = store::hash_anchor(repo_root, &a.path, extent, cache)
                     .map_err(|e| miette::miette!("failed to hash anchor {}: {e}", a.path))?;
                 Ok(store::anchor_record(a.path.clone(), extent, content_hash))
             })
@@ -1611,6 +1622,10 @@ fn path_relative_to(path: &Path, repo_root: &Path) -> String {
 /// Statically validate a structured anchor's line range against the target
 /// file before writing it to the store.
 ///
+/// `cache` avoids re-reading the same target file when multiple anchors across
+/// drafts reference it — each file is read once for bounds validation, not
+/// once per anchor.
+///
 /// Returns `Some(detail)` describing why the anchor is invalid, or `None`
 /// when the anchor is acceptable. `None` here means "let it through" — a
 /// genuine store write failure on an otherwise-valid anchor still fails
@@ -1620,6 +1635,7 @@ fn invalid_anchor_detail(
     anchor: &draft::StructuredAnchor,
     source: DocSource,
     source_paths: &Option<std::collections::HashSet<String>>,
+    cache: &mut store::FileContentCache,
 ) -> Option<String> {
     let (start, end) = (anchor.start_line, anchor.end_line);
     // start < 1 (anchors use 1-based inclusive line numbers).
@@ -1631,15 +1647,19 @@ fn invalid_anchor_detail(
         return Some(format!("start line {start} exceeds end line {end}"));
     }
     // Over-range: end beyond the file's line count.
-    let content = if source_paths.is_none() {
-        // WorkingTree — read from disk.
-        fs::read_to_string(repo_root.join(&anchor.path)).ok()?
+    let abs = repo_root.join(&anchor.path);
+    let owned_content;
+    let content: &str = if source_paths.is_none() {
+        // WorkingTree — read from disk via the per-run cache.
+        let cached = cache.get_or_read(&abs).ok()?;
+        cached.utf8.as_str()
     } else {
-        // Index / Head — read the snapshot so the count matches discovery.
-        let abs = repo_root.join(&anchor.path);
-        read_via_source(&abs, repo_root, source).ok()?
+        // Index / Head — read the git object snapshot so the line count matches
+        // discovery. (Not cached: these are git object reads, not filesystem reads.)
+        owned_content = read_via_source(&abs, repo_root, source).ok()?;
+        &owned_content
     };
-    let line_count = count_lines(&content);
+    let line_count = count_lines(content);
     if u64::from(end) > line_count {
         return Some(format!("end exceeds file line count {line_count}"));
     }
@@ -2360,7 +2380,13 @@ mod tests {
             start_line: 1,
             end_line: 999,
         };
-        let detail = invalid_anchor_detail(repo_root, &anchor, DocSource::WorkingTree, &None);
+        let detail = invalid_anchor_detail(
+            repo_root,
+            &anchor,
+            DocSource::WorkingTree,
+            &None,
+            &mut store::FileContentCache::new(),
+        );
         assert_eq!(
             detail,
             Some("end exceeds file line count 2".to_string()),
@@ -2380,7 +2406,13 @@ mod tests {
             end_line: 3,
         };
         assert_eq!(
-            invalid_anchor_detail(repo_root, &anchor, DocSource::WorkingTree, &None),
+            invalid_anchor_detail(
+                repo_root,
+                &anchor,
+                DocSource::WorkingTree,
+                &None,
+                &mut store::FileContentCache::new(),
+            ),
             None,
             "valid anchor must pass through (preserve fail-closed downstream)"
         );
@@ -2398,7 +2430,13 @@ mod tests {
             end_line: 1,
         };
         assert_eq!(
-            invalid_anchor_detail(repo_root, &anchor, DocSource::WorkingTree, &None),
+            invalid_anchor_detail(
+                repo_root,
+                &anchor,
+                DocSource::WorkingTree,
+                &None,
+                &mut store::FileContentCache::new(),
+            ),
             Some("start line 2 exceeds end line 1".to_string())
         );
     }

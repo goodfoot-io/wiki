@@ -1989,7 +1989,9 @@ mod tests {
 
         // Hash the exact extent as wiki would store it.
         let extent = AnchorExtent::LineRange { start: 1, end: 3 };
-        let hash = store::hash_anchor(repo.path(), "src/lib.rs", extent).unwrap();
+        let hash =
+            store::hash_anchor(repo.path(), "src/lib.rs", extent, &mut store::FileContentCache::new())
+                .unwrap();
 
         // Write the mesh file.
         let anchor = store::anchor_record("src/lib.rs".to_string(), extent, hash.clone());

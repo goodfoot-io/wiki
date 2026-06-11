@@ -1602,10 +1602,11 @@ mod tests {
     /// anchor's stored hash computed from the current worktree content via
     /// `store::hash_anchor`.
     fn seed_mesh(repo: &TestRepo, slug: &str, anchors: &[(&str, AnchorExtent)]) {
+        let mut cache = store::FileContentCache::new();
         let records: Vec<AnchorRecord> = anchors
             .iter()
             .map(|(path, extent)| {
-                let hash = store::hash_anchor(repo.path(), path, *extent)
+                let hash = store::hash_anchor(repo.path(), path, *extent, &mut cache)
                     .unwrap_or_else(|e| panic!("hash_anchor {path}: {e}"));
                 store::anchor_record(path.to_string(), *extent, hash)
             })
@@ -1816,6 +1817,7 @@ mod tests {
             repo.path(),
             "src/code.rs",
             AnchorExtent::LineRange { start: 2, end: 2 },
+            &mut store::FileContentCache::new(),
         )
         .expect("hash");
         assert_eq!(
@@ -1895,6 +1897,7 @@ mod tests {
             repo.path(),
             "src/other.rs",
             AnchorExtent::LineRange { start: 2, end: 2 },
+            &mut store::FileContentCache::new(),
         )
         .expect("hash");
         assert_eq!(movable[0].content_hash, expected);

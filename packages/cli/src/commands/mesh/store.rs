@@ -13,6 +13,7 @@
 //! wired the read path, and Group 3 wires the write path. All public items are
 //! now used in production code.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -21,6 +22,49 @@ use walkdir::WalkDir;
 
 use git_mesh_core::mesh_file::{AnchorRecord, MeshFile};
 use git_mesh_core::{AnchorExtent, RK64_ALGORITHM, cheap_fingerprint_with_extent, rk64_to_hex};
+
+/// Per-run file-content cache that avoids re-reading the same file when
+/// multiple anchors reference the same target. Keyed by absolute path.
+///
+/// A file referenced by K anchors is read once — not up to 2K times — during
+/// mesh validation (bounds checking) and hashing.
+pub(crate) struct FileContentCache {
+    entries: HashMap<PathBuf, CachedFile>,
+}
+
+pub(crate) struct CachedFile {
+    /// UTF-8 string content (for line counting / bounds validation).
+    pub(crate) utf8: String,
+    /// Raw bytes (for rk64 hashing via [`cheap_fingerprint_with_extent`]).
+    pub(crate) bytes: Vec<u8>,
+}
+
+impl FileContentCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    /// Get cached content, reading from disk on first access.
+    pub(crate) fn get_or_read(&mut self, abs_path: &Path) -> Result<&CachedFile> {
+        Ok(match self.entries.entry(abs_path.to_path_buf()) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let bytes = fs::read(abs_path).map_err(|err| {
+                    miette::miette!("failed to read {}: {err}", abs_path.display())
+                })?;
+                let utf8 = String::from_utf8(bytes.clone()).map_err(|err| {
+                    miette::miette!(
+                        "{} is not valid UTF-8: {err}",
+                        abs_path.display()
+                    )
+                })?;
+                e.insert(CachedFile { utf8, bytes })
+            }
+        })
+    }
+}
 
 /// The fixed mesh storage directory: `repo_root/.wiki`.
 pub(crate) fn wiki_dir(repo_root: &Path) -> PathBuf {
@@ -149,16 +193,26 @@ pub(crate) fn delete(repo_root: &Path, slug: &str) -> Result<()> {
 
 /// Read the worktree file at `repo_root/path` and hash the named extent.
 ///
+/// Uses `cache` to avoid re-reading a file already read earlier in the same
+/// run — `get_or_read` hits disk only on the first access for each path.
+///
 /// Returns the bare lowercase-hex rk64 fingerprint produced by
 /// [`git_mesh_core::cheap_fingerprint_with_extent`] + [`git_mesh_core::rk64_to_hex`]
 /// (16 hex digits, no `rk64:` prefix). rk64 is a non-cryptographic identity —
 /// sound here because wiki anchors track documentation links, where a rare
 /// wrong/missed match is self-correcting, not a data-integrity event.
-pub(crate) fn hash_anchor(repo_root: &Path, path: &str, extent: AnchorExtent) -> Result<String> {
+pub(crate) fn hash_anchor(
+    repo_root: &Path,
+    path: &str,
+    extent: AnchorExtent,
+    cache: &mut FileContentCache,
+) -> Result<String> {
     let abs = repo_root.join(path);
-    let bytes =
-        fs::read(&abs).map_err(|e| miette::miette!("failed to read {}: {e}", abs.display()))?;
-    Ok(rk64_to_hex(cheap_fingerprint_with_extent(&bytes, &extent)))
+    let cached = cache.get_or_read(&abs)?;
+    Ok(rk64_to_hex(cheap_fingerprint_with_extent(
+        &cached.bytes,
+        &extent,
+    )))
 }
 
 /// Build an [`AnchorRecord`] from a path, extent, and bare-hex content hash.
@@ -301,20 +355,22 @@ pub(crate) fn upsert_anchors(
     };
 
     // Phase 1: validate + hash every anchor. Any failure aborts before writing.
+    // A per-run cache avoids re-reading the same file for bounds + hashing when
+    // multiple anchors reference the same target.
+    let mut cache = FileContentCache::new();
     let mut records: Vec<(AnchorRecord, String)> = Vec::with_capacity(anchors.len());
     for (path, extent, label) in anchors {
         if let AnchorExtent::LineRange { start, end } = *extent {
             let abs = repo_root.join(path);
-            let content = fs::read_to_string(&abs)
-                .map_err(|e| miette::miette!("failed to read {}: {e}", abs.display()))?;
-            let line_count = content.lines().count() as u32;
+            let cached = cache.get_or_read(&abs)?;
+            let line_count = cached.utf8.lines().count() as u32;
             if end > line_count {
                 return Err(miette::miette!(
                     "anchor `{path}#L{start}-L{end}` is out of bounds: file has {line_count} line(s)"
                 ));
             }
         }
-        let content_hash = hash_anchor(repo_root, path, *extent)?;
+        let content_hash = hash_anchor(repo_root, path, *extent, &mut cache)?;
         let record = anchor_record(path.clone(), *extent, content_hash);
         records.push((record, label.clone()));
     }
@@ -436,7 +492,7 @@ pub(crate) fn relocate_anchor(
             end: new_end,
         }
     };
-    let new_hash = hash_anchor(repo_root, new_path, new_extent)?;
+    let new_hash = hash_anchor(repo_root, new_path, new_extent, &mut FileContentCache::new())?;
 
     anchor.path = new_path.to_string();
     anchor.start_line = new_start;
@@ -557,7 +613,13 @@ mod tests {
         let content = b"alpha\nbravo\ncharlie\n";
         fs::write(root.join("file.txt"), content).unwrap();
 
-        let got = hash_anchor(root, "file.txt", AnchorExtent::WholeFile).unwrap();
+        let got = hash_anchor(
+            root,
+            "file.txt",
+            AnchorExtent::WholeFile,
+            &mut FileContentCache::new(),
+        )
+        .unwrap();
         let expected = rk64_to_hex(cheap_fingerprint_with_extent(
             content,
             &AnchorExtent::WholeFile,
@@ -672,6 +734,7 @@ mod tests {
             root,
             "code.rs",
             AnchorExtent::LineRange { start: 1, end: 1 },
+            &mut FileContentCache::new(),
         )
         .unwrap();
         write(
@@ -702,6 +765,7 @@ mod tests {
             root,
             "code.rs",
             AnchorExtent::LineRange { start: 2, end: 2 },
+            &mut FileContentCache::new(),
         )
         .unwrap();
         assert_eq!(a.content_hash, expected, "hash must match the NEW range");
@@ -735,7 +799,13 @@ mod tests {
         let a = &mesh.anchors[0];
         assert_eq!(a.path, "b.rs");
         assert_eq!((a.start_line, a.end_line), (0, 0));
-        let expected = hash_anchor(root, "b.rs", AnchorExtent::WholeFile).unwrap();
+        let expected = hash_anchor(
+            root,
+            "b.rs",
+            AnchorExtent::WholeFile,
+            &mut FileContentCache::new(),
+        )
+        .unwrap();
         assert_eq!(a.content_hash, expected);
     }
 
@@ -831,8 +901,13 @@ mod tests {
 
         let mesh = read_one(root, "sl").unwrap().unwrap();
         assert_eq!(mesh.anchors.len(), 1, "must refresh in place, not append");
-        let expected_hash =
-            hash_anchor(root, "a.rs", AnchorExtent::LineRange { start: 1, end: 2 }).unwrap();
+        let expected_hash = hash_anchor(
+            root,
+            "a.rs",
+            AnchorExtent::LineRange { start: 1, end: 2 },
+            &mut FileContentCache::new(),
+        )
+        .unwrap();
         assert_eq!(mesh.anchors[0].content_hash, expected_hash);
     }
 
