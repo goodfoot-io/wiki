@@ -154,6 +154,7 @@ pub(crate) fn create_mesh_coverage(
     repo_root: &Path,
     source: crate::index::DocSource,
     dry_run: bool,
+    mesh_index: Option<&crate::commands::mesh_coverage::MeshIndex>,
 ) -> Result<MeshCoverageOutcome> {
     // Re-apply the `/tests/fixtures/` exclusion so the produced mesh set is
     // byte-identical to the former `scaffold` command.
@@ -167,11 +168,20 @@ pub(crate) fn create_mesh_coverage(
         .collect();
 
     // Coverage index: filter out fragment links already covered by a mesh in
-    // the repo.
-    let mesh_index = match crate::commands::mesh_coverage::build_mesh_index(repo_root, &files) {
-        Ok(Some(idx)) => idx,
-        Ok(None) => return Ok(MeshCoverageOutcome::default()),
-        Err(e) => return Err(e),
+    // the repo. When the caller supplies a pre-built index (e.g. from
+    // `run_fix_pass` which already built one for link rewriting), reuse it
+    // to avoid re-walking and re-parsing the entire `.wiki/` store.
+    let owned_index;
+    let mesh_index: &crate::commands::mesh_coverage::MeshIndex = match mesh_index {
+        Some(idx) => idx,
+        None => {
+            owned_index = match crate::commands::mesh_coverage::build_mesh_index(repo_root, &files) {
+                Ok(Some(idx)) => idx,
+                Ok(None) => return Ok(MeshCoverageOutcome::default()),
+                Err(e) => return Err(e),
+            };
+            &owned_index
+        }
     };
 
     let mut all_inputs: Vec<LinkInput> = Vec::new();
@@ -244,7 +254,7 @@ pub(crate) fn create_mesh_coverage(
     // an extension of M instead of a brand-new mesh. Drafts whose new code
     // anchors are *all* already in M are dropped; drafts with remaining new
     // anchors switch to `extends_existing = Some(M)`.
-    apply_section_extension(&mut consolidated, &mesh_index);
+    apply_section_extension(&mut consolidated, mesh_index);
 
     // Resolve slug collisions across both already-assigned slugs in this run
     // and any meshes that already live in the repo. Extension drafts opt out:

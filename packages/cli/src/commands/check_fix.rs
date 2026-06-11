@@ -12,6 +12,7 @@ use git_mesh_core::{
 };
 
 use crate::commands::mesh::store;
+use crate::commands::mesh_coverage::MeshIndex;
 use crate::commands::mesh_coverage::build_mesh_index;
 use crate::frontmatter::parse_frontmatter;
 use crate::headings::{extract_headings, github_slug, resolve_heading, Heading};
@@ -983,6 +984,7 @@ pub fn run_fix_pass(
     globs: &[String],
     source: DocSource,
     dry_run: bool,
+    mesh_index: Option<&crate::commands::mesh_coverage::MeshIndex>,
 ) -> Result<FixPlan> {
     let mut rename_map = RenameMap::build(repo_root)?;
 
@@ -1344,8 +1346,14 @@ pub fn run_fix_pass(
         });
     }
 
-    // Build the MeshIndex using all in-scope files.
-    let mesh_index_opt = build_mesh_index(repo_root, files)?;
+    // Build (or reuse) the MeshIndex for link rewriting and coverage creation.
+    // When the caller supplies a pre-built index (e.g. from `check::run` which
+    // already built one for initial diagnostics), reuse it to avoid a second
+    // full `.wiki/` store walk and parse.
+    let mesh_index_opt: Option<MeshIndex> = match mesh_index {
+        Some(idx) => Some(idx.clone()),
+        None => build_mesh_index(repo_root, files)?,
+    };
 
     // For each wiki file, rewrite broken line-range links that are now covered
     // by the updated mesh.
@@ -1712,7 +1720,10 @@ pub fn run_fix_pass(
     // and a failed/dropped one resurfaces as a residual `mesh_uncovered`).
     // Best-effort: a single mesh that cannot be created is recorded as a
     // failure, never aborting the pass. In `dry_run` it previews only.
-    let mut mesh = super::mesh::scaffold::create_mesh_coverage(files, repo_root, source, dry_run)?;
+    // Reuse the MeshIndex already built above for link rewriting — avoids a
+    // second full `.wiki/` store walk and parse inside `create_mesh_coverage`.
+    let mesh_index = mesh_index_opt.as_ref().expect("always Some");
+    let mut mesh = super::mesh::scaffold::create_mesh_coverage(files, repo_root, source, dry_run, Some(mesh_index))?;
 
     // Cleanup stage: delete scaffold meshes whose sole wiki page was removed.
     // Runs AFTER creation so the two halves never interfere.
@@ -1824,6 +1835,7 @@ mod tests {
             &[],
             crate::index::DocSource::WorkingTree,
             /* dry_run */ true,
+            None,
         )
         .expect("fix pass");
 
@@ -1890,6 +1902,7 @@ mod tests {
             &[],
             crate::index::DocSource::WorkingTree,
             /* dry_run */ true,
+            None,
         )
         .expect("fix pass");
 

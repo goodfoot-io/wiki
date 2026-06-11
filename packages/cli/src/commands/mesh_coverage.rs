@@ -11,6 +11,7 @@ use super::mesh::store;
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /// All mesh data read in-process from `.wiki/<slug>` files.
+#[derive(Clone)]
 pub(crate) struct MeshIndex {
     /// Code anchor `(path, start, end)` → names of every mesh containing it.
     by_anchor: HashMap<(PathBuf, u32, u32), Vec<String>>,
@@ -94,6 +95,7 @@ impl MeshIndex {
 pub(super) fn collect_mesh_diagnostics(
     files: &[PathBuf],
     repo_root: &Path,
+    mesh_index: Option<&MeshIndex>,
 ) -> Result<Vec<CheckDiagnostic>, miette::Error> {
     let mut out: Vec<CheckDiagnostic> = Vec::new();
 
@@ -101,16 +103,24 @@ pub(super) fn collect_mesh_diagnostics(
         return Ok(out);
     }
 
-    let rel_paths: Vec<PathBuf> = files
-        .iter()
-        .map(|p| {
-            p.strip_prefix(repo_root)
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|_| p.clone())
-        })
-        .collect();
-
-    let index = build_mesh_index(repo_root, &rel_paths)?.expect("always Some");
+    // When the caller supplies a pre-built index, reuse it to avoid a full
+    // `.wiki/` store re-walk and re-parse. Otherwise build one fresh.
+    let owned_index;
+    let index: &MeshIndex = match mesh_index {
+        Some(idx) => idx,
+        None => {
+            let rel_paths: Vec<PathBuf> = files
+                .iter()
+                .map(|p| {
+                    p.strip_prefix(repo_root)
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|_| p.clone())
+                })
+                .collect();
+            owned_index = build_mesh_index(repo_root, &rel_paths)?.expect("always Some");
+            &owned_index
+        }
+    };
 
     // Candidate `mesh_uncovered` diagnostics, deferred until after the
     // gitignore filter is applied below.

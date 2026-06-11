@@ -15,7 +15,7 @@ See [Wiki Mesh Integration](../architecture/wiki-mesh-integration.md) for the de
 
 ### `git-mesh list <anchor> --porcelain`
 
-**Where:** [`mesh_coverage.rs`](/packages/cli/src/commands/mesh_coverage.rs#L177-L179)
+**Where:** [`mesh_coverage.rs`](/packages/cli/src/commands/mesh_coverage.rs#L187-L189)
 
 **Invoked by:** [`wiki check`](/packages/cli/src/commands/check.rs#L247-L314)
 
@@ -29,13 +29,13 @@ See [Wiki Mesh Integration](../architecture/wiki-mesh-integration.md) for the de
 ```
 Sentinel `no meshes` (no tabs) when no meshes cover the anchor.
 
-**Subset extracted and used** ([`parse_mesh_ls_output`](/packages/cli/src/commands/mesh_coverage.rs#L225-L266)):
+**Subset extracted and used** ([`parse_mesh_ls_output`](/packages/cli/src/commands/mesh_coverage.rs#L235-L276)):
 - `mesh` — mesh name (everything left of the rightmost two tab-delimited fields)
 - `path` — repo-relative file path of each anchor in the mesh
 
 The line range token (`start-end`) is parsed for format validation only; range filtering is applied server-side by `git-mesh`. The range values themselves are not used by the wiki application.
 
-**Coverage rule** ([`is_covered`](/packages/cli/src/commands/mesh_coverage.rs#L126-L134)): A fragment link is covered iff at least one mesh `M` exists such that `M` anchors the code file region **and** `M` also has the wiki file as an anchor.
+**Coverage rule** ([`is_covered`](/packages/cli/src/commands/mesh_coverage.rs#L136-L144)): A fragment link is covered iff at least one mesh `M` exists such that `M` anchors the code file region **and** `M` also has the wiki file as an anchor.
 
 ---
 

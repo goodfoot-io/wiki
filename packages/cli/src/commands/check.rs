@@ -324,7 +324,28 @@ pub fn run(
         return Ok(2);
     }
 
-    let diagnostics = match collect_for_files(&files, &index_files, repo_root, source, git_reader.as_ref()) {
+    // In fix mode, build the MeshIndex once before the initial diagnostics
+    // and thread it through `collect_for_files` → `collect_mesh_diagnostics`
+    // and into `run_fix_pass` for link rewriting and coverage creation, so the
+    // `.wiki/` store is walked and parsed once rather than once per phase.
+    let fix_mesh_index: Option<mesh_coverage::MeshIndex> = if fix {
+        match mesh_coverage::build_mesh_index(repo_root, &index_files) {
+            Ok(Some(idx)) => Some(idx),
+            Ok(None) => None,
+            Err(e) => {
+                if json {
+                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
+                } else {
+                    eprintln!("error: {e}");
+                }
+                return Ok(2);
+            }
+        }
+    } else {
+        None
+    };
+
+    let diagnostics = match collect_for_files(&files, &index_files, repo_root, source, git_reader.as_ref(), fix_mesh_index.as_ref()) {
         Ok(d) => d,
         Err(e) => {
             if json {
@@ -339,7 +360,7 @@ pub fn run(
     // ── Fix pass ──────────────────────────────────────────────────────────────
     if fix {
         let plan =
-            match check_fix::run_fix_pass(&files, repo_root, scan_root, globs, source, fix_dry_run)
+            match check_fix::run_fix_pass(&files, repo_root, scan_root, globs, source, fix_dry_run, fix_mesh_index.as_ref())
             {
                 Ok(p) => p,
                 Err(e) => {
@@ -464,7 +485,7 @@ pub fn run(
 
         // Non-dry-run: re-collect and emit post-fix diagnostics. A mesh that
         // failed/dropped resurfaces here as a residual `mesh_uncovered`.
-        let post_diagnostics = match collect_for_files(&files, &index_files, repo_root, source, git_reader.as_ref()) {
+        let post_diagnostics = match collect_for_files(&files, &index_files, repo_root, source, git_reader.as_ref(), None) {
             Ok(d) => d,
             Err(e) => {
                 if json {
@@ -557,7 +578,7 @@ pub fn collect_with_source(
         let raw = discover_files(&[], repo_root, repo_root, source, git_reader.as_ref())?;
         filter_files_for_source(raw, repo_root, source, git_reader.as_ref())?
     };
-    collect_for_files(&files, &index_files, repo_root, source, git_reader.as_ref())
+    collect_for_files(&files, &index_files, repo_root, source, git_reader.as_ref(), None)
 }
 
 /// Extract the anchor portion (after `#`) from a markdown link href, if present.
@@ -618,6 +639,7 @@ fn collect_for_files(
     repo_root: &Path,
     source: DocSource,
     git_reader: Option<&GitReader>,
+    mesh_index: Option<&crate::commands::mesh_coverage::MeshIndex>,
 ) -> Result<Vec<CheckDiagnostic>> {
     let mut diagnostics: Vec<CheckDiagnostic> = Vec::new();
 
@@ -851,7 +873,7 @@ fn collect_for_files(
 
     // ── Mesh coverage pass ────────────────────────────────────────────────────
     if matches!(source, DocSource::WorkingTree) {
-        let mesh_diags = mesh_coverage::collect_mesh_diagnostics(files, repo_root)?;
+        let mesh_diags = mesh_coverage::collect_mesh_diagnostics(files, repo_root, mesh_index)?;
         diagnostics.extend(mesh_diags);
     }
 
@@ -1856,6 +1878,7 @@ mod tests {
             &[],
             crate::index::DocSource::WorkingTree,
             false,
+            None,
         )
         .expect("fix pass");
         assert_eq!(plan.mesh_conflicts, 1, "expected one conflict recorded");
