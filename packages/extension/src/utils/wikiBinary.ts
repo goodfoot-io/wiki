@@ -52,6 +52,13 @@ interface ManagedBinaryManifest {
   installedAt: string;
 }
 
+/**
+ * Module-level lock map keyed by `storageRoot:version:platform:arch`, ensuring
+ * that concurrent `installManagedWikiBinary` calls for the same install target
+ * share a single download/install promise rather than racing to the same paths.
+ */
+const inflightInstalls = new Map<string, Promise<InstallManagedWikiBinaryResult>>();
+
 export interface InstallManagedWikiBinaryParams {
   storageRoot: string;
   version: string;
@@ -165,6 +172,38 @@ export async function installManagedWikiBinary(
     return { handle: existing, installed: false };
   }
 
+  // Serialize concurrent installs for the same target: if another call is
+  // already downloading, await its promise so both callers return with the
+  // same result and only one download occurs.
+  const installKey = `${params.storageRoot}:${params.version}:${target.platform}:${target.arch}`;
+  const inflight = inflightInstalls.get(installKey);
+  if (inflight) {
+    return inflight;
+  }
+
+  const promise = installManagedWikiBinaryInner(fetchImpl, params, target);
+  inflightInstalls.set(installKey, promise);
+  void promise.finally(() => {
+    inflightInstalls.delete(installKey);
+  });
+
+  return promise;
+}
+
+/**
+ * Inner download-and-install body, extracted so the outer function can
+ * serialize concurrent calls via {@link inflightInstalls}.
+ *
+ * @param fetchImpl - Fetch implementation used for HTTP requests.
+ * @param params - Installation parameters including version, storage root, and release URL.
+ * @param target - Resolved platform target guaranteed non-null.
+ * @returns Installed or previously validated managed binary handle.
+ */
+async function installManagedWikiBinaryInner(
+  fetchImpl: typeof fetch,
+  params: InstallManagedWikiBinaryParams,
+  target: NonNullable<ReturnType<typeof resolveWikiPlatform>>
+): Promise<InstallManagedWikiBinaryResult> {
   const releaseBaseUrl = normalizeReleaseBaseUrl(params.releaseBaseUrl);
   const tag = getWikiReleaseTag(params.version);
   const checksumsUrl = `${releaseBaseUrl}/${tag}/${getWikiChecksumsAssetName()}`;

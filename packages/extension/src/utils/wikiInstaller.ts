@@ -42,7 +42,10 @@ export class WikiBinaryManager {
     return (await this.start()).handle;
   }
 
-  retry(): Promise<WikiBinaryReadyResult> {
+  async retry(): Promise<WikiBinaryReadyResult> {
+    // Await any in-flight ensureReady before discarding the promise, so two
+    // concurrent retry/start combinations do not race to the same install paths.
+    await this.readyPromise;
     this.readyPromise = null;
     return this.start();
   }
