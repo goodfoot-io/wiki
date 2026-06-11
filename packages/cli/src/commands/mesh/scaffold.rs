@@ -7,6 +7,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use miette::Result;
 use regex::Regex;
@@ -1562,7 +1563,7 @@ fn classify_frontmatter(
 
     // Step 5: run parse_frontmatter_field — if it returns None despite a
     // non-empty title line, the frontmatter is malformed (BOM, CRLF, etc.).
-    let title = parse_frontmatter_field(&text, "title");
+    let title = parse_frontmatter_field(&text);
     if title.is_none() {
         return (FileMeta::default(), Some(ParseErrorKind::Malformed));
     }
@@ -1571,13 +1572,28 @@ fn classify_frontmatter(
     (meta, None)
 }
 
-fn parse_frontmatter_field(content: &str, field: &str) -> Option<String> {
-    // Only parse if the file starts with `---\n`. JS uses /^---\s*\n(?:.*\n)*?title:\s*(.+?)\s*\n/.
-    // Anchor to file start (\A) so a thematic-break `---` later in the body does not
-    // match — that was the JS prototype's intent.
-    let pat = format!(r"\A---\s*\n(?:.*\n)*?{field}:\s*(.+?)\s*\n");
-    let re = Regex::new(&pat).ok()?;
-    let cap = re.captures(content)?;
+/// Extract the `title` field value from YAML frontmatter.
+///
+/// The frontmatter block is located by finding the opening `---` fence at the
+/// start of the content and the next `\n---` closing fence.  The title regex
+/// is compiled once in a [`OnceLock`] and reused across all calls.
+fn parse_frontmatter_field(content: &str) -> Option<String> {
+    // ── Locate the frontmatter block ──────────────────────────────────────
+    let after_open = content.strip_prefix("---")?;
+    // Consume optional horizontal whitespace between `---` and the newline
+    // (mirrors the `\s*` in the original `\A---\s*\n` anchor).
+    let after_open = after_open.trim_start_matches([' ', '\t', '\r']);
+    let after_open = after_open.strip_prefix('\n')?;
+
+    // Find the closing `---` fence so the regex only sees the frontmatter
+    // block — it cannot leak past the fence into body text.
+    let fm_end = after_open.find("\n---")?;
+    let frontmatter = &after_open[..fm_end];
+
+    // ── Extract the title field ───────────────────────────────────────────
+    static TITLE_RE: OnceLock<Regex> = OnceLock::new();
+    let re = TITLE_RE.get_or_init(|| Regex::new(r"(?m)^title:\s*(.+?)\s*$").unwrap());
+    let cap = re.captures(frontmatter)?;
     let raw = cap.get(1)?.as_str().trim();
     let stripped = raw
         .strip_prefix('"')
@@ -1940,15 +1956,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_frontmatter_extracts_title_and_summary() {
+    fn parse_frontmatter_extracts_title() {
         let c = "---\ntitle: Hello World\nsummary: A page summary.\n---\nbody";
         assert_eq!(
-            parse_frontmatter_field(c, "title"),
+            parse_frontmatter_field(c),
             Some("Hello World".into())
-        );
-        assert_eq!(
-            parse_frontmatter_field(c, "summary"),
-            Some("A page summary.".into())
         );
     }
 
@@ -1956,21 +1968,29 @@ mod tests {
     fn parse_frontmatter_handles_quoted_values() {
         let c = "---\ntitle: \"Quoted Title\"\n---\n";
         assert_eq!(
-            parse_frontmatter_field(c, "title"),
+            parse_frontmatter_field(c),
             Some("Quoted Title".into())
         );
     }
 
     #[test]
     fn parse_frontmatter_returns_none_when_absent() {
-        assert!(parse_frontmatter_field("no frontmatter here", "title").is_none());
+        assert!(parse_frontmatter_field("no frontmatter here").is_none());
     }
 
     #[test]
     fn parse_frontmatter_ignores_thematic_break_in_body() {
         // Body contains a `---` separator followed by a `title:` line — must NOT match.
         let c = "# Heading\n\nbody text\n\n---\ntitle: Spurious\n\nmore body\n";
-        assert_eq!(parse_frontmatter_field(c, "title"), None);
+        assert_eq!(parse_frontmatter_field(c), None);
+    }
+
+    #[test]
+    fn parse_frontmatter_does_not_cross_closing_fence() {
+        // The regex must not leak past a closing `---` fence to match a
+        // `title:` line in a later frontmatter block.
+        let c = "---\nsummary: No title here\n---\ntitle: Evil\n";
+        assert_eq!(parse_frontmatter_field(c), None);
     }
 
     // ── heading-chain trim ────────────────────────────────────────────────────
