@@ -4,14 +4,13 @@ use std::path::{Path, PathBuf};
 use crate::commands::resolve_link_path;
 use crate::parser::{LinkKind, parse_fragment_links};
 
-use super::check::CheckDiagnostic;
+use super::check::{CheckDiagnostic, ContentCache};
 use super::mesh::scaffold::locate_existing_suffix;
 use super::mesh::store;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /// All mesh data read in-process from `.wiki/<slug>` files.
-#[derive(Clone)]
 pub(crate) struct MeshIndex {
     /// Code anchor `(path, start, end)` → names of every mesh containing it.
     by_anchor: HashMap<(PathBuf, u32, u32), Vec<String>>,
@@ -95,7 +94,7 @@ impl MeshIndex {
 pub(super) fn collect_mesh_diagnostics(
     files: &[PathBuf],
     repo_root: &Path,
-    mesh_index: Option<&MeshIndex>,
+    content_cache: &mut ContentCache,
 ) -> Result<Vec<CheckDiagnostic>, miette::Error> {
     let mut out: Vec<CheckDiagnostic> = Vec::new();
 
@@ -103,24 +102,16 @@ pub(super) fn collect_mesh_diagnostics(
         return Ok(out);
     }
 
-    // When the caller supplies a pre-built index, reuse it to avoid a full
-    // `.wiki/` store re-walk and re-parse. Otherwise build one fresh.
-    let owned_index;
-    let index: &MeshIndex = match mesh_index {
-        Some(idx) => idx,
-        None => {
-            let rel_paths: Vec<PathBuf> = files
-                .iter()
-                .map(|p| {
-                    p.strip_prefix(repo_root)
-                        .map(Path::to_path_buf)
-                        .unwrap_or_else(|_| p.clone())
-                })
-                .collect();
-            owned_index = build_mesh_index(repo_root, &rel_paths)?.expect("always Some");
-            &owned_index
-        }
-    };
+    let rel_paths: Vec<PathBuf> = files
+        .iter()
+        .map(|p| {
+            p.strip_prefix(repo_root)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|_| p.clone())
+        })
+        .collect();
+
+    let index = build_mesh_index(repo_root, &rel_paths)?.expect("always Some");
 
     // Candidate `mesh_uncovered` diagnostics, deferred until after the
     // gitignore filter is applied below.
@@ -135,7 +126,9 @@ pub(super) fn collect_mesh_diagnostics(
     let mut pending: Vec<Pending> = Vec::new();
 
     for wiki_path in files {
-        let content = match std::fs::read_to_string(wiki_path) {
+        let content = match content_cache
+            .get_or_try_read(wiki_path, || std::fs::read_to_string(wiki_path))
+        {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -145,7 +138,7 @@ pub(super) fn collect_mesh_diagnostics(
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|_| wiki_path.clone());
 
-        for link in parse_fragment_links(&content) {
+        for link in parse_fragment_links(content) {
             if link.kind == LinkKind::External {
                 continue;
             }

@@ -12,9 +12,9 @@ use git_mesh_core::{
 };
 
 use crate::commands::mesh::store;
-use crate::commands::mesh_coverage::MeshIndex;
 use crate::commands::mesh_coverage::build_mesh_index;
 use crate::frontmatter::parse_frontmatter;
+use super::check::ContentCache;
 use crate::headings::{extract_headings, github_slug, resolve_heading, Heading};
 use crate::index::DocSource;
 use crate::parser::{LinkKind, parse_fragment_links};
@@ -984,7 +984,7 @@ pub fn run_fix_pass(
     globs: &[String],
     source: DocSource,
     dry_run: bool,
-    mesh_index: Option<&crate::commands::mesh_coverage::MeshIndex>,
+    content_cache: &mut ContentCache,
 ) -> Result<FixPlan> {
     let mut rename_map = RenameMap::build(repo_root)?;
 
@@ -994,8 +994,10 @@ pub fn run_fix_pass(
     let mut patches: HashMap<PathBuf, String> = HashMap::new();
 
     for file in files {
-        let content = match std::fs::read_to_string(file) {
-            Ok(c) => c,
+        let content = match content_cache
+            .get_or_try_read(file, || std::fs::read_to_string(file))
+        {
+            Ok(c) => c.to_string(),
             Err(_) => continue,
         };
 
@@ -1137,8 +1139,10 @@ pub fn run_fix_pass(
         let content = if let Some(patched) = patches.get(file) {
             patched.clone()
         } else {
-            match std::fs::read_to_string(file) {
-                Ok(c) => c,
+            match content_cache
+                .get_or_try_read(file, || std::fs::read_to_string(file))
+            {
+                Ok(c) => c.to_string(),
                 Err(_) => continue,
             }
         };
@@ -1181,8 +1185,10 @@ pub fn run_fix_pass(
             let target_content = if let Some(patched) = patches.get(&target_abs) {
                 patched.clone()
             } else {
-                match std::fs::read_to_string(&target_abs) {
-                    Ok(c) => c,
+                match content_cache
+                    .get_or_try_read(&target_abs, || std::fs::read_to_string(&target_abs))
+                {
+                    Ok(c) => c.to_string(),
                     Err(_) => continue,
                 }
             };
@@ -1346,19 +1352,8 @@ pub fn run_fix_pass(
         });
     }
 
-    // Build (or reuse) the MeshIndex for link rewriting and coverage creation.
-    // When the caller supplies a pre-built index (e.g. from `check::run` which
-    // already built one for initial diagnostics), reuse it to avoid a second
-    // full `.wiki/` store walk and parse.
-    let mesh_index_opt: Option<MeshIndex> = match mesh_index {
-        Some(idx) => Some(idx.clone()),
-        None => build_mesh_index(repo_root, files)?,
-    };
-
-    // Track whether the Fix #2 loop below relocates any mesh anchors on disk.
-    // When it does, the in-memory index becomes stale and must be rebuilt
-    // before Fix #4's coverage creation pass.
-    let mut mesh_relocated = false;
+    // Build the MeshIndex using all in-scope files.
+    let mesh_index_opt = build_mesh_index(repo_root, files)?;
 
     // For each wiki file, rewrite broken line-range links that are now covered
     // by the updated mesh.
@@ -1366,8 +1361,10 @@ pub fn run_fix_pass(
         let content = if let Some(patched) = patches.get(file) {
             patched.clone()
         } else {
-            match std::fs::read_to_string(file) {
-                Ok(c) => c,
+            match content_cache
+                .get_or_try_read(file, || std::fs::read_to_string(file))
+            {
+                Ok(c) => c.to_string(),
                 Err(_) => continue,
             }
         };
@@ -1505,7 +1502,6 @@ pub fn run_fix_pass(
                     new_start,
                     new_end,
                 )?;
-                mesh_relocated = true;
             }
         }
 
@@ -1542,8 +1538,10 @@ pub fn run_fix_pass(
         let content = if let Some(patched) = patches.get(file) {
             patched.clone()
         } else {
-            match std::fs::read_to_string(file) {
-                Ok(c) => c,
+            match content_cache
+                .get_or_try_read(file, || std::fs::read_to_string(file))
+            {
+                Ok(c) => c.to_string(),
                 Err(_) => continue,
             }
         };
@@ -1586,8 +1584,10 @@ pub fn run_fix_pass(
             let current_target = if let Some(patched) = patches.get(&target_abs) {
                 patched.clone()
             } else {
-                match std::fs::read_to_string(&target_abs) {
-                    Ok(c) => c,
+                match content_cache
+                    .get_or_try_read(&target_abs, || std::fs::read_to_string(&target_abs))
+                {
+                    Ok(c) => c.to_string(),
                     Err(_) => continue,
                 }
             };
@@ -1726,19 +1726,7 @@ pub fn run_fix_pass(
     // and a failed/dropped one resurfaces as a residual `mesh_uncovered`).
     // Best-effort: a single mesh that cannot be created is recorded as a
     // failure, never aborting the pass. In `dry_run` it previews only.
-    //
-    // `relocate_anchor` in the Fix #2 loop above may have modified mesh files
-    // on disk, so the in-memory index cloned before that loop is potentially
-    // stale. Rebuild when a relocate occurred; otherwise reuse the pre-built
-    // index to avoid a redundant `.wiki/` store walk.
-    let coverage_index: Option<MeshIndex>;
-    let coverage_index_ref: Option<&MeshIndex> = if mesh_relocated {
-        coverage_index = build_mesh_index(repo_root, files)?;
-        coverage_index.as_ref()
-    } else {
-        mesh_index_opt.as_ref()
-    };
-    let mut mesh = super::mesh::scaffold::create_mesh_coverage(files, repo_root, source, dry_run, coverage_index_ref)?;
+    let mut mesh = super::mesh::scaffold::create_mesh_coverage(files, repo_root, source, dry_run)?;
 
     // Cleanup stage: delete scaffold meshes whose sole wiki page was removed.
     // Runs AFTER creation so the two halves never interfere.
@@ -1850,7 +1838,7 @@ mod tests {
             &[],
             crate::index::DocSource::WorkingTree,
             /* dry_run */ true,
-            None,
+            &mut ContentCache::new(),
         )
         .expect("fix pass");
 
@@ -1917,7 +1905,7 @@ mod tests {
             &[],
             crate::index::DocSource::WorkingTree,
             /* dry_run */ true,
-            None,
+            &mut ContentCache::new(),
         )
         .expect("fix pass");
 

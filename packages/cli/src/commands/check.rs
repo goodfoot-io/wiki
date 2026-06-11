@@ -17,6 +17,45 @@ use super::check_fix;
 use super::mesh::scaffold::locate_existing_suffix;
 use super::mesh_coverage;
 
+/// Per-run content cache that avoids re-reading the same file from disk.
+///
+/// Each in-scope wiki page is read at least twice during `collect_for_files`
+/// (once for frontmatter, once for link parsing), and once more by the mesh
+/// coverage pass.  In `--fix` mode `collect_for_files` runs twice and
+/// `run_fix_pass` re-reads each file.  This cache collapses redundant reads
+/// into a single read per unique path per run.
+pub(crate) struct ContentCache {
+    cache: HashMap<PathBuf, String>,
+}
+
+impl ContentCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            cache: HashMap::new(),
+        }
+    }
+
+    /// Return the cached content for `path`, calling `read_fn` on a miss and
+    /// storing the result.
+    pub(crate) fn get_or_try_read<F, E>(
+        &mut self,
+        path: &Path,
+        read_fn: F,
+    ) -> std::result::Result<&str, E>
+    where
+        F: FnOnce() -> std::result::Result<String, E>,
+        E: std::fmt::Display,
+    {
+        match self.cache.entry(path.to_path_buf()) {
+            Entry::Occupied(o) => Ok(o.into_mut().as_str()),
+            Entry::Vacant(v) => {
+                let content = read_fn()?;
+                Ok(v.insert(content).as_str())
+            }
+        }
+    }
+}
+
 /// Return `true` when `rel_path` exists as a directory in `source`.
 ///
 /// For `WorkingTree` this delegates to `std::path::Path::is_dir`.  For
@@ -324,28 +363,20 @@ pub fn run(
         return Ok(2);
     }
 
-    // In fix mode, build the MeshIndex once before the initial diagnostics
-    // and thread it through `collect_for_files` → `collect_mesh_diagnostics`
-    // and into `run_fix_pass` for link rewriting and coverage creation, so the
-    // `.wiki/` store is walked and parsed once rather than once per phase.
-    let fix_mesh_index: Option<mesh_coverage::MeshIndex> = if fix {
-        match mesh_coverage::build_mesh_index(repo_root, &index_files) {
-            Ok(Some(idx)) => Some(idx),
-            Ok(None) => None,
-            Err(e) => {
-                if json {
-                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
-                } else {
-                    eprintln!("error: {e}");
-                }
-                return Ok(2);
-            }
-        }
-    } else {
-        None
-    };
+    // Per-run content cache: avoids re-reading wiki pages (frontmatter loop,
+    // link loop, mesh coverage, and fix passes all read the same files).  In
+    // fix mode the same cache instance is shared across the pre-check, the fix
+    // pass, and the post-fix re-check.
+    let mut content_cache = ContentCache::new();
 
-    let diagnostics = match collect_for_files(&files, &index_files, repo_root, source, git_reader.as_ref(), fix_mesh_index.as_ref()) {
+    let diagnostics = match collect_for_files(
+        &files,
+        &index_files,
+        repo_root,
+        source,
+        git_reader.as_ref(),
+        &mut content_cache,
+    ) {
         Ok(d) => d,
         Err(e) => {
             if json {
@@ -359,9 +390,15 @@ pub fn run(
 
     // ── Fix pass ──────────────────────────────────────────────────────────────
     if fix {
-        let plan =
-            match check_fix::run_fix_pass(&files, repo_root, scan_root, globs, source, fix_dry_run, fix_mesh_index.as_ref())
-            {
+        let plan = match check_fix::run_fix_pass(
+            &files,
+            repo_root,
+            scan_root,
+            globs,
+            source,
+            fix_dry_run,
+            &mut content_cache,
+        ) {
                 Ok(p) => p,
                 Err(e) => {
                     if json {
@@ -485,7 +522,17 @@ pub fn run(
 
         // Non-dry-run: re-collect and emit post-fix diagnostics. A mesh that
         // failed/dropped resurfaces here as a residual `mesh_uncovered`.
-        let post_diagnostics = match collect_for_files(&files, &index_files, repo_root, source, git_reader.as_ref(), None) {
+        // Replace the cache with a fresh one so the post-fix re-check reads
+        // the patched files from disk rather than stale pre-fix content.
+        content_cache = ContentCache::new();
+        let post_diagnostics = match collect_for_files(
+            &files,
+            &index_files,
+            repo_root,
+            source,
+            git_reader.as_ref(),
+            &mut content_cache,
+        ) {
             Ok(d) => d,
             Err(e) => {
                 if json {
@@ -578,7 +625,15 @@ pub fn collect_with_source(
         let raw = discover_files(&[], repo_root, repo_root, source, git_reader.as_ref())?;
         filter_files_for_source(raw, repo_root, source, git_reader.as_ref())?
     };
-    collect_for_files(&files, &index_files, repo_root, source, git_reader.as_ref(), None)
+    let mut content_cache = ContentCache::new();
+    collect_for_files(
+        &files,
+        &index_files,
+        repo_root,
+        source,
+        git_reader.as_ref(),
+        &mut content_cache,
+    )
 }
 
 /// Extract the anchor portion (after `#`) from a markdown link href, if present.
@@ -639,7 +694,7 @@ fn collect_for_files(
     repo_root: &Path,
     source: DocSource,
     git_reader: Option<&GitReader>,
-    mesh_index: Option<&crate::commands::mesh_coverage::MeshIndex>,
+    content_cache: &mut ContentCache,
 ) -> Result<Vec<CheckDiagnostic>> {
     let mut diagnostics: Vec<CheckDiagnostic> = Vec::new();
 
@@ -660,7 +715,9 @@ fn collect_for_files(
             continue;
         }
         let in_scope = files_set.contains(path);
-        let content = match read_via_source(path, repo_root, source, git_reader) {
+        let content = match content_cache
+            .get_or_try_read(path, || read_via_source(path, repo_root, source, git_reader))
+        {
             Ok(c) => c,
             Err(e) => {
                 if in_scope {
@@ -675,7 +732,7 @@ fn collect_for_files(
             }
         };
 
-        match parse_frontmatter(&content, path) {
+        match parse_frontmatter(content, path) {
             Ok(Some(fm)) => {
                 pages.push((path.clone(), fm));
             }
@@ -724,12 +781,14 @@ fn collect_for_files(
     // ── Validate links in all in-scope files ─────────────────────────────────
     let mut target_cache: HashMap<PathBuf, CachedTarget> = HashMap::new();
     for path in files {
-        let content = match read_via_source(path, repo_root, source, git_reader) {
+        let content = match content_cache
+            .get_or_try_read(path, || read_via_source(path, repo_root, source, git_reader))
+        {
             Ok(c) => c,
             Err(_) => continue,
         };
 
-        let frag_links = parse_fragment_links(&content);
+        let frag_links = parse_fragment_links(content);
         for link in &frag_links {
             if link.kind == LinkKind::External {
                 continue;
@@ -762,12 +821,14 @@ fn collect_for_files(
             let cached = match target_cache.entry(abs.clone()) {
                 Entry::Occupied(o) => Some(o.into_mut()),
                 Entry::Vacant(v) => {
-                    match read_via_source(&abs, repo_root, source, git_reader) {
+                    match content_cache
+                        .get_or_try_read(&abs, || read_via_source(&abs, repo_root, source, git_reader))
+                    {
                         Ok(c) => {
-                            let headings = extract_headings(&c);
+                            let headings = extract_headings(c);
                             let line_count = c.lines().count() as u32;
                             Some(v.insert(CachedTarget {
-                                content: c,
+                                content: c.to_string(),
                                 line_count,
                                 headings,
                             }))
@@ -873,7 +934,8 @@ fn collect_for_files(
 
     // ── Mesh coverage pass ────────────────────────────────────────────────────
     if matches!(source, DocSource::WorkingTree) {
-        let mesh_diags = mesh_coverage::collect_mesh_diagnostics(files, repo_root, mesh_index)?;
+        let mesh_diags =
+            mesh_coverage::collect_mesh_diagnostics(files, repo_root, content_cache)?;
         diagnostics.extend(mesh_diags);
     }
 
@@ -1878,7 +1940,7 @@ mod tests {
             &[],
             crate::index::DocSource::WorkingTree,
             false,
-            None,
+            &mut ContentCache::new(),
         )
         .expect("fix pass");
         assert_eq!(plan.mesh_conflicts, 1, "expected one conflict recorded");
