@@ -70,7 +70,9 @@
       {
         "command": "wiki.search",
         "key": "shift+cmd+l",
-        "mac": "shift+cmd+l"
+        "mac": "shift+cmd+l",
+        "win": "shift+ctrl+l",
+        "linux": "shift+ctrl+l"
       }
     ]
   },

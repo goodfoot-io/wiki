@@ -10,6 +10,7 @@
 
 import '@vscode-elements/elements/dist/vscode-button/index.js';
 import { post } from './messaging.js';
+import { getModifierGlyphs, platformFromNavigator } from './toolbarGlyphs.js';
 
 /**
  * Mount the toolbar into the `#toolbar` element.
@@ -24,10 +25,13 @@ export function mount(): void {
   toolbarEl.style.alignItems = 'center';
   toolbarEl.style.paddingBottom = '1em';
 
+  const platform = platformFromNavigator();
+  const { shift, meta } = getModifierGlyphs(platform);
+
   toolbarEl.innerHTML = `
     <div id="wiki-btn-search-hint" style="display:flex;align-items:center;gap:3.6px;cursor:pointer">
-      <kbd style="display:inline-flex;align-items:center;justify-content:center;font-size:10.8px;line-height:1;padding:1.2px 3.6px;border:1px solid var(--vscode-descriptionForeground);border-radius:2px;opacity:0.7;font-family:inherit">⇧</kbd>
-      <kbd style="display:inline-flex;align-items:center;justify-content:center;font-size:10.8px;line-height:1;padding:1.2px 3.6px;border:1px solid var(--vscode-descriptionForeground);border-radius:2px;opacity:0.7;font-family:inherit">⌘</kbd>
+      <kbd style="display:inline-flex;align-items:center;justify-content:center;font-size:10.8px;line-height:1;padding:1.2px 3.6px;border:1px solid var(--vscode-descriptionForeground);border-radius:2px;opacity:0.7;font-family:inherit">${shift}</kbd>
+      <kbd style="display:inline-flex;align-items:center;justify-content:center;font-size:10.8px;line-height:1;padding:1.2px 3.6px;border:1px solid var(--vscode-descriptionForeground);border-radius:2px;opacity:0.7;font-family:inherit">${meta}</kbd>
       <kbd style="display:inline-flex;align-items:center;justify-content:center;font-size:10.8px;line-height:1;padding:1.2px 3.6px;border:1px solid var(--vscode-descriptionForeground);border-radius:2px;opacity:0.7;font-family:inherit">L</kbd>
       <span style="font-family:monospace;font-size:12px;color:var(--vscode-descriptionForeground);opacity:0.7;margin-left:3.6px">to search</span>
     </div>
