@@ -1965,6 +1965,90 @@ mod tests {
         }
     }
 
+    /// When the caller supplies a pre-built `MeshIndex`, `run_fix_pass` must
+    /// reuse it (clone) for Fix #2 coverage checks and Fix #4 coverage
+    /// creation instead of re-building from the `.wiki/` store. This test:
+    /// 1. Creates a wiki page with a line-range link to a code file.
+    /// 2. Creates a `.wiki/` mesh covering both files.
+    /// 3. Shifts the code file so the anchor is stale.
+    /// 4. Builds the MeshIndex from committed mesh files.
+    /// 5. Runs `run_fix_pass` with `Some(&mesh_index)` (dry-run).
+    /// 6. Asserts the plan contains a `MeshAnchorShift` fix — proving the
+    ///    pre-built index was used for the coverage gate, which is the
+    ///    precondition for emitting the fix.
+    #[test]
+    fn fix_pass_with_prebuilt_mesh_index_resolves_mesh_anchor_shift() {
+        let repo = TestRepo::new();
+        use git_mesh_core::AnchorExtent;
+        use git_mesh_core::mesh_file::MeshFile;
+
+        // Write the code file with a known block at lines 1–3.
+        repo.write("src/lib.rs", "fn foo() {\n    42\n}\n");
+        // Write a wiki page linking to the code block with a line-range anchor.
+        repo.write(
+            "wiki/page.md",
+            &wiki_page("Page", "See [code](../src/lib.rs#L1-L3).\n"),
+        );
+        repo.commit("seed");
+
+        // Create a mesh that anchors both the code block and the wiki page.
+        let code_extent = AnchorExtent::LineRange { start: 1, end: 3 };
+        let code_hash =
+            store::hash_anchor(repo.path(), "src/lib.rs", code_extent).unwrap();
+        let code_anchor =
+            store::anchor_record("src/lib.rs".to_string(), code_extent, code_hash);
+        let wiki_extent = AnchorExtent::LineRange { start: 1, end: 3 };
+        let wiki_hash =
+            store::hash_anchor(repo.path(), "wiki/page.md", wiki_extent).unwrap();
+        let wiki_anchor =
+            store::anchor_record("wiki/page.md".to_string(), wiki_extent, wiki_hash);
+        let mesh = MeshFile {
+            anchors: vec![code_anchor, wiki_anchor],
+            why: String::new(),
+        };
+        store::write(repo.path(), "my-mesh", &mesh).unwrap();
+        repo.commit("add mesh");
+
+        // Make the code block stale by prepending a line: the original block
+        // at lines 1–3 shifts to lines 2–4.
+        repo.write("src/lib.rs", "// header\nfn foo() {\n    42\n}\n");
+        // Leave uncommitted — dirty working tree ensures `plan_mesh_follows`
+        // detects the drift (the `tree_unchanged` sqlite-gate is absent).
+
+        // Build the MeshIndex from the committed `.wiki/` files.
+        let mesh_index = build_mesh_index(repo.path(), &[])
+            .expect("build_mesh_index")
+            .expect("always Some");
+
+        let wiki_abs = repo.path().join("wiki/page.md");
+        let lib_abs = repo.path().join("src/lib.rs");
+        let plan = run_fix_pass(
+            &[wiki_abs, lib_abs],
+            repo.path(),
+            repo.path(),
+            &[],
+            crate::index::DocSource::WorkingTree,
+            /* dry_run */ true,
+            Some(&mesh_index),
+        )
+        .expect("fix pass");
+
+        // Move-follow should relocate the code anchor from L1-L3 to L2-L4
+        // because the content shifted down by one line. The pre-built
+        // MeshIndex supplies coverage info, which confirms the mesh covers
+        // the (wiki, target) pair — so a MeshAnchorShift fix is produced
+        // rather than a "no mesh coverage" skip.
+        assert!(
+            plan.fixes
+                .iter()
+                .any(|f| matches!(f.kind, FixKind::MeshAnchorShift)),
+            "expected a MeshAnchorShift fix for the shifted anchor; \
+             got fixes={:?} skipped={:?}",
+            plan.fixes,
+            plan.skipped,
+        );
+    }
+
     // ── mesh staleness fixture (shared with phase-2 move/conflict tests) ─────
 
     /// Build a git repo with a `.wiki/` mesh whose anchor points at `src/lib.rs`
