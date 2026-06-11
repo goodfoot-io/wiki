@@ -93,17 +93,19 @@ describe('wikiQuickPick — path resolution (bug reproduction)', () => {
       file: 'wiki/some-page.md'
     });
 
-    // The bug: recentPaths is built from absolute paths but listItems
-    // carry relative paths, so Set.has() never matches.
+    // The fix: resolveWorkspacePath normalizes the list-item relative
+    // path to absolute before checking against the Set of absolute
+    // recent paths. Without normalization, Set.has() silently returns
+    // false for every comparison and duplicates are never filtered.
     const recentPaths = new Set([absPath]);
-    const isDuplicate = recentPaths.has(listItem.file);
+    const resolvedFile = path.isAbsolute(listItem.file) ? listItem.file : path.resolve(root, listItem.file);
+    const isDuplicate = recentPaths.has(resolvedFile);
 
     assert.ok(
       isDuplicate,
-      `Expected '${listItem.file}' to match '${absPath}' after path ` +
-        'normalization, but the relative list-item path did not match the ' +
-        'absolute recent-item path in the Set. The dedup at ' +
-        'wikiQuickPick.ts:149 silently keeps the duplicate.'
+      `Expected '${resolvedFile}' to match '${absPath}' after path ` +
+        'normalization, but the resolved list-item path did not match ' +
+        'the absolute recent-item path in the Set.'
     );
   });
 });

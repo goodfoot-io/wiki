@@ -8,6 +8,7 @@
  * @summary QuickPick command that lets the user search and open wiki pages.
  */
 
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { formatLogError, getWikiLogger } from '../utils/logger.js';
 import { loadValidatedRecentlyViewed } from '../utils/recentlyViewed.js';
@@ -37,6 +38,13 @@ interface WikiSearchItem {
 
 export type WikiQuickPickItem = vscode.QuickPickItem & { file: string };
 
+/**
+ * Map a [WikiListItem](./wikiQuickPick.ts) from `wiki list --format json`
+ * into a [WikiQuickPickItem](./wikiQuickPick.ts) for the QuickPick.
+ *
+ * @param item - A deserialized list result from the wiki CLI.
+ * @returns A QuickPick item with the page title, summary, and repo-relative file path.
+ */
 export function toListQuickPickItem(item: WikiListItem): WikiQuickPickItem {
   return {
     label: item.title,
@@ -56,8 +64,31 @@ function toSearchQuickPickItem(item: WikiSearchItem): WikiQuickPickItem {
   };
 }
 
+/**
+ * Return the absolute filesystem path of the first workspace folder.
+ *
+ * @returns Absolute `fsPath` of the first workspace folder, or `undefined`
+ *          when no workspace folder is open.
+ */
 export function workspaceRoot(): string | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+}
+
+/**
+ * Resolve a possibly repo-relative path to an absolute filesystem path.
+ *
+ * When [workspaceRoot()](./wikiQuickPick.ts) is available and `file` is
+ * not already absolute, resolve it against the workspace root. Otherwise
+ * return `file` unchanged (it is already absolute, or there is no
+ * workspace folder to resolve against).
+ *
+ * @param file - A repo-relative or absolute filesystem path.
+ * @returns The resolved absolute filesystem path.
+ */
+function resolveWorkspacePath(file: string): string {
+  const root = workspaceRoot();
+  if (root == null || path.isAbsolute(file)) return file;
+  return path.resolve(root, file);
 }
 
 async function loadAllPages(binaryPath: string): Promise<WikiQuickPickItem[]> {
@@ -105,8 +136,17 @@ async function searchPages(binaryPath: string, query: string, signal: AbortSigna
   }
 }
 
+/**
+ * Open a wiki file in the custom wiki viewer.
+ *
+ * Resolves repo-relative paths against [workspaceRoot()](./wikiQuickPick.ts)
+ * before constructing the URI, so paths emitted by the CLI
+ * (`wiki list`, `wiki <query>`) resolve correctly.
+ *
+ * @param file - A repo-relative or absolute path to a wiki markdown file.
+ */
 export async function openWikiFile(file: string): Promise<void> {
-  const uri = vscode.Uri.file(file);
+  const uri = vscode.Uri.file(resolveWorkspacePath(file));
   await vscode.commands.executeCommand('vscode.openWith', uri, 'wiki.viewer');
 }
 
@@ -146,7 +186,7 @@ export async function wikiQuickPick(binaryManager: WikiBinaryManager, context: v
   const recentPaths = new Set(recentItems.map((item) => item.file));
   const initialItems: WikiQuickPickItem[] = [
     ...recentItems,
-    ...listItems.filter((item) => !recentPaths.has(item.file))
+    ...listItems.filter((item) => !recentPaths.has(resolveWorkspacePath(item.file)))
   ];
   log.info(
     'Initial list loaded: %d recent + %d list (%d total) in %dms (total since invoke %dms)',
