@@ -1651,14 +1651,22 @@ fn invalid_anchor_detail(
     let owned_content;
     let content: &str = if source_paths.is_none() {
         // WorkingTree — read from disk via the per-run cache.
-        let cached = cache.get_or_read(&abs).ok()?;
-        cached.utf8.as_str()
+        let cached = match cache.get_or_read(&abs) {
+            Ok(c) => c,
+            Err(e) => {
+                return Some(format!("cannot read {}: {e}", abs.display()));
+            }
+        };
+        match cached.utf8() {
+            Ok(s) => s,
+            Err(e) => return Some(format!("{e}")),
+        }
     } else {
         // Index / Head — read the git object snapshot so the line count matches
         // discovery. Insert into the cache so hash_anchor (called later in
         // apply_drafts) uses the same git-sourced content, not the worktree.
         owned_content = read_via_source(&abs, repo_root, source).ok()?;
-        cache.insert(abs, owned_content.clone());
+        cache.insert(abs, owned_content.as_bytes().to_vec());
         &owned_content
     };
     let line_count = count_lines(content);

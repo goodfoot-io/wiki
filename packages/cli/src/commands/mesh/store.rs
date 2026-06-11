@@ -33,10 +33,23 @@ pub(crate) struct FileContentCache {
 }
 
 pub(crate) struct CachedFile {
-    /// UTF-8 string content (for line counting / bounds validation).
-    pub(crate) utf8: String,
-    /// Raw bytes (for rk64 hashing via [`cheap_fingerprint_with_extent`]).
-    pub(crate) bytes: Vec<u8>,
+    /// Raw file bytes. Hashing ([`cheap_fingerprint_with_extent`]) operates on
+    /// these directly. Callers that need line counting use [`CachedFile::utf8`].
+    bytes: Vec<u8>,
+}
+
+impl CachedFile {
+    /// Validate and return the cached content as `&str`.
+    ///
+    /// Returns an error when the content is not valid UTF-8. Hashing via
+    /// [`cheap_fingerprint_with_extent`] works on [`CachedFile::bytes`]
+    /// regardless — this accessor exists only for line counting and bounds
+    /// validation, which require text.
+    pub(crate) fn utf8(&self) -> Result<&str> {
+        std::str::from_utf8(&self.bytes).map_err(|e| {
+            miette::miette!("cached file content is not valid UTF-8: {e}")
+        })
+    }
 }
 
 impl FileContentCache {
@@ -47,6 +60,9 @@ impl FileContentCache {
     }
 
     /// Get cached content, reading from disk on first access.
+    ///
+    /// The returned [`CachedFile`] stores only raw bytes — no UTF-8 validation
+    /// happens here. Callers that need line counting call [`CachedFile::utf8`].
     pub(crate) fn get_or_read(&mut self, abs_path: &Path) -> Result<&CachedFile> {
         Ok(match self.entries.entry(abs_path.to_path_buf()) {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
@@ -54,25 +70,18 @@ impl FileContentCache {
                 let bytes = fs::read(abs_path).map_err(|err| {
                     miette::miette!("failed to read {}: {err}", abs_path.display())
                 })?;
-                let utf8 = String::from_utf8(bytes.clone()).map_err(|err| {
-                    miette::miette!(
-                        "{} is not valid UTF-8: {err}",
-                        abs_path.display()
-                    )
-                })?;
-                e.insert(CachedFile { utf8, bytes })
+                e.insert(CachedFile { bytes })
             }
         })
     }
 
-    /// Insert pre-read content into the cache, deriving raw bytes from the
-    /// UTF-8 string. Used when content was read from a non-filesystem source
-    /// (e.g. git objects) so subsequent [`get_or_read`] calls find it.
-    pub(crate) fn insert(&mut self, abs_path: PathBuf, utf8: String) {
-        let bytes = utf8.as_bytes().to_vec();
+    /// Insert pre-read content into the cache. Used when content was read from
+    /// a non-filesystem source (e.g. git objects) so subsequent
+    /// [`get_or_read`] calls find it.
+    pub(crate) fn insert(&mut self, abs_path: PathBuf, bytes: Vec<u8>) {
         self.entries
             .entry(abs_path)
-            .or_insert(CachedFile { utf8, bytes });
+            .or_insert(CachedFile { bytes });
     }
 }
 
@@ -373,7 +382,7 @@ pub(crate) fn upsert_anchors(
         if let AnchorExtent::LineRange { start, end } = *extent {
             let abs = repo_root.join(path);
             let cached = cache.get_or_read(&abs)?;
-            let line_count = cached.utf8.lines().count() as u32;
+            let line_count = cached.utf8()?.lines().count() as u32;
             if end > line_count {
                 return Err(miette::miette!(
                     "anchor `{path}#L{start}-L{end}` is out of bounds: file has {line_count} line(s)"
