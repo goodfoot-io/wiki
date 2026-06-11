@@ -13,13 +13,19 @@ use miette::Result;
 use regex::Regex;
 
 use crate::commands::resolve_link_path;
+use crate::git::GitReader;
 use crate::index::DocSource;
 use crate::parser::{LinkKind, parse_fragment_links};
 
 /// Read `path` from the chosen [`DocSource`], routing non-worktree reads
-/// through [`DocSource::read`] so the content snapshot matches the discovery
-/// snapshot.
-fn read_via_source(path: &Path, repo_root: &Path, source: DocSource) -> std::io::Result<String> {
+/// through the [`GitReader`] when available so that a single `gix::Repository`
+/// handle is reused across all blob reads in the pipeline.
+fn read_via_source(
+    path: &Path,
+    repo_root: &Path,
+    source: DocSource,
+    git_reader: Option<&GitReader>,
+) -> std::io::Result<String> {
     match source {
         DocSource::WorkingTree => fs::read_to_string(path),
         DocSource::Index | DocSource::Head => {
@@ -27,7 +33,12 @@ fn read_via_source(path: &Path, repo_root: &Path, source: DocSource) -> std::io:
                 .strip_prefix(repo_root)
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| path.to_string_lossy().into_owned());
-            match source.read(repo_root, &path_rel) {
+            let result = if let Some(gr) = git_reader {
+                gr.read_blob(source, &path_rel)
+            } else {
+                source.read(repo_root, &path_rel)
+            };
+            match result {
                 Ok(Some(s)) => Ok(s),
                 Ok(None) => Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
@@ -156,6 +167,7 @@ pub(crate) fn create_mesh_coverage(
     source: crate::index::DocSource,
     dry_run: bool,
     mesh_index: Option<&crate::commands::mesh_coverage::MeshIndex>,
+    git_reader: Option<&GitReader>,
 ) -> Result<MeshCoverageOutcome> {
     // Re-apply the `/tests/fixtures/` exclusion so the produced mesh set is
     // byte-identical to the former `scaffold` command.
@@ -187,7 +199,7 @@ pub(crate) fn create_mesh_coverage(
 
     let mut all_inputs: Vec<LinkInput> = Vec::new();
     for file in &files {
-        let content = match read_via_source(file, repo_root, source) {
+        let content = match read_via_source(file, repo_root, source, git_reader) {
             Ok(s) => s,
             Err(_) => {
                 // Unreadable files are surfaced via parse_errors (classify_frontmatter
@@ -220,7 +232,7 @@ pub(crate) fn create_mesh_coverage(
         std::collections::HashMap::new();
     let mut parse_errors: Vec<ParseError> = Vec::new();
     for f in &files {
-        let (meta, err_kind) = classify_frontmatter(f, repo_root, source);
+        let (meta, err_kind) = classify_frontmatter(f, repo_root, source, git_reader);
         if let Some(kind) = err_kind {
             let rel = path_relative_to(f, repo_root);
             parse_errors.push(ParseError { path: rel, kind });
@@ -269,13 +281,14 @@ pub(crate) fn create_mesh_coverage(
     // the active source.
     let source_paths: Option<std::collections::HashSet<String>> = match source {
         crate::index::DocSource::WorkingTree => None, // check filesystem inline
-        crate::index::DocSource::Index | crate::index::DocSource::Head => Some(
-            source
-                .list_paths(repo_root)
-                .unwrap_or_default()
-                .into_iter()
-                .collect(),
-        ),
+        crate::index::DocSource::Index | crate::index::DocSource::Head => {
+            let paths = if let Some(gr) = git_reader {
+                gr.list_paths(source).unwrap_or_default()
+            } else {
+                source.list_paths(repo_root).unwrap_or_default()
+            };
+            Some(paths.into_iter().collect())
+        }
     };
     let mut dropped_meshes: Vec<DroppedMesh> = Vec::new();
 
@@ -425,7 +438,7 @@ pub(crate) fn create_mesh_coverage(
             // it with a named advisory so the link resurfaces as a residual
             // `mesh_uncovered` on the post-fix recheck rather than aborting.
             if let Some(detail) =
-                invalid_anchor_detail(repo_root, anchor, source, &source_paths, &mut content_cache)
+                invalid_anchor_detail(repo_root, anchor, source, &source_paths, &mut content_cache, git_reader)
             {
                 dropped_meshes.push(DroppedMesh {
                     slug: draft.slug.clone(),
@@ -1501,8 +1514,9 @@ fn classify_frontmatter(
     path: &Path,
     repo_root: &Path,
     source: DocSource,
+    git_reader: Option<&GitReader>,
 ) -> (FileMeta, Option<ParseErrorKind>) {
-    let text = match read_via_source(path, repo_root, source) {
+    let text = match read_via_source(path, repo_root, source, git_reader) {
         Ok(s) => s,
         Err(e) => {
             return (
@@ -1636,6 +1650,7 @@ fn invalid_anchor_detail(
     source: DocSource,
     source_paths: &Option<std::collections::HashSet<String>>,
     cache: &mut store::FileContentCache,
+    git_reader: Option<&GitReader>,
 ) -> Option<String> {
     let (start, end) = (anchor.start_line, anchor.end_line);
     // start < 1 (anchors use 1-based inclusive line numbers).
@@ -1665,7 +1680,7 @@ fn invalid_anchor_detail(
         // Index / Head — read the git object snapshot so the line count matches
         // discovery. Insert into the cache so hash_anchor (called later in
         // apply_drafts) uses the same git-sourced content, not the worktree.
-        owned_content = read_via_source(&abs, repo_root, source).ok()?;
+        owned_content = read_via_source(&abs, repo_root, source, git_reader).ok()?;
         cache.insert(abs, owned_content.as_bytes().to_vec());
         &owned_content
     };
@@ -2053,7 +2068,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let dir = std::env::temp_dir();
         std::fs::write(tmp.path(), text.as_bytes()).unwrap();
-        let (_, kind) = classify_frontmatter(tmp.path(), &dir, DocSource::WorkingTree);
+        let (_, kind) = classify_frontmatter(tmp.path(), &dir, DocSource::WorkingTree, None);
         kind
     }
 
@@ -2095,7 +2110,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), [0xFF_u8, 0xFE, 0x00]).unwrap();
         let (_, kind) =
-            classify_frontmatter(tmp.path(), &std::env::temp_dir(), DocSource::WorkingTree);
+            classify_frontmatter(tmp.path(), &std::env::temp_dir(), DocSource::WorkingTree, None);
         assert!(
             matches!(kind, Some(ParseErrorKind::Unreadable(_))),
             "expected Unreadable, got {kind:?}"
@@ -2396,6 +2411,7 @@ mod tests {
             DocSource::WorkingTree,
             &None,
             &mut store::FileContentCache::new(),
+            None,
         );
         assert_eq!(
             detail,
@@ -2422,6 +2438,7 @@ mod tests {
                 DocSource::WorkingTree,
                 &None,
                 &mut store::FileContentCache::new(),
+                None,
             ),
             None,
             "valid anchor must pass through (preserve fail-closed downstream)"
@@ -2446,6 +2463,7 @@ mod tests {
                 DocSource::WorkingTree,
                 &None,
                 &mut store::FileContentCache::new(),
+                None,
             ),
             Some("start line 2 exceeds end line 1".to_string())
         );

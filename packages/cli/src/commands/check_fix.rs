@@ -14,6 +14,7 @@ use git_mesh_core::{
 use crate::commands::mesh::store;
 use crate::commands::mesh_coverage::build_mesh_index;
 use crate::frontmatter::parse_frontmatter;
+use crate::git::GitReader;
 use super::check::ContentCache;
 use crate::headings::{extract_headings, github_slug, resolve_heading, Heading};
 use crate::index::DocSource;
@@ -977,6 +978,7 @@ fn working_tree_change_set(repo_root: &Path) -> Result<Vec<String>> {
 /// `check::run`). They are forwarded to `cleanup_orphaned_meshes` so that
 /// cleanup only touches orphans whose sole `.md` anchor falls within the
 /// same scope that the discovery pass used.
+#[allow(clippy::too_many_arguments)]
 pub fn run_fix_pass(
     files: &[PathBuf],
     repo_root: &Path,
@@ -985,6 +987,7 @@ pub fn run_fix_pass(
     source: DocSource,
     dry_run: bool,
     content_cache: &mut ContentCache,
+    git_reader: Option<&GitReader>,
 ) -> Result<FixPlan> {
     let mut rename_map = RenameMap::build(repo_root)?;
 
@@ -1726,7 +1729,7 @@ pub fn run_fix_pass(
     // and a failed/dropped one resurfaces as a residual `mesh_uncovered`).
     // Best-effort: a single mesh that cannot be created is recorded as a
     // failure, never aborting the pass. In `dry_run` it previews only.
-    let mut mesh = super::mesh::scaffold::create_mesh_coverage(files, repo_root, source, dry_run, None)?;
+    let mut mesh = super::mesh::scaffold::create_mesh_coverage(files, repo_root, source, dry_run, None, git_reader)?;
 
     // Cleanup stage: delete scaffold meshes whose sole wiki page was removed.
     // Runs AFTER creation so the two halves never interfere.
@@ -1839,6 +1842,7 @@ mod tests {
             crate::index::DocSource::WorkingTree,
             /* dry_run */ true,
             &mut ContentCache::new(),
+            None,
         )
         .expect("fix pass");
 
@@ -1906,6 +1910,7 @@ mod tests {
             crate::index::DocSource::WorkingTree,
             /* dry_run */ true,
             &mut ContentCache::new(),
+            None,
         )
         .expect("fix pass");
 
@@ -2028,6 +2033,7 @@ mod tests {
             crate::index::DocSource::WorkingTree,
             /* dry_run */ true,
             &mut content_cache,
+            None,
         )
         .expect("fix pass");
 

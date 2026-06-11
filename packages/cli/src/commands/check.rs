@@ -398,6 +398,7 @@ pub fn run(
             source,
             fix_dry_run,
             &mut content_cache,
+            git_reader.as_ref(),
         ) {
                 Ok(p) => p,
                 Err(e) => {
@@ -1944,6 +1945,7 @@ mod tests {
             crate::index::DocSource::WorkingTree,
             false,
             &mut ContentCache::new(),
+            None,
         )
         .expect("fix pass");
         assert_eq!(plan.mesh_conflicts, 1, "expected one conflict recorded");
