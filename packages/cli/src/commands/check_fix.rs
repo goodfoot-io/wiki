@@ -1355,6 +1355,11 @@ pub fn run_fix_pass(
         None => build_mesh_index(repo_root, files)?,
     };
 
+    // Track whether the Fix #2 loop below relocates any mesh anchors on disk.
+    // When it does, the in-memory index becomes stale and must be rebuilt
+    // before Fix #4's coverage creation pass.
+    let mut mesh_relocated = false;
+
     // For each wiki file, rewrite broken line-range links that are now covered
     // by the updated mesh.
     for file in files {
@@ -1500,6 +1505,7 @@ pub fn run_fix_pass(
                     new_start,
                     new_end,
                 )?;
+                mesh_relocated = true;
             }
         }
 
@@ -1720,10 +1726,19 @@ pub fn run_fix_pass(
     // and a failed/dropped one resurfaces as a residual `mesh_uncovered`).
     // Best-effort: a single mesh that cannot be created is recorded as a
     // failure, never aborting the pass. In `dry_run` it previews only.
-    // Reuse the MeshIndex already built above for link rewriting — avoids a
-    // second full `.wiki/` store walk and parse inside `create_mesh_coverage`.
-    let mesh_index = mesh_index_opt.as_ref().expect("always Some");
-    let mut mesh = super::mesh::scaffold::create_mesh_coverage(files, repo_root, source, dry_run, Some(mesh_index))?;
+    //
+    // `relocate_anchor` in the Fix #2 loop above may have modified mesh files
+    // on disk, so the in-memory index cloned before that loop is potentially
+    // stale. Rebuild when a relocate occurred; otherwise reuse the pre-built
+    // index to avoid a redundant `.wiki/` store walk.
+    let coverage_index: Option<MeshIndex>;
+    let coverage_index_ref: Option<&MeshIndex> = if mesh_relocated {
+        coverage_index = build_mesh_index(repo_root, files)?;
+        coverage_index.as_ref()
+    } else {
+        mesh_index_opt.as_ref()
+    };
+    let mut mesh = super::mesh::scaffold::create_mesh_coverage(files, repo_root, source, dry_run, coverage_index_ref)?;
 
     // Cleanup stage: delete scaffold meshes whose sole wiki page was removed.
     // Runs AFTER creation so the two halves never interfere.

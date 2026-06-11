@@ -1,6 +1,2 @@
-packages/cli/src/commands/check_fix.rs#L93-L102 rk64:17bc1f0af8d80ff8
-packages/cli/src/commands/check.rs#L399-L405 rk64:4b5205308ec87764
-packages/cli/src/commands/check.rs#L500-L505 rk64:7ffe6ae905eeb2f0
-packages/cli/src/commands/check_fix.rs#L1312-L1330 rk64:32eabba663835c6c
 
 check_fix.rs counts ambiguous (>=2-match) move-follow conflicts into FixPlan.mesh_conflicts and fails closed (never auto-rewrites). check::run must gate its non-zero exit on plan.mesh_conflicts > 0 at both the dry-run and apply sites, or an unresolved ambiguous move would silently exit 0 and slip past pre-commit/CI. The usize field can be ignored without any compiler error, so a new fail-closed conflict category in check_fix must be wired into both exit gates by hand.

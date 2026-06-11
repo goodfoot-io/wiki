@@ -6,4 +6,7 @@ packages/cli/src/commands/check.rs#L247-L314 rk64:a0a6c8e6e5ce4f6b
 packages/cli/src/commands/mesh_coverage.rs#L126-L134 rk64:690431840911cb94
 packages/cli/src/commands/mesh_coverage.rs#L177-L179 rk64:104e65360ea52133
 packages/cli/src/commands/mesh_coverage.rs#L225-L266 rk64:0dc90204e43f7eef
+packages/cli/src/commands/mesh_coverage.rs#L136-L144 rk64:690431840911cb94
+packages/cli/src/commands/mesh_coverage.rs#L187-L189 rk64:104e65360ea52133
+packages/cli/src/commands/mesh_coverage.rs#L235-L276 rk64:0dc90204e43f7eef
 
