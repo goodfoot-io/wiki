@@ -1726,7 +1726,7 @@ pub fn run_fix_pass(
     // and a failed/dropped one resurfaces as a residual `mesh_uncovered`).
     // Best-effort: a single mesh that cannot be created is recorded as a
     // failure, never aborting the pass. In `dry_run` it previews only.
-    let mut mesh = super::mesh::scaffold::create_mesh_coverage(files, repo_root, source, dry_run)?;
+    let mut mesh = super::mesh::scaffold::create_mesh_coverage(files, repo_root, source, dry_run, None)?;
 
     // Cleanup stage: delete scaffold meshes whose sole wiki page was removed.
     // Runs AFTER creation so the two halves never interfere.
