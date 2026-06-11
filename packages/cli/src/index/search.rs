@@ -308,9 +308,11 @@ pub fn resolve_page(
         }));
     }
 
-    // Alias match: aliases_text is whitespace-joined.
+    // Alias match: aliases_text is whitespace-joined. The broad SELECT
+    // intentionally omits b.body — body text is fetched only for the
+    // matching row below, avoiding bulk IO when iterating the corpus.
     let mut stmt = conn.prepare(
-        "SELECT b.rowid, b.title, b.summary, b.body, b.aliases_text, p.path_rel
+        "SELECT b.rowid, b.title, b.summary, b.aliases_text, p.path_rel
          FROM blobs b
          JOIN paths p ON p.oid = b.oid AND p.source = ?1",
     )?;
@@ -321,11 +323,10 @@ pub fn resolve_page(
             r.get::<_, String>(2)?,
             r.get::<_, String>(3)?,
             r.get::<_, String>(4)?,
-            r.get::<_, String>(5)?,
         ))
     })?;
     for row in rows {
-        let (rowid, title, summary, body, aliases, path_rel) = row?;
+        let (rowid, title, summary, aliases, path_rel) = row?;
         let needle = q_lower.as_str();
         let mut matched: Option<String> = None;
         for a in aliases.split(|c: char| c.is_whitespace() || c == ',') {
@@ -336,6 +337,11 @@ pub fn resolve_page(
             }
         }
         if matched.is_some() {
+            let body: String = conn.query_row(
+                "SELECT b.body FROM blobs b WHERE b.rowid = ?1",
+                params![rowid],
+                |r| r.get(0),
+            )?;
             return Ok(Some(ResolvedPage {
                 title,
                 file: repo_root.join(&path_rel).to_string_lossy().into_owned(),
