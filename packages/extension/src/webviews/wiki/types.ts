@@ -11,6 +11,7 @@ export type HostMessage =
   | { type: 'updateContent'; html: string; scrollY?: number }
   | { type: 'showLoading' }
   | { type: 'showError'; message: string }
+  | { type: 'showWarning'; message: string }
   | { type: 'fileInfo'; href: string; relPath: string; title?: string; summary?: string };
 
 // Webview -> Host messages

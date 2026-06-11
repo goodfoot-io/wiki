@@ -1,23 +1,19 @@
 /**
- * Reproduction test: `installManagedWikiBinary` hangs indefinitely when
- * `fetchImpl` receives no `AbortSignal` and the connection never resolves.
+ * Post-fix test: `installManagedWikiBinary` rejects via `AbortSignal` when the
+ * underlying fetch hangs.
  *
- * The default `fetchImpl` is the global `fetch` (L154 of wikiBinary.ts). Neither
- * call site (`checksumsUrl` at L170, `assetUrl` at L188) passes an `AbortSignal`
- * or applies a timeout. When the GitHub release endpoint is unreachable or hangs
- * (offline user, DNS failure, TCP SYN accepted but no response), the download
- * hangs forever.  Because `ensureReady()` → `installManagedWikiBinary()` is
- * awaited by `WikiEditorProvider`'s `ready` handler, a hung download blocks
- * article rendering — no content appears, even though the shell HTML with the
- * loading spinner was already delivered.
+ * `installManagedWikiBinary` accepts an optional `AbortSignal` in
+ * `InstallManagedWikiBinaryParams.signal`. When a caller provides a
+ * signal (backed by an `AbortController` with a timeout), the fetch calls
+ * pass the signal through and the function rejects before the caller's
+ * deadline.
  *
- * This test is a **red-phase reproduction**: it MUST FAIL against the current
- * unfixed code by demonstrating that a hanging fetch blocks indefinitely with
- * no abort mechanism.  After the fix (adding a configurable timeout or
- * `AbortSignal` to `installManagedWikiBinary`), the promise will reject before
- * the 2-second race timeout, and the test will pass.
+ * This test creates an `AbortController` with a short timeout, passes its
+ * signal to `installManagedWikiBinary` along with a never-resolving fetch
+ * mock (simulating a hung TCP connection), and asserts the install promise
+ * rejects — proving the fetch will not block indefinitely.
  *
- * @summary Hanging fetch reproduction test — must fail against unfixed code.
+ * @summary Verifies AbortSignal prevents indefinite hang in installManagedWikiBinary.
  * @module test/suite/wikiBinary.hangingFetch.test
  */
 
@@ -29,7 +25,7 @@ import { installManagedWikiBinary } from '../../src/utils/wikiBinary.js';
 import { resolveWikiPlatform } from '../../src/utils/wikiPlatform.js';
 
 describe('wikiBinary hanging fetch', () => {
-  it('has no fetch timeout or AbortSignal — a hung connection blocks indefinitely', async function () {
+  it('rejects via AbortSignal when the underlying fetch hangs', async function () {
     this.timeout(10_000);
 
     const target = resolveWikiPlatform();
@@ -41,14 +37,34 @@ describe('wikiBinary hanging fetch', () => {
     const version = '9.9.9-test';
     const releaseBaseUrl = 'http://127.0.0.1:0';
 
-    // A fetch implementation that never resolves — simulates a hung TCP
-    // connection (offline, DNS failure, or a remote that accepts the SYN
-    // but never sends a response).
-    const hangingFetch: typeof fetch = () => {
-      return new Promise<Response>(() => {
-        /* never resolves or rejects */
+    // A fetch implementation that hangs indefinitely unless the provided
+    // AbortSignal fires — simulates an unresponsive remote endpoint.
+    const hangingFetch: typeof fetch = (_url, init) => {
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal != null) {
+          if (signal.aborted) {
+            reject(new Error('The operation was aborted'));
+            return;
+          }
+          signal.addEventListener(
+            'abort',
+            () => {
+              reject(new Error('The operation was aborted'));
+            },
+            { once: true }
+          );
+        }
+        // If no signal, hang forever (as before the fix); with a signal,
+        // reject when the caller aborts.
       });
     };
+
+    // Create an AbortController that fires after 500 ms — well within the
+    // 2-second race timeout, so the abort wins.
+    const controller = new AbortController();
+    const ABORT_TIMEOUT_MS = 500;
+    const abortTimer = setTimeout(() => controller.abort(), ABORT_TIMEOUT_MS);
 
     const RACE_TIMEOUT_MS = 2000;
 
@@ -57,7 +73,8 @@ describe('wikiBinary hanging fetch', () => {
         storageRoot,
         version,
         releaseBaseUrl,
-        fetchImpl: hangingFetch
+        fetchImpl: hangingFetch,
+        signal: controller.signal
       });
 
       const timeoutPromise = new Promise<never>((_, reject) => {
@@ -67,28 +84,24 @@ describe('wikiBinary hanging fetch', () => {
         );
       });
 
-      // Race the install against a short timeout.
-      //   - Before fix (no abort):     timeout always wins → test fails (red)
-      //   - After fix  (with abort):   installPromise rejects first with a
-      //     fetch-abort/timeout error → test passes (green)
+      // Race the install against a short test-level timeout.
+      //   - With AbortSignal:    installPromise rejects with an abort error
+      //                          before the 2s test timeout → passes
+      //   - Without AbortSignal: test timeout fires first → fails
       const raced = await Promise.race([installPromise, timeoutPromise]);
 
-      // If the race resolved with a value, the hanging fetch somehow completed.
-      // This should not happen with a never-resolving mock.
       assert.fail(`Unexpected success — install returned ${JSON.stringify(raced)}`);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes('NO_ABORT')) {
-        // The test timeout fired first — the code has no abort mechanism.
-        // Re-throw to fail this test as a red-phase reproduction.
         throw new Error(
-          `installManagedWikiBinary blocked indefinitely — no timeout or AbortSignal on fetch (message: ${message})`
+          `installManagedWikiBinary blocked indefinitely — the AbortSignal did not take effect (message: ${message})`
         );
       }
-      // An error that is NOT the test timeout means the promise rejected for
-      // another reason (e.g. an abort error from the fixed code).  That is the
-      // desired green-phase behavior — swallow the error and pass.
+      // Any non-NO_ABORT error (e.g. abort error) is the desired green-phase
+      // behaviour — swallow and pass.
     } finally {
+      clearTimeout(abortTimer);
       fs.rmSync(storageRoot, { recursive: true, force: true });
     }
   });

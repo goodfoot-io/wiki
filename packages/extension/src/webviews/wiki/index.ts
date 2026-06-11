@@ -182,6 +182,27 @@ onHostMessage((message: HostMessage) => {
       }
       break;
     }
+    case 'showWarning': {
+      // Non-replacing warning: article content remains visible below the
+      // warning banner. Create a #warning element on first use.
+      let warningEl = document.getElementById('warning');
+      if (warningEl == null) {
+        warningEl = document.createElement('div');
+        warningEl.id = 'warning';
+        warningEl.setAttribute('role', 'alert');
+        warningEl.style.cssText =
+          'margin-top:0;margin-bottom:1em;padding:12px 16px;' +
+          'border:1px solid rgba(234,179,8,.4);border-radius:4px;' +
+          'background-color:rgba(234,179,8,.1);';
+        const contentEl = document.getElementById('content');
+        if (contentEl?.parentNode != null) {
+          contentEl.parentNode.insertBefore(warningEl, contentEl);
+        }
+      }
+      warningEl.textContent = message.message;
+      warningEl.style.display = '';
+      break;
+    }
     default: {
       const _exhaustive: never = message;
       console.warn('[wiki-webview] Unhandled host message:', _exhaustive);

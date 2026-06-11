@@ -137,16 +137,25 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     const messageDisposable = webviewPanel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
       switch (message.type) {
         case 'ready': {
-          try {
-            await this._binaryManager.ready();
-            const savedScrollY = this._context.workspaceState.get<number>(scrollKey);
-            await this._renderPage(webviewPanel.webview, document.uri, webviewPanel, savedScrollY);
-          } catch (error) {
-            this._postMessage(webviewPanel.webview, {
-              type: 'showError',
-              message: `Failed to install wiki CLI for this extension: ${this._binaryManager.formatFailure(error)}`
-            });
-          }
+          // Render the page first, unconditionally — the binary is not needed
+          // for rendering, which is purely in-process.
+          const savedScrollY = this._context.workspaceState.get<number>(scrollKey);
+          await this._renderPage(webviewPanel.webview, document.uri, webviewPanel, savedScrollY);
+
+          // Then initialize the binary as a non-blocking follow-up. If the
+          // binary fails to install, post a non-replacing warning — never an
+          // error that replaces the rendered page.
+          this._binaryManager.ready().then(
+            () => {
+              // Binary ready — no additional action needed for rendering
+            },
+            (error) => {
+              this._postMessage(webviewPanel.webview, {
+                type: 'showWarning',
+                message: `Wiki CLI unavailable: ${this._binaryManager.formatFailure(error)}`
+              });
+            }
+          );
           break;
         }
 

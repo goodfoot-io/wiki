@@ -59,6 +59,7 @@ export interface InstallManagedWikiBinaryParams {
   platform?: NodeJS.Platform;
   arch?: NodeJS.Architecture;
   fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
 }
 
 export interface InstallManagedWikiBinaryResult {
@@ -167,7 +168,7 @@ export async function installManagedWikiBinary(
   const releaseBaseUrl = normalizeReleaseBaseUrl(params.releaseBaseUrl);
   const tag = getWikiReleaseTag(params.version);
   const checksumsUrl = `${releaseBaseUrl}/${tag}/${getWikiChecksumsAssetName()}`;
-  const checksumsResponse = await fetchImpl(checksumsUrl);
+  const checksumsResponse = await fetchImpl(checksumsUrl, { signal: params.signal });
   if (!checksumsResponse.ok) {
     throw new WikiBinaryError(
       `Failed to download wiki CLI checksums manifest from ${checksumsUrl} (HTTP ${checksumsResponse.status}).`
@@ -185,7 +186,7 @@ export async function installManagedWikiBinary(
   await mkdir(managedPaths.manifestDirectory, { recursive: true });
 
   const assetUrl = `${releaseBaseUrl}/${tag}/${asset.name}`;
-  const assetResponse = await fetchImpl(assetUrl);
+  const assetResponse = await fetchImpl(assetUrl, { signal: params.signal });
   if (!assetResponse.ok) {
     throw new WikiBinaryError(`Failed to download wiki CLI asset from ${assetUrl} (HTTP ${assetResponse.status}).`);
   }
