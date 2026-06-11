@@ -64,6 +64,16 @@ impl FileContentCache {
             }
         })
     }
+
+    /// Insert pre-read content into the cache, deriving raw bytes from the
+    /// UTF-8 string. Used when content was read from a non-filesystem source
+    /// (e.g. git objects) so subsequent [`get_or_read`] calls find it.
+    pub(crate) fn insert(&mut self, abs_path: PathBuf, utf8: String) {
+        let bytes = utf8.as_bytes().to_vec();
+        self.entries
+            .entry(abs_path)
+            .or_insert(CachedFile { utf8, bytes });
+    }
 }
 
 /// The fixed mesh storage directory: `repo_root/.wiki`.

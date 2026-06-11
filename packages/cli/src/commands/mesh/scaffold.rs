@@ -1655,8 +1655,10 @@ fn invalid_anchor_detail(
         cached.utf8.as_str()
     } else {
         // Index / Head — read the git object snapshot so the line count matches
-        // discovery. (Not cached: these are git object reads, not filesystem reads.)
+        // discovery. Insert into the cache so hash_anchor (called later in
+        // apply_drafts) uses the same git-sourced content, not the worktree.
         owned_content = read_via_source(&abs, repo_root, source).ok()?;
+        cache.insert(abs, owned_content.clone());
         &owned_content
     };
     let line_count = count_lines(content);
