@@ -1,4 +1,4 @@
 packages/cli/src/index/passes/worktree.rs#L52-L206 rk64:f3702287cc3dc478
-packages/cli/src/index/passes/index_file.rs#L4-L100 rk64:fe035ffe6ce980fb
+packages/cli/src/index/passes/index_file.rs#L4-L98 rk64:fa2e50c9d707ce9d
 
 Pass 2 (index_file) and Pass 3 (worktree) batch-load prior path-to-OID mappings from the paths SQLite table before iterating their respective sources, using in-memory HashMap lookups instead of per-file SQL point queries in the hot loop.
