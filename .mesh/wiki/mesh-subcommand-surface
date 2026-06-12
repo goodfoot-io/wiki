@@ -1,5 +1,5 @@
+packages/cli/src/commands/mesh/manage.rs rk64:19d3f2a172af33bd
 packages/cli/src/main.rs#L187-L368 rk64:ff7cbda6a4fad7e1
 plugins/wiki/skills/handbook/sections/command-reference.md rk64:b6aed1c91355cac0
-packages/cli/src/commands/mesh/manage.rs rk64:9ea2054c324afe65
 
 The wiki mesh three-verb command surface (show/add/remove): its clap definition and dispatch in main.rs, its implementation in manage.rs, and its documentation in SKILL.md and the cli.md reference must all agree on verbs, flags, and semantics.
