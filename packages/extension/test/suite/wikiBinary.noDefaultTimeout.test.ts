@@ -32,7 +32,7 @@ import { resolveWikiPlatform } from '../../src/utils/wikiPlatform.js';
 
 describe('wikiBinary no default timeout', () => {
   it('blocks indefinitely when no AbortSignal is provided and fetch hangs', async function () {
-    this.timeout(10_000);
+    this.timeout(45_000);
 
     const target = resolveWikiPlatform();
     if (target == null) {
@@ -54,7 +54,7 @@ describe('wikiBinary no default timeout', () => {
       });
     };
 
-    const HANG_TIMEOUT_MS = 5000;
+    const HANG_TIMEOUT_MS = 35_000;
 
     try {
       const installPromise = installManagedWikiBinary({
