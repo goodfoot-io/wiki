@@ -79,6 +79,10 @@ export class WikiLanguageFeatures {
   private _checkRunning = false;
   /** Whether a save landed while a check was already running — triggers one more check. */
   private _checkPending = false;
+  /** Whether dispose() has been called — guards against timer/async work after disposal. */
+  private _disposed = false;
+  /** Consecutive wiki check failures within a single check invocation. Capped at 3. */
+  private _checkRetries = 0;
 
   constructor(private readonly _binaryManager: WikiBinaryManager) {
     this._checkDiagnostics = vscode.languages.createDiagnosticCollection('wiki-check');
@@ -98,6 +102,11 @@ export class WikiLanguageFeatures {
   }
 
   dispose(): void {
+    if (this._checkTimer != null) {
+      clearTimeout(this._checkTimer);
+      this._checkTimer = null;
+    }
+    this._disposed = true;
     for (const d of this._disposables) {
       d.dispose();
     }
@@ -157,11 +166,11 @@ export class WikiLanguageFeatures {
     return null;
   }
 
-  private async _runWikiJson<T>(args: string[]): Promise<T | null> {
+  private async _runWikiJson<T>(args: string[], signal?: AbortSignal): Promise<T | null> {
     const wsRoot = this._workspaceRoot();
     try {
       const handle = await this._binaryManager.ready();
-      const result = await runWikiCommand(handle.path, args, undefined, wsRoot);
+      const result = await runWikiCommand(handle.path, args, signal, wsRoot);
       if (result.exitCode !== 0 || result.stdout.trim() === '') {
         return null;
       }
@@ -313,32 +322,70 @@ export class WikiLanguageFeatures {
   private async _runCheck(): Promise<void> {
     this._checkTimer = null;
     this._checkRunning = true;
+    this._checkRetries = 0;
+
     try {
-      do {
-        this._checkPending = false;
+      if (this._disposed) return;
 
-        const output = await this._runWikiJson<CheckOutput>(['check', '--format', 'json']);
-        if (output == null) continue;
+      const abortController = new AbortController();
+      const abortTimer = setTimeout(() => abortController.abort(), 30_000);
 
-        this._checkDiagnostics.clear();
+      try {
+        do {
+          this._checkPending = false;
 
-        const byFile = new Map<string, vscode.Diagnostic[]>();
-        for (const err of output.errors) {
-          const diags = byFile.get(err.file) ?? [];
-          const line = err.line > 0 ? err.line - 1 : 0;
-          const range = new vscode.Range(line, 0, line, Number.MAX_SAFE_INTEGER);
+          if (this._disposed) return;
 
-          const diag = new vscode.Diagnostic(range, err.message, vscode.DiagnosticSeverity.Error);
-          diag.source = 'wiki';
-          diag.code = err.kind;
-          diags.push(diag);
-          byFile.set(err.file, diags);
-        }
+          const output = await this._runWikiJson<CheckOutput>(['check', '--format', 'json'], abortController.signal);
 
-        for (const [file, diags] of byFile) {
-          this._checkDiagnostics.set(vscode.Uri.file(file), diags);
-        }
-      } while (this._checkPending);
+          if (output == null) {
+            this._checkRetries++;
+            if (!this._disposed) {
+              this._checkDiagnostics.clear();
+            }
+            console.warn('[wiki] wiki check returned no output (binary may be hung or unavailable).');
+            if (this._checkRetries >= 3) {
+              console.warn('[wiki] wiki check failed 3 consecutive times; giving up until next save.');
+              break;
+            }
+            // Small delay before retry to avoid tight process-spawn loops.
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+            continue;
+          }
+
+          // Reset retry counter on a successful check.
+          this._checkRetries = 0;
+
+          // Guard against unexpected JSON shape (e.g. {"error":"message"}).
+          if (!Array.isArray(output.errors)) {
+            console.warn('[wiki] wiki check returned unexpected JSON shape (missing errors array).');
+            continue;
+          }
+
+          if (this._disposed) return;
+
+          this._checkDiagnostics.clear();
+
+          const byFile = new Map<string, vscode.Diagnostic[]>();
+          for (const err of output.errors) {
+            const diags = byFile.get(err.file) ?? [];
+            const line = err.line > 0 ? err.line - 1 : 0;
+            const range = new vscode.Range(line, 0, line, Number.MAX_SAFE_INTEGER);
+
+            const diag = new vscode.Diagnostic(range, err.message, vscode.DiagnosticSeverity.Error);
+            diag.source = 'wiki';
+            diag.code = err.kind;
+            diags.push(diag);
+            byFile.set(err.file, diags);
+          }
+
+          for (const [file, diags] of byFile) {
+            this._checkDiagnostics.set(vscode.Uri.file(file), diags);
+          }
+        } while (this._checkPending);
+      } finally {
+        clearTimeout(abortTimer);
+      }
     } finally {
       this._checkRunning = false;
     }
