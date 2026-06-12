@@ -22,7 +22,7 @@ sha2 = "0.10"
 fs4 = { version = "0.13", features = ["sync"] }
 anyhow = "1"
 indexmap = { version = "2", features = ["serde"] }
-git-mesh-core = { git = "https://github.com/goodfoot-io/git-mesh.git", rev = "5396c8d30a9bc9f66c233ce356d401f7d0cca29d", package = "git-mesh-core" }
+git-mesh-core = { git = "https://github.com/goodfoot-io/git-mesh.git", rev = "958f3a01045537bdec7fed877e0d26ba957ee3bb", package = "git-mesh-core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
