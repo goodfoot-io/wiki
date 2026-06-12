@@ -77,5 +77,26 @@ Paragraph text.`;
       assert.ok(html.includes('href="path/to/page.md"'), 'Expected href="path/to/page.md"');
       assert.ok(html.includes('>some page<'), 'Expected link text "some page"');
     });
+
+    it('escapes HTML in untagged code fences (no language) without syntax highlighting spans', () => {
+      const html = render('```\nconst x = 1 < 2 && 3 > 1;\n```\n');
+      assert.ok(!html.includes('<span'), 'Untagged fence must not produce syntax-highlighting spans');
+      assert.ok(html.includes('&lt;'), 'Expected escaped < in output');
+      assert.ok(html.includes('&gt;'), 'Expected escaped > in output');
+      assert.ok(html.includes('const x = 1'), 'Expected code content to be present');
+    });
+
+    it('escapes HTML in unknown-language code fences without syntax highlighting spans', () => {
+      const html = render('```fake\n<a href="#">link</a> &amp;\n```\n');
+      assert.ok(!html.includes('<span'), 'Unknown-language fence must not produce syntax-highlighting spans');
+      assert.ok(html.includes('&lt;a href'), 'Expected escaped < in output');
+      assert.ok(html.includes('&gt;'), 'Expected escaped > in output');
+      assert.ok(html.includes('&amp;amp;'), 'Expected ampersand in code to be escaped');
+    });
+
+    it('still produces syntax-highlighting spans for known-language fences (non-regression)', () => {
+      const html = render('```typescript\nconst x: number = 42;\n```\n');
+      assert.ok(html.includes('<span'), 'Known-language fence must still produce syntax-highlighting spans');
+    });
   });
 });

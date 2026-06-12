@@ -127,13 +127,21 @@ const pluginSlugHeaders: MarkdownIt.PluginSimple = (md) => {
 
 const md = new MarkdownIt({ html: false, linkify: true, typographer: true });
 
+/**
+ * Escapes HTML special characters (&, <, >) in a string.
+ * Used to safely embed raw code content into HTML without interpretation.
+ *
+ * @param s - Raw string to escape.
+ * @returns Escaped string safe for inline HTML text content.
+ */
+const escapeHtml = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
 // Configure highlight.js for fenced code blocks.
 // Mermaid fences return a <pre class="mermaid"> wrapper so markdown-it uses it
 // as-is (it skips the default <pre><code> wrap when the result starts with <pre>).
 md.options.highlight = (code, lang) => {
   if (lang.trim().toLowerCase() === 'mermaid') {
-    const escaped = code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    return `<pre class="mermaid">${escaped}</pre>`;
+    return `<pre class="mermaid">${escapeHtml(code)}</pre>`;
   }
   if (lang && hljs.getLanguage(lang)) {
     try {
@@ -141,10 +149,10 @@ md.options.highlight = (code, lang) => {
     } catch (err) {
       getWikiLogger()
         .getChildLogger({ label: 'Render' })
-        .warn('highlight.js failed for language %s, falling back to auto-detection: %s', lang, formatLogError(err));
+        .warn('highlight.js failed for language %s, falling back to plain-text escape: %s', lang, formatLogError(err));
     }
   }
-  return hljs.highlightAuto(code).value;
+  return escapeHtml(code);
 };
 
 // Apply plugins in order.
