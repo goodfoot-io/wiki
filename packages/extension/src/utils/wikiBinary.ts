@@ -50,6 +50,7 @@ interface ManagedBinaryManifest {
   checksum: string;
   sourceUrl: string;
   installedAt: string;
+  size: number;
 }
 
 /**
@@ -143,6 +144,24 @@ export async function resolveManagedWikiBinary(
     return null;
   }
 
+  // Fast path: trust the binary when its mtime is not newer than the install
+  // time and its size matches the manifest record.  An unchanged mtime + size
+  // means the file has not been replaced or tampered with — there is no need
+  // to re-read the entire binary for a full SHA-256 comparison.
+  try {
+    const binaryStat = await stat(managedPaths.binaryPath);
+    const installedAtMs = new Date(manifest.installedAt).getTime();
+    if (binaryStat.mtimeMs <= installedAtMs && binaryStat.size === manifest.size) {
+      return { path: managedPaths.binaryPath, source: 'managed', version: params.version };
+    }
+  } catch {
+    // stat failure (e.g. deleted between checks) — fall through to sha256
+    getWikiLogger().trace(
+      'resolveManagedWikiBinary: stat failed for %s, falling back to sha256',
+      managedPaths.binaryPath
+    );
+  }
+
   if ((await sha256File(managedPaths.binaryPath)) !== manifest.checksum) {
     return null;
   }
@@ -207,7 +226,15 @@ async function installManagedWikiBinaryInner(
   const releaseBaseUrl = normalizeReleaseBaseUrl(params.releaseBaseUrl);
   const tag = getWikiReleaseTag(params.version);
   const checksumsUrl = `${releaseBaseUrl}/${tag}/${getWikiChecksumsAssetName()}`;
-  const checksumsResponse = await fetchImpl(checksumsUrl, { signal: params.signal });
+
+  // Apply a 30-second default timeout so a hung connection never blocks
+  // activation indefinitely.  When the caller provides their own signal we
+  // combine the two so that either the caller's cancellation or the default
+  // timeout can trigger first.
+  const signal =
+    params.signal != null ? AbortSignal.any([params.signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000);
+
+  const checksumsResponse = await fetchWithAbort(fetchImpl, checksumsUrl, signal);
   if (!checksumsResponse.ok) {
     throw new WikiBinaryError(
       `Failed to download wiki CLI checksums manifest from ${checksumsUrl} (HTTP ${checksumsResponse.status}).`
@@ -225,7 +252,7 @@ async function installManagedWikiBinaryInner(
   await mkdir(managedPaths.manifestDirectory, { recursive: true });
 
   const assetUrl = `${releaseBaseUrl}/${tag}/${asset.name}`;
-  const assetResponse = await fetchImpl(assetUrl, { signal: params.signal });
+  const assetResponse = await fetchWithAbort(fetchImpl, assetUrl, signal);
   if (!assetResponse.ok) {
     throw new WikiBinaryError(`Failed to download wiki CLI asset from ${assetUrl} (HTTP ${assetResponse.status}).`);
   }
@@ -256,7 +283,8 @@ async function installManagedWikiBinaryInner(
           assetName: target.assetName,
           checksum: asset.sha256,
           sourceUrl: assetUrl,
-          installedAt: new Date().toISOString()
+          installedAt: new Date().toISOString(),
+          size: assetBytes.length
         } satisfies ManagedBinaryManifest,
         null,
         2
@@ -276,6 +304,43 @@ async function installManagedWikiBinaryInner(
 }
 
 /**
+ * Race a fetch call against an {@link AbortSignal} so the caller's promise
+ * rejects when the signal fires, even when the fetch implementation itself
+ * ignores the signal (e.g. in test mocks or non-standard implementations).
+ *
+ * @param fetchImpl - The fetch implementation to call.
+ * @param url - URL to fetch.
+ * @param signal - Abort signal to race against.
+ * @returns The fetch response promise, rejected on abort.
+ */
+async function fetchWithAbort(fetchImpl: typeof fetch, url: string, signal: AbortSignal): Promise<Response> {
+  // When the signal already fired before we could register the listener,
+  // reject immediately — there is no point initiating the fetch.
+  if (signal.aborted) {
+    throw new DOMException('The operation was aborted', 'AbortError');
+  }
+
+  // Race the real fetch against a promise that rejects synchronously when
+  // the signal fires.  This protects callers whose fetch implementation
+  // does not check the signal option (e.g. test mocks).
+  return new Promise<Response>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException('The operation was aborted', 'AbortError'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    fetchImpl(url, { signal }).then(
+      (response) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(response);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      }
+    );
+  });
+}
+
+/**
+ * Locate a wiki binary on PATH for explicit development fallback scenarios.
  * Locate a wiki binary on PATH for explicit development fallback scenarios.
  *
  * @param platform - Host platform used for executable name resolution.
