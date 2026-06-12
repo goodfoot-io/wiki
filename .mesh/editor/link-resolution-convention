@@ -1,0 +1,5 @@
+packages/extension/src/providers/WikiLanguageFeatures.ts#L57-L70 rk64:2e4fc2dd94195afd
+packages/extension/src/providers/WikiEditorProvider.ts#L38-L44 rk64:f70fa1999a2f1134
+packages/cli/src/commands/mod.rs#L78-L114 rk64:e1adb803e55848c1
+
+Link resolution convention shared by the editor 'completion'/'hover'/'find references' providers, the webview-click handler, and the CLI diagnostics resolver. All three must agree on workspace-root-relative (/ -prefix), filesystem-absolute, page-relative, and external-path semantics. The TypeScript and Rust implementations are independent — no shared schema, type, or cross-language test enforces agreement.
