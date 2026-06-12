@@ -240,7 +240,7 @@ enum MeshCommands {
     /// (conflict markers in output).
     ///
     /// Designed for use as a custom git merge driver:
-    ///   git config merge.wiki-mesh.driver "wiki mesh merge %O %A %B %d"
+    ///   git config merge.wiki-mesh.driver "wiki mesh merge %O %A %B %L"
     Merge {
         /// Base (merge common ancestor) mesh file path
         #[arg(value_name = "base")]

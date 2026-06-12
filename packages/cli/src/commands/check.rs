@@ -373,6 +373,7 @@ pub fn run(
     // the coverage check sees valid data. Conflicted meshes that cannot be
     // resolved are surfaced as skips; the coverage check skips their slugs so
     // remaining diagnostics are still reported for clean meshes.
+    let mut conflict_resolution_incomplete = false;
     if fix {
         match check_fix::resolve_conflicted_meshes(repo_root) {
             Ok(report) => {
@@ -392,6 +393,9 @@ pub fn run(
                     for (slug, reason) in &report.skipped {
                         eprintln!("skipped mesh `{slug}`: {reason}");
                     }
+                }
+                if !report.skipped.is_empty() || !report.partial.is_empty() {
+                    conflict_resolution_incomplete = true;
                 }
             }
             Err(e) => {
@@ -518,7 +522,7 @@ pub fn run(
                     print!("{}", plan.mesh.advisories);
                 }
             }
-            if (!diagnostics.is_empty() || plan.mesh_conflicts > 0) && !no_exit_code {
+            if (!diagnostics.is_empty() || plan.mesh_conflicts > 0 || conflict_resolution_incomplete) && !no_exit_code {
                 return Ok(1);
             }
             return Ok(0);
@@ -612,7 +616,7 @@ pub fn run(
             }
         }
 
-        if (!post_diagnostics.is_empty() || plan.mesh_conflicts > 0) && !no_exit_code {
+        if (!post_diagnostics.is_empty() || plan.mesh_conflicts > 0 || conflict_resolution_incomplete) && !no_exit_code {
             return Ok(1);
         }
         return Ok(0);

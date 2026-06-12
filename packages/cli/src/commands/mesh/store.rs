@@ -254,17 +254,21 @@ pub(crate) fn hash_anchor(
 }
 
 /// Read all meshes, skipping files that fail to parse (e.g. due to git conflict
-/// markers). Writes each skipped file's path and error to stderr.
+/// markers). Returns the parsed meshes alongside a list of skipped slugs so the
+/// caller can print a single consolidated warning.
 ///
 /// Skips dotfiles and runtime artifacts (same filter as [`read_all`]). A missing
-/// `.wiki/` directory returns an empty `Vec` (not an error).
-pub(crate) fn read_all_tolerant(repo_root: &Path) -> Result<Vec<(String, MeshFile)>> {
+/// `.wiki/` directory returns an empty vector and an empty skip list.
+pub(crate) fn read_all_tolerant(
+    repo_root: &Path,
+) -> Result<(Vec<(String, MeshFile)>, Vec<String>)> {
     let root = wiki_dir(repo_root);
     if !root.exists() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
 
     let mut out = Vec::new();
+    let mut skipped = Vec::new();
     for entry in WalkDir::new(&root).sort_by_file_name() {
         let entry = entry.map_err(|e| miette::miette!("failed to walk {}: {e}", root.display()))?;
         if !entry.file_type().is_file() {
@@ -285,18 +289,23 @@ pub(crate) fn read_all_tolerant(repo_root: &Path) -> Result<Vec<(String, MeshFil
         let text = match fs::read_to_string(path) {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("wiki: failed to read mesh `{}`: {e}", path.display());
+                skipped.push(format!(
+                    "failed to read mesh `{}`: {e}",
+                    path.display()
+                ));
                 continue;
             }
         };
         match MeshFile::parse(&text) {
             Ok(mesh) => out.push((slug, mesh)),
             Err(e) => {
-                eprintln!("wiki: skipping unparseable mesh `{}`: {e}", slug);
+                skipped.push(format!(
+                    "skipping unparseable mesh `{slug}`: {e}"
+                ));
             }
         }
     }
-    Ok(out)
+    Ok((out, skipped))
 }
 
 /// Walk `.wiki/` and return `(slug, raw_text)` for every mesh file whose content

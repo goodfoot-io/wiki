@@ -294,6 +294,9 @@ pub fn resolve_conflicted_meshes(repo_root: &Path) -> Result<ConflictResolutionR
                 .then(a.start_line.cmp(&b.start_line))
                 .then(a.end_line.cmp(&b.end_line))
         });
+        final_anchors.dedup_by(|a, b| {
+            a.path == b.path && a.start_line == b.start_line && a.end_line == b.end_line
+        });
 
         // Step 6: Write.
         let fully_resolved = residual.is_empty() && unresolved_why.is_empty();
@@ -312,9 +315,14 @@ pub fn resolve_conflicted_meshes(repo_root: &Path) -> Result<ConflictResolutionR
                 .status()
                 .map_err(|e| miette::miette!("git add failed for mesh `{slug}`: {e}"))?;
             if !status.success() {
-                return Err(miette::miette!(
-                    "git add returned non-zero for mesh `{slug}`"
+                eprintln!(
+                    "warning: failed to stage mesh `{slug}` (git add exited non-zero)"
+                );
+                report.skipped.push((
+                    slug.clone(),
+                    "failed to stage: git add returned non-zero".to_string(),
                 ));
+                continue 'next_mesh;
             }
             report.resolved.push(slug.clone());
         } else {
@@ -1188,7 +1196,13 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<MeshFollowOutcome> {
     // Use tolerant reader to skip any meshes that still carry conflict markers
     // (e.g. after a partial conflict resolution). Anchor auto-follow for those
     // meshes is deferred — the next clean `--fix` pass will handle them.
-    let meshes = store::read_all_tolerant(repo_root)?;
+    let (meshes, skipped) = store::read_all_tolerant(repo_root)?;
+    if !skipped.is_empty() {
+        eprintln!(
+            "wiki: skipped {} unparseable mesh(es) during anchor follow",
+            skipped.len()
+        );
+    }
     if meshes.is_empty() {
         return Ok(MeshFollowOutcome::default());
     }

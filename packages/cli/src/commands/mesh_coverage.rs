@@ -223,7 +223,13 @@ pub(crate) fn build_mesh_index(
     repo_root: &Path,
     _files: &[PathBuf],
 ) -> Result<Option<MeshIndex>, miette::Error> {
-    let meshes = store::read_all_tolerant(repo_root)?;
+    let (meshes, skipped) = store::read_all_tolerant(repo_root)?;
+    if !skipped.is_empty() {
+        eprintln!(
+            "wiki: skipped {} unparseable mesh(es) during index build",
+            skipped.len()
+        );
+    }
 
     let mut by_anchor: HashMap<(PathBuf, u32, u32), Vec<String>> = HashMap::new();
     let mut paths_by_mesh: HashMap<String, Vec<PathBuf>> = HashMap::new();

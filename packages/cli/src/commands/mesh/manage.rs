@@ -456,11 +456,24 @@ fn merge_driver(base: &str, ours: &str, theirs: &str) -> Result<i32> {
             out.push_str(">>>>>>> theirs\n");
         }
 
+        // Detect why sentinel: empty-path unresolved entry marks a why conflict.
+        let has_why_conflict = result.unresolved.iter().any(|u| u.path.is_empty());
+
         // Blank-line separator before why (if any content exists).
-        if !out.is_empty() || !result.merged.why.is_empty() {
+        if !out.is_empty() || !result.merged.why.is_empty() || has_why_conflict {
             out.push('\n');
         }
-        if !result.merged.why.is_empty() {
+        if has_why_conflict {
+            // Wrap both sides' why texts in conflict markers so the user can
+            // reconcile them manually.
+            out.push_str("<<<<<<< ours\n");
+            out.push_str(&ours_mesh.why);
+            out.push('\n');
+            out.push_str("=======\n");
+            out.push_str(&theirs_mesh.why);
+            out.push('\n');
+            out.push_str(">>>>>>> theirs\n");
+        } else if !result.merged.why.is_empty() {
             out.push_str(&result.merged.why);
             out.push('\n');
         }
