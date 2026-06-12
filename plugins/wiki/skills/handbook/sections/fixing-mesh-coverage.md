@@ -28,3 +28,13 @@ When a new slug path-collides with a pre-existing ancestor mesh, `--fix` renames
 ## When `--fix` can't
 
 `--fix` is best-effort and fail-closes on what it can't safely resolve: a missing target path, an ambiguous line-range shift, deleted or moved content, a slug it can't create. It emits a **skip line naming the exact `wiki mesh` command to run**. That line is your starting point — go to `./resolving-skipped-fixes.md`.
+
+## Merge conflict resolution
+
+`wiki check --fix` also resolves `.wiki/` merge conflicts automatically by consuming the git-mesh-core `merge_mesh_files()` kernel. After a merge that produces conflict markers in a `.wiki/` mesh file, running `--fix` collapses the markers: anchor lines are compared against the worktree source and kept or removed so the mesh reflects whichever side survived the source merge.
+
+**Clean-source precondition:** The source file (the code file the anchor targets) must be free of its own conflict markers. `--fix` reads the worktree file as-is to produce the correct anchor hash. If the file still has markers, the mesh is left untouched and the report names the file you must resolve first.
+
+**Diverged `--why` rationale:** If both sides changed the rationale text differently, anchor lines resolve cleanly but the `--why` line retains `<<<<<<<` / `>>>>>>>` residue markers. This is safe to commit only after manual reconciliation — a mesh with residue is **not** re-staged.
+
+**Relation to the merge driver:** For an even smoother experience, see `./git-hook-setup.md` for the optional `wiki mesh merge` git merge driver. It collapses easy `.wiki/` conflicts mid-merge so they never surface as markers. Clones that skip setup fall back to git's line merge + `--fix` — no loss of correctness.

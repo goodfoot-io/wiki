@@ -15,9 +15,9 @@ See [Wiki Mesh Integration](../architecture/wiki-mesh-integration.md) for the de
 
 ### `git-mesh list <anchor> --porcelain`
 
-**Where:** [`mesh_coverage.rs`](/packages/cli/src/commands/mesh_coverage.rs#L180-L182)
+**Where:** [`mesh_coverage.rs`](/packages/cli/src/commands/mesh_coverage.rs#L181-L183)
 
-**Invoked by:** [`wiki check`](/packages/cli/src/commands/check.rs#L286-L353)
+**Invoked by:** [`wiki check`](/packages/cli/src/commands/check.rs#L287-L354)
 
 **Purpose:** Query all mesh subsystems that include a given file anchor. Used to determine whether a fragment link (`path#Lstart-Lend`) in a wiki article has a covering mesh that also anchors the wiki file itself.
 
@@ -29,7 +29,7 @@ See [Wiki Mesh Integration](../architecture/wiki-mesh-integration.md) for the de
 ```
 Sentinel `no meshes` (no tabs) when no meshes cover the anchor.
 
-**Subset extracted and used** ([`parse_mesh_ls_output`](/packages/cli/src/commands/mesh_coverage.rs#L228-L269)):
+**Subset extracted and used** ([`parse_mesh_ls_output`](/packages/cli/src/commands/mesh_coverage.rs#L234-L275)):
 - `mesh` — mesh name (everything left of the rightmost two tab-delimited fields)
 - `path` — repo-relative file path of each anchor in the mesh
 

@@ -16,3 +16,5 @@ plugins/*/.claude-plugin/plugin.json merge=json-version
 
 # Resolve .mesh/ merge conflicts structurally via git-mesh merge driver
 .mesh/** merge=mesh
+# Merge .wiki/ meshes via wiki CLI merge driver (optional; --fix is sufficient)
+.wiki/** merge=wiki-mesh

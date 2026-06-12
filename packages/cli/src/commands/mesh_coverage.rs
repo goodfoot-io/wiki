@@ -88,9 +88,10 @@ impl MeshIndex {
 
 /// Collect `mesh_uncovered` diagnostics for the given wiki files.
 ///
-/// Reads `.wiki/<slug>` files in-process via [`store::read_all`], then
-/// performs all coverage lookups in memory. Coverage is always computed —
-/// there is no external binary to be unavailable.
+/// Reads `.wiki/<slug>` files in-process via [`store::read_all_tolerant`]
+/// (skipping files that fail to parse), then performs all coverage lookups
+/// in memory. Coverage is always computed — there is no external binary to
+/// be unavailable.
 pub(super) fn collect_mesh_diagnostics(
     files: &[PathBuf],
     repo_root: &Path,
@@ -207,17 +208,22 @@ pub(super) fn collect_mesh_diagnostics(
 }
 
 /// Build a `MeshIndex` by reading `.wiki/<slug>` files in-process via
-/// [`store::read_all`].
+/// [`store::read_all_tolerant`] (skips files that fail to parse, e.g. due to
+/// git conflict markers).
 ///
 /// Always returns `Ok(Some(_))` — coverage is always computed, there is no
 /// external binary to be unavailable. Callers in `check_fix.rs` and
 /// `scaffold.rs` that previously handled `None` (binary missing) should treat
 /// `Some` as the only variant.
+///
+/// Files that fail to parse are skipped and logged to stderr. In non-fix
+/// mode, `check.rs` independently detects and reports conflict-markered
+/// meshes so the fail-closed guarantee is preserved at the caller level.
 pub(crate) fn build_mesh_index(
     repo_root: &Path,
     _files: &[PathBuf],
 ) -> Result<Option<MeshIndex>, miette::Error> {
-    let meshes = store::read_all(repo_root)?;
+    let meshes = store::read_all_tolerant(repo_root)?;
 
     let mut by_anchor: HashMap<(PathBuf, u32, u32), Vec<String>> = HashMap::new();
     let mut paths_by_mesh: HashMap<String, Vec<PathBuf>> = HashMap::new();

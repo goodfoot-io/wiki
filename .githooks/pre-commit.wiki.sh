@@ -10,6 +10,14 @@ set -e
 command -v wiki >/dev/null 2>&1 || exit 0
 WIKI_BIN=$(command -v wiki)
 
+# Register the wiki mesh merge driver (optional convenience; --fix alone is sufficient).
+# The driver collapses easy .wiki/ conflicts mid-merge so they never surface as markers.
+# Clones that skip setup fall back to git's line merge + post-merge --fix — no loss of correctness.
+if ! git config --get-regexp '^merge\.wiki-mesh\.driver$' >/dev/null 2>&1; then
+    git config merge.wiki-mesh.driver 'wiki mesh merge %O %A %B %L'
+    echo "wiki: registered wiki-mesh merge driver"
+fi
+
 # ── Single-pass: auto-fix + mesh coverage, re-stage all touched paths ─────────
 # --fix rewrites in place (requires --source=worktree); --print-applied prints
 # created/renamed mesh paths to stdout; --no-exit-code = advisory (best-effort).

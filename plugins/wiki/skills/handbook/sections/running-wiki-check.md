@@ -29,3 +29,7 @@ wiki --source index check   # validate staged content (pre-commit); also: worktr
 ```
 
 `--source` reads a different repo snapshot without touching the worktree. `--fix` requires `--source=worktree` because it rewrites files on disk.
+
+## Merge conflicts in `.wiki/` meshes
+
+Conflict-markered `.wiki/` mesh files are reported as errors in read-only `wiki check` (without `--fix`). The same errors are **resolvable** by running with `--fix`, which consumes the git-mesh-core `merge_mesh_files()` kernel to collapse the markers automatically. See `./fixing-mesh-coverage.md` for details and the two fail-closed cases (conflicted source file, diverged `--why` rationale).

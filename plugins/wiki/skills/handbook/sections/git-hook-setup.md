@@ -46,3 +46,23 @@ exit 0
 A staged edit can break a wikilink on an *unstaged* page or collide with an *untouched* page's title. Checking the entire corpus catches these cross-page failures and lets `--fix` repair them. The pass is idempotent — already-covered links are skipped — so it's cheap on every commit.
 
 Preview before wiring it in: `wiki check --fix --fix-dry-run` shows created meshes and any planned slug-collision renames without mutating anything.
+
+## Optional merge driver
+
+The `.gitattributes` file includes `.wiki/** merge=wiki-mesh` — committed and shared by everyone — but the merge driver itself is a **per-clone** registration. The hook's first run registers it automatically:
+
+```bash
+git config merge.wiki-mesh.driver 'wiki mesh merge %O %A %B %L'
+```
+
+This makes git call `wiki mesh merge` as the merge driver for `.wiki/` files when they conflict during a merge. It collapses easy conflicts mid-merge so they never leave markers in the first place.
+
+**What it does:** When both sides touch disjoint anchors, or one side touches anchors while the other only changes the `--why` rationale, the driver combines them without conflict markers. When both sides touch the same anchor, markers remain — and `--fix` handles the rest.
+
+**What it doesn't do:** The driver is a noise-reducing subset of `--fix`. It only resolves markers in `.wiki/` files; it doesn't re-hash anchors against the worktree, create coverage for new fragment links, or fix drifted links/anchors/frontmatter. Those are `--fix`'s job.
+
+**Fallback:** Clones that skip setup or don't have the wiki CLI installed fall back to git's built-in line merge for `.wiki/` files. The result (conflict markers) is the same input `--fix` already handles — no loss of correctness, just slightly more noise during the merge.
+
+### Why per-clone, not committed
+
+Git doesn't let you commit merge driver configuration to `.git/config`. The `.gitattributes` line references a driver name, but the driver definition (`merge.wiki-mesh.driver`) lives in the clone-local config. The hook sets it once and it persists.

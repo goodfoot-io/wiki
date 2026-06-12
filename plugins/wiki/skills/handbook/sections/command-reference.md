@@ -13,12 +13,13 @@ Flat lookup. For the day-to-day flow see the other sections; this is the surface
 | `wiki mesh show <slug> [--patch]` | Anchors with path, range, hash, fresh/stale; `--patch` diffs committed vs worktree for stale anchors. |
 | `wiki mesh add <slug> [<anchor>…] [--why <text>]` | Create / extend / upsert a mesh. |
 | `wiki mesh remove <slug> [<anchor>]` | Remove one anchor, or the whole mesh if no anchor given. |
+| `wiki mesh merge <base> <ours> <theirs> [markerlen]` | Git merge driver for `.wiki/` files. Combines two sides' mesh anchor sets and --why rationale, leaving markers only on true conflicts (same anchor changed on both sides, or diverged rationale). |
 
 ## `check` flags
 
 | Flag | Effect |
 |---|---|
-| `--fix` | Rewrite drifted links/anchors/frontmatter AND create coverage for uncovered links. Requires `--source=worktree`. |
+| `--fix` | Rewrite drifted links/anchors/frontmatter AND create coverage for uncovered links. Also resolves `.wiki/` merge conflicts. Requires `--source=worktree`. |
 | `--fix-dry-run` | Preview created meshes + planned renames; no mutation. Requires `--fix`. |
 | `--print-applied` | stdout = one repo-relative path per created/renamed mesh; advisories → stderr. Requires `--fix`; conflicts with `--fix-dry-run`. |
 | `--no-exit-code` | Exit 0 even with errors (report-only). |

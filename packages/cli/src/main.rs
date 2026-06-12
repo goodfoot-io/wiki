@@ -97,6 +97,20 @@ enum Commands {
     /// covered by a mesh that anchors both the wiki file and the link
     /// target (stored under `.wiki/`). With `--fix`, also creates that
     /// mesh coverage best-effort (the "Fix #4" pass).
+    ///
+    /// With `--fix`, additionally resolves `.wiki/` merge conflicts
+    /// (consuming the git-mesh-core merge_mesh_files kernel). Conflict
+    /// markers in the mesh are collapsed: anchor lines are compared
+    /// against the worktree source and kept or removed so the mesh
+    /// reflects whichever side survived the source merge — but only
+    /// when the source file itself is clean of conflict markers.
+    ///
+    /// Two fail-closed cases produce residue markers:
+    /// - Conflicted source file: mesh markers are left untouched and
+    ///   the report names the file you must resolve first.
+    /// - Diverged `--why` rationale: anchors resolve cleanly but the
+    ///   why line retains "<<<<<<<" / ">>>>>>>" markers for manual
+    ///   reconciliation. In both cases the mesh is NOT re-staged.
     Check {
         /// Glob patterns to match wiki pages (default: `**/*.md` under the current directory)
         #[arg(value_name = "glob")]

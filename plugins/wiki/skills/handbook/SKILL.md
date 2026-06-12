@@ -12,6 +12,7 @@ description: CLI for documentation in this repository - search with `wiki "[quer
 
 For anything beyond these, route by condition:
 
+- **Merge conflict in a `.wiki/` file after a branch merge**: Read `./sections/fixing-mesh-coverage.md`
 - **Setting up a new wiki, or deciding where a page belongs / whether content belongs in the wiki at all / when to restructure: Diátaxis mode separation, embed-vs-centralize, hub pages, reorganization signals**: Read `./sections/organizing-a-wiki.md`
 - **Finding a page, paginating results, listing the corpus, reading a summary, or deciding whether a `.md` file is even a wiki page**: Read `./sections/searching-and-reading.md`
 - **Writing a new page or editing one: frontmatter rules, required `title`/`summary`, reserved titles, case-insensitive collisions, page-to-page links, path resolution**: Read `./sections/writing-a-page.md`

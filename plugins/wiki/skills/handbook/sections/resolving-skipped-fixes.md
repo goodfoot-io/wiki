@@ -54,3 +54,25 @@ git commit -m "wiki: re-anchor <slug> after <what changed>"
 ```
 
 Then `wiki check` to confirm the failure clears. "Just re-add the anchors" / "batch it" removes the *recovery* effort, not the *per-anchor confirmation* — if that shorthand conflicts with the confirm step, surface it rather than dropping the step silently.
+
+## Merge conflict residue
+
+After a merge that touched both sides' `.wiki/` meshes, `wiki check --fix` automatically resolves most conflicts (see `./fixing-mesh-coverage.md`). Two cases produce **residue** — conflict markers that `--fix` cannot collapse — and the mesh is **not** re-staged until manually resolved.
+
+### 1. Conflicted source file
+
+The code file an anchor targets still has `<<<<<<<` / `>>>>>>>` markers. `--fix` cannot hash a conflicted file, so it leaves the entire mesh untouched and names the source file in the report. The fix is plain:
+
+1. Resolve the code file's conflict markers.
+2. Run `wiki check --fix` again — the mesh collapses automatically.
+
+### 2. Diverged `--why` rationale
+
+Both sides changed the mesh's `--why` rationale text differently. Anchor lines resolve cleanly (they point to resolved source), but the `why` line retains `<<<<<<<` / `>>>>>>>` residue. To resolve:
+
+1. Open the `.wiki/<slug>.mesh` file.
+2. Edit the `why:` line to remove the markers and keep the correct rationale.
+3. Stage the mesh: `git add .wiki/<slug>.mesh`
+4. `wiki check --fix` confirms clean state.
+
+Because a mesh with residue still reports as dirty, the commit stays blocked — which is the safe default. The `--fix` pre-pass report lists each mesh's status: fully resolved, partially resolved (with the reason), or skipped.

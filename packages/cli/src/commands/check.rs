@@ -15,6 +15,7 @@ use crate::parser::{LinkKind, parse_fragment_links};
 
 use super::check_fix;
 use super::mesh::scaffold::locate_existing_suffix;
+use super::mesh::store;
 use super::mesh_coverage;
 
 /// Per-run content cache that avoids re-reading the same file from disk.
@@ -363,38 +364,15 @@ pub fn run(
         return Ok(2);
     }
 
-    // Per-run content cache: avoids re-reading wiki pages (frontmatter loop,
-    // link loop, mesh coverage, and fix passes all read the same files).  In
-    // fix mode the same cache instance is shared across the pre-check, the fix
-    // pass, and the post-fix re-check.
-    let mut content_cache = ContentCache::new();
-
-    let diagnostics = match collect_for_files(
-        &files,
-        &index_files,
-        repo_root,
-        source,
-        git_reader.as_ref(),
-        &mut content_cache,
-    ) {
-        Ok(d) => d,
-        Err(e) => {
-            if json {
-                eprintln!("{}", serde_json::json!({"error": e.to_string()}));
-            } else {
-                eprintln!("error: {e}");
-            }
-            return Ok(2);
-        }
-    };
-
     // ── Conflict resolution pre-pass ─────────────────────────────────────────
     //
     // Resolve any `.wiki/` mesh files that carry git conflict markers BEFORE
-    // running the main fix pass (which parses all meshes via store::read_all).
-    // Conflicted meshes that cannot be read are surfaced as skips; fully
-    // resolved meshes are written clean and staged so the fix pass sees valid
-    // coverage on the re-collect.
+    // running the mesh coverage check (which parses all meshes via
+    // store::read_all and fails closed on conflict-markered files) and BEFORE
+    // the main fix pass. Fully resolved meshes are written clean and staged so
+    // the coverage check sees valid data. Conflicted meshes that cannot be
+    // resolved are surfaced as skips; the coverage check skips their slugs so
+    // remaining diagnostics are still reported for clean meshes.
     if fix {
         match check_fix::resolve_conflicted_meshes(repo_root) {
             Ok(report) => {
@@ -425,7 +403,61 @@ pub fn run(
                 return Ok(2);
             }
         }
+    }
 
+    // Per-run content cache: avoids re-reading wiki pages (frontmatter loop,
+    // link loop, mesh coverage, and fix passes all read the same files).  In
+    // fix mode the same cache instance is shared across the pre-check, the fix
+    // pass, and the post-fix re-check.
+    let mut content_cache = ContentCache::new();
+
+    let mut diagnostics = match collect_for_files(
+        &files,
+        &index_files,
+        repo_root,
+        source,
+        git_reader.as_ref(),
+        &mut content_cache,
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            if json {
+                eprintln!("{}", serde_json::json!({"error": e.to_string()}));
+            } else {
+                eprintln!("error: {e}");
+            }
+            return Ok(2);
+        }
+    };
+
+    // ── Conflict-marker detection (non-fix mode) ────────────────────────────
+    //
+    // `build_mesh_index` now uses `read_all_tolerant` which skips unparseable
+    // meshes instead of failing. In non-fix mode we need to detect and report
+    // conflicted meshes explicitly to preserve the fail-closed guarantee. In
+    // fix mode, the resolution pre-pass above already handled them.
+    if !fix {
+        match store::find_conflicted_meshes(repo_root) {
+            Ok(conflicted) => {
+                for (slug, _) in &conflicted {
+                    diagnostics.push(CheckDiagnostic {
+                        kind: "mesh_conflict".into(),
+                        file: format!(".wiki/{slug}"),
+                        line: 1,
+                        message: format!(
+                            "mesh `{slug}` has unresolved git conflict markers — run `wiki check --fix`"
+                        ),
+                    });
+                }
+            }
+            Err(e) => {
+                eprintln!("error: failed to scan for conflicted meshes: {e}");
+            }
+        }
+    }
+
+    // ── Fix pass (only in --fix mode) ────────────────────────────────────────
+    if fix {
         let plan = match check_fix::run_fix_pass(
             &files,
             repo_root,
@@ -436,21 +468,18 @@ pub fn run(
             &mut content_cache,
             git_reader.as_ref(),
         ) {
-                Ok(p) => p,
-                Err(e) => {
-                    if json {
-                        eprintln!("{}", serde_json::json!({"error": e.to_string()}));
-                    } else {
-                        eprintln!("error: {e}");
-                    }
-                    return Ok(2);
+            Ok(p) => p,
+            Err(e) => {
+                if json {
+                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
+                } else {
+                    eprintln!("error: {e}");
                 }
-            };
+                return Ok(2);
+            }
+        };
 
         if fix_dry_run {
-            // `--print-applied` conflicts with `--fix-dry-run`, so stdout is
-            // the human/JSON preview here. Mesh creation that *would* run is
-            // previewed alongside the link fixes.
             if json {
                 println!(
                     "{}",
@@ -485,27 +514,16 @@ pub fn run(
                 for m in &plan.mesh.planned_deletions {
                     println!("delete mesh: {m}");
                 }
-                // Mesh advisories (parse errors, dropped meshes, "Would rename"
-                // lines) are part of the preview.
                 if !plan.mesh.advisories.is_empty() {
                     print!("{}", plan.mesh.advisories);
                 }
             }
-            // A move-follow conflict (≥ 2-match ambiguity) fails closed: it is
-            // surfaced as a skipped fix above and must make the run non-zero so
-            // it blocks pre-commit/CI, unless the caller opted out of exit codes.
             if (!diagnostics.is_empty() || plan.mesh_conflicts > 0) && !no_exit_code {
                 return Ok(1);
             }
             return Ok(0);
         }
 
-        // Under `--print-applied`, stdout is EXACTLY the repo-relative paths of
-        // created/renamed meshes (one per line). The fix/skip summary, mesh
-        // advisories/failures, and post-fix diagnostics all go to stderr so the
-        // caller can consume stdout as an exact stage list. Without the flag,
-        // the summary and post-fix diagnostics keep their stdout home and mesh
-        // advisories print to stdout too; failures still go to stderr.
         if print_applied {
             for m in &plan.mesh.applied {
                 println!("{m}");
@@ -515,7 +533,6 @@ pub fn run(
             }
         }
 
-        // Human-readable fix/skip summary.
         if !json {
             for f in &plan.fixes {
                 let line = format!(
@@ -539,7 +556,6 @@ pub fn run(
                     println!("{line}");
                 }
             }
-            // Mesh advisories (parse errors, dropped meshes, renames).
             if !plan.mesh.advisories.is_empty() {
                 if print_applied {
                     eprint!("{}", plan.mesh.advisories);
@@ -548,8 +564,6 @@ pub fn run(
                 }
             }
         }
-        // Mesh-creation failures always go to stderr — the in-process store already printed
-        // each reason; name the slug that could not be created.
         for failure in &plan.mesh.failures {
             eprintln!(
                 "wiki check --fix: could not create mesh `{}` (see error output above)",
@@ -557,10 +571,6 @@ pub fn run(
             );
         }
 
-        // Non-dry-run: re-collect and emit post-fix diagnostics. A mesh that
-        // failed/dropped resurfaces here as a residual `mesh_uncovered`.
-        // Replace the cache with a fresh one so the post-fix re-check reads
-        // the patched files from disk rather than stale pre-fix content.
         content_cache = ContentCache::new();
         let post_diagnostics = match collect_for_files(
             &files,
@@ -602,8 +612,6 @@ pub fn run(
             }
         }
 
-        // As in the dry-run path, an unresolved move-follow conflict fails
-        // closed and drives a non-zero exit (unless `--no-exit-code`).
         if (!post_diagnostics.is_empty() || plan.mesh_conflicts > 0) && !no_exit_code {
             return Ok(1);
         }

@@ -1,4 +1,4 @@
-packages/cli/logging.wiki.md rk64:898c34e28f6f0c37
+packages/cli/logging.wiki.md rk64:8f352329b379e192
 packages/cli/src/index/passes/mod.rs#L8-L470 rk64:b7799217723c46de
 packages/cli/src/index/schema.rs#L8-L165 rk64:5ff35230fadfcccc
 packages/cli/tests/index_blob_readd.rs rk64:3651c9f8c47bdf33

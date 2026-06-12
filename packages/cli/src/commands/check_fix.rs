@@ -319,11 +319,15 @@ pub fn resolve_conflicted_meshes(repo_root: &Path) -> Result<ConflictResolutionR
             report.resolved.push(slug.clone());
         } else {
             // Partial: write resolved anchors clean, wrap residue in markers.
+            // Pass both sides' why texts so divergent rationales appear as
+            // conflict markers the user can reconcile manually.
             let partial_output = build_partial_output(
                 &final_anchors,
                 &result.merged.why,
                 &residual,
                 &unresolved_why,
+                &ours.why,
+                &theirs.why,
             );
             let mesh_path = store::slug_path(repo_root, slug);
             if let Some(parent) = mesh_path.parent() {
@@ -445,7 +449,9 @@ fn build_partial_output(
     resolved_anchors: &[AnchorRecord],
     why: &str,
     residual: &[UnresolvedAnchor],
-    _unresolved_why: &[UnresolvedAnchor],
+    unresolved_why: &[UnresolvedAnchor],
+    why_ours: &str,
+    why_theirs: &str,
 ) -> String {
     let mut out = String::new();
 
@@ -464,15 +470,27 @@ fn build_partial_output(
         out.push_str(">>>>>>> theirs\n");
     }
 
-    // For why conflicts: emit both why texts as markers.
-    // (resolved_anchors + residual + why text). The blank-line separator
-    // between anchor block and why text.
-    if !out.is_empty() || !why.is_empty() {
+    // Blank-line separator between anchor block and why text.
+    if !out.is_empty() || !why.is_empty() || !unresolved_why.is_empty() {
         out.push('\n');
     }
-    if !why.is_empty() {
-        out.push_str(why);
+
+    // For why conflicts: wrap both sides' why texts in conflict markers so
+    // the user can reconcile them manually. When there is no why conflict,
+    // write the resolved `why` text cleanly.
+    if unresolved_why.is_empty() {
+        if !why.is_empty() {
+            out.push_str(why);
+            out.push('\n');
+        }
+    } else {
+        out.push_str("<<<<<<< ours\n");
+        out.push_str(why_ours);
         out.push('\n');
+        out.push_str("=======\n");
+        out.push_str(why_theirs);
+        out.push('\n');
+        out.push_str(">>>>>>> theirs\n");
     }
 
     out
@@ -1167,7 +1185,10 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<MeshFollowOutcome> {
         return Ok(MeshFollowOutcome::default());
     }
 
-    let meshes = store::read_all(repo_root)?;
+    // Use tolerant reader to skip any meshes that still carry conflict markers
+    // (e.g. after a partial conflict resolution). Anchor auto-follow for those
+    // meshes is deferred — the next clean `--fix` pass will handle them.
+    let meshes = store::read_all_tolerant(repo_root)?;
     if meshes.is_empty() {
         return Ok(MeshFollowOutcome::default());
     }
@@ -2855,7 +2876,7 @@ mod tests {
             },
         ];
         let why = "Why text.";
-        let output = build_partial_output(&resolved, why, &residual, &[]);
+        let output = build_partial_output(&resolved, why, &residual, &[], "", "");
         assert!(output.contains("src/clean.rs#L1-L1 rk64:aaa"));
         assert!(output.contains("<<<<<<< ours"));
         assert!(output.contains("======="));
