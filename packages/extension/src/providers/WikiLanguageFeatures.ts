@@ -73,6 +73,13 @@ export class WikiLanguageFeatures {
   private readonly _checkDiagnostics: vscode.DiagnosticCollection;
   private readonly _disposables: vscode.Disposable[] = [];
 
+  /** Pending debounce timer handle — coalesces rapid saves into one check. */
+  private _checkTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Whether a `wiki check` process is currently running. */
+  private _checkRunning = false;
+  /** Whether a save landed while a check was already running — triggers one more check. */
+  private _checkPending = false;
+
   constructor(private readonly _binaryManager: WikiBinaryManager) {
     this._checkDiagnostics = vscode.languages.createDiagnosticCollection('wiki-check');
   }
@@ -268,30 +275,73 @@ export class WikiLanguageFeatures {
   // Diagnostics on save
   // --------------------------------------------------------------------------
 
+  /**
+   * Debounced and serialized diagnostics-on-save handler. Saves within 300 ms
+   * of each other coalesce into a single `wiki check`; at most one check runs
+   * at a time. When a save lands while a check is already running the handler
+   * schedules exactly one follow-up check (latest-wins). All diagnostics in
+   * the check output are published, clearing diagnostics for files that no
+   * longer have errors.
+   *
+   * @returns Disposable that unregisters the save listener.
+   */
   private _registerDiagnosticsOnSave(): vscode.Disposable {
-    return vscode.workspace.onDidSaveTextDocument(async (document: vscode.TextDocument) => {
+    return vscode.workspace.onDidSaveTextDocument((document: vscode.TextDocument) => {
       if (!this._isMarkdownFile(document.uri)) return;
 
-      this._checkDiagnostics.delete(document.uri);
-
-      const output = await this._runWikiJson<CheckOutput>(['check', '--format', 'json']);
-      if (output == null) return;
-
-      const diagnostics: vscode.Diagnostic[] = [];
-      for (const err of output.errors) {
-        if (err.file !== document.uri.fsPath) continue;
-
-        const line = err.line > 0 ? err.line - 1 : 0;
-        const range = new vscode.Range(line, 0, line, Number.MAX_SAFE_INTEGER);
-
-        const diag = new vscode.Diagnostic(range, err.message, vscode.DiagnosticSeverity.Error);
-        diag.source = 'wiki';
-        diag.code = err.kind;
-        diagnostics.push(diag);
+      if (this._checkRunning) {
+        this._checkPending = true;
+        return;
       }
 
-      this._checkDiagnostics.set(document.uri, diagnostics);
+      // Coalesce rapid saves (including "Save All") into one check by
+      // resetting the debounce timer on every incoming save.
+      if (this._checkTimer != null) {
+        clearTimeout(this._checkTimer);
+      }
+      this._checkTimer = setTimeout(() => this._runCheck(), 300);
     });
+  }
+
+  /**
+   * Run a single `wiki check` and publish diagnostics for every file in its
+   * output. Loops while {@link _checkPending} is true so a save that lands
+   * mid-check triggers exactly one follow-up run.
+   *
+   * @returns Promise that settles when the check-and-publish loop finishes.
+   */
+  private async _runCheck(): Promise<void> {
+    this._checkTimer = null;
+    this._checkRunning = true;
+    try {
+      do {
+        this._checkPending = false;
+
+        const output = await this._runWikiJson<CheckOutput>(['check', '--format', 'json']);
+        if (output == null) continue;
+
+        this._checkDiagnostics.clear();
+
+        const byFile = new Map<string, vscode.Diagnostic[]>();
+        for (const err of output.errors) {
+          const diags = byFile.get(err.file) ?? [];
+          const line = err.line > 0 ? err.line - 1 : 0;
+          const range = new vscode.Range(line, 0, line, Number.MAX_SAFE_INTEGER);
+
+          const diag = new vscode.Diagnostic(range, err.message, vscode.DiagnosticSeverity.Error);
+          diag.source = 'wiki';
+          diag.code = err.kind;
+          diags.push(diag);
+          byFile.set(err.file, diags);
+        }
+
+        for (const [file, diags] of byFile) {
+          this._checkDiagnostics.set(vscode.Uri.file(file), diags);
+        }
+      } while (this._checkPending);
+    } finally {
+      this._checkRunning = false;
+    }
   }
 
   // --------------------------------------------------------------------------
