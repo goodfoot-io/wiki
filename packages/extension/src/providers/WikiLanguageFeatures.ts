@@ -10,10 +10,10 @@
  * @summary Editor language features for wiki files.
  */
 
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { readFrontmatter } from '../utils/frontmatter.js';
+import { type FrontmatterInfo, readFrontmatter } from '../utils/frontmatter.js';
 import { runWikiCommand } from '../utils/wikiBinary.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
 
@@ -72,6 +72,7 @@ export function resolveLinkTarget(href: string, fromFile: string, workspaceRoot?
 export class WikiLanguageFeatures {
   private readonly _checkDiagnostics: vscode.DiagnosticCollection;
   private readonly _disposables: vscode.Disposable[] = [];
+  private readonly _frontmatterCache = new Map<string, { mtime: number; fm: FrontmatterInfo | null }>();
 
   /** Pending debounce timer handle — coalesces rapid saves into one check. */
   private _checkTimer: ReturnType<typeof setTimeout> | null = null;
@@ -199,7 +200,8 @@ export class WikiLanguageFeatures {
       {
         provideCompletionItems: async (
           document: vscode.TextDocument,
-          position: vscode.Position
+          position: vscode.Position,
+          token: vscode.CancellationToken
         ): Promise<vscode.CompletionItem[] | undefined> => {
           if (!this._isMarkdownFile(document.uri)) return undefined;
 
@@ -213,18 +215,50 @@ export class WikiLanguageFeatures {
 
           const sourceDir = path.dirname(document.uri.fsPath);
           const files = await this._allMarkdownFiles();
+          if (token.isCancellationRequested) return undefined;
+
+          type ResolvedEntry = {
+            fileUri: vscode.Uri;
+            href: string;
+            fm: FrontmatterInfo | null;
+          };
+
+          const resolved = await Promise.all(
+            files.map(async (fileUri): Promise<ResolvedEntry | null> => {
+              const relPath = path.relative(sourceDir, fileUri.fsPath);
+              if (relPath === '') return null;
+              // Normalise separators to POSIX for markdown links.
+              const href = relPath.split(path.sep).join('/');
+              const absPath = fileUri.fsPath;
+
+              // Check mtime-based cache
+              let mtime: number;
+              try {
+                const s = await stat(absPath);
+                mtime = s.mtimeMs;
+              } catch {
+                return { fileUri, href, fm: null };
+              }
+
+              const cached = this._frontmatterCache.get(absPath);
+              if (cached !== undefined && cached.mtime === mtime) {
+                return { fileUri, href, fm: cached.fm };
+              }
+
+              const fm = await readFrontmatter(absPath);
+              this._frontmatterCache.set(absPath, { mtime, fm });
+              return { fileUri, href, fm };
+            })
+          );
+
+          if (token.isCancellationRequested) return undefined;
 
           const items: vscode.CompletionItem[] = [];
-          for (const fileUri of files) {
-            const relPath = path.relative(sourceDir, fileUri.fsPath);
-            if (relPath === '') continue;
-            // Normalise separators to POSIX for markdown links.
-            const href = relPath.split(path.sep).join('/');
-
-            const ci = new vscode.CompletionItem(href, vscode.CompletionItemKind.File);
-            ci.insertText = href;
-
-            const fm = await readFrontmatter(fileUri.fsPath);
+          for (const entry of resolved) {
+            if (entry == null) continue;
+            const ci = new vscode.CompletionItem(entry.href, vscode.CompletionItemKind.File);
+            ci.insertText = entry.href;
+            const fm = entry.fm;
             if (fm?.title != null && fm.summary != null) {
               ci.detail = fm.title;
               ci.documentation = new vscode.MarkdownString(fm.summary);
@@ -232,9 +266,8 @@ export class WikiLanguageFeatures {
               // markdown files.
               ci.sortText = `0_${fm.title.toLowerCase()}`;
             } else {
-              ci.sortText = `1_${href.toLowerCase()}`;
+              ci.sortText = `1_${entry.href.toLowerCase()}`;
             }
-
             items.push(ci);
           }
           return items;
