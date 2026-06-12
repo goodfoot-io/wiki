@@ -1,5 +1,5 @@
-packages/cli/src/commands/mesh/manage.rs rk64:19d3f2a172af33bd
-packages/cli/src/main.rs#L187-L368 rk64:ff7cbda6a4fad7e1
-plugins/wiki/skills/handbook/sections/command-reference.md rk64:b6aed1c91355cac0
+packages/cli/src/commands/mesh/manage.rs rk64:171cdec631e2bf12
+packages/cli/src/main.rs#L187-L368 rk64:9a9a8d3ca3106185
+plugins/wiki/skills/handbook/sections/command-reference.md rk64:08f913c7b67d671a
 
-The wiki mesh three-verb command surface (show/add/remove): its clap definition and dispatch in main.rs, its implementation in manage.rs, and its documentation in SKILL.md and the cli.md reference must all agree on verbs, flags, and semantics.
+The wiki mesh command surface (show/add/remove/merge): its clap definition and dispatch in main.rs, its implementation in manage.rs, and its documentation in the command-reference.md handbook section must all agree on verbs, flags, and semantics.

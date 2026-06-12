@@ -15,7 +15,7 @@ See [Wiki Mesh Integration](../architecture/wiki-mesh-integration.md) for the de
 
 ### `git-mesh list <anchor> --porcelain`
 
-**Where:** [`mesh_coverage.rs`](/packages/cli/src/commands/mesh_coverage.rs#L181-L183)
+**Where:** [`mesh_coverage.rs`](/packages/cli/src/commands/mesh_coverage.rs#L187-L189)
 
 **Invoked by:** [`wiki check`](/packages/cli/src/commands/check.rs#L287-L354)
 
