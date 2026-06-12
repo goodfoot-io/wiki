@@ -1,4 +1,4 @@
+packages/cli/src/commands/mesh/scaffold.rs#L1362-L1389 rk64:8497dae9a8bea11e
 packages/cli/src/commands/mesh/store.rs#L172-L192 rk64:b6745eafdce43d9f
-packages/cli/src/commands/mesh/scaffold.rs#L1337-L1364 rk64:8497dae9a8bea11e
 
 Blocker rename rollback relies on store::write's atomic temp-file-plus-persist semantics to safely restore the original mesh when the destination write fails.
