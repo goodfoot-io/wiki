@@ -4,10 +4,12 @@
 //! failure is resolvable without the `git mesh` binary. All three verbs
 //! operate on the `.wiki/` store via [`super::store`].
 
+use std::io::Write as _;
 use std::path::Path;
 
 use miette::Result;
 
+use git_mesh_core::mesh_file::{MeshFile, merge_mesh_files};
 use git_mesh_core::{AnchorExtent, validate_mesh_name, validate_repo_relative_path};
 
 use crate::MeshCommands;
@@ -31,6 +33,9 @@ pub(crate) fn run(command: MeshCommands, repo_root: &Path, json: bool) -> Result
         MeshCommands::Show { slug, patch } => show(&slug, patch, repo_root),
         MeshCommands::Add { slug, anchors, why } => add(&slug, &anchors, why.as_deref(), repo_root),
         MeshCommands::Remove { slug, anchor } => remove(&slug, anchor.as_deref(), repo_root),
+        MeshCommands::Merge { base, ours, theirs, marker_len: _ } => {
+            merge_driver(&base, &ours, &theirs)
+        }
     }
 }
 
@@ -386,11 +391,101 @@ fn remove(slug: &str, anchor: Option<&str>, repo_root: &Path) -> Result<i32> {
     Ok(0)
 }
 
+// ── merge driver ───────────────────────────────────────────────────────────────
+
+/// Three-way merge driver for `.wiki/` mesh files.
+///
+/// Reads the three mesh files (base, ours, theirs), performs a structural
+/// merge, and writes the result to the ours path (`%A`). Returns `Ok(0)` on
+/// full resolution (no conflict markers in output) and `Ok(1)` on partial
+/// resolution (conflict markers remain for manual resolution).
+///
+/// Does NOT consult the worktree — `source_files` is empty, so same-anchor
+/// hash divergence produces unresolved entries (exits 1).
+fn merge_driver(base: &str, ours: &str, theirs: &str) -> Result<i32> {
+    let base_text = std::fs::read_to_string(base)
+        .map_err(|e| miette::miette!("failed to read base mesh `{base}`: {e}"))?;
+    let ours_text = std::fs::read_to_string(ours)
+        .map_err(|e| miette::miette!("failed to read ours mesh `{ours}`: {e}"))?;
+    let theirs_text = std::fs::read_to_string(theirs)
+        .map_err(|e| miette::miette!("failed to read theirs mesh `{theirs}`: {e}"))?;
+
+    let base_mesh = MeshFile::parse(&base_text)
+        .map_err(|e| miette::miette!("invalid base mesh `{base}`: {e}"))?;
+    let ours_mesh = MeshFile::parse(&ours_text)
+        .map_err(|e| miette::miette!("invalid ours mesh `{ours}`: {e}"))?;
+    let theirs_mesh = MeshFile::parse(&theirs_text)
+        .map_err(|e| miette::miette!("invalid theirs mesh `{theirs}`: {e}"))?;
+
+    let result = merge_mesh_files(Some(&base_mesh), &ours_mesh, &theirs_mesh, &[]);
+
+    if result.unresolved.is_empty() {
+        // Fully resolved: write merged to ours path atomically.
+        let ours_path = Path::new(ours);
+        let parent = ours_path.parent().ok_or_else(|| {
+            miette::miette!("no parent directory for `{ours}`")
+        })?;
+        let mut tmp = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|e| miette::miette!("failed to create temp file: {e}"))?;
+        tmp.write_all(result.merged.serialize().as_bytes())
+            .map_err(|e| miette::miette!("failed to write merged mesh: {e}"))?;
+        tmp.persist(ours_path)
+            .map_err(|e| miette::miette!("failed to persist merged mesh: {e}"))?;
+        Ok(0)
+    } else {
+        // Partial resolution: write resolved anchors cleanly, wrap each
+        // non-empty-path unresolved anchor in conflict markers, then append
+        // the why text. Exit 1 to signal git that manual resolution is needed.
+        let mut out = String::new();
+
+        // Resolved anchors.
+        for anchor in &result.merged.anchors {
+            out.push_str(&anchor.to_string());
+            out.push('\n');
+        }
+
+        // Conflict markers for unresolved anchors with a real path.
+        for u in &result.unresolved {
+            if u.path.is_empty() {
+                continue; // why conflict — handled below via the exit code
+            }
+            out.push_str("<<<<<<< ours\n");
+            out.push_str(&format!("{}\n", u.ours));
+            out.push_str("=======\n");
+            out.push_str(&format!("{}\n", u.theirs));
+            out.push_str(">>>>>>> theirs\n");
+        }
+
+        // Blank-line separator before why (if any content exists).
+        if !out.is_empty() || !result.merged.why.is_empty() {
+            out.push('\n');
+        }
+        if !result.merged.why.is_empty() {
+            out.push_str(&result.merged.why);
+            out.push('\n');
+        }
+
+        let ours_path = Path::new(ours);
+        let parent = ours_path.parent().ok_or_else(|| {
+            miette::miette!("no parent directory for `{ours}`")
+        })?;
+        let mut tmp = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|e| miette::miette!("failed to create temp file: {e}"))?;
+        tmp.write_all(out.as_bytes())
+            .map_err(|e| miette::miette!("failed to write partial mesh: {e}"))?;
+        tmp.persist(ours_path)
+            .map_err(|e| miette::miette!("failed to persist partial mesh: {e}"))?;
+        Ok(1)
+    }
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
     // ── anchor parser tests ───────────────────────────────────────────────────
 
@@ -432,5 +527,214 @@ mod tests {
     fn parse_anchor_start_greater_than_end_is_error() {
         let result = parse_anchor("src/foo.rs#L5-L2");
         assert!(result.is_err(), "start > end must be an error");
+    }
+
+    // ── merge_driver tests ────────────────────────────────────────────────────
+
+    fn anchor_record_simple(path: &str, start: u32, end: u32, hash: &str) -> git_mesh_core::mesh_file::AnchorRecord {
+        use git_mesh_core::mesh_file::AnchorRecord;
+        AnchorRecord {
+            path: path.to_string(),
+            start_line: start,
+            end_line: end,
+            algorithm: "rk64".to_string(),
+            content_hash: hash.to_string(),
+        }
+    }
+
+    /// Full resolution: base + ours + theirs → union, writes %A, exits 0.
+    #[test]
+    fn merge_driver_full_resolution() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        let base_path = root.join("base.mesh");
+        let ours_path = root.join("ours.mesh");
+        let theirs_path = root.join("theirs.mesh");
+
+        let base = MeshFile {
+            anchors: vec![
+                anchor_record_simple("src/common.rs", 0, 0, "base_hash"),
+            ],
+            why: "Base why.".to_string(),
+        };
+        let ours = MeshFile {
+            anchors: vec![
+                anchor_record_simple("src/common.rs", 0, 0, "base_hash"),
+                anchor_record_simple("src/ours_only.rs", 1, 1, "ours_hash"),
+            ],
+            why: "Base why.".to_string(),
+        };
+        let theirs = MeshFile {
+            anchors: vec![
+                anchor_record_simple("src/common.rs", 0, 0, "base_hash"),
+                anchor_record_simple("src/theirs_only.rs", 2, 2, "theirs_hash"),
+            ],
+            why: "Base why.".to_string(),
+        };
+
+        fs::write(&base_path, base.serialize()).unwrap();
+        fs::write(&ours_path, ours.serialize()).unwrap();
+        fs::write(&theirs_path, theirs.serialize()).unwrap();
+
+        let exit = merge_driver(
+            &base_path.to_string_lossy(),
+            &ours_path.to_string_lossy(),
+            &theirs_path.to_string_lossy(),
+        )
+        .unwrap();
+        assert_eq!(exit, 0, "full resolution must exit 0");
+
+        // %A (ours path) should contain the merged result.
+        let content = fs::read_to_string(&ours_path).unwrap();
+        let merged = MeshFile::parse(&content).unwrap();
+        assert_eq!(merged.anchors.len(), 3, "expected union of all anchors");
+        let paths: Vec<&str> = merged.anchors.iter().map(|a| a.path.as_str()).collect();
+        assert!(paths.contains(&"src/common.rs"));
+        assert!(paths.contains(&"src/ours_only.rs"));
+        assert!(paths.contains(&"src/theirs_only.rs"));
+    }
+
+    /// Same-anchor divergence: both sides modify the same anchor identically
+    /// relative to base → merged cleanly (identical changes collapse).
+    #[test]
+    fn merge_driver_identical_changes_collapse() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        let base_path = root.join("base.mesh");
+        let ours_path = root.join("ours.mesh");
+        let theirs_path = root.join("theirs.mesh");
+
+        let base = MeshFile {
+            anchors: vec![
+                anchor_record_simple("src/file.rs", 1, 1, "base_hash"),
+            ],
+            why: "Why.".to_string(),
+        };
+        // Both sides make the identical change.
+        let ours = MeshFile {
+            anchors: vec![
+                anchor_record_simple("src/file.rs", 1, 3, "new_hash"),
+            ],
+            why: "Why changed.".to_string(),
+        };
+        let theirs = MeshFile {
+            anchors: vec![
+                anchor_record_simple("src/file.rs", 1, 3, "new_hash"),
+            ],
+            why: "Why changed.".to_string(),
+        };
+
+        fs::write(&base_path, base.serialize()).unwrap();
+        fs::write(&ours_path, ours.serialize()).unwrap();
+        fs::write(&theirs_path, theirs.serialize()).unwrap();
+
+        let exit = merge_driver(
+            &base_path.to_string_lossy(),
+            &ours_path.to_string_lossy(),
+            &theirs_path.to_string_lossy(),
+        )
+        .unwrap();
+        assert_eq!(exit, 0, "identical changes must resolve cleanly");
+
+        let content = fs::read_to_string(&ours_path).unwrap();
+        let merged = MeshFile::parse(&content).unwrap();
+        assert_eq!(merged.anchors.len(), 1);
+        assert_eq!(merged.anchors[0].content_hash, "new_hash");
+        assert_eq!(merged.why, "Why changed.");
+    }
+
+    /// Same-anchor divergence (different hashes, no source files): both sides
+    /// changed the same anchor differently → unresolved, exits 1.
+    #[test]
+    fn merge_driver_same_anchor_different_hash_exits_1() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        let base_path = root.join("base.mesh");
+        let ours_path = root.join("ours.mesh");
+        let theirs_path = root.join("theirs.mesh");
+
+        let base = MeshFile {
+            anchors: vec![
+                anchor_record_simple("src/file.rs", 1, 1, "base_hash"),
+            ],
+            why: "Why.".to_string(),
+        };
+        let ours = MeshFile {
+            anchors: vec![
+                anchor_record_simple("src/file.rs", 1, 1, "ours_hash"),
+            ],
+            why: "Why.".to_string(),
+        };
+        let theirs = MeshFile {
+            anchors: vec![
+                anchor_record_simple("src/file.rs", 1, 1, "theirs_hash"),
+            ],
+            why: "Why.".to_string(),
+        };
+
+        fs::write(&base_path, base.serialize()).unwrap();
+        fs::write(&ours_path, ours.serialize()).unwrap();
+        fs::write(&theirs_path, theirs.serialize()).unwrap();
+
+        let exit = merge_driver(
+            &base_path.to_string_lossy(),
+            &ours_path.to_string_lossy(),
+            &theirs_path.to_string_lossy(),
+        )
+        .unwrap();
+        assert_eq!(exit, 1, "divergent hashes must exit 1");
+
+        // The output should contain conflict markers.
+        let content = fs::read_to_string(&ours_path).unwrap();
+        assert!(content.contains("<<<<<<< ours"));
+        assert!(content.contains("======="));
+        assert!(content.contains(">>>>>>> theirs"));
+    }
+
+    /// Empty source_files: the merge driver never reads worktree files.
+    /// A test confirming no worktree access (no error for missing source).
+    #[test]
+    fn merge_driver_empty_source_files_no_worktree_access() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        let base_path = root.join("base.mesh");
+        let ours_path = root.join("ours.mesh");
+        let theirs_path = root.join("theirs.mesh");
+
+        // Mesh references a file that does NOT exist on disk.
+        let base = MeshFile {
+            anchors: vec![],
+            why: String::new(),
+        };
+        let ours = MeshFile {
+            anchors: vec![
+                anchor_record_simple("src/nonexistent.rs", 1, 1, "h1"),
+            ],
+            why: String::new(),
+        };
+        let theirs = MeshFile {
+            anchors: vec![
+                anchor_record_simple("src/nonexistent.rs", 1, 1, "h2"),
+            ],
+            why: String::new(),
+        };
+
+        fs::write(&base_path, base.serialize()).unwrap();
+        fs::write(&ours_path, ours.serialize()).unwrap();
+        fs::write(&theirs_path, theirs.serialize()).unwrap();
+
+        // Should NOT fail — merge driver never reads worktree files.
+        let exit = merge_driver(
+            &base_path.to_string_lossy(),
+            &ours_path.to_string_lossy(),
+            &theirs_path.to_string_lossy(),
+        )
+        .unwrap();
+        // Same anchor, different hash, no source → unresolved → exit 1.
+        assert_eq!(exit, 1);
     }
 }

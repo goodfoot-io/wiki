@@ -388,8 +388,44 @@ pub fn run(
         }
     };
 
-    // ── Fix pass ──────────────────────────────────────────────────────────────
+    // ── Conflict resolution pre-pass ─────────────────────────────────────────
+    //
+    // Resolve any `.wiki/` mesh files that carry git conflict markers BEFORE
+    // running the main fix pass (which parses all meshes via store::read_all).
+    // Conflicted meshes that cannot be read are surfaced as skips; fully
+    // resolved meshes are written clean and staged so the fix pass sees valid
+    // coverage on the re-collect.
     if fix {
+        match check_fix::resolve_conflicted_meshes(repo_root) {
+            Ok(report) => {
+                if !report.resolved.is_empty() || !report.partial.is_empty() || !report.skipped.is_empty() {
+                    if !report.resolved.is_empty() {
+                        eprintln!(
+                            "resolved {} conflicted mesh(es)",
+                            report.resolved.len()
+                        );
+                    }
+                    if !report.partial.is_empty() {
+                        eprintln!(
+                            "partially resolved {} mesh(es) with residue",
+                            report.partial.len()
+                        );
+                    }
+                    for (slug, reason) in &report.skipped {
+                        eprintln!("skipped mesh `{slug}`: {reason}");
+                    }
+                }
+            }
+            Err(e) => {
+                if json {
+                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
+                } else {
+                    eprintln!("error: conflict resolution failed: {e}");
+                }
+                return Ok(2);
+            }
+        }
+
         let plan = match check_fix::run_fix_pass(
             &files,
             repo_root,

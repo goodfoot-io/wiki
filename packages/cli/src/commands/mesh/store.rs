@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use miette::Result;
 use walkdir::WalkDir;
 
-use git_mesh_core::mesh_file::{AnchorRecord, MeshFile};
+use git_mesh_core::mesh_file::{AnchorRecord, MeshFile, has_conflict_markers};
 use git_mesh_core::{AnchorExtent, RK64_ALGORITHM, cheap_fingerprint_with_extent, rk64_to_hex};
 
 /// Per-run file-content cache that avoids re-reading the same file when
@@ -91,7 +91,7 @@ pub(crate) fn wiki_dir(repo_root: &Path) -> PathBuf {
 }
 
 /// Resolve the on-disk path of the mesh file for `slug`.
-fn slug_path(repo_root: &Path, slug: &str) -> PathBuf {
+pub(crate) fn slug_path(repo_root: &Path, slug: &str) -> PathBuf {
     let mut path = wiki_dir(repo_root);
     for component in slug.split('/') {
         path.push(component);
@@ -182,6 +182,10 @@ pub(crate) fn exists(repo_root: &Path, slug: &str) -> bool {
 ///
 /// Parent directories are created as needed. The write is atomic: a temp file
 /// in the destination directory is written then renamed into place.
+///
+/// Anchors are written in canonical order: sorted by `(path, start_line,
+/// end_line)` so that every write produces a deterministic serialization
+/// regardless of the order in which anchors were added programmatically.
 pub(crate) fn write(repo_root: &Path, slug: &str, mesh: &MeshFile) -> Result<()> {
     let path = slug_path(repo_root, slug);
     let parent = path
@@ -193,7 +197,17 @@ pub(crate) fn write(repo_root: &Path, slug: &str, mesh: &MeshFile) -> Result<()>
     let mut tmp = tempfile::NamedTempFile::new_in(parent)
         .map_err(|e| miette::miette!("failed to create temp file in {}: {e}", parent.display()))?;
     use std::io::Write as _;
-    tmp.write_all(mesh.serialize().as_bytes())
+
+    // Canonical ordering: sort by (path, start_line, end_line) before serializing.
+    let mut sorted = mesh.clone();
+    sorted.anchors.sort_by(|a, b| {
+        a.path
+            .cmp(&b.path)
+            .then(a.start_line.cmp(&b.start_line))
+            .then(a.end_line.cmp(&b.end_line))
+    });
+
+    tmp.write_all(sorted.serialize().as_bytes())
         .map_err(|e| miette::miette!("failed to write mesh `{slug}`: {e}"))?;
     tmp.persist(&path)
         .map_err(|e| miette::miette!("failed to persist mesh `{slug}`: {e}"))?;
@@ -232,6 +246,45 @@ pub(crate) fn hash_anchor(
         &cached.bytes,
         &extent,
     )))
+}
+
+/// Walk `.wiki/` and return `(slug, raw_text)` for every mesh file whose content
+/// contains git conflict markers.
+///
+/// Skips dotfiles and runtime artifacts (same filter as [`read_all`]). A missing
+/// `.wiki/` directory returns an empty `Vec` (not an error).
+pub(crate) fn find_conflicted_meshes(repo_root: &Path) -> Result<Vec<(String, String)>> {
+    let root = wiki_dir(repo_root);
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::new();
+    for entry in WalkDir::new(&root).sort_by_file_name() {
+        let entry =
+            entry.map_err(|e| miette::miette!("failed to walk {}: {e}", root.display()))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with('.') || is_runtime_artifact(n))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let Some(slug) = slug_for(&root, path) else {
+            continue;
+        };
+        let text = fs::read_to_string(path)
+            .map_err(|e| miette::miette!("failed to read mesh `{}`: {e}", path.display()))?;
+        if has_conflict_markers(&text) {
+            out.push((slug, text));
+        }
+    }
+    Ok(out)
 }
 
 /// Build an [`AnchorRecord`] from a path, extent, and bare-hex content hash.
@@ -527,17 +580,20 @@ mod tests {
     use super::*;
 
     fn sample_mesh() -> MeshFile {
+        // Anchors are in canonical (path, start_line, end_line) order so the
+        // write+read_one round-trip test passes: store::write sorts before
+        // serializing.
         MeshFile {
             anchors: vec![
-                anchor_record(
-                    "src/foo.rs".to_string(),
-                    AnchorExtent::LineRange { start: 2, end: 4 },
-                    "deadbeef".to_string(),
-                ),
                 anchor_record(
                     "src/bar.rs".to_string(),
                     AnchorExtent::WholeFile,
                     "cafef00d".to_string(),
+                ),
+                anchor_record(
+                    "src/foo.rs".to_string(),
+                    AnchorExtent::LineRange { start: 2, end: 4 },
+                    "deadbeef".to_string(),
                 ),
             ],
             why: "Sample subsystem spanning foo and bar.".to_string(),
@@ -717,6 +773,60 @@ mod tests {
             msg.contains("conflicted"),
             "error message must name the offending file: {msg}"
         );
+    }
+
+    #[test]
+    fn find_conflicted_meshes_returns_conflicted_slug_and_raw_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Write a clean mesh (no conflict markers).
+        write(root, "goodslug", &sample_mesh()).unwrap();
+
+        // Write a mesh with git conflict markers.
+        let wiki = wiki_dir(root);
+        let conflicted_text = "<<<<<<< HEAD\nsrc/a.rs rk64:abc123\n=======\nsrc/a.rs rk64:def456\n>>>>>>> other\n\nwhy";
+        fs::write(wiki.join("conflicted"), conflicted_text.as_bytes()).unwrap();
+
+        // find_conflicted_meshes must return only the conflicted file.
+        let results = find_conflicted_meshes(root).unwrap();
+        assert_eq!(results.len(), 1, "expected exactly one conflicted mesh");
+        assert_eq!(results[0].0, "conflicted");
+        assert_eq!(results[0].1, conflicted_text);
+    }
+
+    #[test]
+    fn find_conflicted_meshes_missing_dir_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let results = find_conflicted_meshes(dir.path()).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn find_conflicted_meshes_skips_clean_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "clean1", &sample_mesh()).unwrap();
+        write(root, "clean2", &sample_mesh()).unwrap();
+        let results = find_conflicted_meshes(root).unwrap();
+        assert!(results.is_empty(), "expected no conflicted meshes");
+    }
+
+    #[test]
+    fn find_conflicted_meshes_skips_dotfiles_and_runtime_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let wiki = wiki_dir(root);
+
+        // Create the .wiki directory.
+        fs::create_dir_all(&wiki).unwrap();
+
+        // Write a runtime artifact with marker-looking content — must be skipped.
+        fs::write(wiki.join("wiki-index.sqlite"), b"<<<<<<< HEAD\nsqlite junk\n=======\nmore junk\n>>>>>>> other\n").unwrap();
+        fs::write(wiki.join(".DS_Store"), b"<<<<<<< HEAD\n").unwrap();
+
+        let results = find_conflicted_meshes(root).unwrap();
+        assert!(results.is_empty(), "expected no conflicted meshes from dotfiles/artifacts");
     }
 
     #[test]

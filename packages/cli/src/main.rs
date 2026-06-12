@@ -218,6 +218,29 @@ enum MeshCommands {
         #[arg(value_name = "anchor")]
         anchor: Option<String>,
     },
+    /// Three-way merge driver for `.wiki/` mesh files.
+    ///
+    /// Reads the base, ours, and theirs mesh file paths, performs a structural
+    /// merge of the anchor records and why text, and writes the result to the
+    /// ours path. Exits 0 on full resolution or 1 on partial resolution
+    /// (conflict markers in output).
+    ///
+    /// Designed for use as a custom git merge driver:
+    ///   git config merge.wiki-mesh.driver "wiki mesh merge %O %A %B %d"
+    Merge {
+        /// Base (merge common ancestor) mesh file path
+        #[arg(value_name = "base")]
+        base: String,
+        /// Ours (current branch) mesh file path — result is written here
+        #[arg(value_name = "ours")]
+        ours: String,
+        /// Theirs (other branch) mesh file path
+        #[arg(value_name = "theirs")]
+        theirs: String,
+        /// Conflict marker length (accepted for git compatibility; always uses 7)
+        #[arg(value_name = "markerlen", default_value = "7")]
+        marker_len: usize,
+    },
 }
 
 /// Read all non-empty trimmed lines from stdin, if stdin is not an interactive terminal.

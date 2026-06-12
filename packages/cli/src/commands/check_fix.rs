@@ -10,6 +10,9 @@ use serde::Serialize;
 use git_mesh_core::{
     AnchorExtent, LineIndex, cheap_fingerprint_indexed, rk64_from_hex, scan_indexed_rk64,
 };
+use git_mesh_core::mesh_file::{
+    has_conflict_markers, merge_mesh_files, AnchorRecord, MeshFile, UnresolvedAnchor,
+};
 
 use crate::commands::mesh::store;
 use crate::commands::mesh_coverage::build_mesh_index;
@@ -101,6 +104,378 @@ pub struct FixPlan {
     /// count drives a non-zero exit so the conflict fails pre-commit/CI (the
     /// `wiki check --fix` hot path). Fail-closed: a conflict never auto-rewrites.
     pub mesh_conflicts: usize,
+}
+
+// ── Conflict resolution ─────────────────────────────────────────────────────────
+
+/// The outcome of a mesh conflict-resolution pass.
+#[derive(Debug)]
+pub struct ConflictResolutionReport {
+    /// Slugs of meshes that were fully resolved (merged cleanly).
+    pub resolved: Vec<String>,
+    /// Slugs of meshes that were partially resolved (residue remains).
+    pub partial: Vec<String>,
+    /// Slugs + reason for meshes that could not be resolved at all.
+    pub skipped: Vec<(String, String)>,
+}
+
+/// Walk `.wiki/` and resolve every mesh file that carries git conflict markers.
+///
+/// For each conflicted mesh:
+///
+/// 1. Split the raw text into ours/theirs content by parsing three-way conflict
+///    marker blocks (`<<<<<<<` / `=======` / `>>>>>>>`). Diff3 base markers
+///    (`|||||||`) are discarded.
+///
+/// 2. Parse each side with `MeshFile::parse()`. If either side fails, skip.
+///
+/// 3. Collect every unique `anchor.path` from both parsed meshes, read each
+///    source file from the worktree, and check `has_conflict_markers()` on its
+///    content. If any source file has markers, skip (the source is itself
+///    conflicted — can't authoritatively re-hash).
+///
+/// 4. Call `merge_mesh_files(None, &ours, &theirs, &source_files)` with the
+///    clean worktree file bytes.
+///
+/// 5. Partition unresolved:
+///    - `u.path.is_empty()` → `--why` sentinel → residue
+///    - Non-empty path → same-anchor divergence → try re-hashing the worktree
+///      file directly; if it matches one side, accept that side; otherwise,
+///      keep as residue.
+///
+/// 6. Fully resolved meshes are written via `store::write()` and `git add`-ed.
+///    Partial meshes are written with resolved anchors clean and only the
+///    residue wrapped in conflict markers (NOT staged).
+///
+/// A missing `.wiki/` directory returns a report with all-empty fields.
+pub fn resolve_conflicted_meshes(repo_root: &Path) -> Result<ConflictResolutionReport> {
+    let conflicted = store::find_conflicted_meshes(repo_root)?;
+    if conflicted.is_empty() {
+        return Ok(ConflictResolutionReport {
+            resolved: Vec::new(),
+            partial: Vec::new(),
+            skipped: Vec::new(),
+        });
+    }
+
+    let mut report = ConflictResolutionReport {
+        resolved: Vec::new(),
+        partial: Vec::new(),
+        skipped: Vec::new(),
+    };
+
+    'next_mesh: for (slug, raw_text) in &conflicted {
+        // Step 1: Split markers into ours/theirs content.
+        let (ours_text, theirs_text) = match split_conflict_blocks(raw_text) {
+            Ok(pair) => pair,
+            Err(e) => {
+                report
+                    .skipped
+                    .push((slug.clone(), format!("failed to split markers: {e}")));
+                continue;
+            }
+        };
+
+        // Step 2: Parse each side.
+        let ours = match MeshFile::parse(&ours_text) {
+            Ok(m) => m,
+            Err(e) => {
+                report
+                    .skipped
+                    .push((slug.clone(), format!("ours side failed to parse: {e}")));
+                continue;
+            }
+        };
+        let theirs = match MeshFile::parse(&theirs_text) {
+            Ok(m) => m,
+            Err(e) => {
+                report
+                    .skipped
+                    .push((slug.clone(), format!("theirs side failed to parse: {e}")));
+                continue;
+            }
+        };
+
+        // Step 3: Clean-source precondition — read every source file named by
+        // both sides and verify none are themselves conflicted.
+        let mut seen_paths: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut source_paths: Vec<String> = Vec::new();
+        for anchor in ours.anchors.iter().chain(theirs.anchors.iter()) {
+            if seen_paths.insert(&anchor.path) {
+                source_paths.push(anchor.path.clone());
+            }
+        }
+
+        let mut source_files: Vec<(String, Vec<u8>)> = Vec::new();
+        for sp in &source_paths {
+            let abs = repo_root.join(sp);
+            let bytes = match std::fs::read(&abs) {
+                Ok(b) => b,
+                Err(_) => {
+                    report.skipped.push((
+                        slug.clone(),
+                        format!("source file `{sp}` not found in worktree"),
+                    ));
+                    continue 'next_mesh;
+                }
+            };
+            let text = match String::from_utf8(bytes) {
+                Ok(t) => t,
+                Err(_) => {
+                    report.skipped.push((
+                        slug.clone(),
+                        format!("source file `{sp}` is not valid UTF-8"),
+                    ));
+                    continue 'next_mesh;
+                }
+            };
+            if has_conflict_markers(&text) {
+                report.skipped.push((
+                    slug.clone(),
+                    format!("source file `{sp}` has its own conflict markers"),
+                ));
+                continue 'next_mesh;
+            }
+            source_files.push((sp.clone(), text.into_bytes()));
+        }
+
+        // Step 4: Merge.
+        let result = merge_mesh_files(None, &ours, &theirs, &source_files);
+
+        // Step 5: Partition unresolved.
+        let (unresolved_why, unresolved_anchors): (Vec<_>, Vec<_>) = result
+            .unresolved
+            .into_iter()
+            .partition(|u| u.path.is_empty());
+
+        let mut residual = unresolved_anchors;
+
+        // For same-anchor divergence, try re-hashing the worktree file to see
+        // if one side's hash matches the actual content.
+        let mut resolved_extra: Vec<AnchorRecord> = Vec::new();
+        residual.retain(|u| {
+            let abs = repo_root.join(&u.path);
+            let bytes = match std::fs::read(&abs) {
+                Ok(b) => b,
+                Err(_) => return true, // keep as unresolved
+            };
+            let extent = if u.start_line == 0 && u.end_line == 0 {
+                git_mesh_core::AnchorExtent::WholeFile
+            } else {
+                git_mesh_core::AnchorExtent::LineRange {
+                    start: u.start_line,
+                    end: u.end_line,
+                }
+            };
+            let computed =
+                git_mesh_core::rk64_to_hex(git_mesh_core::cheap_fingerprint_with_extent(
+                    &bytes,
+                    &extent,
+                ));
+
+            // If the worktree hash matches one side, accept that side.
+            if computed == u.ours.content_hash {
+                resolved_extra.push(u.ours.clone());
+                false // removed from residual
+            } else if computed == u.theirs.content_hash {
+                resolved_extra.push(u.theirs.clone());
+                false
+            } else {
+                true // keep as unresolved
+            }
+        });
+
+        // Build the final merged mesh with all resolved anchors.
+        let mut final_anchors = result.merged.anchors;
+        final_anchors.extend(resolved_extra);
+        final_anchors.sort_by(|a, b| {
+            a.path
+                .cmp(&b.path)
+                .then(a.start_line.cmp(&b.start_line))
+                .then(a.end_line.cmp(&b.end_line))
+        });
+
+        // Step 6: Write.
+        let fully_resolved = residual.is_empty() && unresolved_why.is_empty();
+        if fully_resolved {
+            let merged = MeshFile {
+                anchors: final_anchors,
+                why: result.merged.why,
+            };
+            store::write(repo_root, slug, &merged)?;
+            // git add the mesh file.
+            let mesh_path = store::wiki_dir(repo_root).join(slug);
+            let status = std::process::Command::new("git")
+                .current_dir(repo_root)
+                .args(["add", "--"])
+                .arg(&mesh_path)
+                .status()
+                .map_err(|e| miette::miette!("git add failed for mesh `{slug}`: {e}"))?;
+            if !status.success() {
+                return Err(miette::miette!(
+                    "git add returned non-zero for mesh `{slug}`"
+                ));
+            }
+            report.resolved.push(slug.clone());
+        } else {
+            // Partial: write resolved anchors clean, wrap residue in markers.
+            let partial_output = build_partial_output(
+                &final_anchors,
+                &result.merged.why,
+                &residual,
+                &unresolved_why,
+            );
+            let mesh_path = store::slug_path(repo_root, slug);
+            if let Some(parent) = mesh_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    miette::miette!("failed to create {}: {e}", parent.display())
+                })?;
+            }
+            // Write atomically via temp file + persist.
+            let mut tmp = tempfile::NamedTempFile::new_in(
+                mesh_path.parent().ok_or_else(|| {
+                    miette::miette!("mesh slug `{slug}` has no parent directory")
+                })?,
+            )
+            .map_err(|e| miette::miette!("failed to create temp file: {e}"))?;
+            use std::io::Write as _;
+            tmp.write_all(partial_output.as_bytes())
+                .map_err(|e| miette::miette!("failed to write partial mesh `{slug}`: {e}"))?;
+            tmp.persist(&mesh_path)
+                .map_err(|e| miette::miette!("failed to persist mesh `{slug}`: {e}"))?;
+            // Do NOT git add — partial meshes have conflict markers.
+            report.partial.push(slug.clone());
+        }
+    }
+
+    Ok(report)
+}
+
+/// Split the raw text of a mesh file with git conflict markers into
+/// (ours_content, theirs_content) by parsing three-way conflict blocks.
+///
+/// Lines outside any conflict block appear in both outputs. Diff3 base markers
+/// (`|||||||`) are discarded: content between `|||||||` and `=======` is
+/// omitted from both sides.
+///
+/// Returns an error on unterminated marker blocks.
+fn split_conflict_blocks(text: &str) -> Result<(String, String)> {
+    let mut ours = String::new();
+    let mut theirs = String::new();
+
+    #[derive(Debug)]
+    enum State {
+        Outside,
+        InOurs,
+        InBase,
+        InTheirs,
+    }
+    let mut state = State::Outside;
+
+    for line in text.lines() {
+        match state {
+            State::Outside => {
+                if line.starts_with("<<<<<<< ") {
+                    state = State::InOurs;
+                } else if line.starts_with("=======")
+                    || line.starts_with(">>>>>>> ")
+                    || line.starts_with("|||||||")
+                {
+                    // Stray marker line outside a block — skip it silently
+                    // (malformed but recoverable).
+                } else {
+                    ours.push_str(line);
+                    ours.push('\n');
+                    theirs.push_str(line);
+                    theirs.push('\n');
+                }
+            }
+            State::InOurs => {
+                if line.starts_with("|||||||") {
+                    state = State::InBase;
+                } else if line.starts_with("=======") {
+                    state = State::InTheirs;
+                } else if line.starts_with(">>>>>>> ") {
+                    // Empty theirs block — edge case from a resolved conflict;
+                    // treat as a closed block and return to outside.
+                    state = State::Outside;
+                } else if line.starts_with("<<<<<<< ") {
+                    // Nested conflict — malformed; treat as new ours block.
+                    // Push nothing, start a new ours block.
+                    state = State::InOurs;
+                } else {
+                    ours.push_str(line);
+                    ours.push('\n');
+                }
+            }
+            State::InBase => {
+                if line.starts_with("=======") {
+                    state = State::InTheirs;
+                }
+                // Otherwise discard diff3 base content.
+            }
+            State::InTheirs => {
+                if line.starts_with(">>>>>>> ") {
+                    state = State::Outside;
+                } else if line.starts_with("<<<<<<< ") {
+                    // Malformed — treat as new block; flush partial theirs
+                    // state then restart.
+                    state = State::InOurs;
+                } else {
+                    theirs.push_str(line);
+                    theirs.push('\n');
+                }
+            }
+        }
+    }
+
+    if !matches!(state, State::Outside) {
+        return Err(miette::miette!(
+            "unterminated conflict marker block (ended in state {state:?})"
+        ));
+    }
+
+    Ok((ours, theirs))
+}
+
+/// Build the text output for a partially-resolved mesh: resolved anchors
+/// written cleanly, followed by conflict-marker-wrapped blocks for each
+/// residual anchor, then the why text.
+fn build_partial_output(
+    resolved_anchors: &[AnchorRecord],
+    why: &str,
+    residual: &[UnresolvedAnchor],
+    _unresolved_why: &[UnresolvedAnchor],
+) -> String {
+    let mut out = String::new();
+
+    // Write resolved anchors in canonical order.
+    for anchor in resolved_anchors {
+        out.push_str(&anchor.to_string());
+        out.push('\n');
+    }
+
+    // Write residual (same-anchor divergence) wrapped in conflict markers.
+    for u in residual {
+        out.push_str("<<<<<<< ours\n");
+        out.push_str(&format!("{}\n", u.ours));
+        out.push_str("=======\n");
+        out.push_str(&format!("{}\n", u.theirs));
+        out.push_str(">>>>>>> theirs\n");
+    }
+
+    // For why conflicts: emit both why texts as markers.
+    // (resolved_anchors + residual + why text). The blank-line separator
+    // between anchor block and why text.
+    if !out.is_empty() || !why.is_empty() {
+        out.push('\n');
+    }
+    if !why.is_empty() {
+        out.push_str(why);
+        out.push('\n');
+    }
+
+    out
 }
 
 // ── Rename map ────────────────────────────────────────────────────────────────
@@ -2098,5 +2473,417 @@ mod tests {
         // returns false so `plan_mesh_follows` actually runs.
 
         (repo, hash)
+    }
+
+    // ── Conflict resolution tests ─────────────────────────────────────────────
+
+    /// A conflicted mesh file with differing anchors (the why text outside
+    /// markers goes to both sides).
+    const CONFLICTED_MESH: &str = "<<<<<<< HEAD\n\
+         src/file.rs rk64:abc123\n\
+         =======\n\
+         src/file.rs rk64:def456\n\
+         >>>>>>> other\n\
+         \n\
+         Why text.";
+
+    #[test]
+    fn split_conflict_blocks_simple() {
+        let (ours, theirs) = split_conflict_blocks(CONFLICTED_MESH).unwrap();
+        // Lines outside markers (blank line + why text) go to both sides.
+        assert_eq!(ours, "src/file.rs rk64:abc123\n\nWhy text.\n");
+        assert_eq!(theirs, "src/file.rs rk64:def456\n\nWhy text.\n");
+
+        // Parse each side as a valid MeshFile (MeshFile::parse handles
+        // the blank-line separator between anchors and why text).
+        let ours_mesh = MeshFile::parse(&ours).unwrap();
+        let theirs_mesh = MeshFile::parse(&theirs).unwrap();
+        assert_eq!(ours_mesh.anchors.len(), 1);
+        assert_eq!(theirs_mesh.anchors.len(), 1);
+        assert_eq!(ours_mesh.why, "Why text.");
+        assert_eq!(theirs_mesh.why, "Why text.");
+    }
+
+    #[test]
+    fn split_conflict_blocks_no_markers() {
+        let text = "src/a.rs rk64:abc123\n\nSome why.\n";
+        let (ours, theirs) = split_conflict_blocks(text).unwrap();
+        assert_eq!(ours, text);
+        assert_eq!(theirs, text);
+    }
+
+    #[test]
+    fn split_conflict_blocks_multiple_blocks() {
+        let text = "<<<<<<< HEAD\n\
+             src/a.rs rk64:aaa\n\
+             =======\n\
+             src/a.rs rk64:bbb\n\
+             >>>>>>> theirs\n\
+             \n\
+             <<<<<<< HEAD\n\
+             src/b.rs rk64:ccc\n\
+             =======\n\
+             src/b.rs rk64:ddd\n\
+             >>>>>>> theirs\n";
+        let (ours, theirs) = split_conflict_blocks(text).unwrap();
+        // The blank line between conflict blocks is outside markers → both sides.
+        assert_eq!(ours, "src/a.rs rk64:aaa\n\nsrc/b.rs rk64:ccc\n");
+        assert_eq!(theirs, "src/a.rs rk64:bbb\n\nsrc/b.rs rk64:ddd\n");
+    }
+
+    #[test]
+    fn split_conflict_blocks_unterminated_is_error() {
+        let text = "<<<<<<< HEAD\nsrc/a.rs rk64:abc\n";
+        assert!(split_conflict_blocks(text).is_err());
+    }
+
+    #[test]
+    fn split_conflict_blocks_lines_outside_markers_go_to_both() {
+        let text = "src/shared.rs rk64:xyz123\n\
+             <<<<<<< HEAD\n\
+             src/ours.rs rk64:aaa\n\
+             =======\n\
+             src/theirs.rs rk64:bbb\n\
+             >>>>>>> other\n";
+        let (ours, theirs) = split_conflict_blocks(text).unwrap();
+        assert!(ours.contains("src/shared.rs rk64:xyz123"));
+        assert!(theirs.contains("src/shared.rs rk64:xyz123"));
+        assert!(ours.contains("src/ours.rs rk64:aaa"));
+        assert!(!ours.contains("src/theirs.rs rk64:bbb"));
+        assert!(!theirs.contains("src/ours.rs rk64:aaa"));
+        assert!(theirs.contains("src/theirs.rs rk64:bbb"));
+    }
+
+    /// 1.4 union-of-divergent-anchors: different anchors on each branch → one
+    /// canonical mesh with the union of both sides.
+    #[test]
+    fn resolve_conflicted_union_of_anchors() {
+        let repo = TestRepo::new();
+        let root = repo.path();
+
+        // Ours has src/a.rs, theirs has src/b.rs — no overlap. Why text is
+        // the same on both sides and placed outside markers so it goes to both.
+        let conflicted = "\
+             <<<<<<< HEAD\n\
+             src/a.rs rk64:aaaaaaaaaaaaaaaa\n\
+             =======\n\
+             src/b.rs rk64:bbbbbbbbbbbbbbbb\n\
+             >>>>>>> other\n\
+             \n\
+             Unified why.\n";
+
+        // Create the source files the anchors reference.
+        repo.write("src/a.rs", "// a\n");
+        repo.write("src/b.rs", "// b\n");
+
+        // Write the conflicted mesh.
+        let wiki = root.join(".wiki");
+        fs::create_dir_all(&wiki).unwrap();
+        fs::write(wiki.join("myslug"), conflicted).unwrap();
+
+        let report = resolve_conflicted_meshes(root).unwrap();
+        assert!(
+            report.skipped.is_empty(),
+            "expected no skipped: {:?}",
+            report.skipped
+        );
+        assert_eq!(report.resolved.len(), 1, "myslug must be resolved");
+        assert!(report.partial.is_empty());
+
+        let mesh = store::read_one(root, "myslug").unwrap().unwrap();
+        assert_eq!(mesh.anchors.len(), 2, "expected union of both sides");
+        let paths: Vec<&str> = mesh.anchors.iter().map(|a| a.path.as_str()).collect();
+        assert!(paths.contains(&"src/a.rs"));
+        assert!(paths.contains(&"src/b.rs"));
+        assert_eq!(mesh.why, "Unified why.");
+    }
+
+    /// Same-anchor divergence (range shift): same anchor path+extent on both
+    /// sides, different content_hash. With source files provided, merge_mesh_files
+    /// re-hashes against the worktree and resolves the divergence.
+    #[test]
+    fn resolve_conflicted_same_anchor_rehashed() {
+        let repo = TestRepo::new();
+        let root = repo.path();
+
+        // Source file with known content.
+        repo.write("src/file.rs", "fn current() {}\n");
+
+        // Compute the hash that the worktree file produces at L1-L1.
+        let extent = git_mesh_core::AnchorExtent::LineRange { start: 1, end: 1 };
+        let worktree_hash = store::hash_anchor(
+            root,
+            "src/file.rs",
+            extent,
+            &mut store::FileContentCache::new(),
+        )
+        .unwrap();
+
+        // Conflicted mesh with same anchor, different hashes on each side.
+        let conflicted = format!(
+            "<<<<<<< HEAD\n\
+             src/file.rs#L1-L1 rk64:aaaaaaaaaaaaaaaa\n\
+             =======\n\
+             src/file.rs#L1-L1 rk64:bbbbbbbbbbbbbbbb\n\
+             >>>>>>> other\n\
+             \n\
+             Why."
+        );
+
+        let wiki = root.join(".wiki");
+        fs::create_dir_all(&wiki).unwrap();
+        fs::write(wiki.join("slug"), &conflicted).unwrap();
+
+        let report = resolve_conflicted_meshes(root).unwrap();
+        assert!(
+            report.skipped.is_empty(),
+            "expected no skipped: {:?}",
+            report.skipped
+        );
+        assert_eq!(report.resolved.len(), 1, "must be resolved via re-hash");
+
+        let mesh = store::read_one(root, "slug").unwrap().unwrap();
+        assert_eq!(mesh.anchors.len(), 1);
+        assert_eq!(mesh.anchors[0].content_hash, worktree_hash);
+    }
+
+    /// Clean-source precondition: source file has conflict markers → mesh is
+    /// skipped with a reason naming the conflicted source file.
+    #[test]
+    fn resolve_conflicted_skipped_when_source_has_markers() {
+        let repo = TestRepo::new();
+        let root = repo.path();
+
+        // Source file with conflict markers.
+        repo.write("src/file.rs", "<<<<<<< HEAD\nstuff\n=======\nthings\n>>>>>>> other\n");
+
+        let conflicted = "\
+             <<<<<<< HEAD\n\
+             src/file.rs rk64:aaa\n\
+             =======\n\
+             src/file.rs rk64:bbb\n\
+             >>>>>>> other\n\
+             \n\
+             Why.\n";
+
+        let wiki = root.join(".wiki");
+        fs::create_dir_all(&wiki).unwrap();
+        fs::write(wiki.join("slug"), conflicted).unwrap();
+
+        let report = resolve_conflicted_meshes(root).unwrap();
+        assert_eq!(report.resolved.len(), 0);
+        assert_eq!(report.partial.len(), 0);
+        assert_eq!(
+            report.skipped.len(),
+            1,
+            "must skip mesh when source has markers: {:?}",
+            report.skipped
+        );
+        let (slug, reason) = &report.skipped[0];
+        assert_eq!(slug, "slug");
+        assert!(
+            reason.contains("src/file.rs"),
+            "reason must name the conflicted source: {reason}"
+        );
+    }
+
+    /// Empty-path `--why` sentinel: both branches changed the why text → the
+    /// mesh is partially resolved (anchors clean, why in conflict — partial exit).
+    #[test]
+    fn resolve_conflicted_why_only_partial() {
+        let repo = TestRepo::new();
+        let root = repo.path();
+
+        // Same anchor on both sides (identical hash). The blank line before
+        // the markers separates the anchor block from the why text.
+        let conflicted = "src/a.rs rk64:aaaaaaaaaaaaaaaa\n\
+             \n\
+             <<<<<<< HEAD\n\
+             Why from HEAD.\n\
+             =======\n\
+             Why from other.\n\
+             >>>>>>> other\n";
+
+        repo.write("src/a.rs", "// a\n");
+        let wiki = root.join(".wiki");
+        fs::create_dir_all(&wiki).unwrap();
+        fs::write(wiki.join("slug"), conflicted).unwrap();
+
+        let report = resolve_conflicted_meshes(root).unwrap();
+        assert!(
+            report.skipped.is_empty(),
+            "expected no skipped: {:?}",
+            report.skipped
+        );
+        assert_eq!(report.partial.len(), 1, "why conflict is partial");
+        assert!(report.resolved.is_empty());
+
+        // File should still exist on disk (not git added).
+        let path = wiki.join("slug");
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("src/a.rs rk64:aaaaaaaaaaaaaaaa"));
+    }
+
+    /// Partial via why conflict: same anchors on both sides but different why
+    /// text → mesh is partially resolved (anchors clean, why in markers).
+    /// NOT staged.
+    #[test]
+    fn resolve_conflicted_partial_via_why_conflict() {
+        let repo = TestRepo::new();
+        let root = repo.path();
+
+        repo.write("src/shared.rs", "// shared\n");
+        // Same anchor on both sides; why text diverges (inside markers after
+        // the blank-line separator so it's treated as why, not anchors).
+        let conflicted = "src/shared.rs rk64:cccccccccccccccc\n\
+             \n\
+             <<<<<<< HEAD\n\
+             Why from HEAD.\n\
+             =======\n\
+             Why from other.\n\
+             >>>>>>> other\n";
+
+        let wiki = root.join(".wiki");
+        fs::create_dir_all(&wiki).unwrap();
+        fs::write(wiki.join("slug"), conflicted).unwrap();
+
+        let report = resolve_conflicted_meshes(root).unwrap();
+        assert!(
+            report.skipped.is_empty(),
+            "expected no skipped: {:?}",
+            report.skipped
+        );
+        assert_eq!(report.partial.len(), 1, "expected partial from why conflict");
+        assert!(report.resolved.is_empty(), "no fully resolved meshes");
+
+        let path = wiki.join("slug");
+        let content = fs::read_to_string(&path).unwrap();
+        // The shared anchor should be present cleanly.
+        assert!(content.contains("src/shared.rs rk64:cccccccccccccccc"));
+    }
+
+    /// Canonical ordering: ours and theirs differ only in anchor order →
+    /// merged result has canonical (path, start_line, end_line) order, no residue.
+    #[test]
+    fn resolve_conflicted_canonical_ordering() {
+        let repo = TestRepo::new();
+        let root = repo.path();
+
+        repo.write("src/a.rs", "// a\n");
+        repo.write("src/b.rs", "// b\n");
+
+        // Ours: [b.rs, a.rs]; theirs: [a.rs, b.rs]
+        let conflicted = "\
+             <<<<<<< HEAD\n\
+             src/b.rs rk64:bbbbbbbbbbbbbbbb\n\
+             src/a.rs rk64:aaaaaaaaaaaaaaaa\n\
+             =======\n\
+             src/a.rs rk64:aaaaaaaaaaaaaaaa\n\
+             src/b.rs rk64:bbbbbbbbbbbbbbbb\n\
+             >>>>>>> other\n\
+             \n\
+             Why.\n";
+
+        let wiki = root.join(".wiki");
+        fs::create_dir_all(&wiki).unwrap();
+        fs::write(wiki.join("slug"), conflicted).unwrap();
+
+        let report = resolve_conflicted_meshes(root).unwrap();
+        assert!(
+            report.skipped.is_empty(),
+            "expected no skipped: {:?}",
+            report.skipped
+        );
+        assert_eq!(report.resolved.len(), 1, "must be resolved");
+        assert!(report.partial.is_empty());
+
+        let mesh = store::read_one(root, "slug").unwrap().unwrap();
+        assert_eq!(mesh.anchors.len(), 2);
+        // Canonical order: src/a.rs before src/b.rs.
+        assert_eq!(mesh.anchors[0].path, "src/a.rs");
+        assert_eq!(mesh.anchors[1].path, "src/b.rs");
+    }
+
+    /// Diff3 base markers (|||||||) are discarded during marker splitting.
+    #[test]
+    fn split_conflict_blocks_discards_diff3_base() {
+        let text = "<<<<<<< HEAD\n\
+             src/file.rs rk64:ours_hash\n\
+             |||||||\n\
+             src/file.rs rk64:base_hash\n\
+             =======\n\
+             src/file.rs rk64:theirs_hash\n\
+             >>>>>>> other\n";
+        let (ours, theirs) = split_conflict_blocks(text).unwrap();
+        // Ours should NOT contain the base marker or base content.
+        assert_eq!(ours, "src/file.rs rk64:ours_hash\n");
+        assert_eq!(theirs, "src/file.rs rk64:theirs_hash\n");
+    }
+
+    /// build_partial_output produces the expected format with resolved anchors,
+    /// conflict markers for residuals, and why text.
+    #[test]
+    fn build_partial_output_format() {
+        let resolved = vec![
+            AnchorRecord {
+                path: "src/clean.rs".to_string(),
+                start_line: 1,
+                end_line: 1,
+                algorithm: "rk64".to_string(),
+                content_hash: "aaa".to_string(),
+            },
+        ];
+        let residual = vec![
+            UnresolvedAnchor {
+                path: "src/conflicted.rs".to_string(),
+                start_line: 2,
+                end_line: 4,
+                ours: AnchorRecord {
+                    path: "src/conflicted.rs".to_string(),
+                    start_line: 2,
+                    end_line: 4,
+                    algorithm: "rk64".to_string(),
+                    content_hash: "bbb".to_string(),
+                },
+                theirs: AnchorRecord {
+                    path: "src/conflicted.rs".to_string(),
+                    start_line: 2,
+                    end_line: 4,
+                    algorithm: "rk64".to_string(),
+                    content_hash: "ccc".to_string(),
+                },
+            },
+        ];
+        let why = "Why text.";
+        let output = build_partial_output(&resolved, why, &residual, &[]);
+        assert!(output.contains("src/clean.rs#L1-L1 rk64:aaa"));
+        assert!(output.contains("<<<<<<< ours"));
+        assert!(output.contains("======="));
+        assert!(output.contains(">>>>>>> theirs"));
+        assert!(output.contains("Why text."));
+        assert!(output.contains("src/conflicted.rs#L2-L4 rk64:bbb"));
+        assert!(output.contains("src/conflicted.rs#L2-L4 rk64:ccc"));
+    }
+
+    /// find_conflicted_meshes in store.rs works end-to-end: a mesh with markers
+    /// is returned, a clean mesh is not.
+    #[test]
+    fn find_conflicted_meshes_e2e() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let wiki = root.join(".wiki");
+        fs::create_dir_all(&wiki).unwrap();
+
+        // Clean mesh.
+        let clean = "src/clean.rs rk64:aaa\n\nClean.\n";
+        fs::write(wiki.join("clean"), clean).unwrap();
+
+        // Conflicted mesh.
+        let conflicted = "<<<<<<< HEAD\nsrc/c.rs rk64:bbb\n=======\nsrc/c.rs rk64:ccc\n>>>>>>> t\n\nWhy.\n";
+        fs::write(wiki.join("conflicted"), conflicted).unwrap();
+
+        let results = crate::commands::mesh::store::find_conflicted_meshes(root).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "conflicted");
     }
 }
