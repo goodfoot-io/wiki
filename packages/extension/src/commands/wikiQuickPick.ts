@@ -93,12 +93,7 @@ function resolveWorkspacePath(file: string): string {
 
 async function loadAllPages(binaryPath: string): Promise<WikiQuickPickItem[]> {
   try {
-    const result = await runWikiCommand(
-      binaryPath,
-      ['list', '--limit', '10', '--format', 'json'],
-      undefined,
-      workspaceRoot()
-    );
+    const result = await runWikiCommand(binaryPath, ['list', '--format', 'json'], undefined, workspaceRoot());
     if (result.exitCode !== 0) {
       const message = result.stderr.trim() || `wiki list exited with code ${result.exitCode}`;
       qpLog().warn('wiki list failed: %s', message);
@@ -181,31 +176,36 @@ export function createSearchHandler(
   onResetToInitial: () => void
 ): SearchHandler {
   let activeAbort: AbortController | undefined;
+  let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 
   return {
     onQueryChange(query: string): void {
       activeAbort?.abort();
+      clearTimeout(debounceTimer);
 
       if (query.trim() === '') {
         onResetToInitial();
         return;
       }
 
-      const abort = new AbortController();
-      activeAbort = abort;
-      onBusy(true);
+      debounceTimer = setTimeout(() => {
+        const abort = new AbortController();
+        activeAbort = abort;
+        onBusy(true);
 
-      void (async () => {
-        const results = await search(query.trim(), abort.signal);
-        if (!abort.signal.aborted) {
-          onResults(results);
-          onBusy(false);
-        }
-      })();
+        void (async () => {
+          const results = await search(query.trim(), abort.signal);
+          if (!abort.signal.aborted) {
+            onResults(results);
+            onBusy(false);
+          }
+        })();
+      }, 150);
     },
 
     dispose(): void {
       activeAbort?.abort();
+      clearTimeout(debounceTimer);
     }
   };
 }
@@ -240,6 +240,7 @@ export async function wikiQuickPick(binaryManager: WikiBinaryManager, context: v
   qp.placeholder = 'Search wiki pages…';
   qp.matchOnDetail = true;
   qp.busy = true;
+  qp.show();
 
   const loadStart = Date.now();
   const [recentItems, listItems] = await Promise.all([loadValidatedRecentlyViewed(context), loadAllPages(binaryPath)]);
@@ -285,6 +286,4 @@ export async function wikiQuickPick(binaryManager: WikiBinaryManager, context: v
     searchHandler.dispose();
     qp.dispose();
   });
-
-  qp.show();
 }

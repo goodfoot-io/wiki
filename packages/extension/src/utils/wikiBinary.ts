@@ -307,6 +307,11 @@ export function runWikiCommand(
 ): Promise<WikiCommandResult> {
   const log = getWikiLogger().getChildLogger({ label: 'Spawn' });
   const startedAt = Date.now();
+  // Insert '--' separator when a user-supplied query looks like a CLI flag,
+  // preventing argument injection (e.g., typing '--help' in the QuickPick).
+  if (args.length > 0 && args[0] != null && args[0].startsWith('-') && args[0] !== '--') {
+    args = ['--', ...args];
+  }
   log.debug('spawn %s %s (cwd=%s)', binaryPath, args.join(' '), cwd ?? '<inherit>');
   return new Promise((resolve, reject) => {
     const child = spawn(binaryPath, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd });
