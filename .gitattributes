@@ -13,3 +13,6 @@
 # Resolve version conflicts automatically during merges by picking the highest semver
 .claude-plugin/marketplace.json merge=json-version
 plugins/*/.claude-plugin/plugin.json merge=json-version
+
+# Resolve .mesh/ merge conflicts structurally via git-mesh merge driver
+.mesh/** merge=mesh
