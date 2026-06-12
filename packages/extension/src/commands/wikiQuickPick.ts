@@ -151,6 +151,66 @@ export async function openWikiFile(file: string): Promise<void> {
 }
 
 /**
+ * Handler returned by {@link createSearchHandler}.
+ */
+export interface SearchHandler {
+  /** Handle a query change event from the QuickPick. */
+  onQueryChange: (query: string) => void;
+  /** Abort any in-flight search. */
+  dispose: () => void;
+}
+
+/**
+ * Create a handler for QuickPick value-change events that manages abort
+ * controllers for in-flight searches.
+ *
+ * CURRENT BEHAVIOR (bug): Each call immediately invokes `search` with no
+ * debounce. A debounce timer should wrap the `search` call to batch rapid
+ * keystrokes into a single invocation.
+ *
+ * @param search           - Async search function (e.g., spawns wiki CLI).
+ * @param onResults        - Called with search results when they arrive.
+ * @param onBusy           - Called to update busy/loading state.
+ * @param onResetToInitial - Called when query is cleared.
+ * @returns A handler object with `onQueryChange` and `dispose` methods.
+ */
+export function createSearchHandler(
+  search: (query: string, signal: AbortSignal) => Promise<WikiQuickPickItem[]>,
+  onResults: (items: WikiQuickPickItem[]) => void,
+  onBusy: (busy: boolean) => void,
+  onResetToInitial: () => void
+): SearchHandler {
+  let activeAbort: AbortController | undefined;
+
+  return {
+    onQueryChange(query: string): void {
+      activeAbort?.abort();
+
+      if (query.trim() === '') {
+        onResetToInitial();
+        return;
+      }
+
+      const abort = new AbortController();
+      activeAbort = abort;
+      onBusy(true);
+
+      void (async () => {
+        const results = await search(query.trim(), abort.signal);
+        if (!abort.signal.aborted) {
+          onResults(results);
+          onBusy(false);
+        }
+      })();
+    },
+
+    dispose(): void {
+      activeAbort?.abort();
+    }
+  };
+}
+
+/**
  * Show a QuickPick that lets the user browse and search wiki pages.
  *
  * @param binaryManager - Service that resolves or installs the wiki CLI.
@@ -199,28 +259,20 @@ export async function wikiQuickPick(binaryManager: WikiBinaryManager, context: v
   qp.items = initialItems;
   qp.busy = false;
 
-  let activeAbort: AbortController | undefined;
-
-  qp.onDidChangeValue((query) => {
-    activeAbort?.abort();
-
-    if (query.trim() === '') {
+  const searchHandler = createSearchHandler(
+    (query, signal) => searchPages(binaryPath, query, signal),
+    (items) => {
+      qp.items = items;
+    },
+    (busy) => {
+      qp.busy = busy;
+    },
+    () => {
       qp.items = initialItems;
-      return;
     }
+  );
 
-    const abort = new AbortController();
-    activeAbort = abort;
-    qp.busy = true;
-
-    void (async () => {
-      const results = await searchPages(binaryPath, query.trim(), abort.signal);
-      if (!abort.signal.aborted) {
-        qp.items = results;
-        qp.busy = false;
-      }
-    })();
-  });
+  qp.onDidChangeValue((query) => searchHandler.onQueryChange(query));
 
   qp.onDidAccept(async () => {
     const selected = qp.selectedItems[0];
@@ -230,7 +282,7 @@ export async function wikiQuickPick(binaryManager: WikiBinaryManager, context: v
   });
 
   qp.onDidHide(() => {
-    activeAbort?.abort();
+    searchHandler.dispose();
     qp.dispose();
   });
 
