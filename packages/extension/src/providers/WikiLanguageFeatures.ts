@@ -327,16 +327,43 @@ export class WikiLanguageFeatures {
     try {
       if (this._disposed) return;
 
-      const abortController = new AbortController();
-      const abortTimer = setTimeout(() => abortController.abort(), 30_000);
+      do {
+        this._checkPending = false;
 
-      try {
-        do {
-          this._checkPending = false;
+        if (this._disposed) return;
 
-          if (this._disposed) return;
+        // Each iteration gets a fresh AbortController + 30s timer so one
+        // iteration's timeout does not permanently abort subsequent iterations.
+        const abortController = new AbortController();
+        const abortTimer = setTimeout(() => abortController.abort(), 30_000);
 
-          const output = await this._runWikiJson<CheckOutput>(['check', '--format', 'json'], abortController.signal);
+        try {
+          // Racing _runWikiJson against an abort rejection ensures that
+          // _binaryManager.ready() (called inside _runWikiJson) is also
+          // bounded by the 30s timeout.
+          const abortRejection = new Promise<never>((_, reject) => {
+            if (abortController.signal.aborted) {
+              reject(new DOMException('Aborted', 'AbortError'));
+              return;
+            }
+            abortController.signal.addEventListener(
+              'abort',
+              () => {
+                reject(new DOMException('Aborted', 'AbortError'));
+              },
+              { once: true }
+            );
+          });
+
+          let output: CheckOutput | null = null;
+          try {
+            output = await Promise.race([
+              this._runWikiJson<CheckOutput>(['check', '--format', 'json'], abortController.signal),
+              abortRejection
+            ]);
+          } catch {
+            output = null;
+          }
 
           if (output == null) {
             this._checkRetries++;
@@ -382,10 +409,10 @@ export class WikiLanguageFeatures {
           for (const [file, diags] of byFile) {
             this._checkDiagnostics.set(vscode.Uri.file(file), diags);
           }
-        } while (this._checkPending);
-      } finally {
-        clearTimeout(abortTimer);
-      }
+        } finally {
+          clearTimeout(abortTimer);
+        }
+      } while (this._checkPending);
     } finally {
       this._checkRunning = false;
     }
