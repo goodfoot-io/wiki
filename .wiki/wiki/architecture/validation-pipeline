@@ -4,4 +4,5 @@ packages/cli/src/commands/check.rs#L55-L55 rk64:4f9a5fa9c95be53a
 packages/cli/src/commands/check.rs#L102-L103 rk64:14e58518d234dfa6
 packages/cli/src/frontmatter.rs#L55-L55 rk64:4f9a5fa9c95be53a
 packages/cli/src/commands/check.rs#L141-L142 rk64:14e58518d234dfa6
+packages/cli/src/commands/check.rs#L142-L143 rk64:14e58518d234dfa6
 
