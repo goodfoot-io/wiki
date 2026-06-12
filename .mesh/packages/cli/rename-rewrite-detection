@@ -1,5 +1,5 @@
 packages/cli/src/index/passes/tree.rs#L40-L46 rk64:c74edd8bacfabc9d
-packages/cli/tests/index_rename_edit.rs#L29-L47 rk64:98cfb7e8252c37b9
 packages/cli/src/index/passes/tree.rs#L96-L158 rk64:116f275497b8bf0d
+packages/cli/tests/index_rename_edit.rs#L29-L47 rk64:98cfb7e8252c37b9
 
 Tree-pass rename detection that classifies a committed rename as pure (same blob OID, row-level path swap) or rename-plus-edit (decomposed into Remove + Add for full blob bookkeeping), driven by gix rewrite tracking at its default similarity threshold, which the integration fixture is deliberately sized to clear so the Rewrite path is actually exercised.
