@@ -1,4 +1,5 @@
 packages/cli/src/commands/check.rs#L217-L260 rk64:95dcd925cb78b920
+packages/cli/src/commands/check.rs#L218-L261 rk64:95dcd925cb78b920
 packages/cli/src/commands/mesh/scaffold.rs#L188-L214 rk64:1a5ca93b72e8a00d
 packages/cli/src/commands/mod.rs#L35-L74 rk64:14fa51e9a3f99b66
 

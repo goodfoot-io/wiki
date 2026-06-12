@@ -12,8 +12,8 @@ use super::mesh::store;
 
 /// All mesh data read in-process from `.wiki/<slug>` files.
 pub(crate) struct MeshIndex {
-    /// Code anchor `(path, start, end)` → names of every mesh containing it.
-    by_anchor: HashMap<(PathBuf, u32, u32), Vec<String>>,
+    /// Normalized path → list of `(start_line, end_line, mesh_names)` entries.
+    by_anchor: HashMap<PathBuf, Vec<(u32, u32, Vec<String>)>>,
     /// Mesh name → every path anchored by that mesh (any range).
     paths_by_mesh: HashMap<String, Vec<PathBuf>>,
 }
@@ -32,19 +32,21 @@ impl MeshIndex {
         // (`anchor.start <= start && end <= anchor.end`). Containment (rather
         // than exact-range matching) keeps `wiki check --fix` from re-splitting
         // ranges that `git mesh stale --fix` has already coalesced.
+        let normalized = normalize_path(code_path);
+        let Some(entries) = self.by_anchor.get(&normalized) else {
+            return false;
+        };
+        let wiki_normalized = normalize_path(wiki_rel);
         let anchors_wiki = |name: &String| {
             self.paths_by_mesh
                 .get(name)
-                .is_some_and(|paths| paths.iter().any(|p| paths_equal(p, wiki_rel)))
+                .is_some_and(|paths| paths.iter().any(|p| p == &wiki_normalized))
         };
-        self.by_anchor
-            .iter()
-            .filter(|((path, _, _), _)| paths_equal(path, code_path))
-            .any(|((_, a_start, a_end), names)| {
-                let contains =
-                    (*a_start == 0 && *a_end == 0) || (*a_start <= start && end <= *a_end);
-                contains && names.iter().any(&anchors_wiki)
-            })
+        entries.iter().any(|(a_start, a_end, names)| {
+            let contains =
+                (*a_start == 0 && *a_end == 0) || (*a_start <= start && end <= *a_end);
+            contains && names.iter().any(&anchors_wiki)
+        })
     }
 
     /// Return the name of an existing mesh that anchors the exact
@@ -52,9 +54,12 @@ impl MeshIndex {
     /// anchor the same triple the lexicographically first name wins so the
     /// choice is deterministic.
     pub(crate) fn owning_mesh_for_exact(&self, path: &Path, start: u32, end: u32) -> Option<&str> {
-        let key = (path.to_path_buf(), start, end);
-        let names = self.by_anchor.get(&key)?;
-        names.iter().min().map(String::as_str)
+        let normalized = normalize_path(path);
+        let entries = self.by_anchor.get(&normalized)?;
+        entries
+            .iter()
+            .find(|(s, e, _)| *s == start && *e == end)
+            .and_then(|(_, _, names)| names.iter().min().map(String::as_str))
     }
 
     /// Whether `mesh` contains an anchor on `path` whose range contains
@@ -73,14 +78,15 @@ impl MeshIndex {
         start: u32,
         end: u32,
     ) -> bool {
-        self.by_anchor
-            .iter()
-            .filter(|((ap, _, _), _)| paths_equal(ap, path))
-            .any(|((_, a_start, a_end), names)| {
-                let contains = (*a_start == 0 && *a_end == 0)
-                    || (*a_start <= start && end <= *a_end);
-                contains && names.iter().any(|n| n == mesh)
-            })
+        let normalized = normalize_path(path);
+        let Some(entries) = self.by_anchor.get(&normalized) else {
+            return false;
+        };
+        entries.iter().any(|(a_start, a_end, names)| {
+            let contains = (*a_start == 0 && *a_end == 0)
+                || (*a_start <= start && end <= *a_end);
+            contains && names.iter().any(|n| n == mesh)
+        })
     }
 }
 
@@ -231,18 +237,30 @@ pub(crate) fn build_mesh_index(
         );
     }
 
-    let mut by_anchor: HashMap<(PathBuf, u32, u32), Vec<String>> = HashMap::new();
+    let mut by_anchor: HashMap<PathBuf, Vec<(u32, u32, Vec<String>)>> = HashMap::new();
     let mut paths_by_mesh: HashMap<String, Vec<PathBuf>> = HashMap::new();
 
     for (slug, mesh_file) in meshes {
         for anchor in &mesh_file.anchors {
-            let path = PathBuf::from(&anchor.path);
-            let key = (path.clone(), anchor.start_line, anchor.end_line);
-            by_anchor.entry(key).or_default().push(slug.clone());
+            let raw_path = PathBuf::from(&anchor.path);
+            let normalized_path = normalize_path(&raw_path);
 
+            // Group entries by normalized path; dedup slugs with same (start, end).
+            let entries = by_anchor.entry(normalized_path.clone()).or_default();
+            if let Some(existing) =
+                entries.iter_mut().find(|(s, e, _)| *s == anchor.start_line && *e == anchor.end_line)
+            {
+                if !existing.2.contains(&slug) {
+                    existing.2.push(slug.clone());
+                }
+            } else {
+                entries.push((anchor.start_line, anchor.end_line, vec![slug.clone()]));
+            }
+
+            // Track path per mesh, dedup by normalized path.
             let mesh_paths = paths_by_mesh.entry(slug.clone()).or_default();
-            if !mesh_paths.iter().any(|p| paths_equal(p, &path)) {
-                mesh_paths.push(path);
+            if !mesh_paths.iter().any(|p| p == &normalized_path) {
+                mesh_paths.push(normalized_path);
             }
         }
     }
@@ -255,18 +273,12 @@ pub(crate) fn build_mesh_index(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Normalize-compare two paths by components, handling leading `./`.
-fn paths_equal(a: &Path, b: &Path) -> bool {
-    use std::path::Component;
-    let a_components: Vec<_> = a
-        .components()
-        .filter(|c| !matches!(c, Component::CurDir))
-        .collect();
-    let b_components: Vec<_> = b
-        .components()
-        .filter(|c| !matches!(c, Component::CurDir))
-        .collect();
-    a_components == b_components
+/// Normalize a path by stripping leading `./` components into a `PathBuf`
+/// suitable for use as a HashMap key.
+fn normalize_path(path: &Path) -> PathBuf {
+    path.components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -383,8 +395,10 @@ mod tests {
     }
 
     #[test]
-    fn paths_equal_ignores_leading_dotslash() {
-        assert!(paths_equal(Path::new("./foo/bar"), Path::new("foo/bar")));
+    fn normalize_path_strips_curdir() {
+        assert_eq!(normalize_path(Path::new("./foo/bar")), PathBuf::from("foo/bar"));
+        assert_eq!(normalize_path(Path::new("foo/bar")), PathBuf::from("foo/bar"));
+        assert_eq!(normalize_path(Path::new("./foo/./bar")), PathBuf::from("foo/bar"));
     }
 
     /// Reproduction for exact-vs-containment anchor filtering disagreement.
