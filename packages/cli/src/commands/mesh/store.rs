@@ -259,6 +259,7 @@ pub(crate) fn hash_anchor(
 ///
 /// Skips dotfiles and runtime artifacts (same filter as [`read_all`]). A missing
 /// `.wiki/` directory returns an empty vector and an empty skip list.
+#[allow(clippy::type_complexity)]
 pub(crate) fn read_all_tolerant(
     repo_root: &Path,
 ) -> Result<(Vec<(String, MeshFile)>, Vec<String>)> {
