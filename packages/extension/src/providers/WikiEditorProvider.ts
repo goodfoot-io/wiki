@@ -399,7 +399,7 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta
     http-equiv="Content-Security-Policy"
-    content="default-src 'none'; script-src ${cspSource} 'unsafe-inline'; style-src ${cspSource} 'unsafe-inline'; font-src ${cspSource}; img-src ${cspSource} https: data:;"
+    content="default-src 'none'; script-src ${cspSource}; style-src ${cspSource} 'unsafe-inline'; font-src ${cspSource}; img-src ${cspSource} https: data:;"
   />
   <link href="${codiconUri}" rel="stylesheet" id="vscode-codicon-stylesheet" />
   <link href="${markdownCssUri}" rel="stylesheet" />
