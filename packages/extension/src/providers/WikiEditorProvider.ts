@@ -127,13 +127,23 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
 
     const scrollKey = `scroll:${document.uri.toString()}`;
 
-    const onDocumentChange = async (changedDocument: vscode.TextDocument) => {
+    // Debounce timer for onDidChangeTextDocument re-renders.
+    // Rapid typing (~250ms) coalesces multiple edits into a single render cycle.
+    let renderChangeTimeout: ReturnType<typeof setTimeout> | undefined;
+
+    const onDocumentChange = (changedDocument: vscode.TextDocument) => {
       if (changedDocument.uri.toString() !== document.uri.toString()) return;
-      await this._renderPage(webviewPanel.webview, document.uri, webviewPanel);
+      if (renderChangeTimeout != null) {
+        clearTimeout(renderChangeTimeout);
+      }
+      renderChangeTimeout = setTimeout(() => {
+        renderChangeTimeout = undefined;
+        void this._renderPage(webviewPanel.webview, document.uri, webviewPanel, undefined, true);
+      }, 250);
     };
 
     const changeDisposable = vscode.workspace.onDidChangeTextDocument((event) => {
-      void onDocumentChange(event.document);
+      onDocumentChange(event.document);
     });
 
     const messageDisposable = webviewPanel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
@@ -225,6 +235,9 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     webviewPanel.onDidDispose(() => {
       changeDisposable.dispose();
       messageDisposable.dispose();
+      if (renderChangeTimeout != null) {
+        clearTimeout(renderChangeTimeout);
+      }
     });
   }
 
@@ -317,9 +330,12 @@ export class WikiEditorProvider implements vscode.CustomTextEditorProvider {
     webview: vscode.Webview,
     uri: vscode.Uri,
     panel: vscode.WebviewPanel,
-    scrollY?: number
+    scrollY?: number,
+    skipLoading?: boolean
   ): Promise<void> {
-    this._postMessage(webview, { type: 'showLoading' });
+    if (!skipLoading) {
+      this._postMessage(webview, { type: 'showLoading' });
+    }
 
     let text: string;
     try {

@@ -23,6 +23,26 @@ async function getMermaid(): Promise<MermaidModule> {
 }
 
 /**
+ * Compare the source text of old and new `<pre class="mermaid">` elements.
+ *
+ * Used by the morphdom `onBeforeElUpdated` callback in `content.ts` to skip
+ * updating `<pre class="mermaid" data-processed>` elements whose diagram source
+ * text hasn't changed, preserving the rendered SVG output.
+ *
+ * @param oldEl - The existing DOM element (from the live document).
+ * @param newEl - The new element (from the parsed HTML update).
+ * @returns True when both elements are `<pre class="mermaid">` with identical
+ *          text content. Returns `false` when arguments are missing, elements
+ *          are not both `<pre class="mermaid">`, or text content differs.
+ */
+export function isDiagramSourceUnchanged(oldEl?: Element, newEl?: Element): boolean {
+  if (oldEl == null || newEl == null) return false;
+  if (oldEl.tagName !== 'PRE' || newEl.tagName !== 'PRE') return false;
+  if (!oldEl.classList.contains('mermaid') || !newEl.classList.contains('mermaid')) return false;
+  return oldEl.textContent === newEl.textContent;
+}
+
+/**
  * Render all `pre.mermaid` elements in the document that have not yet been
  * processed by mermaid (identified by the absence of `data-processed`).
  *

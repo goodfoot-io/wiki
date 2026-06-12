@@ -9,6 +9,7 @@
  */
 
 import morphdom from 'morphdom';
+import { isDiagramSourceUnchanged } from './diagrams.js';
 
 /**
  * Incrementally patch the `#content` element with new HTML.
@@ -22,7 +23,19 @@ export function patch(html: string): void {
   const doc = parser.parseFromString(`<div id="content" class="markdown-body vscode-body">${html}</div>`, 'text/html');
   const newEl = doc.body.firstElementChild;
   if (newEl == null) return;
-  morphdom(contentEl, newEl);
+  morphdom(contentEl, newEl, {
+    onBeforeElUpdated: (fromEl, toEl) => {
+      // Preserve already-rendered mermaid diagrams whose source text is
+      // unchanged. Without this guard, morphdom replaces the rendered SVG
+      // with raw diagram source and strips the `data-processed` attribute,
+      // forcing renderDiagrams() to re-process every diagram on every
+      // content update — even when only unrelated text changed.
+      if (fromEl.hasAttribute('data-processed') && isDiagramSourceUnchanged(fromEl, toEl)) {
+        return false;
+      }
+      return true;
+    }
+  });
 }
 
 /**
