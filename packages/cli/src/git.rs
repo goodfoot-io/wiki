@@ -149,31 +149,49 @@ pub fn repo_inventory(repo: &Path) -> Result<Vec<String>> {
         Ok(())
     })?;
 
-    let walker = ignore::WalkBuilder::new(repo)
+    // Parallelize the worktree walk so blocked filesystem stats overlap on a
+    // hostile (fuseblk) filesystem. Every builder setting matches the serial
+    // walk; the parallel visitor replicates the exact filter logic.
+    let collected: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    ignore::WalkBuilder::new(repo)
         .hidden(false)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
         .require_git(false)
         .follow_links(false)
-        .build();
-    for entry in walker.flatten() {
-        let entry_path = entry.path();
-        if entry_path == repo {
-            continue;
-        }
-        // Skip directories: we want files only. The walker yields both.
-        if entry.file_type().is_some_and(|t| t.is_dir()) {
-            continue;
-        }
-        // Skip `.git` and anything inside it.
-        if let Ok(rel) = entry_path.strip_prefix(repo) {
-            if rel.components().next().map(|c| c.as_os_str()) == Some(std::ffi::OsStr::new(".git"))
-            {
-                continue;
-            }
-            paths.insert(rel.to_string_lossy().into_owned());
-        }
+        .build_parallel()
+        .run(|| {
+            Box::new(|result| {
+                // The old `.flatten()` silently dropped errors — skip on error.
+                let Ok(entry) = result else {
+                    return ignore::WalkState::Continue;
+                };
+                let entry_path = entry.path();
+                if entry_path == repo {
+                    return ignore::WalkState::Continue;
+                }
+                // Skip directories: we want files only. The walker yields both.
+                if entry.file_type().is_some_and(|t| t.is_dir()) {
+                    return ignore::WalkState::Continue;
+                }
+                // Skip `.git` and anything inside it.
+                if let Ok(rel) = entry_path.strip_prefix(repo) {
+                    if rel.components().next().map(|c| c.as_os_str())
+                        == Some(std::ffi::OsStr::new(".git"))
+                    {
+                        return ignore::WalkState::Continue;
+                    }
+                    collected
+                        .lock()
+                        .expect("repo_inventory walk mutex poisoned")
+                        .push(rel.to_string_lossy().into_owned());
+                }
+                ignore::WalkState::Continue
+            })
+        });
+    for p in collected.into_inner().expect("repo_inventory walk mutex poisoned") {
+        paths.insert(p);
     }
 
     let mut paths: Vec<String> = paths.into_iter().collect();
