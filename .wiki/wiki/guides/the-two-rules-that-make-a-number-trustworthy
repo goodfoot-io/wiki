@@ -1,0 +1,4 @@
+wiki/guides/benchmarking-wiki-cli-performance.md#L10-L16 rk64:eeae50f369afdd82
+packages/cli/Cargo.toml#L1-L5 rk64:e0f5457ccdc1b8cb
+packages/cli/src/index/fs_class.rs#L34-L37 rk64:0dc3f659016d9ecc
+
