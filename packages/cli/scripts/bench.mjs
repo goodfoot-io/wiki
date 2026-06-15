@@ -29,6 +29,7 @@ function parseArgs(argv) {
     runs: 11,
     warmup: 2,
     coldRuns: 11,
+    trials: 1,
     json: false,
     bin: process.env.WIKI_BENCH_BIN ?? join(CLI_DIR, "target", "build", "release", "wiki"),
     corpus: WORKSPACE_ROOT,
@@ -39,6 +40,7 @@ function parseArgs(argv) {
     else if (arg === "--runs") opts.runs = Number(argv[++i]);
     else if (arg === "--warmup") opts.warmup = Number(argv[++i]);
     else if (arg === "--cold-runs") opts.coldRuns = Number(argv[++i]);
+    else if (arg === "--trials") opts.trials = Number(argv[++i]);
     else if (arg === "--bin") opts.bin = resolve(argv[++i]);
     else if (arg === "--corpus") opts.corpus = resolve(argv[++i]);
     else {
@@ -49,6 +51,7 @@ function parseArgs(argv) {
   if (!Number.isFinite(opts.runs) || opts.runs < 1) opts.runs = 11;
   if (!Number.isFinite(opts.warmup) || opts.warmup < 0) opts.warmup = 0;
   if (!Number.isFinite(opts.coldRuns) || opts.coldRuns < 1) opts.coldRuns = 11;
+  if (!Number.isFinite(opts.trials) || opts.trials < 1) opts.trials = 1;
   return opts;
 }
 
@@ -73,6 +76,69 @@ function summarize(samples) {
 }
 
 const ms = (x) => (x == null ? "   —  " : `${x.toFixed(1).padStart(6)}`);
+
+// Median of a plain numeric array (non-null only), or null if empty. Used to
+// collapse a per-trial statistic into a single robust value.
+function medianOf(values) {
+  const xs = values.filter((x) => x != null).sort((a, b) => a - b);
+  if (xs.length === 0) return null;
+  return percentile(xs, 50);
+}
+
+// Max of a plain numeric array (non-null only), or null if empty.
+function maxOf(values) {
+  const xs = values.filter((x) => x != null);
+  if (xs.length === 0) return null;
+  return Math.max(...xs);
+}
+
+// Collapse one stat object (the summarize() shape: {median,p10,p90,p99,n}) per
+// trial into a single stat object of the same shape. Distribution stats take
+// the MEDIAN across trials (median-of-medians — robust to one bad trial); the
+// p99 tail takes the MAX across trials (worst observed tail — be pessimistic);
+// n is kept as the per-trial sample count (it is identical across trials).
+function aggregateStat(perTrialStats) {
+  return {
+    median: medianOf(perTrialStats.map((s) => s.median)),
+    p10: medianOf(perTrialStats.map((s) => s.p10)),
+    p90: medianOf(perTrialStats.map((s) => s.p90)),
+    p99: maxOf(perTrialStats.map((s) => s.p99)),
+    n: perTrialStats.length > 0 ? perTrialStats[0].n : 0,
+  };
+}
+
+// The summarize-shaped fields on every op result that aggregateAcrossTrials
+// collapses across trials.
+const STAT_KEYS = ["wall", "startup", "fast_gate", "refresh", "body"];
+
+// Given an array of per-trial result sets — each `{ warm: [...], cold: [...] }`
+// where every op carries summarize-shaped stat objects — return a single result
+// set of the SAME shape with each op's stat objects aggregated across trials
+// via aggregateStat. Non-stat fields (name/args/budgetMs/available/failedStatus)
+// are taken from the first trial; failedStatus surfaces the first failing trial.
+function aggregateAcrossTrials(perTrialResults) {
+  const aggregatePath = (path) => {
+    const opCount = perTrialResults[0][path].length;
+    const out = [];
+    for (let i = 0; i < opCount; i++) {
+      const perTrialOps = perTrialResults.map((set) => set[path][i]);
+      const base = perTrialOps[0];
+      const agg = {
+        name: base.name,
+        args: base.args,
+        failedStatus: perTrialOps.map((o) => o.failedStatus).find((s) => s != null) ?? null,
+        budgetMs: base.budgetMs,
+      };
+      if ("available" in base) agg.available = base.available;
+      for (const key of STAT_KEYS) {
+        agg[key] = aggregateStat(perTrialOps.map((o) => o[key]));
+      }
+      out.push(agg);
+    }
+    return out;
+  };
+  return { warm: aggregatePath("warm"), cold: aggregatePath("cold") };
+}
 
 // ---- environment ---------------------------------------------------------
 
@@ -267,6 +333,8 @@ function firstPageTitle(bin, corpus) {
 }
 
 function buildOps(bin, corpus) {
+  // These budgetMs values are informational regression tripwires on the fuseblk
+  // scoreboard, not commit gates — they flag drift, they never fail the build.
   const summaryTitle = firstPageTitle(bin, corpus);
   const ops = [
     { name: "search", args: ["index", "--format", "json"], budgetMs: 200 },
@@ -276,8 +344,10 @@ function buildOps(bin, corpus) {
     ops.push({ name: "summary", args: ["summary", summaryTitle], budgetMs: 200 });
   }
   // `check` validates the corpus directly and stays expensive even on a gate
-  // hit, so it gets its own, looser budget and never shares a row.
-  ops.push({ name: "check", args: ["check", "--format", "json"], budgetMs: 1000 });
+  // hit, so it gets its own, looser budget and never shares a row. Re-baselined
+  // to 400ms now that check medians ~110-130ms: ample headroom over the cold
+  // median, tight enough that a real regression trips the `over` marker.
+  ops.push({ name: "check", args: ["check", "--format", "json"], budgetMs: 400 });
   return ops;
 }
 
@@ -319,7 +389,8 @@ function printTable(warm, cold, perceived, env) {
   );
   console.log(
     `runs:    warm ${env.runs} (first ${env.warmup} discarded as warm-up); ` +
-      `cold ${env.coldRuns} (mtime-bumped, none discarded); gate on median`,
+      `cold ${env.coldRuns} (mtime-bumped, none discarded); gate on median` +
+      (env.trials > 1 ? `; trials ${env.trials} (median-of-medians, worst-case p99)` : ""),
   );
   console.log("");
   printOpTable("warm path (steady-state, gate hits → no refresh)", warm);
@@ -340,6 +411,16 @@ function printTable(warm, cold, perceived, env) {
 }
 
 // ---- main ----------------------------------------------------------------
+
+// One full per-op measurement pass: build the op set, then run warm + cold for
+// every op. Returns a `{ warm, cold }` result set. Called once per trial.
+function measureOnce(opts) {
+  const ops = buildOps(opts.bin, opts.corpus);
+  const touchFile = firstTrackedMarkdown(opts.corpus);
+  const warm = ops.map((op) => benchOp(opts.bin, opts.corpus, op, opts.runs, opts.warmup));
+  const cold = ops.map((op) => benchOpCold(opts.bin, opts.corpus, op, opts.coldRuns, touchFile));
+  return { warm, cold };
+}
 
 function main() {
   const opts = parseArgs(process.argv.slice(2));
@@ -364,16 +445,22 @@ function main() {
     runs: opts.runs,
     warmup: opts.warmup,
     coldRuns: opts.coldRuns,
+    trials: opts.trials,
   };
 
-  const ops = buildOps(opts.bin, opts.corpus);
-  const touchFile = firstTrackedMarkdown(opts.corpus);
-  const warm = ops.map((op) => benchOp(opts.bin, opts.corpus, op, opts.runs, opts.warmup));
-  const cold = ops.map((op) => benchOpCold(opts.bin, opts.corpus, op, opts.coldRuns, touchFile));
+  // Run the entire measurement opts.trials times. With trials === 1 we use the
+  // single result set directly so behaviour and output are identical to before.
+  const perTrial = [];
+  for (let t = 0; t < opts.trials; t++) perTrial.push(measureOnce(opts));
+  const { warm, cold } =
+    opts.trials === 1 ? perTrial[0] : aggregateAcrossTrials(perTrial);
   const perceived = perceivedLatency(warm, cold);
 
   if (opts.json) {
-    console.log(JSON.stringify({ env, warm, cold, perceived }, null, 2));
+    const payload = { env, warm, cold, perceived };
+    // Preserve the raw per-trial sets so aggregation never loses data.
+    if (opts.trials > 1) payload.trials = perTrial;
+    console.log(JSON.stringify(payload, null, 2));
   } else {
     printTable(warm, cold, perceived, env);
   }
