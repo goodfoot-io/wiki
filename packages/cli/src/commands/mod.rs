@@ -377,22 +377,55 @@ fn discover_default_files(
         Err(_) => return discover_files_by_walk(&[], walk_root),
     };
 
-    let mut files = Vec::new();
-    for path_rel in inventory {
-        if !path_rel.ends_with(".md")
-            || is_fixture_path(&path_rel)
-            || !path_under_prefix(&path_rel, prefix)
-        {
-            continue;
-        }
-        let path = repo_root.join(&path_rel);
-        if path.is_file()
-            && let Ok(content) = std::fs::read_to_string(&path)
-            && crate::frontmatter::has_wiki_frontmatter(&content)
-        {
-            files.push(path);
-        }
+    // First pass: cheaply filter the inventory using string predicates only —
+    // no filesystem access — into a list of absolute candidate paths.
+    let candidates: Vec<PathBuf> = inventory
+        .into_iter()
+        .filter(|path_rel| {
+            path_rel.ends_with(".md")
+                && !is_fixture_path(path_rel)
+                && path_under_prefix(path_rel, prefix)
+        })
+        .map(|path_rel| repo_root.join(&path_rel))
+        .collect();
+
+    if candidates.is_empty() {
+        return Ok(Vec::new());
     }
+
+    // Second pass: read+check the candidates in parallel. On a hostile
+    // (fuseblk) filesystem each `read_to_string` blocks in userspace, so the
+    // serial version dominated latency. This mirrors the worker pattern in
+    // `ContentCache::warm_working_tree`.
+    let parallelism = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let worker_count = parallelism.min(8).min(candidates.len()).max(1);
+
+    let chunk_size = candidates.len().div_ceil(worker_count);
+    let mut files: Vec<PathBuf> = Vec::with_capacity(candidates.len());
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(worker_count);
+        for chunk in candidates.chunks(chunk_size) {
+            handles.push(scope.spawn(move || {
+                let mut out: Vec<PathBuf> = Vec::with_capacity(chunk.len());
+                for path in chunk {
+                    if path.is_file()
+                        && let Ok(content) = std::fs::read_to_string(path)
+                        && crate::frontmatter::has_wiki_frontmatter(&content)
+                    {
+                        out.push(path.clone());
+                    }
+                }
+                out
+            }));
+        }
+        for handle in handles {
+            if let Ok(out) = handle.join() {
+                files.extend(out);
+            }
+        }
+    });
 
     Ok(files)
 }
