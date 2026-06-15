@@ -49,8 +49,6 @@ pub enum Confidence {
     High,
     /// Plausible; one replacement at the same structural position.
     Medium,
-    /// Plausible but could be wrong; requires human review.
-    Low,
 }
 
 /// A rewrite that the fixer determined is safe to apply.
@@ -698,76 +696,6 @@ fn git_log_follow_renames(repo_root: &Path, old_path: &Path) -> Result<Vec<Strin
         }
     }
     Ok(vec![])
-}
-
-// ── Layered baseline reader ────────────────────────────────────────────────────
-
-/// Read `path` from the most recent layer that holds a baseline version
-/// (worktree → index → HEAD). Returns `(content, source_label)` for the first
-/// layer whose content is non-empty, or `Ok(None)` when no baseline exists.
-///
-/// For Fix #1, we only need to know if the path existed in git history — the
-/// content is not used for path rewriting. The staged-mesh layer is deferred to
-/// Fix #2.
-#[allow(dead_code)]
-pub fn read_at_baseline(path: &Path, repo_root: &Path) -> Result<Option<(String, &'static str)>> {
-    let path_rel = path
-        .strip_prefix(repo_root)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| path.to_string_lossy().into_owned());
-
-    // Worktree
-    if let Some(s) = DocSource::WorkingTree.read(repo_root, &path_rel)? {
-        return Ok(Some((s, "worktree")));
-    }
-
-    // Index
-    if let Some(s) = DocSource::Index.read(repo_root, &path_rel)? {
-        return Ok(Some((s, "index")));
-    }
-
-    // HEAD
-    if let Some(s) = DocSource::Head.read(repo_root, &path_rel)? {
-        return Ok(Some((s, "head")));
-    }
-
-    // HEAD history via git log --follow
-    let output = Command::new("git")
-        .current_dir(repo_root)
-        .args([
-            "log",
-            "--diff-filter=R",
-            "--follow",
-            "--format=%H",
-            "--",
-            &path_rel,
-        ])
-        .output()
-        .map_err(|e| miette::miette!("git log failed: {e}"))?;
-
-    if output.status.success() {
-        let text = String::from_utf8_lossy(&output.stdout);
-        for sha in text.lines() {
-            let sha = sha.trim();
-            if sha.is_empty() {
-                continue;
-            }
-            let blob = Command::new("git")
-                .current_dir(repo_root)
-                .args(["show", &format!("{sha}:{path_rel}")])
-                .output()
-                .map_err(|e| miette::miette!("git show failed: {e}"))?;
-            if blob.status.success()
-                && let Ok(s) = String::from_utf8(blob.stdout)
-            {
-                // Leak sha string for 'static lifetime — only in tests / rare paths.
-                let label = Box::leak(format!("history:{sha}").into_boxed_str());
-                return Ok(Some((s, label)));
-            }
-        }
-    }
-
-    Ok(None)
 }
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
@@ -2655,19 +2583,17 @@ mod tests {
         .unwrap();
 
         // Conflicted mesh with same anchor, different hashes on each side.
-        let conflicted = format!(
-            "<<<<<<< HEAD\n\
+        let conflicted = "<<<<<<< HEAD\n\
              src/file.rs#L1-L1 rk64:aaaaaaaaaaaaaaaa\n\
              =======\n\
              src/file.rs#L1-L1 rk64:bbbbbbbbbbbbbbbb\n\
              >>>>>>> other\n\
              \n\
-             Why."
-        );
+             Why.";
 
         let wiki = root.join(".wiki");
         fs::create_dir_all(&wiki).unwrap();
-        fs::write(wiki.join("slug"), &conflicted).unwrap();
+        fs::write(wiki.join("slug"), conflicted).unwrap();
 
         let report = resolve_conflicted_meshes(root).unwrap();
         assert!(

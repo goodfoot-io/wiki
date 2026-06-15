@@ -5,12 +5,10 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 
-#[allow(dead_code)]
-pub struct FastTriple {
-    pub head_oid: String,
-    pub index_checksum: [u8; 20],
-    pub worktree_generation: i64,
-}
+/// Marker returned when the fast gate matches: the on-disk HEAD/index/worktree
+/// triple equals the stored state, so no refresh is required. Carries no data —
+/// callers only distinguish `Some` (fresh) from `None` (refresh required).
+pub struct FastTriple;
 
 /// Stat-only fast gate: three stats + one state-row read; no gix open.
 ///
@@ -74,11 +72,7 @@ pub fn fast_gate(
         return Ok(None);
     }
 
-    Ok(Some(FastTriple {
-        head_oid,
-        index_checksum,
-        worktree_generation: state_generation,
-    }))
+    Ok(Some(FastTriple))
 }
 
 /// Resolve `.git/HEAD` to a 40-char hex OID, following a single symref hop.

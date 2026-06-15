@@ -5,7 +5,7 @@
 //! them with strict later-source-wins ordering, applies refcount-driven
 //! blob bookkeeping, and re-tokenizes only on actual content changes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -64,8 +64,6 @@ pub enum DeltaAction {
 /// Counters returned from the orchestrator.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RefreshOutcome {
-    #[allow(dead_code)]
-    pub deltas_applied: usize,
     pub fts_retokenizations: u64,
     pub pass3_full_rescans: u64,
     /// Number of directories Pass 3 had to descend into and stat/hash files
@@ -311,7 +309,6 @@ pub fn refresh(
         // CAS lost — roll back every delta we applied in this tx.
         drop(tx);
         return Ok(RefreshOutcome {
-            deltas_applied: 0,
             fts_retokenizations: 0,
             pass3_full_rescans: 0,
             pass3_dir_walks: 0,
@@ -322,7 +319,6 @@ pub fn refresh(
     crate::perf::scope_result("index.commit", serde_json::json!({}), || tx.commit())?;
 
     Ok(RefreshOutcome {
-        deltas_applied,
         fts_retokenizations,
         pass3_full_rescans,
         pass3_dir_walks,
@@ -534,10 +530,6 @@ fn decrement_blob(
     Ok(())
 }
 
-/// In-memory cache for `paths`-table reads (currently unused; reserved
-/// for Group C's incremental pass cache).
-#[allow(dead_code)]
-pub(crate) type SeenPaths = HashMap<PathBuf, (Source, BlobOid)>;
 
 #[cfg(test)]
 mod tests {

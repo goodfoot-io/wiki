@@ -210,22 +210,6 @@ pub enum Source {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BlobOid(pub String);
 
-/// Result of a refresh attempt: did we walk, was the lock contended, did
-/// the CAS lose?
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefreshOutcome {
-    /// Triple-stat gate matched; no refresh required.
-    Clean,
-    /// We acquired the lock and committed a new `state.generation`.
-    Refreshed,
-    /// Another process held the refresh lock; we served the existing
-    /// snapshot.
-    LockContended,
-    /// We refreshed but lost the CAS at commit; rolled back.
-    CasLost,
-}
-
 /// Classification of the filesystem hosting `.git/`. Hostile filesystems
 /// (overlayfs / NFS / CIFS) disable the dir-mtime Merkle optimization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,8 +232,6 @@ pub struct WikiIndex {
     repo: Option<gix::Repository>,
     conn: Connection,
     last_stats: IndexStats,
-    #[allow(dead_code)]
-    fs_class: HostileFs,
 }
 
 impl WikiIndex {
@@ -328,7 +310,6 @@ impl WikiIndex {
             repo: None,
             conn,
             last_stats: IndexStats::default(),
-            fs_class,
         };
 
         // Fast triple gate — stat-only path with no gix open.

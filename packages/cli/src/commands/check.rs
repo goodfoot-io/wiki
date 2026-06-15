@@ -730,9 +730,7 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 /// Cached content and parsed data for a single link target file.
-#[allow(dead_code)]
 struct CachedTarget {
-    content: String,
     line_count: u32,
     headings: Vec<Heading>,
 }
@@ -877,7 +875,6 @@ fn collect_for_files(
                             let headings = extract_headings(c);
                             let line_count = c.lines().count() as u32;
                             Some(v.insert(CachedTarget {
-                                content: c.to_string(),
                                 line_count,
                                 headings,
                             }))

@@ -22,36 +22,6 @@ pub struct GitAccelerationState {
     pub split_index: Option<bool>,
 }
 
-/// Run a `git` command with the given args, rooted at `cwd`, and return stdout
-/// as a UTF-8 string.  Fails with a descriptive error when the process exits
-/// non-zero or produces invalid UTF-8.
-fn git_output_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let output = Command::new("git")
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .into_diagnostic()
-        .wrap_err_with(|| format!("failed to spawn `git {}`", args.join(" ")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(miette!(
-            "git {} failed ({}): {}",
-            args.join(" "),
-            output.status,
-            stderr
-        ));
-    }
-
-    Ok(output.stdout)
-}
-
-fn git_output(cwd: &Path, args: &[&str]) -> Result<String> {
-    String::from_utf8(git_output_bytes(cwd, args)?)
-        .into_diagnostic()
-        .wrap_err("git output is not valid UTF-8")
-}
-
 fn open_repo(repo: &Path) -> Result<gix::Repository> {
     gix::open(repo)
         .into_diagnostic()
@@ -158,14 +128,6 @@ pub fn git_acceleration_state(repo: &Path) -> Result<GitAccelerationState> {
         untracked_cache: config.boolean("core.untrackedCache"),
         split_index: config.boolean("core.splitIndex"),
     })
-}
-
-/// Return tracked paths changed between two commits.
-pub fn changed_paths_between(repo: &Path, from_ref: &str, to_ref: &str) -> Result<Vec<String>> {
-    let range = format!("{from_ref}..{to_ref}");
-    let out = git_output(repo, &["diff", "--name-only", &range, "--"])
-        .wrap_err_with(|| format!("failed to list changed paths for '{range}'"))?;
-    Ok(parse_line_paths(&out))
 }
 
 /// Return the tracked and untracked, non-ignored repository file inventory as
@@ -290,18 +252,6 @@ pub fn ignored_paths(repo: &Path, candidates: &[String]) -> Result<HashSet<Strin
         .filter(|line| !line.is_empty())
         .map(str::to_owned)
         .collect())
-}
-
-fn parse_line_paths(out: &str) -> Vec<String> {
-    let mut paths = out
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    paths.sort();
-    paths.dedup();
-    paths
 }
 
 // ─── Index / HEAD helpers ─────────────────────────────────────────────────────
