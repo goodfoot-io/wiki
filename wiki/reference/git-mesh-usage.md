@@ -17,7 +17,7 @@ See [Wiki Mesh Integration](../architecture/wiki-mesh-integration.md) for the de
 
 **Where:** [`mesh_coverage.rs`](/packages/cli/src/commands/mesh_coverage.rs#L187-L189)
 
-**Invoked by:** [`wiki check`](/packages/cli/src/commands/check.rs#L287-L354)
+**Invoked by:** [`wiki check`](/packages/cli/src/commands/check.rs#L343-L410)
 
 **Purpose:** Query all mesh subsystems that include a given file anchor. Used to determine whether a fragment link (`path#Lstart-Lend`) in a wiki article has a covering mesh that also anchors the wiki file itself.
 

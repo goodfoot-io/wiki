@@ -55,6 +55,62 @@ impl ContentCache {
             }
         }
     }
+
+    /// Pre-read the given working-tree paths in parallel and populate the cache.
+    /// Only successful reads are inserted; failures are left absent so the serial
+    /// read path still runs read_fn and produces the exact error diagnostic.
+    /// Already-cached paths and duplicates are skipped. No-op for non-WorkingTree
+    /// sources (their reads go through a non-thread-safe git handle).
+    pub(crate) fn warm_working_tree(&mut self, paths: &[PathBuf]) {
+        // Collect the unique, not-yet-cached paths.
+        let mut targets: Vec<PathBuf> = Vec::with_capacity(paths.len());
+        let mut seen: std::collections::HashSet<&PathBuf> = std::collections::HashSet::new();
+        for path in paths {
+            if self.cache.contains_key(path) {
+                continue;
+            }
+            if seen.insert(path) {
+                targets.push(path.clone());
+            }
+        }
+        if targets.is_empty() {
+            return;
+        }
+
+        // Bounded worker count: at most one thread per path, capped at 8, and
+        // never more than the available parallelism.
+        let parallelism = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let worker_count = parallelism.min(8).min(targets.len()).max(1);
+
+        // Chunk the targets into contiguous slices, one per worker.
+        let chunk_size = targets.len().div_ceil(worker_count);
+        let mut collected: Vec<(PathBuf, String)> = Vec::with_capacity(targets.len());
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(worker_count);
+            for chunk in targets.chunks(chunk_size) {
+                handles.push(scope.spawn(move || {
+                    let mut out: Vec<(PathBuf, String)> = Vec::with_capacity(chunk.len());
+                    for path in chunk {
+                        if let Ok(content) = std::fs::read_to_string(path) {
+                            out.push((path.clone(), content));
+                        }
+                    }
+                    out
+                }));
+            }
+            for handle in handles {
+                if let Ok(out) = handle.join() {
+                    collected.extend(out);
+                }
+            }
+        });
+
+        for (path, content) in collected {
+            self.cache.entry(path).or_insert(content);
+        }
+    }
 }
 
 /// Return `true` when `rel_path` exists as a directory in `source`.
@@ -744,6 +800,15 @@ fn collect_for_files(
     content_cache: &mut ContentCache,
 ) -> Result<Vec<CheckDiagnostic>> {
     let mut diagnostics: Vec<CheckDiagnostic> = Vec::new();
+
+    if matches!(source, DocSource::WorkingTree) {
+        // Pre-warm the cache with parallel reads of the union of pages we are
+        // about to read serially. Overlaps blocked reads on hostile filesystems.
+        let mut union: Vec<PathBuf> = Vec::with_capacity(index_files.len() + files.len());
+        union.extend(index_files.iter().cloned());
+        union.extend(files.iter().cloned());
+        content_cache.warm_working_tree(&union);
+    }
 
     let files_set: std::collections::HashSet<&PathBuf> = files.iter().collect();
 
