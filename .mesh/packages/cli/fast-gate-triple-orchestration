@@ -1,0 +1,4 @@
+packages/cli/src/index/freshness.rs#L22-L75 rk64:c3e8102d581339e7
+packages/cli/src/index/passes/mod.rs#L287-L306 rk64:fa1d32ef5c433ef7
+
+Fast triple gate orchestrator that compares HEAD OID, index checksum, and worktree generation read from the state row against on-disk sources; its decision logic must stay coordinated with the writer's CAS update that stores the same triple.
