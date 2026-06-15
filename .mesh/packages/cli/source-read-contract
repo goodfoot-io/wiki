@@ -1,5 +1,5 @@
-packages/cli/src/git.rs#L489-L569 rk64:5baf365cdd7850ca
-packages/cli/src/git.rs#L578-L589 rk64:01ce4b48f13136c1
+packages/cli/src/git.rs#L507-L587 rk64:5baf365cdd7850ca
+packages/cli/src/git.rs#L596-L607 rk64:01ce4b48f13136c1
 packages/cli/src/index/mod.rs#L136-L152 rk64:462f67d51dc827ce
 
 DocSource::read dispatch for Index and HEAD sources delegates to git.rs functions (read_index_blob_inner, read_head_blob_inner) that implement source-specific tree walks with symlink following, submodule gitlink skipping, and Ok(None) for blob-through-tree paths, while check.rs::source_aware_exists mirrors the existence semantics via has_index_entry/has_head_entry.

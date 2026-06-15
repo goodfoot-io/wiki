@@ -1,5 +1,5 @@
 package.json#L22-L23 rk64:03e3bd9e6666514e
 packages/cli/package.json#L9-L10 rk64:12bc202240122fb2
-packages/cli/scripts/bench.mjs#L32-L33 rk64:e01215eabc312d18
+packages/cli/scripts/bench.mjs#L34-L35 rk64:e01215eabc312d18
 
 yarn bench wiring: the root script delegates to the CLI package's bench script, which builds the release binary under CARGO_TARGET_DIR=target/build and then runs bench.mjs, whose default --bin path must resolve to that same target/build/release/wiki location.
