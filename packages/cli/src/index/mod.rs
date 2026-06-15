@@ -316,7 +316,16 @@ impl WikiIndex {
         // A forced HostileFs::Yes skips the gate so the test can observe a
         // Pass 3 full rescan.
         if forced_fs_class != Some(HostileFs::Yes) {
-            match freshness::fast_gate(&index.dot_git, &index.conn) {
+            // Wrap the gate in a perf span: its worktree leg walks and stats the
+            // whole repo on every invocation, the single largest unmeasured
+            // per-command cost. The span surfaces that cost in wiki.log so the
+            // benchmark can attribute it to the prepare term.
+            let gate = crate::perf::scope_result(
+                "index.fast_gate",
+                serde_json::json!({}),
+                || freshness::fast_gate(&index.dot_git, &index.conn),
+            );
+            match gate {
                 Ok(Some(_)) => return Ok(index),
                 Ok(None) => {}
                 Err(_) => {}

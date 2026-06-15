@@ -313,6 +313,10 @@ fn run_for_each(
 }
 
 fn main() {
+    // Capture process entry as early as possible so the `startup` perf event
+    // measures the pre-command-span residual (process spawn + repo-root
+    // resolution) that the command span itself cannot see.
+    let process_start = Instant::now();
     let cli = Cli::parse();
     if cli.version {
         println!("wiki {}", crate::version::VERSION);
@@ -334,7 +338,15 @@ fn main() {
         SourceArg::Head => index::DocSource::Head,
     };
 
-    let result = run(cli.command, cli.query, cli.limit, cli.offset, json, source);
+    let result = run(
+        cli.command,
+        cli.query,
+        cli.limit,
+        cli.offset,
+        json,
+        source,
+        process_start,
+    );
 
     match result {
         Ok(code) => process::exit(code),
@@ -356,6 +368,7 @@ fn run(
     offset: usize,
     json: bool,
     source: index::DocSource,
+    process_start: Instant,
 ) -> Result<i32> {
     let repo_root = git::repo_root()?;
     let scan_root = std::env::current_dir()
@@ -364,6 +377,15 @@ fn run(
 
     let command_name = command_name(command.as_ref(), query.as_deref());
     perf::init(&repo_root, command_name, json);
+    // The command span starts here, after repo-root resolution; record the
+    // elapsed time since process entry as the `startup` term so the
+    // three-term decomposition (startup / prepare / body) is complete.
+    perf::log_event(
+        "startup",
+        process_start.elapsed().as_secs_f64() * 1000.0,
+        "ok",
+        serde_json::json!({ "command": command_name }),
+    );
     let _command_span = perf::span_for_command(command_name);
     let started = Instant::now();
 

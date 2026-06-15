@@ -7,6 +7,19 @@ This guide describes how to measure the per-operation latency of the everyday `w
 
 For *why* the CLI is fast in steady state — the index, the fast gate, FTS5 — see [Wiki Performance Optimization](./wiki-performance-optimization.md). This page is the complementary how-to: the procedure for measuring it.
 
+## The quick path: `yarn bench`
+
+The procedure below is implemented as a standalone command. From the repo root:
+
+```bash
+yarn bench                 # build the release binary, then benchmark the repo corpus
+yarn bench --json          # machine-readable output
+```
+
+`yarn bench` builds the `wiki` binary from the source under test, spawns it N times per common command against the repo's own corpus, parses the per-span timings from `wiki.log`, and prints a per-operation table — wall-clock median/p10/p90 plus the startup / gate / refresh / body decomposition — with the detected filesystem class labelled on every run. It is **report-only** (always exits 0) and is deliberately **not** part of `yarn validate`: latency on a hostile filesystem is too variant to gate a commit lane on, so budgets are shown as `within`/`over` markers rather than enforced. The driver lives in [`bench.mjs`](/packages/cli/scripts/bench.mjs).
+
+The rest of this page explains the methodology the command encodes — read it to interpret the numbers, to benchmark by hand, or to extend the driver.
+
 ## The two rules that make a number trustworthy
 
 Two methodology mistakes invalidate a benchmark before it starts. Both are easy to make and both have already produced false conclusions about this tool.
@@ -61,15 +74,15 @@ Collect the 25 wall-clock samples per command and report `min / p10 / median / p
 
 A median is not actionable until you know *which* term it lives in. Every subcommand dispatched from [`main.rs`](/packages/cli/src/main.rs#L358-L370) shares one prefix — resolve the repo root, then [`WikiIndex::prepare`](/packages/cli/src/index/mod.rs#L241), then run the command body — so a win or regression must be attributed to the right term:
 
-1. **Startup / pre-span residual.** Process spawn plus the in-process repo-root discovery at [`main.rs`](/packages/cli/src/main.rs#L360), which runs *before* the command span starts at [`span_for_command`](/packages/cli/src/perf.rs#L63). Recover it as `wall − command-span`; a bare `wiki --version` (which skips `prepare`) gives the floor.
-2. **Index preparation.** [`prepare`](/packages/cli/src/index/mod.rs#L241) calls the stat-only [`fast_gate`](/packages/cli/src/index/freshness.rs#L18) at [its call site](/packages/cli/src/index/mod.rs#L315-L325); on a gate miss it falls through to a full `index.refresh`. The refresh is wrapped in a perf span; the gate walk over the worktree at [`compute_worktree_dir_hash`](/packages/cli/src/index/freshness.rs#L143-L147) currently is **not**, so on a gate miss it shows up as the unspanned gap before `index.gix_open` in the perf log.
-3. **Command body.** The work inside the command span itself (the actual search, list, summary, or check).
+1. **Startup.** Process spawn plus the in-process repo-root discovery at [`main.rs`](/packages/cli/src/main.rs#L360), which runs *before* the command span starts. This is captured directly by the `startup` event, emitted in [`run`](/packages/cli/src/main.rs#L352) from an `Instant` taken at process entry — so it no longer has to be recovered as `wall − command-span`. A bare `wiki --version` (which skips `prepare`) gives the floor.
+2. **Index preparation.** [`prepare`](/packages/cli/src/index/mod.rs#L241) calls the stat-only [`fast_gate`](/packages/cli/src/index/freshness.rs#L18) at [its call site](/packages/cli/src/index/mod.rs#L318-L324); on a gate miss it falls through to a full `index.refresh`. Both the gate walk and the refresh are wrapped in perf spans — `index.fast_gate` and `index.refresh` — so the dominant per-invocation cost (the worktree walk in [`compute_worktree_dir_hash`](/packages/cli/src/index/freshness.rs#L143-L147)) is now visible rather than hiding in an unspanned gap.
+3. **Command body.** The work inside the command span itself (the actual search, list, summary, or check), recovered as `command_finish − (fast_gate + gix_open + refresh)`.
 
-Read the spans back out of the perf log to separate terms (2) and (3):
+Read the spans back out of the perf log to separate the terms:
 
 ```bash
 WIKI_PERF=1 "$B" "index" --format json >/dev/null 2>spans.txt
-grep -E "command\.|index\.refresh|index\.gix_open" spans.txt
+grep -E "startup|index\.fast_gate|index\.refresh|index\.gix_open|command\." spans.txt
 ```
 
 The gap between the command span's start and the first `index.gix_open` event is the gate-walk cost. The `index.refresh` span is the refresh cost. Whatever remains inside the command span is the body.
