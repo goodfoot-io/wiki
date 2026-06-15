@@ -1335,10 +1335,20 @@ fn finding1_last_page_deleted_cleanup_still_runs() {
         "follow-up fix pass must exit 0; stderr=\n{}",
         String::from_utf8_lossy(&followup.stderr)
     );
-    // No more meshes on disk.
+    // No more meshes on disk. The store's ensure_wiki_dir writes
+    // .wiki/.gitattributes as a runtime artifact (a dotfile, like .mesh/
+    // does) — filter it out the same way the store walker skips dotfiles.
     let wiki_dir = root.join(".wiki");
     if wiki_dir.is_dir() {
-        let remaining: Vec<_> = walkdir(&wiki_dir);
+        let remaining: Vec<_> = walkdir(&wiki_dir)
+            .into_iter()
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| !n.starts_with('.'))
+                    .unwrap_or(true)
+            })
+            .collect();
         assert!(
             remaining.is_empty(),
             "no mesh files should remain after cleanup: {remaining:?}"

@@ -90,6 +90,25 @@ pub(crate) fn wiki_dir(repo_root: &Path) -> PathBuf {
     repo_root.join(".wiki")
 }
 
+/// Write `.wiki/.gitattributes` with `* text eol=lf` if missing or stale.
+///
+/// Mirrors `git_mesh::mesh::structural::ensure_mesh_dir` for the `.wiki/` store:
+/// idempotent — writes only when the file is absent or its content differs from
+/// the canonical form. This guarantees mesh files check out with LF line endings
+/// on all platforms without per-developer `core.autocrlf` configuration, so rk64
+/// anchor hashes mean the same thing everywhere.
+fn ensure_wiki_dir(repo_root: &Path) -> Result<()> {
+    let wiki = wiki_dir(repo_root);
+    let ga_path = wiki.join(".gitattributes");
+    let canonical = "* text eol=lf\n";
+    let current = std::fs::read_to_string(&ga_path).unwrap_or_default();
+    if current != canonical {
+        std::fs::write(&ga_path, canonical)
+            .map_err(|e| miette::miette!("failed to write {}: {e}", ga_path.display()))?;
+    }
+    Ok(())
+}
+
 /// Resolve the on-disk path of the mesh file for `slug`.
 pub(crate) fn slug_path(repo_root: &Path, slug: &str) -> PathBuf {
     let mut path = wiki_dir(repo_root);
@@ -198,6 +217,7 @@ pub(crate) fn write(repo_root: &Path, slug: &str, mesh: &MeshFile) -> Result<()>
         .ok_or_else(|| miette::miette!("mesh slug `{slug}` has no parent directory"))?;
     fs::create_dir_all(parent)
         .map_err(|e| miette::miette!("failed to create {}: {e}", parent.display()))?;
+    ensure_wiki_dir(repo_root)?;
 
     let mut tmp = tempfile::NamedTempFile::new_in(parent)
         .map_err(|e| miette::miette!("failed to create temp file in {}: {e}", parent.display()))?;
