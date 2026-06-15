@@ -14,7 +14,7 @@
 // `within` / `over` markers, not enforced, until the perf fixes land.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 
@@ -28,6 +28,7 @@ function parseArgs(argv) {
   const opts = {
     runs: 11,
     warmup: 2,
+    coldRuns: 11,
     json: false,
     bin: process.env.WIKI_BENCH_BIN ?? join(CLI_DIR, "target", "build", "release", "wiki"),
     corpus: WORKSPACE_ROOT,
@@ -37,6 +38,7 @@ function parseArgs(argv) {
     if (arg === "--json") opts.json = true;
     else if (arg === "--runs") opts.runs = Number(argv[++i]);
     else if (arg === "--warmup") opts.warmup = Number(argv[++i]);
+    else if (arg === "--cold-runs") opts.coldRuns = Number(argv[++i]);
     else if (arg === "--bin") opts.bin = resolve(argv[++i]);
     else if (arg === "--corpus") opts.corpus = resolve(argv[++i]);
     else {
@@ -46,6 +48,7 @@ function parseArgs(argv) {
   }
   if (!Number.isFinite(opts.runs) || opts.runs < 1) opts.runs = 11;
   if (!Number.isFinite(opts.warmup) || opts.warmup < 0) opts.warmup = 0;
+  if (!Number.isFinite(opts.coldRuns) || opts.coldRuns < 1) opts.coldRuns = 11;
   return opts;
 }
 
@@ -59,11 +62,12 @@ function percentile(sorted, p) {
 
 function summarize(samples) {
   const xs = samples.filter((x) => x != null).sort((a, b) => a - b);
-  if (xs.length === 0) return { median: null, p10: null, p90: null, n: 0 };
+  if (xs.length === 0) return { median: null, p10: null, p90: null, p99: null, n: 0 };
   return {
     median: percentile(xs, 50),
     p10: percentile(xs, 10),
     p90: percentile(xs, 90),
+    p99: percentile(xs, 99),
     n: xs.length,
   };
 }
@@ -164,6 +168,87 @@ function benchOp(bin, corpus, op, runs, warmup) {
   };
 }
 
+// Cold path: force a fast-gate MISS before every spawn by bumping the mtime of
+// one tracked markdown file. That changes the worktree-generation signal the
+// gate keys on (so the command pays a full index refresh) without touching file
+// content or git status. Every run is independently cold, so nothing is
+// discarded as warm-up. With no touchable file the cold stats are unavailable.
+function benchOpCold(bin, corpus, op, runs, touchFile) {
+  if (!touchFile) {
+    const unavailable = summarize([]);
+    return {
+      name: op.name,
+      args: op.args,
+      failedStatus: null,
+      available: false,
+      wall: unavailable,
+      startup: unavailable,
+      fast_gate: unavailable,
+      refresh: unavailable,
+      body: unavailable,
+      budgetMs: op.budgetMs,
+    };
+  }
+  const raw = [];
+  for (let i = 0; i < runs; i++) {
+    // Monotonically increasing timestamp so each run is a genuine mtime bump.
+    const t = new Date();
+    utimesSync(touchFile, t, t);
+    raw.push(spawnOnce(bin, corpus, op.args));
+  }
+  const failed = raw.find((r) => !r.ok);
+  const pick = (key) => summarize(raw.map((r) => r[key]));
+  return {
+    name: op.name,
+    args: op.args,
+    failedStatus: failed ? failed.status : null,
+    available: true,
+    wall: pick("wall"),
+    startup: pick("startup"),
+    fast_gate: pick("fast_gate"),
+    refresh: pick("refresh"),
+    body: pick("body"),
+    budgetMs: op.budgetMs,
+  };
+}
+
+// First stable tracked markdown file in the corpus, absolute path, or null.
+function firstTrackedMarkdown(corpus) {
+  const r = spawnSync("git", ["ls-files", "*.md"], { cwd: corpus, encoding: "utf8" });
+  if (r.status !== 0 || !r.stdout) return null;
+  const first = r.stdout.split("\n").find((line) => line.trim().length > 0);
+  return first ? join(corpus, first.trim()) : null;
+}
+
+// ---- perceived latency ---------------------------------------------------
+
+// How often each command is actually invoked; search dominates everyday use.
+// The freq-weighted perceived latency is the single scoreboard number users
+// feel — tail latency (p99) is what they remember.
+const PERCEIVED_WEIGHTS = { search: 0.5, list: 0.2, summary: 0.2, check: 0.1 };
+
+// Weighted sum of one wall stat across the ops actually present, normalized by
+// the sum of those ops' weights (so a missing op doesn't deflate the number).
+function weightedWall(results, key) {
+  let num = 0;
+  let den = 0;
+  for (const r of results) {
+    const w = PERCEIVED_WEIGHTS[r.name];
+    const v = r.wall?.[key];
+    if (w == null || v == null) continue;
+    num += w * v;
+    den += w;
+  }
+  return den === 0 ? null : num / den;
+}
+
+function perceivedLatency(warm, cold) {
+  return {
+    warm: { median: weightedWall(warm, "median"), p99: weightedWall(warm, "p99") },
+    cold: { median: weightedWall(cold, "median"), p99: weightedWall(cold, "p99") },
+  };
+}
+
 // ---- operation set -------------------------------------------------------
 
 // Resolve a summary target that actually exists in the corpus, so the row is
@@ -198,7 +283,30 @@ function buildOps(bin, corpus) {
 
 // ---- output --------------------------------------------------------------
 
-function printTable(results, env) {
+function printOpTable(title, results) {
+  console.log(title);
+  console.log(
+    "op        wall(med/p90/p99)        startup  gate    refresh  body    budget   status",
+  );
+  console.log("─".repeat(92));
+  for (const r of results) {
+    const w = r.wall;
+    if (r.available === false) {
+      console.log(`${r.name.padEnd(9)} (unavailable — no tracked markdown file to bump)`);
+      continue;
+    }
+    const over = w.median != null && w.median > r.budgetMs;
+    const status = r.failedStatus != null && r.failedStatus > 1 ? "ERROR" : over ? "over" : "within";
+    console.log(
+      `${r.name.padEnd(9)} ` +
+        `${ms(w.median)}/${ms(w.p90)}/${ms(w.p99)}  ` +
+        `${ms(r.startup.median)}  ${ms(r.fast_gate.median)}  ${ms(r.refresh.median)}  ${ms(r.body.median)}  ` +
+        `${String(r.budgetMs).padStart(5)}ms  ${status}`,
+    );
+  }
+}
+
+function printTable(warm, cold, perceived, env) {
   const scoreboard = env.fsClass === SCOREBOARD_FS;
   console.log("");
   console.log(`wiki benchmark — ${env.binVersion}`);
@@ -209,28 +317,26 @@ function printTable(results, env) {
         ? "  (scoreboard)"
         : `  (NOT the ${SCOREBOARD_FS} scoreboard — treat as a labelled lower-bound only)`),
   );
-  console.log(`runs:    ${env.runs} (first ${env.warmup} discarded as warm-up); gate on median`);
+  console.log(
+    `runs:    warm ${env.runs} (first ${env.warmup} discarded as warm-up); ` +
+      `cold ${env.coldRuns} (mtime-bumped, none discarded); gate on median`,
+  );
   console.log("");
+  printOpTable("warm path (steady-state, gate hits → no refresh)", warm);
+  console.log("");
+  printOpTable("cold path (gate miss → refresh)", cold);
+  console.log("");
+  const pw = perceived.warm;
+  const pc = perceived.cold;
   console.log(
-    "op        wall(med/p10/p90)        startup  gate    refresh  body    budget   status",
+    `perceived (freq-weighted):  warm  med ${ms(pw.median)}ms  p99 ${ms(pw.p99)}ms` +
+      `     cold  med ${ms(pc.median)}ms  p99 ${ms(pc.p99)}ms`,
   );
-  console.log(
-    "─".repeat(92),
-  );
-  for (const r of results) {
-    const w = r.wall;
-    const over = w.median != null && w.median > r.budgetMs;
-    const status = r.failedStatus != null && r.failedStatus > 1 ? "ERROR" : over ? "over" : "within";
-    console.log(
-      `${r.name.padEnd(9)} ` +
-        `${ms(w.median)}/${ms(w.p10)}/${ms(w.p90)}  ` +
-        `${ms(r.startup.median)}  ${ms(r.fast_gate.median)}  ${ms(r.refresh.median)}  ${ms(r.body.median)}  ` +
-        `${String(r.budgetMs).padStart(5)}ms  ${status}`,
-    );
-  }
   console.log("");
   console.log("All times in ms. wall = full process wall-clock; startup/gate/refresh/body are");
-  console.log("median per-term spans from wiki.log. Report-only: this command always exits 0.");
+  console.log("median per-term spans from wiki.log. The cold path bumps one tracked .md file's");
+  console.log("mtime before each run to force a gate miss (content & git status unchanged).");
+  console.log("Report-only: this command always exits 0.");
 }
 
 // ---- main ----------------------------------------------------------------
@@ -257,15 +363,19 @@ function main() {
     fsClass: detectFsClass(opts.corpus),
     runs: opts.runs,
     warmup: opts.warmup,
+    coldRuns: opts.coldRuns,
   };
 
   const ops = buildOps(opts.bin, opts.corpus);
-  const results = ops.map((op) => benchOp(opts.bin, opts.corpus, op, opts.runs, opts.warmup));
+  const touchFile = firstTrackedMarkdown(opts.corpus);
+  const warm = ops.map((op) => benchOp(opts.bin, opts.corpus, op, opts.runs, opts.warmup));
+  const cold = ops.map((op) => benchOpCold(opts.bin, opts.corpus, op, opts.coldRuns, touchFile));
+  const perceived = perceivedLatency(warm, cold);
 
   if (opts.json) {
-    console.log(JSON.stringify({ env, results }, null, 2));
+    console.log(JSON.stringify({ env, warm, cold, perceived }, null, 2));
   } else {
-    printTable(results, env);
+    printTable(warm, cold, perceived, env);
   }
 
   // Report-only: always succeed.
