@@ -155,7 +155,12 @@ pub(crate) fn compute_worktree_dir_hash(repo_root: &Path) -> i64 {
     // Collect (rel_path, mtime_ns) for every directory and markdown file
     // under repo_root. The walk mirrors git's ignore semantics as a superset of
     // what the index ingests, and additionally prunes `.git` and `.wiki`.
-    let mut pairs: Vec<(std::path::PathBuf, i64)> = Vec::new();
+    // The parallel walker overlaps the per-entry stat round-trips across
+    // threads, which dominates latency on a hostile (fuseblk) filesystem.
+    // Threads push kept pairs into a shared Mutex<Vec>; the work is stat-bound,
+    // not lock-bound, so a per-entry lock-and-push is fine. The pairs are sorted
+    // by path after the walk, so collection order does not affect the hash.
+    let pairs = std::sync::Mutex::new(Vec::<(std::path::PathBuf, i64)>::new());
     let walker = ignore::WalkBuilder::new(repo_root)
         .standard_filters(true)
         .hidden(false)
@@ -168,43 +173,52 @@ pub(crate) fn compute_worktree_dir_hash(repo_root: &Path) -> i64 {
             let name = e.file_name();
             name != ".git" && name != ".wiki"
         })
-        .build();
-    for entry in walker {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let rel = match entry.path().strip_prefix(repo_root) {
-            Ok(r) => r.to_path_buf(),
-            Err(_) => continue,
-        };
+        .build_parallel();
+    walker.run(|| {
+        let pairs = &pairs;
+        Box::new(
+            move |entry: Result<ignore::DirEntry, ignore::Error>| -> ignore::WalkState {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => return ignore::WalkState::Continue,
+                };
+                let rel = match entry.path().strip_prefix(repo_root) {
+                    Ok(r) => r.to_path_buf(),
+                    Err(_) => return ignore::WalkState::Continue,
+                };
 
-        // Cheap readdir-backed filter first (no stat): only directories and
-        // markdown files are kept. `file_type()` comes from readdir's d_type
-        // on Linux, so this discards `.rs`/`.ts`/`.json`/etc. without a stat.
-        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
-        let is_file = entry.file_type().is_some_and(|ft| ft.is_file());
-        if !(is_dir || (is_file && is_markdown(&rel))) {
-            continue;
-        }
+                // Cheap readdir-backed filter first (no stat): only directories
+                // and markdown files are kept. `file_type()` comes from
+                // readdir's d_type on Linux, so this discards
+                // `.rs`/`.ts`/`.json`/etc. without a stat.
+                let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+                let is_file = entry.file_type().is_some_and(|ft| ft.is_file());
+                if !(is_dir || (is_file && is_markdown(&rel))) {
+                    return ignore::WalkState::Continue;
+                }
 
-        // Stat only the entries we keep. `entry.metadata()` may reuse a stat
-        // already performed by the walker.
-        let mtime_ns = match entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos() as i64)
-        {
-            Some(m) => m,
-            None => continue,
-        };
+                // Stat only the entries we keep. `entry.metadata()` may reuse a
+                // stat already performed by the walker.
+                let mtime_ns = match entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos() as i64)
+                {
+                    Some(m) => m,
+                    None => return ignore::WalkState::Continue,
+                };
 
-        pairs.push((rel, mtime_ns));
-    }
+                pairs.lock().unwrap().push((rel, mtime_ns));
+                ignore::WalkState::Continue
+            },
+        )
+    });
 
-    // Sort for deterministic ordering independent of filesystem readdir order.
+    // Sort for deterministic ordering independent of filesystem readdir order
+    // and of the thread interleaving above.
+    let mut pairs = pairs.into_inner().unwrap();
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
