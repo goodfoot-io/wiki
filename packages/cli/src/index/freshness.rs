@@ -19,16 +19,15 @@ pub fn fast_gate(
     dot_git: &Path,
     conn: &rusqlite::Connection,
 ) -> anyhow::Result<Option<FastTriple>> {
-    let head_path = dot_git.join("HEAD");
     let index_path = dot_git.join("index");
     let repo_root = dot_git.parent().unwrap_or(dot_git);
 
-    if fs::metadata(&head_path).is_err()
-        || fs::metadata(&index_path).is_err()
-        || fs::metadata(repo_root).is_err()
-    {
-        return Ok(None);
-    }
+    // No explicit existence stats here: every read below fails closed on a
+    // missing input. `read_head_oid` returns None if HEAD is absent,
+    // `read_index_trailer` stats the index itself and returns None if absent,
+    // and a missing `repo_root` yields an empty worktree hash that cannot match
+    // the stored generation. In all cases `fast_gate` returns `Ok(None)` (a
+    // refresh), so the redundant up-front stats only cost the warm hot path.
 
     let head_oid = match read_head_oid(dot_git) {
         Some(h) => h,
