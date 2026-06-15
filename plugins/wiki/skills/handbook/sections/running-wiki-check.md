@@ -3,9 +3,9 @@
 The health gate. Validates links, frontmatter, and mesh coverage in one pass.
 
 ```bash
-cd wiki && wiki check     # scope to wiki/; the usual invocation
-wiki check                # every *.md under CWD
-wiki check path/to/page.md  # specific globs, resolved from CWD
+cd wiki && wiki check --fix  # scope to wiki/; the usual invocation — clears mechanical drift first
+wiki check                   # read-only; every *.md under CWD
+wiki check path/to/page.md   # specific globs, resolved from CWD
 ```
 
 ## Three diagnostic buckets

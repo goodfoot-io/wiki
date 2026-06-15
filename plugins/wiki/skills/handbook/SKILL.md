@@ -7,7 +7,7 @@ description: CLI for documentation in this repository - search with `wiki "[quer
 **Reach for `wiki "[query]"` to learn about this project.** It's the point of the wiki: ranked, source-anchored answers about how this codebase actually works — architecture, design rationale, how subsystems connect. Before grepping or guessing at unfamiliar code, search the wiki first; a maintained page beats re-deriving intent from source. Run it early and often, not just when authoring.
 
 - **Search**: `wiki "[query]"` (default subcommand). Your first move on any unfamiliar area; also run it before authoring to find the canonical title to link and to catch a collision early. `-l N`/`-o N` paginate (default 3).
-- **Check**: `wiki check --fix` validates links, frontmatter, and mesh coverage. The pre-commit hook runs `--fix` automatically on every commit.
+- **Check**: `wiki check --fix` is the first line of defense — run it *before* hand-editing fragment line numbers or investigating a failure. Editing cited source shifts line numbers, so a bare `wiki check` surfaces alarming `broken_link`/`mesh_uncovered` errors that are usually mechanical: `--fix` follows the mesh to the new lines and re-anchors stale meshes. The drift is often pre-existing, not from your change. Only what `--fix` leaves behind (see `resolving-skipped-fixes.md`) needs judgment. The pre-commit hook runs `--fix` automatically.
 - **Write a page**: `.md` with `title`+`summary` frontmatter (both required = page-hood); cross-link with relative markdown; cite code with **line-ranged** fragment links (`path#L10-L40`).
 
 For anything beyond these, route by condition:
