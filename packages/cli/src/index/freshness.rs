@@ -178,7 +178,20 @@ pub(crate) fn compute_worktree_dir_hash(repo_root: &Path) -> i64 {
             Ok(r) => r.to_path_buf(),
             Err(_) => continue,
         };
-        let mtime_ns = match std::fs::metadata(entry.path())
+
+        // Cheap readdir-backed filter first (no stat): only directories and
+        // markdown files are kept. `file_type()` comes from readdir's d_type
+        // on Linux, so this discards `.rs`/`.ts`/`.json`/etc. without a stat.
+        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+        let is_file = entry.file_type().is_some_and(|ft| ft.is_file());
+        if !(is_dir || (is_file && is_markdown(&rel))) {
+            continue;
+        }
+
+        // Stat only the entries we keep. `entry.metadata()` may reuse a stat
+        // already performed by the walker.
+        let mtime_ns = match entry
+            .metadata()
             .ok()
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -188,11 +201,7 @@ pub(crate) fn compute_worktree_dir_hash(repo_root: &Path) -> i64 {
             None => continue,
         };
 
-        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
-        let is_file = entry.file_type().is_some_and(|ft| ft.is_file());
-        if is_dir || (is_file && is_markdown(&rel)) {
-            pairs.push((rel, mtime_ns));
-        }
+        pairs.push((rel, mtime_ns));
     }
 
     // Sort for deterministic ordering independent of filesystem readdir order.
