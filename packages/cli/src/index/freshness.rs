@@ -140,19 +140,36 @@ fn read_index_trailer(index_path: &Path) -> Option<[u8; 20]> {
 /// and deletion; file mtimes catch in-place edits (which do not update the
 /// parent directory's mtime on Linux).
 ///
-/// The walk excludes `.git` and returns a deterministic hash suitable for
-/// comparing against a stored `worktree_generation` value.
+/// The walk is gitignore-aware (it skips `target/`, `node_modules/`, and
+/// anything else gitignored — none of which the index ingests), and also skips
+/// `.git` and `.wiki` (the tool's own derived-data store, whose churn must not
+/// affect the hash) at any depth. Dot-directories like `.github` are still
+/// walked because hidden filtering is disabled. The result is a superset of the
+/// content the index ingests, so the gate never falsely HITs after a real edit.
+///
+/// Returns a deterministic hash suitable for comparing against a stored
+/// `worktree_generation` value.
 pub(crate) fn compute_worktree_dir_hash(repo_root: &Path) -> i64 {
     use std::hash::{Hash, Hasher};
 
     // Collect (rel_path, mtime_ns) for every directory and markdown file
-    // under repo_root.
+    // under repo_root. The walk mirrors git's ignore semantics as a superset of
+    // what the index ingests, and additionally prunes `.git` and `.wiki`.
     let mut pairs: Vec<(std::path::PathBuf, i64)> = Vec::new();
-    for entry in walkdir::WalkDir::new(repo_root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| e.file_name() != ".git")
-    {
+    let walker = ignore::WalkBuilder::new(repo_root)
+        .standard_filters(true)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .ignore(true)
+        .parents(true)
+        .filter_entry(|e| {
+            let name = e.file_name();
+            name != ".git" && name != ".wiki"
+        })
+        .build();
+    for entry in walker {
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,
@@ -171,7 +188,9 @@ pub(crate) fn compute_worktree_dir_hash(repo_root: &Path) -> i64 {
             None => continue,
         };
 
-        if entry.file_type().is_dir() || (entry.file_type().is_file() && is_markdown(&rel)) {
+        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+        let is_file = entry.file_type().is_some_and(|ft| ft.is_file());
+        if is_dir || (is_file && is_markdown(&rel)) {
             pairs.push((rel, mtime_ns));
         }
     }
