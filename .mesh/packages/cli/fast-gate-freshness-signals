@@ -1,4 +1,4 @@
-packages/cli/src/index/freshness.rs#L88-L142 rk64:d6673c2b4d44a019
-packages/cli/src/index/passes/mod.rs#L271-L308 rk64:52af6cb3a7caf67c
+packages/cli/src/index/freshness.rs#L82-L136 rk64:d6673c2b4d44a019
+packages/cli/src/index/passes/mod.rs#L269-L306 rk64:52af6cb3a7caf67c
 
 Stat-only freshness fast gate whose signals — the HEAD OID (40-zero sentinel for unborn HEAD) and the 20-byte SHA-1 trailer of .git/index — are stored by the refresh writer via gix and re-derived by raw no-gix file reads on every invocation, compared byte-for-byte to skip the refresh.
