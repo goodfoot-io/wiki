@@ -31,8 +31,8 @@ These scopes cover the cold-cache path: when the stat-only freshness gate misses
 |----------|-----------|----------|----------|
 | [index/mod.rs](./src/index/mod.rs#L353-L356) | `index.gix_open` | Time to open the gix repository for a refresh | Empty object |
 | [index/mod.rs](./src/index/mod.rs#L357-L366) | `index.refresh` | Total three-pass refresh including delta apply and commit | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L139-L141) | `index.pass_tree` | Pass 1: diff `HEAD^{tree}` against the previously indexed tree | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L152-L154) | `index.pass_index` | Pass 2: git index entry scan | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L143-L145) | `index.pass_tree` | Pass 1: diff `HEAD^{tree}` against the previously indexed tree | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L182-L185) | `index.pass_index` | Pass 2: git index entry scan | Empty object |
 | [index/passes/mod.rs](./src/index/passes/mod.rs#L190-L199) | `index.pass_worktree` | Pass 3: worktree walk, read + hash of candidate markdown | Empty object |
 | [index/passes/mod.rs](./src/index/passes/mod.rs#L230-L283) | `index.apply_deltas` | Applying all merged deltas (blob parse, FTS insert, paths/refcount bookkeeping) | `deltas` (count) |
 | [index/passes/mod.rs](./src/index/passes/mod.rs#L351-L351) | `index.commit` | SQLite transaction commit | Empty object |
