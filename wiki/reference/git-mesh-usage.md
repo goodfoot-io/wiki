@@ -43,7 +43,7 @@ The line range token (`start-end`) is parsed for format validation only; range f
 
 **Where:** [`render.rs`](/packages/cli/src/commands/mesh/render.rs#L151-L160)
 
-**Invoked by:** [`wiki check --fix`](/packages/cli/src/commands/mesh/scaffold.rs#L160-L201) — creates meshes directly, does **not** shell out to `git-mesh`.
+**Invoked by:** [`wiki check --fix`](/packages/cli/src/commands/mesh/scaffold.rs#L164-L205) — creates meshes directly, does **not** shell out to `git-mesh`.
 
 **Purpose:** Command used by `wiki check --fix` for adding anchors (wiki file + code file/range) to a named mesh subsystem.
 
@@ -51,9 +51,9 @@ The line range token (`start-end`) is parsed for format validation only; range f
 
 ### `git-mesh why <name> -m "<message>"` *(generated, not invoked)*
 
-**Where:** [`render.rs`](/packages/cli/src/commands/mesh/render.rs#L147-L147)
+**Where:** [`scaffold.rs`](/packages/cli/src/commands/mesh/scaffold.rs#L164-L205) — `why` text is now set inline via the `--why` flag on `wiki mesh add`; a standalone `git mesh why` command is no longer generated.
 
-**Invoked by:** [`wiki check --fix`](/packages/cli/src/commands/mesh/scaffold.rs#L160-L201) — creates meshes directly, does **not** shell out to `git-mesh`.
+**Invoked by:** [`wiki check --fix`](/packages/cli/src/commands/mesh/scaffold.rs#L164-L205) — creates meshes directly, does **not** shell out to `git-mesh`.
 
 **Purpose:** Command used by `wiki check --fix` for setting the human-readable description of a mesh subsystem.
 
