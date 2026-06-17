@@ -13,35 +13,25 @@ See [Wiki Mesh Integration](../architecture/wiki-mesh-integration.md) for the de
 
 ## Commands Currently Used
 
-### `git-mesh list <anchor> --porcelain`
+### Mesh coverage query *(in-process, not shelled out)*
 
-**Where:** [`mesh_coverage.rs`](/packages/cli/src/commands/mesh_coverage.rs#L187-L189)
+**Where:** [`build_mesh_index`](/packages/cli/src/commands/mesh_coverage.rs#L228-L233) reads every mesh in the store directly via `store::read_all_tolerant`; the wiki CLI no longer shells out to `git-mesh list`.
 
-**Invoked by:** [`wiki check`](/packages/cli/src/commands/check.rs#L343-L410)
+**Invoked by:** the mesh-coverage pass of [`wiki check`](/packages/cli/src/commands/check.rs#L1119-L1123), which calls [`collect_mesh_diagnostics`](/packages/cli/src/commands/mesh_coverage.rs#L101-L104).
 
 **Purpose:** Query all mesh subsystems that include a given file anchor. Used to determine whether a fragment link (`path#Lstart-Lend`) in a wiki article has a covering mesh that also anchors the wiki file itself.
 
 **Anchor format:** `<repo-relative-path>#L<start>-L<end>`
 
-**Output format (porcelain):** One tab-separated row per anchor in all matching meshes:
-```
-<mesh-name>\t<path>\t<start>-<end>
-```
-Sentinel `no meshes` (no tabs) when no meshes cover the anchor.
+**Index shape:** `build_mesh_index` builds an in-memory `MeshIndex` keyed by anchor path, so coverage is answered from process memory rather than from a porcelain text stream. The line range token (`start-end`) is compared by containment, not exact match.
 
-**Subset extracted and used** ([`parse_mesh_ls_output`](/packages/cli/src/commands/mesh_coverage.rs#L234-L275)):
-- `mesh` — mesh name (everything left of the rightmost two tab-delimited fields)
-- `path` — repo-relative file path of each anchor in the mesh
-
-The line range token (`start-end`) is parsed for format validation only; range filtering is applied server-side by `git-mesh`. The range values themselves are not used by the wiki application.
-
-**Coverage rule** ([`is_covered`](/packages/cli/src/commands/mesh_coverage.rs#L22-L46)): A fragment link is covered iff at least one mesh `M` exists such that `M` anchors the code file region **and** `M` also has the wiki file as an anchor.
+**Coverage rule** ([`is_covered`](/packages/cli/src/commands/mesh_coverage.rs#L22-L50)): A fragment link is covered iff at least one mesh `M` exists such that `M` anchors the code file region (whole-file sentinel `0-0` or a range containing the link range) **and** `M` also has the wiki file as an anchor.
 
 ---
 
 ### `git-mesh add <name> <anchor>...` *(generated, not invoked)*
 
-**Where:** [`render.rs`](/packages/cli/src/commands/mesh/render.rs#L151-L160)
+**Where:** [`create_mesh_coverage`](/packages/cli/src/commands/mesh/scaffold.rs#L164-L205) — anchors are added to the in-process store directly; no `git mesh add` command is shelled out or rendered.
 
 **Invoked by:** [`wiki check --fix`](/packages/cli/src/commands/mesh/scaffold.rs#L164-L205) — creates meshes directly, does **not** shell out to `git-mesh`.
 
