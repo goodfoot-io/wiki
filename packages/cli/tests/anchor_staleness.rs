@@ -66,9 +66,9 @@ fn seed_mesh(root: &Path, slug: &str, path: &str, extent: AnchorExtent, source_b
         }],
         why: String::new(),
     };
-    let slug_dir = root.join(".wiki");
-    std::fs::create_dir_all(&slug_dir).unwrap();
-    std::fs::write(slug_dir.join(slug), mesh.serialize()).unwrap();
+    let slug_path = root.join(".wiki").join(slug);
+    std::fs::create_dir_all(slug_path.parent().unwrap()).unwrap();
+    std::fs::write(slug_path, mesh.serialize()).unwrap();
 }
 
 /// Create a mesh via the real `wiki mesh add` CLI (covers page + target so the
@@ -661,5 +661,262 @@ fn anchor_stale_md_source_line_range_detected() {
     assert!(
         combined.to_lowercase().contains("anchor"),
         "expected an anchor_stale diagnostic for the line-range .md citation; got:\n{combined}"
+    );
+}
+
+// ── Test 16 (F-FM2) ────────────────────────────────────────────────────────────
+
+/// A wiki page A line-range-cites a DIFFERENT wiki page B. A meaning change to
+/// B's cited lines must be detected — the narrowed self-section exemption only
+/// covers a page citing its OWN section, not a cross-page citation into another
+/// wiki page.
+#[test]
+fn anchor_cross_page_wiki_line_range_citation_detected() {
+    let tmp = init_repo();
+    let root = tmp.path();
+
+    // Page B is a wiki page (title + summary) whose body cites a rate limit.
+    let page_b = "---\ntitle: Limits\nsummary: Rate limits doc.\n---\n\n\
+                  The cap is 100 requests per second.\nMore prose.\n";
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::write(root.join("wiki/limits.md"), page_b).unwrap();
+    // Page A is the citing page; its mesh slug lives under wiki/, but the cited
+    // anchor targets page B (a different page) on a line range.
+    write_page(root, "page.md", "See [limits](./limits.md#L6).");
+    // Seed a mesh slug that is page A's (wiki/...), anchoring page B's line 6.
+    seed_mesh(
+        root,
+        "page-limits-ref",
+        "wiki/limits.md",
+        AnchorExtent::LineRange { start: 6, end: 6 },
+        page_b.as_bytes(),
+    );
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "seed"]);
+
+    // Change the MEANING of the cited line in page B.
+    let edited = "---\ntitle: Limits\nsummary: Rate limits doc.\n---\n\n\
+                  The cap is 5000 requests per second.\nMore prose.\n";
+    std::fs::write(root.join("wiki/limits.md"), edited).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "raise cap"]);
+
+    let out = wiki_check(root, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "cross-page wiki line-range citation drift must be detected; stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.to_lowercase().contains("anchor"),
+        "expected an anchor_stale diagnostic for the cross-page citation; got:\n{combined}"
+    );
+}
+
+// ── Test 17 (F-FM2) ────────────────────────────────────────────────────────────
+
+/// A wiki page's scaffold-managed SELF-section anchor (a line-range `.md` anchor
+/// whose page is the mesh's own owning page) stays exempt: a prose edit to the
+/// page's own cited section does not raise an anchor-staleness failure.
+#[test]
+fn anchor_self_section_wiki_anchor_exempt() {
+    let tmp = init_repo();
+    let root = tmp.path();
+
+    // A wiki page under wiki/ whose own section is anchored by ITS OWN mesh
+    // (slug `wiki/<noun>` — page directory `wiki` is the slug prefix).
+    let page = "---\ntitle: Self\nsummary: A self page.\n---\n\n\
+                ## Section\n\nOriginal section prose.\n";
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::write(root.join("wiki/self.md"), page).unwrap();
+    seed_mesh(
+        root,
+        "wiki/section",
+        "wiki/self.md",
+        AnchorExtent::LineRange { start: 6, end: 8 },
+        page.as_bytes(),
+    );
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "seed"]);
+
+    // Edit the page's own section prose and commit.
+    let edited = "---\ntitle: Self\nsummary: A self page.\n---\n\n\
+                  ## Section\n\nCompletely rewritten section prose here.\n";
+    std::fs::write(root.join("wiki/self.md"), edited).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "edit own section"]);
+
+    let out = wiki_check(root, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "scaffold self-section anchor must stay exempt → exit 0; stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// ── Test 18 (F-INDENT) ─────────────────────────────────────────────────────────
+
+/// An indentation-only reformat (2→4 spaces) of a cited range carries no token
+/// change, so `wiki check --fix` re-anchors it as whitespace-only and exits 0 —
+/// it is NOT a SkippedFix.
+#[test]
+fn anchor_fix_indentation_only_is_whitespace_equivalent() {
+    let tmp = init_repo();
+    let root = tmp.path();
+
+    let src = "fn foo() {\n  let x = 1;\n  bar(x);\n}\n";
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), src).unwrap();
+    write_page(root, "page.md", "Documentation prose.");
+    seed_mesh(
+        root,
+        "myslug",
+        "src/lib.rs",
+        AnchorExtent::LineRange { start: 1, end: 4 },
+        src.as_bytes(),
+    );
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "seed"]);
+
+    // Reindent the cited range from 2 to 4 spaces; no token changes. Committed.
+    let reindented = "fn foo() {\n    let x = 1;\n    bar(x);\n}\n";
+    std::fs::write(root.join("src/lib.rs"), reindented).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "rustfmt reindent"]);
+
+    let out = wiki_check(root, &["--fix", "--print-applied"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "indentation-only reformat must auto-settle as whitespace-only → exit 0; \
+         stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !combined.contains("wiki mesh add"),
+        "indentation-only reformat must NOT be a SkippedFix; got:\n{combined}"
+    );
+}
+
+// ── Test 19 (F-FM1) ────────────────────────────────────────────────────────────
+
+/// A committed whitespace-only edit in a FULL-history repo is classified
+/// whitespace-only and auto-settled by `--fix` (the recoverable path).
+#[test]
+fn anchor_fix_whitespace_committed_full_history_settles() {
+    let tmp = init_repo();
+    let root = tmp.path();
+
+    let src = "fn foo() {\n    42\n}\n";
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), src).unwrap();
+    write_page(root, "page.md", "Documentation prose.");
+    seed_mesh(
+        root,
+        "myslug",
+        "src/lib.rs",
+        AnchorExtent::LineRange { start: 1, end: 3 },
+        src.as_bytes(),
+    );
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "seed"]);
+
+    // Trailing-whitespace tweak, committed. Pre-edit bytes recoverable from HEAD~.
+    std::fs::write(root.join("src/lib.rs"), "fn foo() {   \n    42  \n}\n").unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "ws tweak"]);
+
+    let out = wiki_check(root, &["--fix", "--print-applied"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "committed whitespace drift in full history must auto-settle → exit 0; \
+         stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A committed drift whose pre-edit content is UNRECOVERABLE (shallow clone via
+/// `git clone --depth 1`) is fail-closed (exit 1) with a DISTINCT "could not
+/// recover pre-edit content" reason — not a false whitespace-only auto-settle
+/// and not a misleading "meaning-changing diff" claim.
+#[test]
+fn anchor_fix_unrecoverable_history_fails_closed_distinctly() {
+    let tmp = init_repo();
+    let origin = tmp.path();
+
+    let src = "fn foo() {\n    42\n}\n";
+    std::fs::create_dir_all(origin.join("src")).unwrap();
+    std::fs::write(origin.join("src/lib.rs"), src).unwrap();
+    write_page(origin, "page.md", "Documentation prose.");
+    seed_mesh(
+        origin,
+        "myslug",
+        "src/lib.rs",
+        AnchorExtent::LineRange { start: 1, end: 3 },
+        src.as_bytes(),
+    );
+    git(origin, &["add", "-A"]);
+    git(origin, &["commit", "-q", "-m", "seed"]);
+
+    // A committed whitespace-only tweak — recoverable in a full clone, but the
+    // shallow clone below will not carry the pre-edit blob.
+    std::fs::write(origin.join("src/lib.rs"), "fn foo() {   \n    42  \n}\n").unwrap();
+    git(origin, &["add", "-A"]);
+    git(origin, &["commit", "-q", "-m", "ws tweak"]);
+
+    // Shallow clone (depth 1) — the GitHub Actions actions/checkout default.
+    let clone_dir = tempfile::tempdir().unwrap();
+    let clone_path = clone_dir.path().join("shallow");
+    let origin_url = format!("file://{}", origin.display());
+    let st = Command::new("git")
+        .args([
+            "clone",
+            "--depth",
+            "1",
+            "-q",
+            &origin_url,
+            clone_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("git clone");
+    assert!(st.success(), "shallow clone must succeed");
+
+    let out = wiki_check(&clone_path, &["--fix", "--print-applied"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "unrecoverable-history drift must fail closed → exit 1; stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("could not be recovered"),
+        "must surface the distinct unrecoverable-history reason; got:\n{combined}"
+    );
+    assert!(
+        !combined.contains("meaning-changing"),
+        "must NOT misclassify unrecoverable drift as a meaning-changing diff; got:\n{combined}"
     );
 }

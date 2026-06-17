@@ -540,6 +540,11 @@ pub fn run(
                             "changed in place",
                             format!("wiki mesh add {} {anchor_arg}", d.mesh_name),
                         ),
+                        check_fix::AnchorDriftKind::Unrecoverable => (
+                            "drifted; pre-edit content unrecoverable (shallow clone or \
+                             history older than the scan limit), cannot auto-classify",
+                            format!("wiki mesh add {} {anchor_arg}", d.mesh_name),
+                        ),
                         check_fix::AnchorDriftKind::Deleted => (
                             "deleted or out of bounds",
                             // wiki mesh remove drops the dead anchor; wiki mesh

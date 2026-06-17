@@ -47,6 +47,12 @@ pub enum FixKind {
 pub enum AnchorDriftKind {
     /// Content changed in place; whitespace-only diff → auto-re-anchored by --fix.
     Changed { whitespace_only: bool },
+    /// Content changed in place, but the pre-edit bytes could not be recovered
+    /// from history (shallow clone, or the edit is older than
+    /// [`HISTORY_SCAN_LIMIT`] commits), so whitespace-equivalence cannot be
+    /// proven. Fail-closed: NOT auto-settled, but distinguished from a confirmed
+    /// meaning change so the diagnostic is honest about the cause.
+    Unrecoverable,
     /// File deleted or line range out of bounds.
     Deleted,
 }
@@ -1134,8 +1140,7 @@ pub struct MeshFollowOutcome {
 const HISTORY_SCAN_LIMIT: usize = 50;
 
 /// True when `bytes` decode to a wiki page: markdown with YAML frontmatter
-/// carrying both a non-empty `title` and a non-empty `summary`. Used to exempt
-/// scaffold-managed wiki-page section anchors from staleness classification.
+/// carrying both a non-empty `title` and a non-empty `summary`.
 fn is_wiki_page_bytes(bytes: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return false;
@@ -1146,15 +1151,67 @@ fn is_wiki_page_bytes(bytes: &[u8]) -> bool {
     )
 }
 
+/// True when a wiki-page line-range anchor is the scaffold-managed *self-section*
+/// anchor of the mesh that owns it — the case the [`is_wiki_page_bytes`]
+/// exemption was always meant to cover, and the ONLY case it may safely cover.
+///
+/// The coverage scaffold names a mesh `<page_subdir>/<noun>`, where `page_subdir`
+/// is the owning page's directory relative to the repo root (see
+/// `mesh::draft::build_slug`). It re-anchors each page's OWN section as a
+/// line-range `.md` anchor on every `--fix`, so those self-anchors must not fail
+/// closed as meaning-change drift. A line-range citation INTO a *different* wiki
+/// page is a human-authored cross-page reference and MUST be checked.
+///
+/// We recognise a self-section anchor structurally: the anchored page is a wiki
+/// page AND its directory is the leading path prefix of the mesh slug (the
+/// `page_subdir/...` shape the scaffold mints). A citation into another page
+/// fails this test whenever the cited page lives outside the owning page's
+/// directory — which is the reproduced false-negative case.
+fn is_scaffold_self_section_anchor(slug: &str, anchor_path: &str, page_bytes: &[u8]) -> bool {
+    if !is_wiki_page_bytes(page_bytes) {
+        return false;
+    }
+    // The page's directory, relative to the repo root (empty for repo-root pages).
+    let page_dir = Path::new(anchor_path)
+        .parent()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let page_dir = page_dir.trim_start_matches("./").trim_matches('/');
+
+    // Slug's directory portion is everything up to the final `/` (the noun).
+    let slug_dir = match slug.rsplit_once('/') {
+        Some((dir, _noun)) => dir,
+        None => "", // repo-root page: slug is bare `<noun>`
+    };
+
+    if page_dir.is_empty() {
+        // Repo-root page owns a bare-`<noun>` slug (no directory segment).
+        return slug_dir.is_empty();
+    }
+
+    // The scaffold collapses repeated path segments, so `slug_dir` carries every
+    // distinct segment of `page_dir` in order. A self-anchor's page directory is
+    // therefore a path-segment prefix of the slug directory.
+    let slug_segs: Vec<&str> = slug_dir.split('/').filter(|s| !s.is_empty()).collect();
+    page_dir
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .enumerate()
+        .all(|(i, seg)| slug_segs.get(i) == Some(&seg))
+}
+
 /// True when `a` and `b` contain the same non-whitespace content.
 ///
-/// Conservative: strip trailing whitespace per line, filter blank lines, join,
-/// compare. A trailing-space reformat or blank-line addition is equivalent; an
-/// identifier rename or added parameter is not.
+/// Conservative: strip leading AND trailing whitespace per line, filter blank
+/// lines, join, compare. A trailing-space reformat, blank-line addition, or
+/// indentation-only reflow (2→4 spaces, tabs↔spaces) is equivalent — leading
+/// indentation is whitespace, so a routine formatter run (rustfmt/prettier/
+/// gofmt) over a cited range is whitespace-equivalent. An identifier rename or
+/// added parameter changes a non-whitespace token and is NOT equivalent.
 fn whitespace_equivalent(a: &str, b: &str) -> bool {
     fn normalise(s: &str) -> String {
         s.lines()
-            .map(|l| l.trim_end())
+            .map(|l| l.trim())
             .filter(|l| !l.is_empty())
             .collect::<Vec<_>>()
             .join("\n")
@@ -1262,11 +1319,12 @@ fn classify_inplace_drift(
         };
     }
 
-    // Old bytes not found within HISTORY_SCAN_LIMIT: fail-closed. The author
-    // must re-anchor manually; `wiki mesh add` clears the failure.
-    AnchorDriftKind::Changed {
-        whitespace_only: false,
-    }
+    // Old bytes not found within HISTORY_SCAN_LIMIT (shallow clone, or the edit
+    // is older than the scan limit): fail-closed, but DISTINCT from a confirmed
+    // meaning change. We cannot prove whitespace-equivalence, so we never
+    // auto-bless; we also do not claim the diff carries meaning. The author
+    // re-anchors manually; `wiki mesh add` clears the failure.
+    AnchorDriftKind::Unrecoverable
 }
 
 /// Compute mesh move plans and in-place drift in-process from the `.wiki/` store.
@@ -1440,19 +1498,22 @@ pub fn plan_mesh_follows(repo_root: &Path, source: DocSource) -> Result<MeshFoll
                     continue;
                 }
 
-                // Skip classification when the anchor's source IS a wiki page
-                // (a `.md` file with title+summary frontmatter). Wiki-page
-                // section anchors are scaffold-managed bookkeeping: the mesh
-                // coverage pass (`create_mesh_coverage`) re-anchors them when
-                // the page is edited, so they are not external code citations
-                // and must not fail closed as meaning-change drift. Plain
-                // markdown line-range citations (no wiki frontmatter) ARE still
-                // checked.
+                // Skip classification ONLY for the scaffold-managed self-section
+                // anchor: a line-range `.md` anchor whose page is the wiki page
+                // that owns this mesh (the page citing its own section). The
+                // coverage pass (`create_mesh_coverage`) re-anchors those on
+                // every `--fix`, so they are bookkeeping, not external citations,
+                // and must not fail closed as meaning-change drift.
+                //
+                // A line-range citation INTO a *different* wiki page is a
+                // human-authored cross-page reference and IS checked — narrowing
+                // this from the old "any wiki-page source" guard, which silently
+                // swallowed cross-page `.md`→`.md` citation drift.
                 if (anchor.path.ends_with(".md") || anchor.path.ends_with(".MD"))
                     && file_bytes
                         .get(&anchor.path)
                         .and_then(|o| o.as_deref())
-                        .map(is_wiki_page_bytes)
+                        .map(|b| is_scaffold_self_section_anchor(slug, &anchor.path, b))
                         .unwrap_or(false)
                 {
                     continue;
@@ -2377,6 +2438,21 @@ pub fn run_fix_pass(
                         "anchor `{anchor_arg}` in mesh `{}` has changed with a meaning-changing \
                          diff; re-anchor to acknowledge:\n  wiki mesh add {} {anchor_arg}",
                         d.mesh_name, d.mesh_name
+                    ),
+                });
+            }
+            AnchorDriftKind::Unrecoverable => {
+                anchor_stale_count += 1;
+                skipped.push(SkippedFix {
+                    file: format!(".wiki/{}", d.mesh_name),
+                    line: 0,
+                    kind: FixKind::AnchorContentRefresh,
+                    reason: format!(
+                        "anchor `{anchor_arg}` in mesh `{}` drifted, but the pre-edit content \
+                         could not be recovered (shallow clone, or the edit is older than {} \
+                         commits), so whitespace-equivalence cannot be auto-classified; \
+                         re-anchor to acknowledge:\n  wiki mesh add {} {anchor_arg}",
+                        d.mesh_name, HISTORY_SCAN_LIMIT, d.mesh_name
                     ),
                 });
             }
