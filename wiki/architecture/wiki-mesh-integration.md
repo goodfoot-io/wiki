@@ -21,7 +21,7 @@ wiki check wiki/architecture/*.md
 wiki check "packages/auth/**/*.md"
 ```
 
-Extends the existing `wiki check` validation pass with a [mesh coverage check](/packages/cli/src/commands/mesh_coverage.rs#L56-L59). For each internal fragment link with a line range, it [runs `git mesh list`](/packages/cli/src/commands/mesh_coverage.rs#L177-L177) `<path>#L<s>-L<e> --porcelain` and verifies that at least one returned mesh also anchors the wiki file containing the link. Any uncovered link is reported as an error ([non-zero exit](/packages/cli/src/commands/mesh_coverage.rs#L123-L133)).
+Extends the existing `wiki check` validation pass with a [mesh coverage check](/packages/cli/src/commands/mesh_coverage.rs#L101-L105). For each internal fragment link with a line range, it [reads the `.wiki/` mesh store in-process](/packages/cli/src/commands/mesh_coverage.rs#L228-L232) (via `store::read_all_tolerant` — it never shells out to `git mesh`) and [verifies that some mesh anchors both the link's code range and the wiki file](/packages/cli/src/commands/mesh_coverage.rs#L45-L49) containing the link. Any uncovered link is [reported as a `mesh_uncovered` error](/packages/cli/src/commands/mesh_coverage.rs#L202-L211) (which drives a non-zero exit).
 
 Mesh coverage is always on; `git mesh` must be installed or `wiki check` fails fast. Glob targeting follows the same rules as bare `wiki check`: a markdown file is treated as a wiki page only when its frontmatter has both a non-empty `title` and `summary`; omitting globs walks all `.md` files under `$WIKI_DIR` (defaulting to `wiki`) applying that filter.
 
@@ -40,7 +40,7 @@ wiki check --fix "packages/auth/**/*.md"
 Names follow the `wiki/<page-title-slug>/<target-slug>` convention:
 
 - **Page title slug** — derived from the wiki page's frontmatter `title` field (falling back to the filename stem). This keeps names stable across file renames.
-- **Target slug** — derived from the link label ([truncated at five words](/packages/cli/src/commands/mesh/draft.rs#L163-L163), falling back to the target file stem for long or path-style labels).
+- **Target slug** — derived from the deepest section heading, [falling back to the kebab-cased link label, then the target file stem](/packages/cli/src/commands/mesh/draft.rs#L160-L180) for empty or path-style labels.
 
 Names are topical, not path-derived: one wiki page will typically produce several meshes covering different subsystems. Authors are expected to rename generated slugs to match the conceptual relationship before committing.
 
@@ -54,7 +54,7 @@ Generated whys require author review — sentences that started with a backtick 
 
 ### Default glob behavior
 
-Omitting globs walks all `.md` files and treats those whose frontmatter has both a non-empty `title` and `summary` as wiki pages. `$WIKI_DIR` defaults to `wiki`. This matches the default discovery behavior used by all other wiki commands (see [discover_files](/packages/cli/src/commands/mod.rs#L150-L192)).
+Omitting globs walks all `.md` files and treats those whose frontmatter has both a non-empty `title` and `summary` as wiki pages. `$WIKI_DIR` defaults to `wiki`. This matches the default discovery behavior used by all other wiki commands (see [discover_files](/packages/cli/src/commands/mod.rs#L182-L208)).
 
 ### Missing-path filtering
 
@@ -93,4 +93,4 @@ wiki check
 
 ## References
 
-- [discover_files](/packages/cli/src/commands/mod.rs#L150-L192)
+- [discover_files](/packages/cli/src/commands/mod.rs#L182-L208)

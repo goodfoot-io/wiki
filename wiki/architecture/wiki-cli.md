@@ -9,11 +9,11 @@ The wiki CLI validates and maintains fragment links between wiki pages and sourc
 
 ## Fragment Link Parsing
 
-The [parser](/packages/cli/src/parser.rs#L6-L12) extracts fragment links from markdown content: [fragment links](/packages/cli/src/parser.rs#L224-L224) (`[label](path#sha-L10-L20)`). The parser operates on [scrubbed content](/packages/cli/src/parser.rs#L79-L79) — code blocks, inline code, and HTML comments are blanked out before extraction to avoid false matches.
+The [parser](/packages/cli/src/parser.rs#L6-L12) extracts fragment links from markdown content: [fragment links](/packages/cli/src/parser.rs#L251-L257) (`[label](path#L10-L20)`) are split on `#` into a path part and a line-range fragment. The parser operates on [scrubbed content](/packages/cli/src/parser.rs#L61-L63) — code blocks, inline code, and HTML comments are blanked out before extraction to avoid false matches.
 
 ## Validation Pipeline
 
-The [check command](/packages/cli/src/commands/check.rs#L198-L199) runs a full validation pass: [frontmatter parsing](/packages/cli/src/frontmatter.rs#L55-L55), title/alias collision detection, wikilink resolution, and fragment link verification (file existence and line range bounds at the pinned SHA). With `--fix`, unpinned fragment links are pinned automatically rather than reported as errors — already-pinned links are never touched.
+The [check command](/packages/cli/src/commands/check.rs#L283-L297) runs a full validation pass: [frontmatter parsing](/packages/cli/src/frontmatter.rs#L109-L121), title/alias collision detection, wikilink resolution, and fragment link verification (file existence and line range bounds at the pinned SHA). With `--fix`, unpinned fragment links are pinned automatically rather than reported as errors — already-pinned links are never touched.
 
 ## PostToolUse Hook
 
@@ -25,7 +25,7 @@ Several commands support navigating and searching the wiki from the command line
 
 - **Search**: The [search command](/packages/cli/src/commands/search.rs) is the primary entrypoint for finding wiki content. It performs a weighted search that ranks exact title matches, repo-relative path matches, and full-text matches (BM25) in a single unified flow.
 - **Suggest**: The suggest command (used internally by `check` to recommend fixes) finds the best matches for a query with a minimum score threshold, prioritizing titles and aliases.
-- **Summary**: The [summary command](/packages/cli/src/commands/summary.rs#L130-L130) outputs a page's frontmatter-defined summary along with a repo-relative path to its source file.
+- **Summary**: The [summary command](/packages/cli/src/commands/summary.rs#L72-L82) outputs a page's frontmatter-defined summary along with a repo-relative path to its source file.
 
 ## Rendering
 
@@ -33,4 +33,4 @@ The CLI does not render markdown. HTML rendering is owned entirely by the VS Cod
 
 ## Frontmatter
 
-The [frontmatter module](/packages/cli/src/frontmatter.rs#L45-L50) parses and validates YAML frontmatter from wiki pages. It [reserves certain titles](/packages/cli/src/frontmatter.rs#L48-L50) (`check`, `pin`, `stale`, `links`, `list`, `summary`, `print`) to prevent ambiguity with command-line dispatch.
+The [frontmatter module](/packages/cli/src/frontmatter.rs#L109-L121) parses and validates YAML frontmatter from wiki pages. It [reserves certain titles](/packages/cli/src/frontmatter.rs#L45-L48) (`check`, `list`, `summary`, `mesh`) to prevent ambiguity with command-line dispatch.

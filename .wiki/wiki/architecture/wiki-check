@@ -1,16 +1,6 @@
-packages/cli/src/commands/mesh_coverage.rs#L55-L58 rk64:9ad44ca317c504a2
-packages/cli/src/commands/mesh_coverage.rs#L56-L59 rk64:e2a75665b94805c1
-packages/cli/src/commands/mesh_coverage.rs#L57-L60 rk64:7ab00fe37bab20cf
-packages/cli/src/commands/mesh_coverage.rs#L106-L116 rk64:cc82add2aac29d7d
-packages/cli/src/commands/mesh_coverage.rs#L116-L126 rk64:cc82add2aac29d7d
-packages/cli/src/commands/mesh_coverage.rs#L117-L127 rk64:cc82add2aac29d7d
-packages/cli/src/commands/mesh_coverage.rs#L121-L131 rk64:cc82add2aac29d7d
-packages/cli/src/commands/mesh_coverage.rs#L123-L133 rk64:cc82add2aac29d7d
-packages/cli/src/commands/mesh_coverage.rs#L125-L135 rk64:cc82add2aac29d7d
-packages/cli/src/commands/mesh_coverage.rs#L147-L147 rk64:edc30e67a59f016d
-packages/cli/src/commands/mesh_coverage.rs#L170-L170 rk64:edc30e67a59f016d
-packages/cli/src/commands/mesh_coverage.rs#L171-L171 rk64:edc30e67a59f016d
-packages/cli/src/commands/mesh_coverage.rs#L173-L173 rk64:edc30e67a59f016d
-packages/cli/src/commands/mesh_coverage.rs#L177-L177 rk64:edc30e67a59f016d
+packages/cli/src/commands/mesh_coverage.rs#L45-L49 rk64:cfd268999dbffa3f
+packages/cli/src/commands/mesh_coverage.rs#L101-L105 rk64:346b1abca20e7bd0
+packages/cli/src/commands/mesh_coverage.rs#L202-L211 rk64:1a84853b16037f77
+packages/cli/src/commands/mesh_coverage.rs#L228-L232 rk64:4c27ed37b20dd52c
 wiki/architecture/wiki-mesh-integration.md#L16-L26 rk64:a971e62c99149067
 
