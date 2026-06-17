@@ -1,6 +1,6 @@
 .gitignore#L70-L76 rk64:4c4e65457aaeb241
 packages/cli/src/commands/mesh/store.rs#L93-L110 rk64:2bb20b926cbc4c44
-packages/cli/src/commands/mesh/store.rs#L121-L130 rk64:ede81a68a7147e0e
+packages/cli/src/commands/mesh/store.rs#L157-L166 rk64:ede81a68a7147e0e
 packages/cli/src/index/lock.rs#L17-L29 rk64:d8eb3fcc6ee78810
 packages/cli/src/index/mod.rs#L72-L81 rk64:278280f914a98f10
 packages/cli/src/perf.rs#L130-L133 rk64:c7d205c6efd35b72
