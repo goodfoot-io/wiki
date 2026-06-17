@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+
 use crate::commands::resolve_link_path;
 use crate::parser::{LinkKind, parse_fragment_links};
 
@@ -194,9 +195,17 @@ pub(super) fn collect_mesh_diagnostics(
     // committed, so a missing mesh for them is a real, fixable finding.
     let candidate_targets: Vec<String> = pending.iter().map(|p| p.target.clone()).collect();
     let ignored = crate::git::ignored_paths(repo_root, &candidate_targets)?;
+    // A fragment link into a wikiignored path is likewise exempt: the target is
+    // invisible at every wiki surface, so demanding mesh coverage for it would
+    // be unsatisfiable.
+    let wiki_ignore =
+        crate::wikiignore::WikiIgnore::load(repo_root).map_err(|e| miette::miette!("{e}"))?;
 
     for p in pending {
         if ignored.contains(&p.target) {
+            continue;
+        }
+        if wiki_ignore.is_ignored(Path::new(&p.target)) {
             continue;
         }
         out.push(CheckDiagnostic {
@@ -414,6 +423,38 @@ mod tests {
     ///
     /// This test **fails** until `mesh_contains_anchor` (or its call site in
     /// `apply_section_extension`) adopts containment semantics.
+    #[test]
+    fn test_mesh_uncovered_exempts_wikiignored_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .current_dir(root)
+            .status()
+            .unwrap();
+        // A live wiki page with a fragment link into a wikiignored source file.
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/foo.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+        std::fs::create_dir_all(root.join("wiki")).unwrap();
+        std::fs::write(
+            root.join("wiki/page.md"),
+            "---\ntitle: Page\nsummary: P.\n---\n\n[foo](../src/foo.rs#L1-L2)\n",
+        )
+        .unwrap();
+        // No mesh covers src/foo.rs — without the exemption this is mesh_uncovered.
+        std::fs::create_dir_all(root.join(".wiki")).unwrap();
+        std::fs::write(root.join(".wiki/.wikiignore"), "src/foo.rs\n").unwrap();
+
+        let files = vec![root.join("wiki/page.md")];
+        let mut cache = ContentCache::new();
+        let diags = collect_mesh_diagnostics(&files, root, &mut cache).expect("collect");
+        assert!(
+            diags.iter().all(|d| d.kind != "mesh_uncovered"),
+            "wikiignored target must be exempt from mesh_uncovered: {diags:?}"
+        );
+    }
+
     #[test]
     fn mesh_contains_anchor_uses_containment_not_exact_match() {
         let dir = tempfile::tempdir().unwrap();

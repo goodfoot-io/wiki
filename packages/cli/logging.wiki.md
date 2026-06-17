@@ -21,7 +21,7 @@ Perf scope events measure execution time and record success/error status. They a
 
 | Location | Scope Name | Measures | Metadata |
 |----------|-----------|----------|----------|
-| [main.rs](./src/main.rs#L365-L368) | `command.<name>` | Total wall time of the command (stderr span only; not written to `wiki.log`) | — |
+| [main.rs](./src/main.rs#L366-L369) | `command.<name>` | Total wall time of the command (stderr span only; not written to `wiki.log`) | — |
 
 ### Index Refresh
 
@@ -34,8 +34,8 @@ These scopes cover the cold-cache path: when the stat-only freshness gate misses
 | [index/passes/mod.rs](./src/index/passes/mod.rs#L139-L141) | `index.pass_tree` | Pass 1: diff `HEAD^{tree}` against the previously indexed tree | Empty object |
 | [index/passes/mod.rs](./src/index/passes/mod.rs#L152-L154) | `index.pass_index` | Pass 2: git index entry scan | Empty object |
 | [index/passes/mod.rs](./src/index/passes/mod.rs#L160-L169) | `index.pass_worktree` | Pass 3: worktree walk, read + hash of candidate markdown | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L198-L251) | `index.apply_deltas` | Applying all merged deltas (blob parse, FTS insert, paths/refcount bookkeeping) | `deltas` (count) |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L319-L319) | `index.commit` | SQLite transaction commit | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L200-L253) | `index.apply_deltas` | Applying all merged deltas (blob parse, FTS insert, paths/refcount bookkeeping) | `deltas` (count) |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L321-L321) | `index.commit` | SQLite transaction commit | Empty object |
 
 ### File Discovery
 

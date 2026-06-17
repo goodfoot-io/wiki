@@ -15,9 +15,9 @@ See [Wiki Mesh Integration](../architecture/wiki-mesh-integration.md) for the de
 
 ### Mesh coverage query *(in-process, not shelled out)*
 
-**Where:** [`build_mesh_index`](/packages/cli/src/commands/mesh_coverage.rs#L228-L233) reads every mesh in the store directly via `store::read_all_tolerant`; the wiki CLI no longer shells out to `git-mesh list`.
+**Where:** [`build_mesh_index`](/packages/cli/src/commands/mesh_coverage.rs#L237-L242) reads every mesh in the store directly via `store::read_all_tolerant`; the wiki CLI no longer shells out to `git-mesh list`.
 
-**Invoked by:** the mesh-coverage pass of [`wiki check`](/packages/cli/src/commands/check.rs#L1119-L1123), which calls [`collect_mesh_diagnostics`](/packages/cli/src/commands/mesh_coverage.rs#L101-L104).
+**Invoked by:** the mesh-coverage pass of [`wiki check`](/packages/cli/src/commands/check.rs#L1119-L1123), which calls [`collect_mesh_diagnostics`](/packages/cli/src/commands/mesh_coverage.rs#L102-L105).
 
 **Purpose:** Query all mesh subsystems that include a given file anchor. Used to determine whether a fragment link (`path#Lstart-Lend`) in a wiki article has a covering mesh that also anchors the wiki file itself.
 
@@ -25,7 +25,7 @@ See [Wiki Mesh Integration](../architecture/wiki-mesh-integration.md) for the de
 
 **Index shape:** `build_mesh_index` builds an in-memory `MeshIndex` keyed by anchor path, so coverage is answered from process memory rather than from a porcelain text stream. The line range token (`start-end`) is compared by containment, not exact match.
 
-**Coverage rule** ([`is_covered`](/packages/cli/src/commands/mesh_coverage.rs#L22-L50)): A fragment link is covered iff at least one mesh `M` exists such that `M` anchors the code file region (whole-file sentinel `0-0` or a range containing the link range) **and** `M` also has the wiki file as an anchor.
+**Coverage rule** ([`is_covered`](/packages/cli/src/commands/mesh_coverage.rs#L23-L51)): A fragment link is covered iff at least one mesh `M` exists such that `M` anchors the code file region (whole-file sentinel `0-0` or a range containing the link range) **and** `M` also has the wiki file as an anchor.
 
 ---
 

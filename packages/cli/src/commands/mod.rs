@@ -220,10 +220,15 @@ pub fn discover_files(
                 None => repo_root.to_path_buf(),
             };
 
+            let wiki_ignore = Arc::new(
+                crate::wikiignore::WikiIgnore::load(repo_root)
+                    .map_err(|e| miette!("{e}"))?,
+            );
+
             let mut files = match source {
                 DocSource::Index | DocSource::Head => {
                     if globs.is_empty() {
-                        discover_default_files(repo_root, &walk_root, prefix.as_deref(), source, git_reader)?
+                        discover_default_files(repo_root, &walk_root, prefix.as_deref(), source, git_reader, &wiki_ignore)?
                     } else {
                         // For non-worktree sources we must never read the
                         // worktree filesystem to satisfy a glob.  Filter the
@@ -235,17 +240,18 @@ pub fn discover_files(
                             prefix.as_deref(),
                             source,
                             git_reader,
+                            &wiki_ignore,
                         )?
                     }
                 }
                 DocSource::WorkingTree => {
                     let initial = if globs.is_empty() {
-                        discover_default_files(repo_root, &walk_root, prefix.as_deref(), source, git_reader)?
+                        discover_default_files(repo_root, &walk_root, prefix.as_deref(), source, git_reader, &wiki_ignore)?
                     } else {
                         Vec::new()
                     };
                     if initial.is_empty() || !globs.is_empty() {
-                        discover_files_by_walk(globs, &walk_root)?
+                        discover_files_by_walk(globs, &walk_root, repo_root, Arc::clone(&wiki_ignore))?
                     } else {
                         initial
                     }
@@ -333,6 +339,7 @@ fn discover_default_files(
     prefix: Option<&Path>,
     source: DocSource,
     git_reader: Option<&GitReader>,
+    wiki_ignore: &Arc<crate::wikiignore::WikiIgnore>,
 ) -> Result<Vec<PathBuf>> {
     // For non-worktree sources, seed from the source's own path list so that
     // files absent from the worktree (deleted locally but present in HEAD or
@@ -349,7 +356,11 @@ fn discover_default_files(
             let files: Vec<PathBuf> = all_paths
                 .into_iter()
                 .filter(|p| {
-                    if !p.ends_with(".md") || is_fixture_path(p) || !path_under_prefix(p, prefix) {
+                    if !p.ends_with(".md")
+                        || is_fixture_path(p)
+                        || !path_under_prefix(p, prefix)
+                        || wiki_ignore.is_ignored(Path::new(p))
+                    {
                         return false;
                     }
                     // Include .md files with a frontmatter fence — even if the
@@ -374,7 +385,7 @@ fn discover_default_files(
 
     let inventory = match repo_inventory(repo_root) {
         Ok(inventory) => inventory,
-        Err(_) => return discover_files_by_walk(&[], walk_root),
+        Err(_) => return discover_files_by_walk(&[], walk_root, repo_root, Arc::clone(wiki_ignore)),
     };
 
     // First pass: cheaply filter the inventory using string predicates only —
@@ -385,6 +396,7 @@ fn discover_default_files(
             path_rel.ends_with(".md")
                 && !is_fixture_path(path_rel)
                 && path_under_prefix(path_rel, prefix)
+                && !wiki_ignore.is_ignored(Path::new(path_rel))
         })
         .map(|path_rel| repo_root.join(&path_rel))
         .collect();
@@ -449,6 +461,7 @@ fn discover_files_by_glob_in_source(
     prefix: Option<&Path>,
     source: DocSource,
     git_reader: Option<&GitReader>,
+    wiki_ignore: &Arc<crate::wikiignore::WikiIgnore>,
 ) -> Result<Vec<PathBuf>> {
     let mut glob_builder = globset::GlobSetBuilder::new();
     for glob in globs {
@@ -473,7 +486,7 @@ fn discover_files_by_glob_in_source(
         if !path_rel.ends_with(".md") {
             continue;
         }
-        if glob_set.is_match(&path_rel) {
+        if glob_set.is_match(&path_rel) && !wiki_ignore.is_ignored(Path::new(&path_rel)) {
             files.push(repo_root.join(&path_rel));
         }
     }
@@ -482,11 +495,16 @@ fn discover_files_by_glob_in_source(
     Ok(files)
 }
 
-fn discover_files_by_walk(globs: &[String], base_dir: &Path) -> Result<Vec<PathBuf>> {
+fn discover_files_by_walk(
+    globs: &[String],
+    base_dir: &Path,
+    repo_root: &Path,
+    wiki_ignore: Arc<crate::wikiignore::WikiIgnore>,
+) -> Result<Vec<PathBuf>> {
     let mut files: Vec<PathBuf> = Vec::new();
 
     let candidates = if globs.is_empty() {
-        discover_files_by_parallel_walk(base_dir, &["**/*.md".to_string()])?
+        discover_files_by_parallel_walk(base_dir, &["**/*.md".to_string()], repo_root, Arc::clone(&wiki_ignore))?
     } else {
         // Globs are CWD-relative; the walk matches them against paths relative
         // to `base_dir`, so normalize against the same base.
@@ -494,7 +512,7 @@ fn discover_files_by_walk(globs: &[String], base_dir: &Path) -> Result<Vec<PathB
             .iter()
             .map(|glob| normalize_repo_relative_path(glob, base_dir))
             .collect::<Vec<_>>();
-        discover_files_by_parallel_walk(base_dir, &normalized_globs)?
+        discover_files_by_parallel_walk(base_dir, &normalized_globs, repo_root, Arc::clone(&wiki_ignore))?
     };
 
     for path in candidates {
@@ -520,7 +538,12 @@ fn discover_files_by_walk(globs: &[String], base_dir: &Path) -> Result<Vec<PathB
     Ok(files)
 }
 
-fn discover_files_by_parallel_walk(base_dir: &Path, patterns: &[String]) -> Result<Vec<PathBuf>> {
+fn discover_files_by_parallel_walk(
+    base_dir: &Path,
+    patterns: &[String],
+    repo_root: &Path,
+    wiki_ignore: Arc<crate::wikiignore::WikiIgnore>,
+) -> Result<Vec<PathBuf>> {
     let mut glob_builder = globset::GlobSetBuilder::new();
     for pattern in patterns {
         let glob = globset::Glob::new(pattern)
@@ -547,6 +570,8 @@ fn discover_files_by_parallel_walk(base_dir: &Path, patterns: &[String]) -> Resu
             let files = Arc::clone(&files);
             let first_error = Arc::clone(&first_error);
             let base_dir = base_dir.to_path_buf();
+            let repo_root = repo_root.to_path_buf();
+            let wiki_ignore = Arc::clone(&wiki_ignore);
 
             Box::new(move |entry| {
                 let entry = match entry {
@@ -562,6 +587,11 @@ fn discover_files_by_parallel_walk(base_dir: &Path, patterns: &[String]) -> Resu
 
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    return ignore::WalkState::Continue;
+                }
+
+                let repo_relative = path.strip_prefix(&repo_root).unwrap_or(path);
+                if wiki_ignore.is_ignored(repo_relative) {
                     return ignore::WalkState::Continue;
                 }
 
@@ -956,11 +986,89 @@ mod tests {
         repo.create_file(".gitignore", "ignored-dir/\n");
         repo.git(&["add", "-A"]);
 
-        let inventory_files =
-            discover_default_files(repo.path(), repo.path(), None, DocSource::WorkingTree, None)
-                .expect("inventory discover");
-        let walk_files = discover_files_by_walk(&[], repo.path()).expect("walk discover");
+        let wiki_ignore = Arc::new(crate::wikiignore::WikiIgnore::load(repo.path()).unwrap());
+        let inventory_files = discover_default_files(
+            repo.path(),
+            repo.path(),
+            None,
+            DocSource::WorkingTree,
+            None,
+            &wiki_ignore,
+        )
+        .expect("inventory discover");
+        let walk_files =
+            discover_files_by_walk(&[], repo.path(), repo.path(), Arc::clone(&wiki_ignore))
+                .expect("walk discover");
 
         assert_eq!(inventory_files, walk_files);
+    }
+
+    #[test]
+    fn test_discover_respects_wikiignore_default_walk() {
+        let repo = TestRepo::new();
+        repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
+        repo.create_file(
+            "wiki/secret.md",
+            "---\ntitle: Secret\nsummary: Hidden.\n---\n",
+        );
+        repo.create_file(".wiki/.wikiignore", "wiki/secret.md\n");
+        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree, None)
+            .expect("discover");
+        let paths: Vec<_> = files
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        assert!(paths.iter().any(|p| p.ends_with("wiki/page.md")));
+        assert!(
+            !paths.iter().any(|p| p.ends_with("wiki/secret.md")),
+            "wikiignored file must be excluded, got: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn test_discover_wikiignore_glob_pattern() {
+        let repo = TestRepo::new();
+        repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
+        repo.create_file("drafts/a.md", "---\ntitle: A\nsummary: A.\n---\n");
+        repo.create_file("drafts/b.md", "---\ntitle: B\nsummary: B.\n---\n");
+        repo.create_file(".wiki/.wikiignore", "drafts/*.md\n");
+        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree, None)
+            .expect("discover");
+        let paths: Vec<_> = files
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        assert!(paths.iter().any(|p| p.ends_with("wiki/page.md")));
+        assert!(
+            !paths.iter().any(|p| p.contains("drafts/")),
+            "all drafts files must be excluded, got: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn test_discover_wikiignore_applies_to_explicit_glob() {
+        let repo = TestRepo::new();
+        repo.create_file("drafts/page.md", "---\ntitle: Draft\nsummary: D.\n---\n");
+        repo.create_file(".wiki/.wikiignore", "drafts/\n");
+        let globs = vec!["drafts/page.md".to_string()];
+        let files = discover_files(&globs, repo.path(), repo.path(), DocSource::WorkingTree, None)
+            .expect("discover");
+        assert!(
+            files.is_empty(),
+            "explicit glob on a wikiignored file must return nothing, got: {files:?}"
+        );
+    }
+
+    #[test]
+    fn test_discover_wikiignore_absent_is_noop() {
+        let repo = TestRepo::new();
+        repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
+        repo.create_file(
+            "drafts/a.md",
+            "---\ntitle: A\nsummary: A.\n---\n",
+        );
+        let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree, None)
+            .expect("discover");
+        assert_eq!(files.len(), 2, "no .wikiignore → behaviour unchanged");
     }
 }

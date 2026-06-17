@@ -1421,6 +1421,9 @@ pub fn plan_mesh_follows(repo_root: &Path, source: DocSource) -> Result<MeshFoll
         return Ok(MeshFollowOutcome::default());
     }
 
+    let wiki_ignore =
+        crate::wikiignore::WikiIgnore::load(repo_root).map_err(|e| miette::miette!("{e}"))?;
+
     // Read every file an anchor names exactly once (a file with K anchors is
     // read once, not K times), so `LineIndex` and the content hashes are
     // computed over a single owned buffer per path. Read from the selected
@@ -1428,6 +1431,9 @@ pub fn plan_mesh_follows(repo_root: &Path, source: DocSource) -> Result<MeshFoll
     let mut file_bytes: HashMap<String, Option<Vec<u8>>> = HashMap::new();
     for (_, mesh) in &meshes {
         for anchor in &mesh.anchors {
+            if wiki_ignore.is_ignored(Path::new(&anchor.path)) {
+                continue;
+            }
             file_bytes
                 .entry(anchor.path.clone())
                 .or_insert_with(|| read_anchor_source(repo_root, source, &anchor.path));
@@ -1447,6 +1453,9 @@ pub fn plan_mesh_follows(repo_root: &Path, source: DocSource) -> Result<MeshFoll
 
     for (slug, mesh) in &meshes {
         for anchor in &mesh.anchors {
+            if wiki_ignore.is_ignored(Path::new(&anchor.path)) {
+                continue;
+            }
             let extent = if anchor.start_line == 0 && anchor.end_line == 0 {
                 AnchorExtent::WholeFile
             } else {
@@ -2925,6 +2934,48 @@ mod tests {
         // returns false so `plan_mesh_follows` actually runs.
 
         (repo, hash)
+    }
+
+    #[test]
+    fn test_plan_mesh_follows_skips_wikiignored_anchor_target() {
+        use crate::commands::mesh::store;
+        use git_mesh_core::AnchorExtent;
+        use git_mesh_core::mesh_file::MeshFile;
+
+        let repo = TestRepo::new();
+
+        // Source file with a known block on lines 1–3.
+        repo.write("src/lib.rs", "fn foo() {\n    42\n}\n");
+        repo.commit("initial");
+
+        let extent = AnchorExtent::LineRange { start: 1, end: 3 };
+        let hash = store::hash_anchor(
+            repo.path(),
+            "src/lib.rs",
+            extent,
+            &mut store::FileContentCache::new(),
+        )
+        .unwrap();
+        let anchor = store::anchor_record("src/lib.rs".to_string(), extent, hash);
+        let mesh = MeshFile {
+            anchors: vec![anchor],
+            why: String::new(),
+        };
+        store::write(repo.path(), "myslug", &mesh).unwrap();
+        repo.commit("add mesh");
+
+        // Wikiignore the anchor's source file, then make it stale.
+        repo.write(".wiki/.wikiignore", "src/lib.rs\n");
+        repo.write("src/lib.rs", "// header\nfn foo() {\n    42\n}\n");
+        // Leave uncommitted (dirty) so plan_mesh_follows runs.
+
+        let outcome =
+            plan_mesh_follows(repo.path(), crate::index::DocSource::WorkingTree).expect("plan");
+        assert!(
+            outcome.drifted.is_empty(),
+            "a wikiignored anchor target must produce no drift: {:?}",
+            outcome.drifted
+        );
     }
 
     // ── Conflict resolution tests ─────────────────────────────────────────────

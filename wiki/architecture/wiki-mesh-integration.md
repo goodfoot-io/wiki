@@ -21,7 +21,7 @@ wiki check wiki/architecture/*.md
 wiki check "packages/auth/**/*.md"
 ```
 
-Extends the existing `wiki check` validation pass with a [mesh coverage check](/packages/cli/src/commands/mesh_coverage.rs#L101-L105). For each internal fragment link with a line range, it [reads the `.wiki/` mesh store in-process](/packages/cli/src/commands/mesh_coverage.rs#L228-L232) (via `store::read_all_tolerant` — it never shells out to `git mesh`) and [verifies that some mesh anchors both the link's code range and the wiki file](/packages/cli/src/commands/mesh_coverage.rs#L45-L49) containing the link. Any uncovered link is [reported as a `mesh_uncovered` error](/packages/cli/src/commands/mesh_coverage.rs#L202-L211) (which drives a non-zero exit).
+Extends the existing `wiki check` validation pass with a [mesh coverage check](/packages/cli/src/commands/mesh_coverage.rs#L102-L106). For each internal fragment link with a line range, it [reads the `.wiki/` mesh store in-process](/packages/cli/src/commands/mesh_coverage.rs#L237-L241) (via `store::read_all_tolerant` — it never shells out to `git mesh`) and [verifies that some mesh anchors both the link's code range and the wiki file](/packages/cli/src/commands/mesh_coverage.rs#L46-L50) containing the link. Any uncovered link is [reported as a `mesh_uncovered` error](/packages/cli/src/commands/mesh_coverage.rs#L211-L220) (which drives a non-zero exit).
 
 Mesh coverage is always on; `git mesh` must be installed or `wiki check` fails fast. Glob targeting follows the same rules as bare `wiki check`: a markdown file is treated as a wiki page only when its frontmatter has both a non-empty `title` and `summary`; omitting globs walks all `.md` files under `$WIKI_DIR` (defaulting to `wiki`) applying that filter.
 

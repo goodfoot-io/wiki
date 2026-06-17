@@ -6,6 +6,7 @@ mod index;
 mod parser;
 mod perf;
 mod version;
+mod wikiignore;
 
 use std::io::{self, BufRead, IsTerminal};
 use std::process;

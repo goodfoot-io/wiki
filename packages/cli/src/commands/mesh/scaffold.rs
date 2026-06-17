@@ -369,6 +369,11 @@ pub(crate) fn create_mesh_coverage(
         .map(|a| a.path.clone())
         .collect();
     let ignored_anchor_paths = crate::git::ignored_paths(repo_root, &candidate_anchor_paths)?;
+    // Wikiignored anchor targets are stripped alongside gitignored ones: they
+    // are invisible at every wiki surface, so scaffolding a mesh that anchors
+    // them would resurrect them via the mesh-coverage contract.
+    let wiki_ignore =
+        crate::wikiignore::WikiIgnore::load(repo_root).map_err(|e| miette::miette!("{e}"))?;
 
     consolidated.retain_mut(|draft| {
         let code_start = code_anchor_start(draft);
@@ -383,7 +388,9 @@ pub(crate) fn create_mesh_coverage(
             .skip(code_start)
             .zip(draft.structured_anchors.iter().skip(code_start))
         {
-            if ignored_anchor_paths.contains(&a.path) {
+            if ignored_anchor_paths.contains(&a.path)
+                || wiki_ignore.is_ignored(Path::new(&a.path))
+            {
                 dropped_meshes.push(DroppedMesh {
                     slug: draft.slug.clone(),
                     reason: DropReason::IgnoredPath {
@@ -2745,6 +2752,45 @@ See [a](./card.ts#L69-L95), [b](./card.ts#L75-L75), [c](./card.ts#L81-L81).
             None,
             "locate_existing_suffix must not match in-repo files \
              for paths that resolve outside the repo"
+        );
+    }
+
+    #[test]
+    fn test_scaffold_strips_wikiignored_anchors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_root = tmp.path();
+        std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .current_dir(repo_root)
+            .status()
+            .unwrap();
+        std::fs::create_dir_all(repo_root.join("src")).unwrap();
+        std::fs::write(repo_root.join("src/foo.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+        std::fs::create_dir_all(repo_root.join("wiki")).unwrap();
+        std::fs::write(
+            repo_root.join("wiki/page.md"),
+            "---\ntitle: Page\nsummary: P.\n---\n\n[foo](../src/foo.rs#L1-L2)\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo_root.join(".wiki")).unwrap();
+        std::fs::write(repo_root.join(".wiki/.wikiignore"), "src/foo.rs\n").unwrap();
+
+        let files = vec![repo_root.join("wiki/page.md")];
+        let outcome = create_mesh_coverage(
+            &files,
+            repo_root,
+            DocSource::WorkingTree,
+            true, // dry_run
+            None,
+            None,
+        )
+        .expect("create_mesh_coverage");
+
+        assert!(
+            outcome.planned.is_empty(),
+            "no mesh should be planned for a wikiignored anchor target: {:?}",
+            outcome.planned
         );
     }
 }

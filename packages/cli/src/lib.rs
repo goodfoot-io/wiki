@@ -15,3 +15,4 @@ pub mod index;
 // scope events inside `index`.
 #[allow(dead_code)]
 mod perf;
+pub mod wikiignore;

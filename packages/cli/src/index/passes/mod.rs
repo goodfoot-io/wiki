@@ -156,6 +156,7 @@ pub fn refresh(
     // Pass 3: Worktree.
     let mut pass3_full_rescans: u64 = 0;
     let mut pass3_dir_walks: u64 = 0;
+    let wiki_ignore = crate::wikiignore::WikiIgnore::load(repo_root)?;
     let worktree_deltas =
         crate::perf::scope_result("index.pass_worktree", serde_json::json!({}), || {
             worktree::pass_worktree(
@@ -165,6 +166,7 @@ pub fn refresh(
                 hostile_fs,
                 &mut pass3_full_rescans,
                 &mut pass3_dir_walks,
+                &wiki_ignore,
             )
         })?;
 

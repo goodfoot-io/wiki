@@ -18,6 +18,7 @@ use walkdir::WalkDir;
 
 use crate::index::blob::compute_blob_oid;
 use crate::index::{BlobOid, HostileFs, Source};
+use crate::wikiignore::WikiIgnore;
 
 use super::{DeltaAction, PassDelta, source_id};
 
@@ -28,6 +29,7 @@ pub fn pass_worktree(
     hostile_fs: HostileFs,
     pass3_full_rescans: &mut u64,
     pass3_dir_walks: &mut u64,
+    wiki_ignore: &WikiIgnore,
 ) -> Result<Vec<PassDelta>> {
     let is_hostile = matches!(hostile_fs, HostileFs::Yes);
     if is_hostile {
@@ -155,7 +157,12 @@ pub fn pass_worktree(
                 // they survive the removal-reconciliation pass below.
                 if let Some(children) = paths_by_parent.get(&rel) {
                     for p in children {
-                        seen_paths.insert(p.clone());
+                        // A newly-wikiignored child inside an otherwise-clean
+                        // directory must NOT be carried forward, so the
+                        // removal-reconciliation sweep below purges its row.
+                        if !wiki_ignore.is_ignored(p) {
+                            seen_paths.insert(p.clone());
+                        }
                     }
                 }
                 clean_dirs.insert(rel.clone());
@@ -174,6 +181,12 @@ pub fn pass_worktree(
             continue;
         }
         if !is_markdown(&rel) {
+            continue;
+        }
+        // Wikiignore gate at file level (not directory pruning): never add
+        // to seen_paths so the removal-reconciliation sweep purges any
+        // previously-indexed row.
+        if wiki_ignore.is_ignored(&rel) {
             continue;
         }
         // For files inside a clean directory (parent mtime unchanged),

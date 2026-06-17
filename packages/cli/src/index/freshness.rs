@@ -215,6 +215,24 @@ pub(crate) fn compute_worktree_dir_hash(repo_root: &Path) -> i64 {
         )
     });
 
+    // Fold .wiki/.wikiignore mtime into the generation hash so any edit to the
+    // ignore list busts the fast gate and triggers reindex. The walk above
+    // prunes `.wiki/` entirely, so without this an edit to `.wikiignore` would
+    // change neither the dir hash nor head/index checksums. No WikiIgnore load
+    // here (the function returns i64 and cannot fail closed) — only a stat.
+    {
+        let wikiignore_path = repo_root.join(".wiki").join(".wikiignore");
+        if let Ok(meta) = std::fs::metadata(&wikiignore_path)
+            && let Ok(mtime) = meta.modified()
+            && let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH)
+        {
+            pairs.lock().unwrap().push((
+                std::path::PathBuf::from(".wiki/.wikiignore"),
+                dur.as_nanos() as i64,
+            ));
+        }
+    }
+
     // Sort for deterministic ordering independent of filesystem readdir order
     // and of the thread interleaving above.
     let mut pairs = pairs.into_inner().unwrap();
@@ -292,5 +310,57 @@ mod tests {
         let oid = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
         fs::write(dot_git.join("HEAD"), format!("{oid}\n")).unwrap();
         assert_eq!(read_head_oid(dot_git), Some(oid.to_string()));
+    }
+
+    fn set_mtime_ns(path: &std::path::Path, mtime_ns: i64) {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let c = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let times = [
+            libc::timespec {
+                tv_sec: (mtime_ns / 1_000_000_000) as libc::time_t,
+                tv_nsec: (mtime_ns % 1_000_000_000) as _,
+            },
+            libc::timespec {
+                tv_sec: (mtime_ns / 1_000_000_000) as libc::time_t,
+                tv_nsec: (mtime_ns % 1_000_000_000) as _,
+            },
+        ];
+        let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) };
+        assert_eq!(rc, 0, "utimensat failed");
+    }
+
+    #[test]
+    fn test_compute_worktree_dir_hash_changes_on_wikiignore_content_change() {
+        // Editing `.wiki/.wikiignore` must bust the freshness fast-gate even
+        // though the walk prunes `.wiki/` — the file's mtime is folded into
+        // the hash.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join(".wiki")).unwrap();
+        let ignore = root.join(".wiki").join(".wikiignore");
+
+        // Absent → present must change the hash (the mtime pair is folded in).
+        let absent = compute_worktree_dir_hash(root);
+        fs::write(&ignore, "drafts/\n").unwrap();
+        let present = compute_worktree_dir_hash(root);
+        assert_ne!(
+            absent, present,
+            "creating .wiki/.wikiignore must change the generation hash"
+        );
+
+        // A content edit that advances the mtime must also change the hash.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        let later_ns = later
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        fs::write(&ignore, "secrets/\n").unwrap();
+        set_mtime_ns(&ignore, later_ns as i64);
+        let edited = compute_worktree_dir_hash(root);
+        assert_ne!(
+            present, edited,
+            "editing .wiki/.wikiignore must change the generation hash"
+        );
     }
 }
