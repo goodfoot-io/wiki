@@ -156,6 +156,58 @@ fn test_pass_tree_removes_newly_wikiignored_committed_file() {
     );
 }
 
+/// Un-ignoring a committed file via a commit that only edits
+/// `.wiki/.wikiignore` (the file's blob unchanged across that commit) must
+/// restore the file to `--source head`. The Tree pass is diff-based and emits
+/// no delta for the unchanged file, so the bidirectional reconciliation
+/// triggered by the wikiignore content change must re-add the previously
+/// removed Tree row. Mirrors the 3-commit runtime repro.
+#[test]
+fn test_pass_tree_uningnore_unchanged_blob_restores_head() {
+    let repo = common::FixtureRepo::new();
+
+    // Commit 1: two wiki pages, neither ignored.
+    repo.write_wiki_md("wiki/pub.md", "Pub", "A public page.", "body");
+    repo.write_wiki_md("wiki/doc.md", "Doc", "A doc page.", "body");
+    repo.git_add("wiki/pub.md");
+    repo.git_add("wiki/doc.md");
+    repo.git_commit("add pub and doc");
+
+    // Seed the Head DB.
+    let index =
+        WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Head).expect("prepare head");
+    assert!(index.resolve_page("Doc").expect("resolve").is_some());
+    assert!(index.resolve_page("Pub").expect("resolve").is_some());
+    drop(index);
+
+    // Commit 2: ignore doc.md — its blob is NOT touched in this commit.
+    repo.write_file(".wiki/.wikiignore", "wiki/doc.md\n");
+    repo.git_add(".wiki/.wikiignore");
+    repo.git_commit("ignore doc");
+
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Head)
+        .expect("prepare head after ignore");
+    assert!(
+        index.resolve_page("Doc").expect("resolve").is_none(),
+        "ignored committed file must be removed from --source head"
+    );
+    assert!(index.resolve_page("Pub").expect("resolve").is_some());
+    drop(index);
+
+    // Commit 3: remove the pattern — doc.md's blob is STILL unchanged.
+    repo.write_file(".wiki/.wikiignore", "# nothing ignored\n");
+    repo.git_add(".wiki/.wikiignore");
+    repo.git_commit("un-ignore doc");
+
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Head)
+        .expect("prepare head after un-ignore");
+    assert!(
+        index.resolve_page("Doc").expect("resolve").is_some(),
+        "un-ignored committed file (blob unchanged) must be restored to --source head"
+    );
+    assert!(index.resolve_page("Pub").expect("resolve").is_some());
+}
+
 // ---------------------------------------------------------------------------
 // Pass 2 (Index / --source index) exclusion tests
 // ---------------------------------------------------------------------------

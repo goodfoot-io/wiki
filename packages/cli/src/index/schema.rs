@@ -5,7 +5,7 @@
 //! `fts` synchronized so an FTS row dies the moment the corresponding
 //! `blobs.refcount` hits zero.
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub const SCHEMA_V1: &str = r#"
 CREATE TABLE state (
@@ -15,7 +15,12 @@ CREATE TABLE state (
   index_checksum BLOB NOT NULL,
   worktree_generation INTEGER NOT NULL,
   schema_version INTEGER NOT NULL,
-  generation INTEGER NOT NULL
+  generation INTEGER NOT NULL,
+  -- SHA-1 of `.wiki/.wikiignore` contents at the last refresh (20-zero
+  -- sentinel when the file is absent). The Tree pass is diff-based and
+  -- cannot observe a wikiignore-only commit, so a change in this hash is
+  -- the signal to run a full bidirectional Tree reconciliation.
+  wikiignore_hash BLOB NOT NULL
 ) STRICT;
 
 CREATE TABLE blobs (
@@ -100,8 +105,9 @@ pub fn bootstrap(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
              {schema}
              {triggers}
              INSERT INTO state (id, head_oid, head_tree_oid, index_checksum,
-                                worktree_generation, schema_version, generation)
-             VALUES (1, '', '', zeroblob(20), 0, {version}, 0);
+                                worktree_generation, schema_version, generation,
+                                wikiignore_hash)
+             VALUES (1, '', '', zeroblob(20), 0, {version}, 0, zeroblob(20));
              COMMIT;",
             schema = SCHEMA_V1,
             triggers = FTS_TRIGGERS,

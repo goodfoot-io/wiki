@@ -108,6 +108,23 @@ fn read_blob_bytes(
     }
 }
 
+/// SHA-1 of the `.wiki/.wikiignore` contents, or the 20-zero sentinel when
+/// the file is absent. Stored in `state.wikiignore_hash` so the next refresh
+/// can detect a wikiignore-only commit (which the diff-based Tree pass cannot
+/// otherwise observe) and run a full bidirectional Tree reconciliation.
+fn compute_wikiignore_hash(repo_root: &Path) -> Vec<u8> {
+    let path = repo_root.join(".wiki").join(".wikiignore");
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, &bytes)
+                .expect("SHA-1 hashing is infallible")
+                .as_bytes()
+                .to_vec()
+        }
+        Err(_) => vec![0u8; 20],
+    }
+}
+
 /// Drive Pass 1, Pass 2, Pass 3 and apply their deltas inside a single
 /// `BEGIN IMMEDIATE` transaction.
 pub fn refresh(
@@ -119,13 +136,18 @@ pub fn refresh(
 ) -> Result<RefreshOutcome> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
-    // Read prior state (head_tree_oid + index_checksum + generation).
-    let (prior_head_tree, prior_index_checksum, prior_generation): (String, Vec<u8>, i64) = tx
-        .query_row(
-            "SELECT head_tree_oid, index_checksum, generation FROM state WHERE id = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(3 - 1)?)),
-        )?;
+    // Read prior state (head_tree_oid + index_checksum + generation + wikiignore_hash).
+    let (prior_head_tree, prior_index_checksum, prior_generation, prior_wikiignore_hash): (
+        String,
+        Vec<u8>,
+        i64,
+        Vec<u8>,
+    ) = tx.query_row(
+        "SELECT head_tree_oid, index_checksum, generation, wikiignore_hash
+         FROM state WHERE id = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
     let prior_head_tree_oid = if prior_head_tree.is_empty() {
         None
     } else {
@@ -138,6 +160,16 @@ pub fn refresh(
     // Load WikiIgnore once; all three passes apply the same filter so
     // wikiignored paths are never inserted into the DB regardless of source.
     let wiki_ignore = crate::wikiignore::WikiIgnore::load(repo_root)?;
+
+    // Hash the current `.wiki/.wikiignore` contents (20-zero sentinel when
+    // absent). The Tree pass is diff-based and cannot observe a commit that
+    // only edits `.wiki/.wikiignore` while leaving a file's blob unchanged, so
+    // a change in this hash relative to the last refresh is the sole signal to
+    // run a full bidirectional Tree reconciliation (un-ignore re-adds as well
+    // as ignore removes). When the hash is unchanged the common HEAD-advance
+    // path stays on the pure incremental diff and pays no extra cost.
+    let new_wikiignore_hash = compute_wikiignore_hash(repo_root);
+    let wikiignore_changed = new_wikiignore_hash.as_slice() != prior_wikiignore_hash.as_slice();
 
     // Pass 1: Tree (committed snapshot).
     let mut tree_deltas = crate::perf::scope_result("index.pass_tree", serde_json::json!({}), || {
@@ -168,6 +200,47 @@ pub fn refresh(
                     });
                 }
             }
+        }
+    }
+
+    // Un-ignore direction (symmetric counterpart of the sweep above). Only run
+    // when `.wiki/.wikiignore` changed since the last refresh: a wikiignore-only
+    // commit (file blob unchanged) produces no tree diff, so a file that became
+    // un-ignored has no Add from `pass_tree` and its previously-removed Tree row
+    // would otherwise stay missing on `--source head`. Enumerate the current
+    // HEAD-tree markdown blobs; for each not-ignored entry with no existing
+    // Tree row (and no Add already queued by the diff), emit an Add so the row
+    // is re-created by reading the blob from the ODB.
+    if wikiignore_changed {
+        let existing_tree_rows: HashSet<String> = {
+            let mut stmt = tx.prepare("SELECT path_rel FROM paths WHERE source = ?1")?;
+            let rows = stmt.query_map(params![source_id(Source::Tree)], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<HashSet<_>>>()?
+        };
+        for (path, oid) in tree::head_tree_markdown_entries(repo)? {
+            if wiki_ignore.is_ignored(&path) {
+                continue;
+            }
+            let path_str = path.to_string_lossy().to_string();
+            if existing_tree_rows.contains(&path_str) {
+                continue;
+            }
+            // Skip if the diff already queued an Add/Rename for this path.
+            let already_added = tree_deltas.iter().any(|d| {
+                d.path == path && matches!(d.action, DeltaAction::Add { .. } | DeltaAction::Rename { .. })
+            });
+            if already_added {
+                continue;
+            }
+            tree_deltas.push(PassDelta {
+                path,
+                source: Source::Tree,
+                action: DeltaAction::Add {
+                    oid,
+                    blob_bytes: None,
+                    stat_mtime_ns: None,
+                },
+            });
         }
     }
 
@@ -326,13 +399,15 @@ pub fn refresh(
     // signal and the caller continues to serve the prior snapshot.
     let updated = tx.execute(
         "UPDATE state SET head_oid = ?1, head_tree_oid = ?2, index_checksum = ?3,
-                          worktree_generation = ?4, generation = generation + 1
-         WHERE id = 1 AND generation = ?5",
+                          worktree_generation = ?4, wikiignore_hash = ?5,
+                          generation = generation + 1
+         WHERE id = 1 AND generation = ?6",
         params![
             new_head_oid,
             new_head_tree,
             new_index_checksum,
             new_worktree_generation,
+            new_wikiignore_hash,
             prior_generation
         ],
     )?;

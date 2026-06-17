@@ -190,6 +190,57 @@ pub fn pass_tree(
     Ok(out)
 }
 
+/// Enumerate every markdown blob in the current HEAD tree as
+/// `(repo-relative path, blob OID)`. Used by the bidirectional Tree
+/// reconciliation when `.wiki/.wikiignore` changed since the last refresh:
+/// the incremental diff cannot observe a wikiignore-only commit, so the full
+/// HEAD snapshot is needed to re-add files that became un-ignored without a
+/// blob change. Returns an empty vector when HEAD is unborn.
+pub fn head_tree_markdown_entries(repo: &gix::Repository) -> Result<Vec<(PathBuf, BlobOid)>> {
+    let tree_id = match repo.head_tree_id() {
+        Ok(id) => id.detach(),
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut out = Vec::new();
+    recurse_tree(repo, tree_id, &mut String::new(), &mut out)?;
+    Ok(out)
+}
+
+fn recurse_tree(
+    repo: &gix::Repository,
+    tree_id: gix::ObjectId,
+    prefix: &mut String,
+    out: &mut Vec<(PathBuf, BlobOid)>,
+) -> Result<()> {
+    let tree = repo
+        .find_tree(tree_id)
+        .map_err(|e| anyhow::anyhow!("find tree {tree_id}: {e}"))?;
+    for entry_ref in tree.iter() {
+        let entry = entry_ref.map_err(|e| anyhow::anyhow!("decode tree entry: {e}"))?;
+        let name = std::str::from_utf8(entry.filename())
+            .map_err(|e| anyhow::anyhow!("tree entry name not utf-8: {e}"))?;
+        let prev_len = prefix.len();
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(name);
+        match entry.mode().kind() {
+            gix::object::tree::EntryKind::Tree => {
+                recurse_tree(repo, entry.object_id(), prefix, out)?;
+            }
+            gix::object::tree::EntryKind::Blob | gix::object::tree::EntryKind::BlobExecutable => {
+                let path = PathBuf::from(&*prefix);
+                if is_markdown(&path) {
+                    out.push((path, BlobOid(entry.object_id().to_hex().to_string())));
+                }
+            }
+            _ => {}
+        }
+        prefix.truncate(prev_len);
+    }
+    Ok(())
+}
+
 fn bstring_to_path(b: &gix::bstr::BString) -> PathBuf {
     PathBuf::from(b.to_string())
 }
