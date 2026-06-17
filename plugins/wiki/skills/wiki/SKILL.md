@@ -1,5 +1,5 @@
 ---
-name: handbook
+name: wiki
 description: CLI for documentation in this repository - search with `wiki "[query]"` to start. Includes tools for validation, stale link tracking, and authoring.
 ---
 
