@@ -41,7 +41,7 @@ These scopes cover the cold-cache path: when the stat-only freshness gate misses
 
 | Location | Scope Name | Measures | Metadata |
 |----------|-----------|----------|----------|
-| [commands/mod.rs](./src/commands/mod.rs#L207-L274) | `discover_files` | Time to resolve glob patterns and find wiki markdown files | `globs` (array of glob patterns) |
+| [commands/mod.rs](./src/commands/mod.rs#L207-L282) | `discover_files` | Time to resolve glob patterns and find wiki markdown files | `globs` (array of glob patterns) |
 | [commands/mod.rs](./src/commands/mod.rs#L253-L260) | `discover_files_result` | Zero-duration marker carrying the discovered-file count | `count` |
 
 ## Direct Output Points (println! and eprintln!)

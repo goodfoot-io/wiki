@@ -1,4 +1,4 @@
-packages/cli/src/commands/mesh_coverage.rs#L22-L354 rk64:45d4097ddf50ca08
+packages/cli/src/commands/mesh_coverage.rs#L22-L354 rk64:a5c613920c394dc6
 wiki/architecture/wiki-mesh-integration.md rk64:e2310d4007ef908c
 wiki/guides/adding-mesh-coverage.md rk64:d6bccfe3be82b0c6
 wiki/reference/git-mesh-usage.md rk64:5f1cadb4889e673a

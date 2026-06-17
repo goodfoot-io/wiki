@@ -5,5 +5,5 @@ packages/cli/src/index/mod.rs#L324-L330 rk64:3419a2a9bdd8f21d
 packages/cli/src/main.rs#L373-L390 rk64:8a99a8423e47f4c7
 packages/cli/src/main.rs#L383-L389 rk64:f4899370093f41d7
 packages/cli/src/perf.rs#L63-L63 rk64:218b59104d395f7b
-wiki/guides/benchmarking-wiki-cli-performance.md#L73-L88 rk64:26812a0eab1b6797
+wiki/guides/benchmarking-wiki-cli-performance.md#L73-L88 rk64:99d5816d5c26cf40
 
