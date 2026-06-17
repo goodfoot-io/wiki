@@ -1,7 +1,2 @@
-packages/cli/logging.wiki.md#L151-L159 rk64:cde6d80383eea800
-packages/cli/src/commands/install.rs#L679-L679 rk64:1faf018a3ac7b2d0
-packages/cli/src/commands/install.rs#L927-L927 rk64:64e6f7bf46fa7e0f
-packages/cli/src/commands/install.rs#L946-L946 rk64:480debffff3de05a
-packages/cli/src/commands/install.rs#L991-L991 rk64:76647a30807e6e4a
-packages/cli/src/commands/install.rs#L1024-L1024 rk64:eba0864f10de1f61
+packages/cli/logging.wiki.md#L151-L159 rk64:d43d7ca9d2ae26f4
 

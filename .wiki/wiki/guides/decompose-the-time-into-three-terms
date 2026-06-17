@@ -1,6 +1,6 @@
 wiki/guides/benchmarking-wiki-cli-performance.md#L60-L75 rk64:130cdf40dd7d39eb
 packages/cli/src/main.rs#L358-L370 rk64:0ad67b9559e9dc2c
-packages/cli/src/index/mod.rs#L241-L241 rk64:97aefce64ad77fa6
+packages/cli/src/index/mod.rs#L247-L247 rk64:97aefce64ad77fa6
 packages/cli/src/index/mod.rs#L315-L325 rk64:723570e63948ee2d
 packages/cli/src/perf.rs#L63-L63 rk64:218b59104d395f7b
 packages/cli/src/index/freshness.rs#L18-L18 rk64:0e65173c9a3b9c1c
