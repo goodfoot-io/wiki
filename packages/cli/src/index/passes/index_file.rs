@@ -17,6 +17,7 @@ pub fn pass_index(
     last_index_checksum: &[u8; 20],
     tx: &rusqlite::Transaction,
     wiki_ignore: &WikiIgnore,
+    wikiignore_changed: bool,
 ) -> Result<Vec<PassDelta>> {
     let index_path = dot_git.join("index");
     if !index_path.exists() {
@@ -34,10 +35,16 @@ pub fn pass_index(
         Err(_) => return Ok(Vec::new()),
     };
 
-    // Cheap shortcut: if the on-disk checksum matches the prior snapshot,
-    // nothing changed since last refresh.
-    if let Some(checksum) = file.checksum()
-        && checksum.as_bytes() == last_index_checksum
+    // Cheap shortcut: if the on-disk checksum matches the prior snapshot AND
+    // the wikiignore is unchanged, nothing changed since last refresh.
+    // When the wikiignore changed we must bypass this gate: the git index
+    // checksum may be unchanged even though a file that was previously indexed
+    // is now wikiignored (or was previously ignored and must be re-added).
+    if !wikiignore_changed
+        && file
+            .checksum()
+            .map(|c| c.as_bytes() == last_index_checksum)
+            .unwrap_or(false)
     {
         return Ok(Vec::new());
     }

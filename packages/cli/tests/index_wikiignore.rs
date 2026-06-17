@@ -212,6 +212,65 @@ fn test_pass_tree_uningnore_unchanged_blob_restores_head() {
 // Pass 2 (Index / --source index) exclusion tests
 // ---------------------------------------------------------------------------
 
+/// Regression: an UNSTAGED `.wiki/.wikiignore` edit (git index checksum
+/// unchanged) must still cause `pass_index` to exclude the now-wikiignored
+/// file. This is the fail-open leak: previously `pass_index` saw an unchanged
+/// git index checksum and returned early, leaving stale `Source::Index` rows
+/// for files whose wikiignore status changed without a `git add`.
+///
+/// Runtime repro: commit pub.md + doc.md; then write `.wiki/.wikiignore` =
+/// `wiki/doc.md` WITHOUT staging. `wiki --source index list` must NOT list
+/// doc.md.
+#[test]
+fn test_pass_index_excludes_wikiignored_file_when_wikiignore_unstaged() {
+    let repo = common::FixtureRepo::new();
+
+    // Commit both pages so they appear in the git index.
+    repo.write_wiki_md("wiki/pub.md", "Pub", "A public page.", "body");
+    repo.write_wiki_md("wiki/doc.md", "Doc", "A secret doc.", "topsecret_token");
+    repo.git_add("wiki/pub.md");
+    repo.git_add("wiki/doc.md");
+    repo.git_commit("add pub and doc");
+
+    // Seed the Index DB — both files must be visible.
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Index)
+        .expect("prepare index initial");
+    assert!(
+        index.resolve_page("Doc").expect("resolve").is_some(),
+        "doc.md visible before wikiignore"
+    );
+    assert!(
+        index.resolve_page("Pub").expect("resolve").is_some(),
+        "pub.md visible before wikiignore"
+    );
+    drop(index);
+
+    // Write `.wiki/.wikiignore` WITHOUT staging — git index checksum unchanged.
+    repo.write_file(".wiki/.wikiignore", "wiki/doc.md\n");
+
+    // Pass 2 must still exclude doc.md even though the git index didn't change.
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Index)
+        .expect("prepare index after unstaged wikiignore");
+    assert!(
+        index.resolve_page("Doc").expect("resolve").is_none(),
+        "wikiignored file must be excluded from --source index even when .wikiignore is unstaged"
+    );
+    assert!(
+        index.resolve_page("Pub").expect("resolve").is_some(),
+        "non-ignored sibling must remain visible"
+    );
+    drop(index);
+
+    // Un-ignore: remove the pattern (still unstaged) — doc.md must come back.
+    repo.write_file(".wiki/.wikiignore", "# nothing ignored\n");
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Index)
+        .expect("prepare index after un-ignore");
+    assert!(
+        index.resolve_page("Doc").expect("resolve").is_some(),
+        "un-ignored file must be restored to --source index (un-ignore direction)"
+    );
+}
+
 /// A staged wikiignored file must be absent from the Index-source index
 /// (`--source index`): `pass_index` must not insert it into the DB.
 #[test]

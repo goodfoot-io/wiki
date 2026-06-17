@@ -254,7 +254,7 @@ pub fn refresh(
     };
     let index_deltas =
         crate::perf::scope_result("index.pass_index", serde_json::json!({}), || {
-            index_file::pass_index(dot_git, &prior_index_checksum_arr, &tx, &wiki_ignore)
+            index_file::pass_index(dot_git, &prior_index_checksum_arr, &tx, &wiki_ignore, wikiignore_changed)
         })?;
 
     // Pass 3: Worktree.
