@@ -1,6 +1,6 @@
-packages/cli/src/commands/mesh_coverage.rs#L45-L49 rk64:cfd268999dbffa3f
-packages/cli/src/commands/mesh_coverage.rs#L101-L105 rk64:346b1abca20e7bd0
-packages/cli/src/commands/mesh_coverage.rs#L202-L211 rk64:1a84853b16037f77
-packages/cli/src/commands/mesh_coverage.rs#L228-L232 rk64:4c27ed37b20dd52c
+packages/cli/src/commands/mesh_coverage.rs#L46-L50 rk64:cfd268999dbffa3f
+packages/cli/src/commands/mesh_coverage.rs#L102-L106 rk64:346b1abca20e7bd0
+packages/cli/src/commands/mesh_coverage.rs#L211-L220 rk64:1a84853b16037f77
+packages/cli/src/commands/mesh_coverage.rs#L237-L241 rk64:4c27ed37b20dd52c
 wiki/architecture/wiki-mesh-integration.md#L16-L26 rk64:a971e62c99149067
 
