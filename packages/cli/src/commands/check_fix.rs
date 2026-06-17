@@ -1155,67 +1155,128 @@ fn is_wiki_page_bytes(bytes: &[u8]) -> bool {
 /// anchor of the mesh that owns it — the case the [`is_wiki_page_bytes`]
 /// exemption was always meant to cover, and the ONLY case it may safely cover.
 ///
-/// The coverage scaffold names a mesh `<page_subdir>/<noun>`, where `page_subdir`
-/// is the owning page's directory relative to the repo root (see
-/// `mesh::draft::build_slug`). It re-anchors each page's OWN section as a
-/// line-range `.md` anchor on every `--fix`, so those self-anchors must not fail
-/// closed as meaning-change drift. A line-range citation INTO a *different* wiki
-/// page is a human-authored cross-page reference and MUST be checked.
+/// The coverage scaffold (`mesh::draft`) names a mesh `<page_subdir>/<noun>`,
+/// where `page_subdir` is the OWNING page's directory and `<noun>` is the
+/// kebab-cased heading of the section the mesh covers (see
+/// `draft::build_slug` / `draft::derive_noun`). It anchors that owning page's
+/// OWN section as a line-range `.md` anchor and re-anchors it on every `--fix`,
+/// so the self-section anchor must not fail closed as meaning-change drift.
 ///
-/// We recognise a self-section anchor structurally: the anchored page is a wiki
-/// page AND its directory is the leading path prefix of the mesh slug (the
-/// `page_subdir/...` shape the scaffold mints). A citation into another page
-/// fails this test whenever the cited page lives outside the owning page's
-/// directory — which is the reproduced false-negative case.
-fn is_scaffold_self_section_anchor(slug: &str, anchor_path: &str, page_bytes: &[u8]) -> bool {
+/// A naive directory-prefix test is NOT enough: a line-range citation INTO a
+/// *same-directory sibling* wiki page shares the owning page's directory and was
+/// wrongly exempted (F-FM2). The robust owning-page signal is to **reconstruct
+/// the slug from the candidate page itself**: take the page's directory as the
+/// subdir, kebab the heading enclosing the anchored range as the noun, and
+/// rebuild `build_slug(subdir, noun)`. The exemption fires only when that
+/// reconstruction reproduces the mesh slug — i.e. the candidate page IS the page
+/// the mesh was scaffolded for. A citation into another page (sibling, ancestor,
+/// or elsewhere) reconstructs a different slug and is therefore staleness-checked.
+///
+/// `repo_root` lets us derive the page subdir relative to the repo; `anchor_path`
+/// is the page file (repo-relative), `start` the anchor's 1-based start line.
+fn is_scaffold_self_section_anchor(
+    repo_root: &Path,
+    slug: &str,
+    anchor_path: &str,
+    start: u32,
+    page_bytes: &[u8],
+) -> bool {
     if !is_wiki_page_bytes(page_bytes) {
         return false;
     }
-    // The page's directory, relative to the repo root (empty for repo-root pages).
-    let page_dir = Path::new(anchor_path)
-        .parent()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_default();
-    let page_dir = page_dir.trim_start_matches("./").trim_matches('/');
-
-    // Slug's directory portion is everything up to the final `/` (the noun).
-    let slug_dir = match slug.rsplit_once('/') {
-        Some((dir, _noun)) => dir,
-        None => "", // repo-root page: slug is bare `<noun>`
+    let Ok(text) = std::str::from_utf8(page_bytes) else {
+        return false;
     };
 
-    if page_dir.is_empty() {
-        // Repo-root page owns a bare-`<noun>` slug (no directory segment).
-        return slug_dir.is_empty();
-    }
+    // Page subdir: the owning page's directory relative to the wiki/repo root,
+    // forward slashes (empty for repo-root pages). `build_slug` collapses
+    // repeated segments, so we pass the raw directory and let it normalise.
+    let abs_page = repo_root.join(anchor_path);
+    let page_subdir = crate::commands::mesh::scaffold::resolve_page_subdir(&abs_page, repo_root);
 
-    // The scaffold collapses repeated path segments, so `slug_dir` carries every
-    // distinct segment of `page_dir` in order. A self-anchor's page directory is
-    // therefore a path-segment prefix of the slug directory.
-    let slug_segs: Vec<&str> = slug_dir.split('/').filter(|s| !s.is_empty()).collect();
-    page_dir
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .enumerate()
-        .all(|(i, seg)| slug_segs.get(i) == Some(&seg))
+    // The noun is the kebab of the heading enclosing the anchored range — the
+    // nearest heading at or above `start`. Match it the way the scaffold derives
+    // the section noun (`draft::derive_noun` kebabs the section heading text).
+    let headings = extract_headings(text);
+    let enclosing = headings
+        .iter()
+        .filter(|h| h.line as u32 <= start.max(1))
+        .max_by_key(|h| h.line);
+    let Some(h) = enclosing else {
+        // No heading governs the anchored range — the scaffold could not have
+        // derived a heading noun for it, so this is not a heading-section
+        // self-anchor. Fail-closed: check it.
+        return false;
+    };
+    let noun = super::mesh::draft::kebab(&h.text);
+    if noun.is_empty() {
+        return false;
+    }
+    let reconstructed = super::mesh::draft::build_slug(&page_subdir, &noun);
+    reconstructed == slug
 }
 
-/// True when `a` and `b` contain the same non-whitespace content.
+/// True when the file at `path` belongs to a language/format where leading
+/// indentation is COSMETIC (insignificant to meaning) — the brace/C-family and
+/// similar. For these, an indentation-only reflow (2→4 spaces, tabs↔spaces) is a
+/// routine formatter run that carries no meaning change, so leading whitespace
+/// may be stripped before whitespace-equivalence comparison.
 ///
-/// Conservative: strip leading AND trailing whitespace per line, filter blank
-/// lines, join, compare. A trailing-space reformat, blank-line addition, or
-/// indentation-only reflow (2→4 spaces, tabs↔spaces) is equivalent — leading
-/// indentation is whitespace, so a routine formatter run (rustfmt/prettier/
-/// gofmt) over a cited range is whitespace-equivalent. An identifier rename or
-/// added parameter changes a non-whitespace token and is NOT equivalent.
-fn whitespace_equivalent(a: &str, b: &str) -> bool {
-    fn normalise(s: &str) -> String {
+/// Fail-closed: any extension NOT on this list — including indentation-
+/// significant formats (`.py`, `.yaml`, `.md`, Makefiles, Haskell/F#, …) and any
+/// unknown/extensionless file — returns `false`. There an indentation-only edit
+/// can change meaning (e.g. dedenting a statement out of a Python `if` block), so
+/// leading whitespace is preserved and such a change is treated as potentially
+/// meaning-changing.
+fn leading_whitespace_insignificant(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    // Files named Makefile / makefile / *.mk are indentation-significant (tabs
+    // are recipe markers) — explicitly excluded (covered by the default `false`,
+    // but the `.mk` check below makes the intent unmissable).
+    let stem = lower.rsplit('/').next().unwrap_or(&lower);
+    if stem == "makefile" || stem.ends_with(".mk") {
+        return false;
+    }
+    let Some((_, ext)) = lower.rsplit_once('.') else {
+        // No extension → unknown → fail-closed.
+        return false;
+    };
+    matches!(
+        ext,
+        // Brace / C-family and similar where leading whitespace is cosmetic.
+        "rs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "c" | "h" | "cpp"
+            | "cc" | "hpp" | "hh" | "java" | "go" | "cs" | "php" | "swift" | "kt"
+            | "kts" | "scala" | "css" | "scss" | "less" | "json" | "jsonc"
+    )
+}
+
+/// True when `a` and `b` contain the same non-whitespace content, with leading-
+/// indentation handling gated by `path`'s file type.
+///
+/// Trailing-whitespace trimming and blank-line dropping are ALWAYS applied —
+/// those are universally safe across every language. Leading-indentation
+/// stripping is applied ONLY when [`leading_whitespace_insignificant`] holds for
+/// `path` (the brace/C-family): there a rustfmt/prettier/gofmt reindent is
+/// whitespace-equivalent. For indentation-significant or unknown file types,
+/// leading whitespace is preserved, so a dedent/reindent that could change
+/// meaning is NOT graded whitespace-only (fail-closed). An identifier rename or
+/// added parameter changes a non-whitespace token and is NOT equivalent in any
+/// language.
+fn whitespace_equivalent(a: &str, b: &str, path: &str) -> bool {
+    let strip_leading = leading_whitespace_insignificant(path);
+    let normalise = |s: &str| -> String {
         s.lines()
-            .map(|l| l.trim())
+            .map(|l| {
+                if strip_leading {
+                    l.trim()
+                } else {
+                    l.trim_end()
+                }
+            })
             .filter(|l| !l.is_empty())
             .collect::<Vec<_>>()
             .join("\n")
-    }
+    };
     normalise(a) == normalise(b)
 }
 
@@ -1297,7 +1358,7 @@ fn classify_inplace_drift(
             let head_slice = store::slice_at_extent(&head_bytes, extent);
             let cur_slice = store::slice_at_extent(current_bytes, extent);
             return AnchorDriftKind::Changed {
-                whitespace_only: whitespace_equivalent(&head_slice, &cur_slice),
+                whitespace_only: whitespace_equivalent(&head_slice, &cur_slice, &anchor.path),
             };
         }
     }
@@ -1315,7 +1376,7 @@ fn classify_inplace_drift(
         let old_slice = store::slice_at_extent(&old_bytes, extent);
         let cur_slice = store::slice_at_extent(current_bytes, extent);
         return AnchorDriftKind::Changed {
-            whitespace_only: whitespace_equivalent(&old_slice, &cur_slice),
+            whitespace_only: whitespace_equivalent(&old_slice, &cur_slice, &anchor.path),
         };
     }
 
@@ -1513,7 +1574,15 @@ pub fn plan_mesh_follows(repo_root: &Path, source: DocSource) -> Result<MeshFoll
                     && file_bytes
                         .get(&anchor.path)
                         .and_then(|o| o.as_deref())
-                        .map(|b| is_scaffold_self_section_anchor(slug, &anchor.path, b))
+                        .map(|b| {
+                            is_scaffold_self_section_anchor(
+                                repo_root,
+                                slug,
+                                &anchor.path,
+                                anchor.start_line,
+                                b,
+                            )
+                        })
                         .unwrap_or(false)
                 {
                     continue;

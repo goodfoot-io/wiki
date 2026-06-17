@@ -815,6 +815,258 @@ fn anchor_fix_indentation_only_is_whitespace_equivalent() {
 
 // ── Test 19 (F-FM1) ────────────────────────────────────────────────────────────
 
+// ── Test 18b (F-INDENT, indentation-significant) ────────────────────────────────
+
+/// Seed a multi-anchor mesh: a leading owning-page self-section anchor followed
+/// by the listed *target* anchors. Models the scaffold's emitted shape (owning
+/// page section first, citations after).
+fn seed_mesh_multi(
+    root: &Path,
+    slug: &str,
+    leading: (&str, AnchorExtent, &[u8]),
+    targets: &[(&str, AnchorExtent, &[u8])],
+) {
+    let mut anchors: Vec<AnchorRecord> = Vec::new();
+    for (path, extent, bytes) in std::iter::once(leading).chain(targets.iter().copied()) {
+        let hash = rk64_to_hex(cheap_fingerprint_with_extent(bytes, &extent));
+        let (start, end) = match extent {
+            AnchorExtent::WholeFile => (0, 0),
+            AnchorExtent::LineRange { start, end } => (start, end),
+        };
+        anchors.push(AnchorRecord {
+            path: path.to_string(),
+            start_line: start,
+            end_line: end,
+            algorithm: "rk64".to_string(),
+            content_hash: hash,
+        });
+    }
+    let mesh = MeshFile {
+        anchors,
+        why: String::new(),
+    };
+    let slug_path = root.join(".wiki").join(slug);
+    std::fs::create_dir_all(slug_path.parent().unwrap()).unwrap();
+    std::fs::write(slug_path, mesh.serialize()).unwrap();
+}
+
+/// A `.py` dedent that moves a statement OUT of an `if` block changes meaning
+/// purely through leading indentation. Python is indentation-significant, so the
+/// edit must NOT be graded whitespace-only: `wiki check --fix` fails closed
+/// (exit 1, SkippedFix) and bare `wiki check` exits 1.
+#[test]
+fn anchor_fix_python_dedent_is_not_whitespace_only() {
+    let tmp = init_repo();
+    let root = tmp.path();
+
+    // Cited lines 1-3: a guarded call nested inside the `if`.
+    let src = "if cond:\n    do_thing()\n    cleanup()\n";
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/app.py"), src).unwrap();
+    write_page(root, "page.md", "Documentation prose.");
+    seed_mesh(
+        root,
+        "myslug",
+        "src/app.py",
+        AnchorExtent::LineRange { start: 1, end: 3 },
+        src.as_bytes(),
+    );
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "seed"]);
+
+    // Dedent `cleanup()` out of the `if` — now it always runs. Indentation-only
+    // diff, but the meaning changed. Committed.
+    let dedented = "if cond:\n    do_thing()\ncleanup()\n";
+    std::fs::write(root.join("src/app.py"), dedented).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "dedent cleanup"]);
+
+    let out = wiki_check(root, &["--fix"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "python dedent (meaning change) must NOT auto-settle → exit 1; stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("wiki mesh add myslug src/app.py#L1-L3"),
+        "python dedent must surface as a SkippedFix with a re-anchor command; got:\n{combined}"
+    );
+
+    let bare = wiki_check(root, &[]);
+    assert_eq!(
+        bare.status.code(),
+        Some(1),
+        "bare check on the python dedent must exit 1; stderr=\n{}",
+        String::from_utf8_lossy(&bare.stderr)
+    );
+}
+
+/// A `.yaml` indentation change re-nests a key under a different parent —
+/// meaning-changing in an indentation-significant format. It must NOT be graded
+/// whitespace-only.
+#[test]
+fn anchor_fix_yaml_indentation_is_not_whitespace_only() {
+    let tmp = init_repo();
+    let root = tmp.path();
+
+    let src = "root:\n  child: 1\n  other: 2\n";
+    std::fs::create_dir_all(root.join("cfg")).unwrap();
+    std::fs::write(root.join("cfg/app.yaml"), src).unwrap();
+    write_page(root, "page.md", "Documentation prose.");
+    seed_mesh(
+        root,
+        "myslug",
+        "cfg/app.yaml",
+        AnchorExtent::LineRange { start: 1, end: 3 },
+        src.as_bytes(),
+    );
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "seed"]);
+
+    // Dedent `other` to the top level — re-parents it. Indentation-only diff.
+    let reindented = "root:\n  child: 1\nother: 2\n";
+    std::fs::write(root.join("cfg/app.yaml"), reindented).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "reindent yaml"]);
+
+    let out = wiki_check(root, &["--fix"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "yaml indentation change must NOT auto-settle → exit 1; stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// ── Test 16b (F-FM2, same-directory sibling) ─────────────────────────────────────
+
+/// Page A line-range-cites a SAME-DIRECTORY sibling wiki page B. The scaffolded
+/// mesh leads with A's own section anchor, then carries B's cited range as a
+/// target. A meaning change to B's cited lines MUST be detected — the
+/// self-section exemption fires only for the mesh's leading owning-page anchor,
+/// never a same-directory cross-page citation.
+#[test]
+fn anchor_same_dir_sibling_cross_page_citation_detected() {
+    let tmp = init_repo();
+    let root = tmp.path();
+
+    std::fs::create_dir_all(root.join("wiki/meta")).unwrap();
+    // Owning page A.
+    let page_a = "---\ntitle: Ref\nsummary: A reference page.\n---\n\n\
+                  ## Refs\n\nSee the concept cap.\n";
+    std::fs::write(root.join("wiki/meta/ref.md"), page_a).unwrap();
+    // Sibling page B (same directory).
+    let page_b = "---\ntitle: Concept\nsummary: A concept page.\n---\n\n\
+                  The cap is 100 per second.\nMore.\n";
+    std::fs::write(root.join("wiki/meta/concept.md"), page_b).unwrap();
+
+    // Mesh is A's (slug under wiki/meta): leading anchor = A's own section,
+    // target = B's line 6 (a same-directory cross-page citation).
+    seed_mesh_multi(
+        root,
+        "wiki/meta/refs",
+        (
+            "wiki/meta/ref.md",
+            AnchorExtent::LineRange { start: 6, end: 8 },
+            page_a.as_bytes(),
+        ),
+        &[(
+            "wiki/meta/concept.md",
+            AnchorExtent::LineRange { start: 6, end: 6 },
+            page_b.as_bytes(),
+        )],
+    );
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "seed"]);
+
+    // Meaning change to B's cited line.
+    let edited_b = "---\ntitle: Concept\nsummary: A concept page.\n---\n\n\
+                    The cap is 5000 per second.\nMore.\n";
+    std::fs::write(root.join("wiki/meta/concept.md"), edited_b).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "raise cap"]);
+
+    let out = wiki_check(root, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "same-directory sibling cross-page citation drift must be detected; \
+         stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.to_lowercase().contains("anchor"),
+        "expected an anchor_stale diagnostic for the sibling citation; got:\n{combined}"
+    );
+}
+
+// ── Test 16c (F-FM2, ancestor-directory) ─────────────────────────────────────────
+
+/// Page A (under wiki/meta) line-range-cites a page B in an ANCESTOR directory
+/// (wiki/). A meaning change to B's cited lines MUST be detected: B is a target,
+/// not the mesh's leading owning-page anchor.
+#[test]
+fn anchor_ancestor_dir_cross_page_citation_detected() {
+    let tmp = init_repo();
+    let root = tmp.path();
+
+    std::fs::create_dir_all(root.join("wiki/meta")).unwrap();
+    let page_a = "---\ntitle: Ref\nsummary: A reference page.\n---\n\n\
+                  ## Refs\n\nSee the parent cap.\n";
+    std::fs::write(root.join("wiki/meta/ref.md"), page_a).unwrap();
+    // Ancestor-directory page B (directly under wiki/).
+    let page_b = "---\ntitle: Top\nsummary: A top page.\n---\n\n\
+                  The cap is 100 per second.\nMore.\n";
+    std::fs::write(root.join("wiki/top.md"), page_b).unwrap();
+
+    seed_mesh_multi(
+        root,
+        "wiki/meta/refs",
+        (
+            "wiki/meta/ref.md",
+            AnchorExtent::LineRange { start: 6, end: 8 },
+            page_a.as_bytes(),
+        ),
+        &[(
+            "wiki/top.md",
+            AnchorExtent::LineRange { start: 6, end: 6 },
+            page_b.as_bytes(),
+        )],
+    );
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "seed"]);
+
+    let edited_b = "---\ntitle: Top\nsummary: A top page.\n---\n\n\
+                    The cap is 5000 per second.\nMore.\n";
+    std::fs::write(root.join("wiki/top.md"), edited_b).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "raise cap"]);
+
+    let out = wiki_check(root, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "ancestor-directory cross-page citation drift must be detected; \
+         stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// A committed whitespace-only edit in a FULL-history repo is classified
 /// whitespace-only and auto-settled by `--fix` (the recoverable path).
 #[test]
