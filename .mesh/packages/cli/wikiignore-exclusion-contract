@@ -1,0 +1,10 @@
+packages/cli/src/commands/mod.rs#L220-L230 rk64:915fc4410ff7c163
+packages/cli/src/index/freshness.rs#L218-L234 rk64:26604bd6a5914c56
+packages/cli/src/index/passes/mod.rs#L159-L171 rk64:899a4915113ea321
+packages/cli/src/index/passes/worktree.rs#L20-L44 rk64:93cb3e5d19e23ace
+packages/cli/src/lib.rs#L16-L18 rk64:ead7a117c4a33d6e
+packages/cli/src/main.rs#L7-L9 rk64:cb6c25825ba57174
+packages/cli/src/wikiignore.rs rk64:0189ff7e71b320a5
+packages/cli/tests/index_wikiignore.rs rk64:cdb93e398ece5967
+
+.wiki/.wikiignore pattern file that excludes paths from wiki discovery (Pass 3 walk + discovery filtering) and freshness detection; changes to ignore semantics or file format must be coordinated across all call sites.
