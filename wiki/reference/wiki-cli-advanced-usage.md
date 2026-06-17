@@ -32,7 +32,7 @@ wiki check --fix
 
 ## Stdin and Path Input
 
-[`wiki`](/packages/cli/src/commands/search.rs#L61-L90) and [`wiki summary`](/packages/cli/src/commands/summary.rs#L130-L158) each accept a file path in addition to a page title or alias:
+[`wiki`](/packages/cli/src/commands/search.rs#L9-L43) and [`wiki summary`](/packages/cli/src/commands/summary.rs#L72-L100) each accept a file path in addition to a page title or alias:
 
 ```bash
 # Path argument
@@ -56,7 +56,7 @@ When multiple inputs are provided via stdin, the exit code reflects the worst re
 
 ## Targeting Specific Files
 
-All commands accept explicit glob patterns instead of scanning [`WIKI_DIR`](/packages/cli/src/main.rs#L125-L127):
+All commands accept explicit glob patterns instead of scanning [the current working directory](/packages/cli/src/main.rs#L373-L376):
 
 ```bash
 wiki check wiki/some-section/**/*.md
@@ -64,7 +64,7 @@ wiki check wiki/some-section/**/*.md
 
 ## JSON Output
 
-Every command accepts [`--format json`](/packages/cli/src/main.rs#L45-L47) for scripting:
+Every command accepts [`--format json`](/packages/cli/src/main.rs#L41-L43) for scripting:
 
 ```bash
 wiki check --format json
