@@ -118,6 +118,42 @@ pub(crate) fn slug_path(repo_root: &Path, slug: &str) -> PathBuf {
     path
 }
 
+/// Extract lines `start..=end` (1-based) from `content`. Whole-file (0/0)
+/// returns all. Each returned line keeps a trailing `\n`.
+///
+/// Shared helper: the mesh-maintenance diff renderer and the staleness
+/// classifier both extract a named line range from a source file the same way.
+pub(crate) fn slice_lines(content: &str, start: u32, end: u32) -> String {
+    if start == 0 && end == 0 {
+        return content.to_string();
+    }
+    content
+        .lines()
+        .enumerate()
+        .filter_map(|(i, line)| {
+            let lineno = (i + 1) as u32;
+            if lineno >= start && lineno <= end {
+                Some(format!("{line}\n"))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Extract the text for `extent` from raw `bytes` (lossily decoded as UTF-8).
+///
+/// `WholeFile` returns the whole content; `LineRange { start, end }` returns
+/// lines `start..=end` via [`slice_lines`]. Used by the staleness classifier to
+/// compare an anchor's old and current content for whitespace equivalence.
+pub(crate) fn slice_at_extent(bytes: &[u8], extent: &AnchorExtent) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    match extent {
+        AnchorExtent::WholeFile => text.into_owned(),
+        AnchorExtent::LineRange { start, end } => slice_lines(&text, *start, *end),
+    }
+}
+
 /// Whether a filename under `.wiki/` is a non-mesh runtime artifact written by
 /// the CLI (the index cache DB, its SQLite WAL/SHM/journal sidecars, the
 /// refresh lock, and the perf log). These coexist with mesh files under

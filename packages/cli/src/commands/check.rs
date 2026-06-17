@@ -516,6 +516,63 @@ pub fn run(
         }
     }
 
+    // ── Anchor-staleness detection (non-fix mode) ───────────────────────────
+    //
+    // A cited anchor whose stored hash no longer matches its current content is
+    // stale. Moved anchors are intentionally silent in bare `wiki check` (their
+    // bytes are intact, only coordinates drifted — `--fix` auto-settles them).
+    // Only `outcome.drifted` (Changed/Deleted) drives a non-zero exit here.
+    if !fix {
+        match check_fix::plan_mesh_follows(repo_root, source) {
+            Ok(outcome) => {
+                for d in &outcome.drifted {
+                    let anchor_arg = if d.start == 0 {
+                        d.path.clone()
+                    } else {
+                        format!("{}#L{}-L{}", d.path, d.start, d.end)
+                    };
+                    let (description, fix_hint) = match &d.kind {
+                        check_fix::AnchorDriftKind::Changed { whitespace_only: true } => (
+                            "whitespace-only drift",
+                            "run `wiki check --fix` to re-anchor automatically".to_string(),
+                        ),
+                        check_fix::AnchorDriftKind::Changed { whitespace_only: false } => (
+                            "changed in place",
+                            format!("wiki mesh add {} {anchor_arg}", d.mesh_name),
+                        ),
+                        check_fix::AnchorDriftKind::Deleted => (
+                            "deleted or out of bounds",
+                            // wiki mesh remove drops the dead anchor; wiki mesh
+                            // add (optional) re-anchors the relocated content.
+                            // Order matters: remove first.
+                            format!(
+                                "wiki mesh remove {} {anchor_arg}\n  \
+                                 # then optionally: wiki mesh add {} <new-location>",
+                                d.mesh_name, d.mesh_name
+                            ),
+                        ),
+                    };
+                    diagnostics.push(CheckDiagnostic {
+                        kind: "anchor_stale".into(),
+                        file: format!(".wiki/{}", d.mesh_name),
+                        line: 0,
+                        message: format!(
+                            "anchor `{anchor_arg}` in mesh `{}` is stale ({description}); \
+                             re-anchor with:\n  {fix_hint}",
+                            d.mesh_name
+                        ),
+                    });
+                }
+            }
+            Err(e) => {
+                // Fail-closed: a staleness-check failure must not silently
+                // produce exit 0. exit 2 matches other runtime errors here.
+                eprintln!("error: anchor staleness check failed: {e}");
+                return Ok(2);
+            }
+        }
+    }
+
     // ── Fix pass (only in --fix mode) ────────────────────────────────────────
     if fix {
         let plan = match check_fix::run_fix_pass(
@@ -578,7 +635,12 @@ pub fn run(
                     print!("{}", plan.mesh.advisories);
                 }
             }
-            if (!diagnostics.is_empty() || plan.mesh_conflicts > 0 || conflict_resolution_incomplete) && !no_exit_code {
+            if (!diagnostics.is_empty()
+                || plan.mesh_conflicts > 0
+                || plan.anchor_stale_count > 0
+                || conflict_resolution_incomplete)
+                && !no_exit_code
+            {
                 return Ok(1);
             }
             return Ok(0);
@@ -672,7 +734,12 @@ pub fn run(
             }
         }
 
-        if (!post_diagnostics.is_empty() || plan.mesh_conflicts > 0 || conflict_resolution_incomplete) && !no_exit_code {
+        if (!post_diagnostics.is_empty()
+            || plan.mesh_conflicts > 0
+            || plan.anchor_stale_count > 0
+            || conflict_resolution_incomplete)
+            && !no_exit_code
+        {
             return Ok(1);
         }
         return Ok(0);
@@ -2131,17 +2198,25 @@ mod tests {
         // short-circuit) but the anchored content itself is untouched.
         repo.create_file("src/unrelated.rs", "// noise\n");
 
-        let outcome = check_fix::plan_mesh_follows(repo.path()).expect("plan");
+        let outcome =
+            check_fix::plan_mesh_follows(repo.path(), crate::index::DocSource::WorkingTree)
+                .expect("plan");
         assert!(
             outcome.plans.is_empty(),
             "fresh anchor must yield no move plan, got: {:?}",
             outcome.plans
         );
+        assert!(
+            outcome.drifted.is_empty(),
+            "fresh anchor must not drift, got: {:?}",
+            outcome.drifted
+        );
     }
 
-    /// Fix 2 (acceptance signal #4): an unchanged working tree resolves through
-    /// the stat gate without re-hashing — `plan_mesh_follows` returns no plans
-    /// even though a stale anchor would otherwise be detectable.
+    /// Anchor staleness on an otherwise-unchanged tree is detected: the
+    /// freshness re-hash always runs (no stat gate), so a wrong stored hash is
+    /// surfaced as drift even when the working tree is clean and the index is
+    /// primed. This replaces the old `tree_unchanged` short-circuit behavior.
     #[test]
     fn fix2_unchanged_tree_skips_rehash() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
@@ -2153,13 +2228,14 @@ mod tests {
         );
         repo.commit("baseline");
 
-        // Seed a mesh whose stored hash is deliberately wrong: a real re-hash
-        // would flag this anchor as stale. The stat gate must prevent that.
+        // Seed a mesh whose stored hash is deliberately wrong but is a VALID
+        // 16-hex rk64 value, so `rk64_from_hex` parses it and the freshness
+        // comparison runs (a 64-char placeholder would be skipped vacuously).
         let mesh = MeshFile {
             anchors: vec![store::anchor_record(
                 "src/code.rs".to_string(),
                 AnchorExtent::LineRange { start: 1, end: 1 },
-                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+                "deadbeef00000000".to_string(),
             )],
             why: "Test mesh.".to_string(),
         };
@@ -2168,14 +2244,16 @@ mod tests {
         repo.commit("commit mesh");
 
         // Prime the index so the state row matches the on-disk triple, then run
-        // with a genuinely unchanged tree. The gate short-circuits the pass.
+        // with a genuinely unchanged tree. The gate is gone — drift is detected.
         crate::index::WikiIndex::prepare(repo.path()).expect("prepare index");
 
-        let outcome = check_fix::plan_mesh_follows(repo.path()).expect("plan");
+        let outcome =
+            check_fix::plan_mesh_follows(repo.path(), crate::index::DocSource::WorkingTree)
+                .expect("plan");
         assert!(
-            outcome.plans.is_empty(),
-            "unchanged tree must short-circuit the gate (no re-hash, no plans), got: {:?}",
-            outcome.plans
+            !outcome.drifted.is_empty(),
+            "wrong stored hash on an unchanged tree must be detected as drift, got: {:?}",
+            outcome.drifted
         );
     }
 

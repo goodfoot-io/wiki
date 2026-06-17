@@ -193,7 +193,9 @@ fn read_committed_slice(
 ) -> Result<CommittedSlice> {
     use crate::commands::check_fix::read_blob_at;
     if let Some(blob) = read_blob_at(repo_root, "HEAD", path)? {
-        return Ok(CommittedSlice::Present(slice_lines(&blob, start, end)));
+        return Ok(CommittedSlice::Present(
+            crate::commands::mesh::store::slice_lines(&blob, start, end),
+        ));
     }
     // read_blob_at returned None: either the path is absent from HEAD, or its
     // blob exists but is not valid UTF-8. Disambiguate via object existence.
@@ -220,29 +222,10 @@ fn read_worktree_slice(
 ) -> Result<Option<String>> {
     let abs = repo_root.join(path);
     match std::fs::read_to_string(&abs) {
-        Ok(content) => Ok(Some(slice_lines(&content, start, end))),
+        Ok(content) => Ok(Some(crate::commands::mesh::store::slice_lines(&content, start, end))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(miette::miette!("failed to read {}: {e}", abs.display())),
     }
-}
-
-/// Extract lines `start..=end` (1-based) from `content`. Whole-file (0/0) returns all.
-fn slice_lines(content: &str, start: u32, end: u32) -> String {
-    if start == 0 && end == 0 {
-        return content.to_string();
-    }
-    content
-        .lines()
-        .enumerate()
-        .filter_map(|(i, line)| {
-            let lineno = (i + 1) as u32;
-            if lineno >= start && lineno <= end {
-                Some(format!("{line}\n"))
-            } else {
-                None
-            }
-        })
-        .collect()
 }
 
 /// Print a simple before/after diff to stdout.

@@ -38,6 +38,31 @@ pub enum FixKind {
     AliasToCanonical,
     /// Fix 5: update a heading anchor that was renamed in-place (same position).
     HeadingRename,
+    /// Fix 6: refresh a hash that drifted due to whitespace-only in-place edit.
+    AnchorContentRefresh,
+}
+
+/// Classification of a stale anchor in [`plan_mesh_follows`].
+#[derive(Debug)]
+pub enum AnchorDriftKind {
+    /// Content changed in place; whitespace-only diff → auto-re-anchored by --fix.
+    Changed { whitespace_only: bool },
+    /// File deleted or line range out of bounds.
+    Deleted,
+}
+
+/// One anchor whose stored hash no longer matches its current content and which
+/// did not relocate to a unique new position (so it is not a [`MeshMovePlan`]).
+#[derive(Debug)]
+pub struct AnchorDrift {
+    pub mesh_name: String,
+    /// Repo-relative path the anchor names.
+    pub path: String,
+    /// 1-based start line (0 for whole-file).
+    pub start: u32,
+    /// 1-based end line (0 for whole-file).
+    pub end: u32,
+    pub kind: AnchorDriftKind,
 }
 
 /// How confident the fixer is that the proposed rewrite is correct.
@@ -102,6 +127,13 @@ pub struct FixPlan {
     /// count drives a non-zero exit so the conflict fails pre-commit/CI (the
     /// `wiki check --fix` hot path). Fail-closed: a conflict never auto-rewrites.
     pub mesh_conflicts: usize,
+    /// Number of `Changed { whitespace_only: false }` + `Deleted` anchors that
+    /// `--fix` cannot auto-settle. Each is also recorded in `skipped` with an
+    /// actionable re-anchor command; this count drives a non-zero exit so the
+    /// drift fails pre-commit/CI. Per the `mesh-conflict-exit-gate` mesh, this
+    /// new fail-closed category must be wired into both fix-mode exit gates by
+    /// hand (the field can be ignored without any compiler error).
+    pub anchor_stale_count: usize,
 }
 
 // ── Conflict resolution ─────────────────────────────────────────────────────────
@@ -1093,34 +1125,169 @@ pub struct MeshFollowOutcome {
     pub plans: Vec<MeshMovePlan>,
     /// Anchors whose content matched ≥ 2 candidate locations (fail-closed).
     pub conflicts: Vec<MeshConflict>,
+    /// Stale anchors with zero unambiguous relocation, classified as in-place
+    /// `Changed` (whitespace-only or meaning-changing) or `Deleted`.
+    pub drifted: Vec<AnchorDrift>,
 }
 
-/// Compute mesh move plans in-process from the `.wiki/` store.
+/// Maximum git commits to inspect when recovering old anchor bytes.
+const HISTORY_SCAN_LIMIT: usize = 50;
+
+/// True when `bytes` decode to a wiki page: markdown with YAML frontmatter
+/// carrying both a non-empty `title` and a non-empty `summary`. Used to exempt
+/// scaffold-managed wiki-page section anchors from staleness classification.
+fn is_wiki_page_bytes(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    matches!(
+        parse_frontmatter(text, Path::new("page.md")),
+        Ok(Some(fm)) if !fm.title.is_empty() && !fm.summary.is_empty()
+    )
+}
+
+/// True when `a` and `b` contain the same non-whitespace content.
 ///
-/// Hot-path gate: if the working tree is unchanged since the last verified
-/// index state ([`crate::index::tree_unchanged`]), no anchor can have drifted,
-/// so we return no plans without re-hashing anything.
+/// Conservative: strip trailing whitespace per line, filter blank lines, join,
+/// compare. A trailing-space reformat or blank-line addition is equivalent; an
+/// identifier rename or added parameter is not.
+fn whitespace_equivalent(a: &str, b: &str) -> bool {
+    fn normalise(s: &str) -> String {
+        s.lines()
+            .map(|l| l.trim_end())
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    normalise(a) == normalise(b)
+}
+
+/// Walk git log for `path`, returning the file bytes from the first commit
+/// where the anchor extent hashes to `stored_fp`, or `None` if not found within
+/// `limit` commits.
 ///
-/// Per anchor (across every mesh in `.wiki/`):
-/// 1. **Freshness.** Re-hash the anchored extent in the file it names. If it
-///    equals the stored hash, the anchor is fresh — skip.
-/// 2. **Same-file-first.** If stale, scan only the anchor's own file with
-///    `near = old_start` (whole-file: no `near`). Exactly one match ⇒ a plan to
-///    the new range in the same file.
-/// 3. **Change set.** Still unmatched ⇒ scan the working-tree change set with
-///    `near = None`. Exactly one match ⇒ plan. Two or more matches ⇒ conflict:
-///    no plan, the link is left untouched (fail-closed). Zero ⇒ genuinely
-///    stale, no auto-fix.
+/// Used to recover "old content" when HEAD no longer contains it (committed
+/// reformat). The search short-circuits on the first match, so recent changes
+/// are found in O(1) git invocations.
+fn recover_anchor_bytes_from_history(
+    repo_root: &Path,
+    path: &str,
+    extent: &AnchorExtent,
+    stored_fp: u64,
+    limit: usize,
+) -> Option<Vec<u8>> {
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(["log", "--format=%H", "--", path])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for sha in stdout.lines().take(limit) {
+        if let Ok(Some(text)) = read_blob_at(repo_root, sha, path) {
+            let bytes = text.into_bytes();
+            let idx = LineIndex::build(&bytes);
+            if cheap_fingerprint_indexed(&idx, extent) == stored_fp {
+                return Some(bytes);
+            }
+        }
+    }
+    None
+}
+
+/// Read the bytes for an anchor's source file from the layer selected by `source`.
 ///
-/// The candidate set is the change set by default; there is no `--rescan` flag
-/// in the current CLI surface, so a whole-tree rescan is not offered here.
-pub fn plan_mesh_follows(repo_root: &Path) -> Result<MeshFollowOutcome> {
-    // Stat-gate the whole pass: an unchanged tree cannot have drifted anchors,
-    // so there is nothing to re-hash.
-    if crate::index::tree_unchanged(repo_root) {
-        return Ok(MeshFollowOutcome::default());
+/// Returns `None` if the file is absent in that layer (→ Deleted).
+fn read_anchor_source(repo_root: &Path, source: DocSource, path: &str) -> Option<Vec<u8>> {
+    match source {
+        DocSource::WorkingTree => std::fs::read(repo_root.join(path)).ok(),
+        DocSource::Head => read_blob_at(repo_root, "HEAD", path)
+            .ok()
+            .flatten()
+            .map(|s| s.into_bytes()),
+        DocSource::Index => read_blob_at(repo_root, "", path) // git show :path
+            .ok()
+            .flatten()
+            .map(|s| s.into_bytes()),
+    }
+}
+
+/// Determine whether a stale (non-moved) anchor represents a whitespace-only or
+/// meaning-changing edit, covering BOTH committed and uncommitted changes.
+///
+/// `source` selects the "current" layer. The HEAD fast-path is taken only for
+/// `WorkingTree` (where HEAD can serve as the "old" baseline). For `Head`/`Index`
+/// sources `current_bytes` already IS HEAD/index content, so reading HEAD again
+/// as the "old" comparison target would be circular — the history walk handles
+/// those cases.
+fn classify_inplace_drift(
+    repo_root: &Path,
+    anchor: &AnchorRecord,
+    extent: &AnchorExtent,
+    current_bytes: &[u8],
+    stored_fp: u64,
+    source: DocSource,
+) -> AnchorDriftKind {
+    // Fast path (WorkingTree source only): try HEAD as the "old bytes" baseline.
+    if source == DocSource::WorkingTree
+        && let Ok(Some(head_text)) = read_blob_at(repo_root, "HEAD", &anchor.path)
+    {
+        let head_bytes = head_text.into_bytes();
+        let head_idx = LineIndex::build(&head_bytes);
+        if cheap_fingerprint_indexed(&head_idx, extent) == stored_fp {
+            let head_slice = store::slice_at_extent(&head_bytes, extent);
+            let cur_slice = store::slice_at_extent(current_bytes, extent);
+            return AnchorDriftKind::Changed {
+                whitespace_only: whitespace_equivalent(&head_slice, &cur_slice),
+            };
+        }
     }
 
+    // History-walk fallback: HEAD already moved on (committed change) or we are
+    // using a non-WorkingTree source. Walk git log to find the commit whose blob
+    // at this extent hashes to stored_fp, then compare old vs current.
+    if let Some(old_bytes) = recover_anchor_bytes_from_history(
+        repo_root,
+        &anchor.path,
+        extent,
+        stored_fp,
+        HISTORY_SCAN_LIMIT,
+    ) {
+        let old_slice = store::slice_at_extent(&old_bytes, extent);
+        let cur_slice = store::slice_at_extent(current_bytes, extent);
+        return AnchorDriftKind::Changed {
+            whitespace_only: whitespace_equivalent(&old_slice, &cur_slice),
+        };
+    }
+
+    // Old bytes not found within HISTORY_SCAN_LIMIT: fail-closed. The author
+    // must re-anchor manually; `wiki mesh add` clears the failure.
+    AnchorDriftKind::Changed {
+        whitespace_only: false,
+    }
+}
+
+/// Compute mesh move plans and in-place drift in-process from the `.wiki/` store.
+///
+/// Phase-split: a freshness re-hash always runs (no gate); the move-scan (which
+/// spawns `git status`) runs lazily only when at least one anchor is stale. On
+/// the all-fresh green path only the freshness phase runs.
+///
+/// Per stale anchor:
+/// 1. **Own-file scan.** Search the SAME file for the content at a different
+///    line range (no git diff). Detects same-file moves on clean trees.
+/// 2. **Change-set scan.** Search files that differ from HEAD in the working
+///    tree (`working_tree_change_set`). Detects cross-file moves.
+///
+/// On the combined hit count: exactly one ⇒ a [`MeshMovePlan`]; two or more ⇒ a
+/// [`MeshConflict`] (fail-closed); zero ⇒ in-place drift, classified by
+/// [`classify_inplace_drift`] into [`AnchorDrift`].
+///
+/// `source` selects which layer ([`DocSource`]) the anchor's source bytes are
+/// read from (worktree / HEAD / index).
+pub fn plan_mesh_follows(repo_root: &Path, source: DocSource) -> Result<MeshFollowOutcome> {
     // Use tolerant reader to skip any meshes that still carry conflict markers
     // (e.g. after a partial conflict resolution). Anchor auto-follow for those
     // meshes is deferred — the next clean `--fix` pass will handle them.
@@ -1135,40 +1302,29 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<MeshFollowOutcome> {
         return Ok(MeshFollowOutcome::default());
     }
 
-    // Working-tree change set: repo-relative paths that differ from HEAD
-    // (staged, unstaged, or untracked).
-    let change_set = working_tree_change_set(repo_root)?;
-
-    // Read every file an anchor names plus every change-set file exactly once
-    // (a file with K anchors is read once, not K times), so `LineIndex` and the
-    // content hashes are computed over a single owned buffer per path.
-    let mut file_bytes: HashMap<String, Vec<u8>> = HashMap::new();
-    for path in change_set.iter().cloned().chain(
-        meshes
-            .iter()
-            .flat_map(|(_, m)| m.anchors.iter().map(|a| a.path.clone())),
-    ) {
-        file_bytes
-            .entry(path.clone())
-            .or_insert_with(|| std::fs::read(repo_root.join(&path)).unwrap_or_default());
+    // Read every file an anchor names exactly once (a file with K anchors is
+    // read once, not K times), so `LineIndex` and the content hashes are
+    // computed over a single owned buffer per path. Read from the selected
+    // source layer.
+    let mut file_bytes: HashMap<String, Option<Vec<u8>>> = HashMap::new();
+    for (_, mesh) in &meshes {
+        for anchor in &mesh.anchors {
+            file_bytes
+                .entry(anchor.path.clone())
+                .or_insert_with(|| read_anchor_source(repo_root, source, &anchor.path));
+        }
     }
 
-    // Build the change-set line index once and reuse it for every stale
-    // anchor's cross-file search. The anchor's own file may appear here too:
-    // by the time control reaches the change-set scan the own-file pass has
-    // already found 0 matches (a unique hit or a ≥2 ambiguity would have
-    // `continue`d), so its inclusion contributes nothing and the result is
-    // identical to excluding it.
-    let change_set_idx: Vec<(String, LineIndex)> = change_set
-        .iter()
-        .filter_map(|p| {
-            let b = file_bytes.get(p)?;
-            (!b.is_empty()).then(|| (p.clone(), LineIndex::build(b)))
-        })
-        .collect();
-
-    let mut plans: Vec<MeshMovePlan> = Vec::new();
-    let mut conflicts: Vec<MeshConflict> = Vec::new();
+    // Phase 1: freshness re-hash (no gate). A stale anchor records (slug, anchor,
+    // extent, stored_fp). An anchor whose source file is unreadable in this
+    // layer is stale too (will classify to Deleted in phase 2).
+    struct Stale<'a> {
+        slug: &'a str,
+        anchor: &'a AnchorRecord,
+        extent: AnchorExtent,
+        stored_fp: u64,
+    }
+    let mut stale_set: Vec<Stale> = Vec::new();
 
     for (slug, mesh) in &meshes {
         for anchor in &mesh.anchors {
@@ -1181,63 +1337,177 @@ pub fn plan_mesh_follows(repo_root: &Path) -> Result<MeshFollowOutcome> {
                 }
             };
 
-            // The stored content identity is an rk64 fingerprint (16 hex).
-            // A record that does not parse as rk64 cannot be matched against
-            // rk64 windows — skip it rather than guess.
+            // The stored content identity is an rk64 fingerprint (16 hex). A
+            // record that does not parse as rk64 cannot be matched against rk64
+            // windows — skip it rather than guess.
             let Some(stored_fp) = rk64_from_hex(&anchor.content_hash) else {
                 continue;
             };
 
-            // The anchor's own file, read once above. Missing/empty ⇒ skip
-            // straight to the change-set search.
-            let own_bytes = file_bytes
-                .get(&anchor.path)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-
-            if !own_bytes.is_empty() {
-                // Index the own file once and reuse it for both the freshness
-                // check and the same-file move scan.
-                let own_pair = [(anchor.path.clone(), LineIndex::build(own_bytes))];
-
-                // 1. Freshness — re-fingerprint in place. If it matches, the
-                //    anchor is fresh; nothing to do.
-                if cheap_fingerprint_indexed(&own_pair[0].1, &extent) == stored_fp {
-                    continue;
-                }
-
-                // 2. Same-file-first move (exhaustive over the file's windows,
-                //    fail-closed on rk64 ambiguity).
-                let near = match extent {
-                    AnchorExtent::WholeFile => None,
-                    AnchorExtent::LineRange { start, .. } => Some(start),
-                };
-                let hits = scan_indexed_rk64(&own_pair, stored_fp, extent, near);
-                if hits.len() == 1 {
-                    push_plan(&mut plans, slug, anchor, &hits[0]);
-                    continue;
-                }
-                if hits.len() >= 2 {
-                    // Same-file ambiguity: the content appears in ≥ 2 places in
-                    // the anchor's own file. Fail-closed — report, no rewrite.
-                    push_conflict(&mut conflicts, slug, anchor, hits.len());
-                    continue;
-                }
+            let Some(Some(bytes)) = file_bytes.get(&anchor.path) else {
+                // Unreadable / absent in this layer ⇒ stale.
+                stale_set.push(Stale { slug, anchor, extent, stored_fp });
+                continue;
+            };
+            let idx = LineIndex::build(bytes);
+            if cheap_fingerprint_indexed(&idx, &extent) != stored_fp {
+                stale_set.push(Stale { slug, anchor, extent, stored_fp });
             }
+            // Fresh ⇒ nothing.
+        }
+    }
 
-            // 3. Change-set move. Exactly one match ⇒ a unique relocation.
-            //    Zero ⇒ genuinely stale, no auto-fix. Two or more ⇒ conflict:
-            //    fail-closed, leave the link untouched.
-            let hits = scan_indexed_rk64(&change_set_idx, stored_fp, extent, None);
-            if hits.len() == 1 {
-                push_plan(&mut plans, slug, anchor, &hits[0]);
-            } else if hits.len() >= 2 {
-                push_conflict(&mut conflicts, slug, anchor, hits.len());
+    let mut plans: Vec<MeshMovePlan> = Vec::new();
+    let mut conflicts: Vec<MeshConflict> = Vec::new();
+    let mut drifted: Vec<AnchorDrift> = Vec::new();
+
+    if stale_set.is_empty() {
+        return Ok(MeshFollowOutcome { plans, conflicts, drifted });
+    }
+
+    // Phase 2: move-scan (lazy — only when stale anchors exist).
+    //
+    // Working-tree change set: repo-relative paths that differ from HEAD
+    // (staged, unstaged, or untracked). Always worktree content regardless of
+    // `source` — `git status` reports the working tree.
+    let change_set = working_tree_change_set(repo_root)?;
+    let mut change_set_bytes: HashMap<String, Vec<u8>> = HashMap::new();
+    for path in &change_set {
+        change_set_bytes
+            .entry(path.clone())
+            .or_insert_with(|| std::fs::read(repo_root.join(path)).unwrap_or_default());
+    }
+    let change_set_idx: Vec<(String, LineIndex)> = change_set
+        .iter()
+        .filter_map(|p| {
+            let b = change_set_bytes.get(p)?;
+            (!b.is_empty()).then(|| (p.clone(), LineIndex::build(b)))
+        })
+        .collect();
+
+    for s in &stale_set {
+        let Stale { slug, anchor, extent, stored_fp } = *s;
+
+        // (a) Own-file scan: look for the anchor content at a different range in
+        //     the same file. No git diff required; preserves same-file move
+        //     detection on clean trees (committed moves included).
+        let own_bytes = file_bytes
+            .get(&anchor.path)
+            .and_then(|o| o.as_deref())
+            .unwrap_or(&[]);
+        let own_hits = if own_bytes.is_empty() {
+            Vec::new()
+        } else {
+            let own_pair = [(anchor.path.clone(), LineIndex::build(own_bytes))];
+            let near = match extent {
+                AnchorExtent::WholeFile => None,
+                AnchorExtent::LineRange { start, .. } => Some(start),
+            };
+            scan_indexed_rk64(&own_pair, stored_fp, extent, near)
+        };
+
+        // (b) Change-set scan: look for the anchor content in OTHER files
+        //     changed vs HEAD in the working tree. The anchor's own file is
+        //     excluded here so it is never double-counted against the own-file
+        //     scan above (which already covers it) — counting both would turn a
+        //     single in-file shift into a spurious 2-candidate conflict.
+        let cross_idx: Vec<(String, LineIndex)> = change_set_idx
+            .iter()
+            .filter(|(p, _)| p != &anchor.path)
+            .map(|(p, idx)| (p.clone(), idx.clone()))
+            .collect();
+        let cross_hits = scan_indexed_rk64(&cross_idx, stored_fp, extent, None);
+
+        let total = own_hits.len() + cross_hits.len();
+        match total {
+            1 => {
+                let hit = own_hits.first().or_else(|| cross_hits.first()).unwrap();
+                push_plan(&mut plans, slug, anchor, hit);
+            }
+            n if n >= 2 => {
+                push_conflict(&mut conflicts, slug, anchor, n);
+            }
+            _ => {
+                // 0 hits: stale, no unambiguous relocation — classify in place.
+                //
+                // Skip classification for structural page-anchors only: a
+                // WholeFile extent targeting a `.md` file. Line-range `.md`
+                // citations ARE checked. (Page-anchor move-follow still ran
+                // above — only this classification step is skipped.)
+                if matches!(extent, AnchorExtent::WholeFile)
+                    && (anchor.path.ends_with(".md") || anchor.path.ends_with(".MD"))
+                {
+                    continue;
+                }
+
+                // Skip classification when the anchor's source IS a wiki page
+                // (a `.md` file with title+summary frontmatter). Wiki-page
+                // section anchors are scaffold-managed bookkeeping: the mesh
+                // coverage pass (`create_mesh_coverage`) re-anchors them when
+                // the page is edited, so they are not external code citations
+                // and must not fail closed as meaning-change drift. Plain
+                // markdown line-range citations (no wiki frontmatter) ARE still
+                // checked.
+                if (anchor.path.ends_with(".md") || anchor.path.ends_with(".MD"))
+                    && file_bytes
+                        .get(&anchor.path)
+                        .and_then(|o| o.as_deref())
+                        .map(is_wiki_page_bytes)
+                        .unwrap_or(false)
+                {
+                    continue;
+                }
+
+                // File missing in this layer → Deleted.
+                let Some(Some(current_bytes)) = file_bytes.get(&anchor.path) else {
+                    drifted.push(AnchorDrift {
+                        mesh_name: slug.to_string(),
+                        path: anchor.path.clone(),
+                        start: anchor.start_line,
+                        end: anchor.end_line,
+                        kind: AnchorDriftKind::Deleted,
+                    });
+                    continue;
+                };
+
+                // Out-of-bounds → Deleted. Use LineIndex line count (consistent
+                // with cheap_fingerprint_indexed) to avoid off-by-one on files
+                // without a trailing newline.
+                let idx = LineIndex::build(current_bytes);
+                if let AnchorExtent::LineRange { end, .. } = extent
+                    && end as usize > idx.line_count()
+                {
+                    drifted.push(AnchorDrift {
+                        mesh_name: slug.to_string(),
+                        path: anchor.path.clone(),
+                        start: anchor.start_line,
+                        end: anchor.end_line,
+                        kind: AnchorDriftKind::Deleted,
+                    });
+                    continue;
+                }
+
+                // Content exists but changed — classify with whitespace detection.
+                let kind = classify_inplace_drift(
+                    repo_root,
+                    anchor,
+                    &extent,
+                    current_bytes,
+                    stored_fp,
+                    source,
+                );
+                drifted.push(AnchorDrift {
+                    mesh_name: slug.to_string(),
+                    path: anchor.path.clone(),
+                    start: anchor.start_line,
+                    end: anchor.end_line,
+                    kind,
+                });
             }
         }
     }
 
-    Ok(MeshFollowOutcome { plans, conflicts })
+    Ok(MeshFollowOutcome { plans, conflicts, drifted })
 }
 
 /// Append a [`MeshMovePlan`] for `anchor` relocated to `hit`.
@@ -1638,7 +1908,8 @@ pub fn run_fix_pass(
     let MeshFollowOutcome {
         plans: move_plans,
         conflicts: mesh_conflicts,
-    } = plan_mesh_follows(repo_root)?;
+        drifted,
+    } = plan_mesh_follows(repo_root, source)?;
 
     // Map (old_path, old_start, old_end) → (slug, new_path, new_start, new_end).
     // The destination path is carried so a cross-file move rewrites the link's
@@ -2059,6 +2330,75 @@ pub fn run_fix_pass(
         }
     }
 
+    // ── Fix #6: in-place anchor staleness ─────────────────────────────────────
+    //
+    // For each stale anchor with no unambiguous relocation, auto-re-anchor
+    // whitespace-only drift (same coords, refreshed hash) and surface
+    // meaning-change / deleted drift fail-closed with a remediation command.
+    let mut anchor_stale_count: usize = 0;
+    // Repo-relative `.wiki/<slug>` paths whose hash was refreshed — staged via
+    // `--print-applied`. Extended into `mesh.applied` once `mesh` exists below.
+    let mut anchor_refresh_applied: Vec<String> = Vec::new();
+
+    for d in &drifted {
+        let anchor_arg = if d.start == 0 {
+            d.path.clone()
+        } else {
+            format!("{}#L{}-L{}", d.path, d.start, d.end)
+        };
+
+        match &d.kind {
+            AnchorDriftKind::Changed { whitespace_only: true } => {
+                // Auto-re-anchor: same coords, refresh hash to current content.
+                if !dry_run {
+                    store::relocate_anchor(
+                        repo_root,
+                        &d.mesh_name,
+                        &d.path,
+                        d.start,
+                        d.end,
+                        &d.path,
+                        d.start,
+                        d.end, // same location → hash-only refresh
+                    )?;
+                }
+                // Emit repo-relative path to --print-applied stdout for staging.
+                // Mesh files are extensionless; the hook's `*.md` pattern never
+                // matches, so this is the only signal that stages them.
+                anchor_refresh_applied.push(format!(".wiki/{}", d.mesh_name));
+            }
+            AnchorDriftKind::Changed { whitespace_only: false } => {
+                anchor_stale_count += 1;
+                skipped.push(SkippedFix {
+                    file: format!(".wiki/{}", d.mesh_name),
+                    line: 0,
+                    kind: FixKind::AnchorContentRefresh,
+                    reason: format!(
+                        "anchor `{anchor_arg}` in mesh `{}` has changed with a meaning-changing \
+                         diff; re-anchor to acknowledge:\n  wiki mesh add {} {anchor_arg}",
+                        d.mesh_name, d.mesh_name
+                    ),
+                });
+            }
+            AnchorDriftKind::Deleted => {
+                anchor_stale_count += 1;
+                skipped.push(SkippedFix {
+                    file: format!(".wiki/{}", d.mesh_name),
+                    line: 0,
+                    kind: FixKind::AnchorContentRefresh,
+                    reason: format!(
+                        "anchor `{anchor_arg}` in mesh `{}` is deleted or out of bounds; \
+                         remove the dead anchor first (clears the failure), then optionally \
+                         re-anchor the new location:\n  \
+                         wiki mesh remove {} {anchor_arg}\n  \
+                         # then optionally: wiki mesh add {} <new-location>",
+                        d.mesh_name, d.mesh_name, d.mesh_name
+                    ),
+                });
+            }
+        }
+    }
+
     // ── Fix #4: mesh coverage ─────────────────────────────────────────────────
     //
     // Runs AFTER the link/anchor patches are written to disk so mesh anchors
@@ -2081,11 +2421,15 @@ pub fn run_fix_pass(
         mesh.advisories.push_str(&cleanup.advisories);
     }
 
+    // Stage whitespace-only hash refreshes alongside the other applied paths.
+    mesh.applied.extend(anchor_refresh_applied);
+
     Ok(FixPlan {
         fixes,
         skipped,
         mesh,
         mesh_conflicts: mesh_conflicts.len(),
+        anchor_stale_count,
     })
 }
 
