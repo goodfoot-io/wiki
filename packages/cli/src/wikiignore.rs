@@ -33,10 +33,38 @@ impl WikiIgnore {
         Ok(Self { inner })
     }
 
-    /// `true` if `repo_relative_path` matches any active pattern.
-    /// Uses `matched_path_or_any_parents` so a `dir/` pattern correctly
-    /// excludes all files under that directory.
+    /// `true` if `repo_relative_path` should be hidden from wiki surfaces.
+    ///
+    /// Matches git's gitignore(5) rule that "it is not possible to re-include a
+    /// file if a parent directory of that file is excluded." `ignore`'s
+    /// `matched_path_or_any_parents` evaluates a `!`-whitelist against the literal
+    /// full path and returns `Whitelist` BEFORE walking parents — so `drafts/`
+    /// plus `!drafts/page.md` would re-include (expose) `page.md`. That is
+    /// fail-open and diverges from git in the unsafe direction.
+    ///
+    /// We instead walk each ancestor directory first: if any ancestor directory
+    /// is itself ignored (and not re-included at that ancestor level), the path
+    /// stays ignored and a deeper whitelist cannot resurrect it. Only when no
+    /// ancestor directory is excluded do we honor a same-level/sibling negation
+    /// (e.g. `*.tmp` + `!keep.tmp`), exactly as git does.
     pub fn is_ignored(&self, repo_relative_path: &Path) -> bool {
+        // First: if any ancestor directory is excluded, the path is ignored and
+        // no deeper `!` whitelist may re-include it (git's no-re-include rule).
+        let mut ancestor = std::path::PathBuf::new();
+        let mut components = repo_relative_path.components().peekable();
+        while let Some(component) = components.next() {
+            // Skip the final component — that is the path itself, handled below.
+            if components.peek().is_none() {
+                break;
+            }
+            ancestor.push(component);
+            if self.inner.matched(&ancestor, true).is_ignore() {
+                return true;
+            }
+        }
+
+        // No ancestor directory is excluded: honor a same-level decision,
+        // including a sibling-level `!` re-include, matching git.
         self.inner
             .matched_path_or_any_parents(repo_relative_path, false)
             .is_ignore()
@@ -83,18 +111,37 @@ mod tests {
     }
 
     #[test]
-    fn test_negation_diverges_from_git() {
-        // Divergence from git: `matched_path_or_any_parents` checks the full
-        // path first (last-match-wins among patterns matching the literal
-        // path) and only walks parents when the full-path check is None. The
-        // dir-only glob `**/drafts` does not match the literal file path
-        // `drafts/page.md`; the `!drafts/page.md` whitelist does → Whitelist
-        // is returned before any parent walk → the file is re-included.
+    fn test_no_reinclude_under_excluded_directory() {
+        // git's gitignore(5) rule: "it is not possible to re-include a file if
+        // a parent directory of that file is excluded." Once `drafts/` is
+        // excluded, the deeper `!drafts/page.md` whitelist cannot resurrect the
+        // file. Verified identical to `git check-ignore`.
         let tmp = TempDir::new().unwrap();
         write_ignore(tmp.path(), "drafts/\n!drafts/page.md\n");
         let wi = WikiIgnore::load(tmp.path()).unwrap();
-        assert!(!wi.is_ignored(Path::new("drafts/page.md")));
+        assert!(wi.is_ignored(Path::new("drafts/page.md")));
         assert!(wi.is_ignored(Path::new("drafts/other.md")));
+    }
+
+    #[test]
+    fn test_no_reinclude_deep_under_excluded_directory() {
+        // A whitelist nested several levels below an excluded directory is also
+        // powerless, matching git.
+        let tmp = TempDir::new().unwrap();
+        write_ignore(tmp.path(), "drafts/\n!drafts/sub/deep.md\n");
+        let wi = WikiIgnore::load(tmp.path()).unwrap();
+        assert!(wi.is_ignored(Path::new("drafts/sub/deep.md")));
+    }
+
+    #[test]
+    fn test_sibling_negation_reincludes() {
+        // No ancestor directory is excluded, so a same-level `!` re-include is
+        // honored — exactly as git does for `*.tmp` + `!keep.tmp`.
+        let tmp = TempDir::new().unwrap();
+        write_ignore(tmp.path(), "*.tmp\n!keep.tmp\n");
+        let wi = WikiIgnore::load(tmp.path()).unwrap();
+        assert!(wi.is_ignored(Path::new("scratch.tmp")));
+        assert!(!wi.is_ignored(Path::new("keep.tmp")));
     }
 
     #[test]

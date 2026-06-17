@@ -871,6 +871,8 @@ fn collect_for_files(
     git_reader: Option<&GitReader>,
     content_cache: &mut ContentCache,
 ) -> Result<Vec<CheckDiagnostic>> {
+    let wiki_ignore =
+        crate::wikiignore::WikiIgnore::load(repo_root).map_err(|e| miette::miette!("{e}"))?;
     let mut diagnostics: Vec<CheckDiagnostic> = Vec::new();
 
     if matches!(source, DocSource::WorkingTree) {
@@ -998,6 +1000,13 @@ fn collect_for_files(
                 resolved
             };
             let abs = repo_root.join(&resolved);
+
+            // A link whose target is wikiignored is exempt from broken-link and
+            // broken-anchor diagnostics: the target is invisible at every wiki
+            // surface by design, so the link is valid by definition.
+            if wiki_ignore.is_ignored(&resolved) {
+                continue;
+            }
 
             // Try to read the target. Directories are valid link targets.
             // Cache target content + computed data to avoid re-reading and
@@ -2854,6 +2863,41 @@ mod tests {
             "expected hint about repo-relative path under --source=head (file exists at HEAD), \
              got: {}",
             bl[0].message
+        );
+    }
+
+    /// A link whose target is wikiignored must not produce `broken_link` or
+    /// `broken_anchor` diagnostics, even when the target file is missing or has
+    /// an out-of-bounds line range.
+    #[test]
+    fn wikiignored_link_target_exempt_from_broken_link_and_broken_anchor() {
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let repo = TestRepo::new();
+
+        // Wiki page links into a wikiignored file that does not exist.
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page(
+                "Page",
+                "See [secret](/src/secret.rs#L1-L5) and [also](/src/secret.rs).",
+            ),
+        );
+        // Wikiignore the target; do NOT create the target file so it would
+        // trigger broken_link / broken_anchor if the exemption were absent.
+        repo.create_file(".wiki/.wikiignore", "src/secret.rs\n");
+        repo.commit("add page with wikiignored link target");
+
+        let diags =
+            collect_with_source(&[], repo.path(), crate::index::DocSource::WorkingTree)
+                .expect("collect");
+
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| d.kind == "broken_link" || d.kind == "broken_anchor")
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "wikiignored link target must not raise broken_link or broken_anchor: {bad:?}",
         );
     }
 }

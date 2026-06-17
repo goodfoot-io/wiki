@@ -1507,6 +1507,7 @@ pub fn plan_mesh_follows(repo_root: &Path, source: DocSource) -> Result<MeshFoll
     }
     let change_set_idx: Vec<(String, LineIndex)> = change_set
         .iter()
+        .filter(|p| !wiki_ignore.is_ignored(Path::new(p.as_str())))
         .filter_map(|p| {
             let b = change_set_bytes.get(p)?;
             (!b.is_empty()).then(|| (p.clone(), LineIndex::build(b)))
@@ -3364,6 +3365,54 @@ mod tests {
         assert!(output.contains("Why text."));
         assert!(output.contains("src/conflicted.rs#L2-L4 rk64:bbb"));
         assert!(output.contains("src/conflicted.rs#L2-L4 rk64:ccc"));
+    }
+
+    /// A cross-file move whose destination is wikiignored must not produce a
+    /// `MeshMovePlan`. Content that moves into a wikiignored file is invisible
+    /// at every wiki surface; auto-following the anchor there would create a
+    /// permanently-unverifiable pointer.
+    #[test]
+    fn plan_mesh_follows_does_not_follow_cross_file_move_to_wikiignored_destination() {
+        use crate::commands::mesh::store;
+        use git_mesh_core::AnchorExtent;
+        use git_mesh_core::mesh_file::MeshFile;
+
+        let repo = TestRepo::new();
+
+        // Source file with a known block on lines 1–3.
+        repo.write("src/original.rs", "fn foo() {\n    42\n}\n");
+        repo.commit("initial");
+
+        let extent = AnchorExtent::LineRange { start: 1, end: 3 };
+        let hash = store::hash_anchor(
+            repo.path(),
+            "src/original.rs",
+            extent,
+            &mut store::FileContentCache::new(),
+        )
+        .unwrap();
+        let anchor = store::anchor_record("src/original.rs".to_string(), extent, hash);
+        let mesh = MeshFile { anchors: vec![anchor], why: String::new() };
+        store::write(repo.path(), "moveslug", &mesh).unwrap();
+        repo.commit("add mesh");
+
+        // Move the content into a wikiignored destination. Delete the original
+        // so the anchor is stale (triggering the move scan). The destination
+        // carries the same block so it would be a cross-file hit — but it must
+        // be excluded by the wikiignore filter.
+        repo.write(".wiki/.wikiignore", "src/secret.rs\n");
+        repo.write("src/secret.rs", "fn foo() {\n    42\n}\n");
+        // Remove original from worktree to make anchor stale.
+        std::fs::remove_file(repo.path().join("src/original.rs")).expect("remove original");
+
+        let outcome =
+            plan_mesh_follows(repo.path(), crate::index::DocSource::WorkingTree).expect("plan");
+
+        assert!(
+            outcome.plans.is_empty(),
+            "move into wikiignored destination must not produce a MeshMovePlan: {:?}",
+            outcome.plans
+        );
     }
 
     /// find_conflicted_meshes in store.rs works end-to-end: a mesh with markers

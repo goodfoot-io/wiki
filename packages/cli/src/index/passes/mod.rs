@@ -135,10 +135,41 @@ pub fn refresh(
         )
     };
 
+    // Load WikiIgnore once; all three passes apply the same filter so
+    // wikiignored paths are never inserted into the DB regardless of source.
+    let wiki_ignore = crate::wikiignore::WikiIgnore::load(repo_root)?;
+
     // Pass 1: Tree (committed snapshot).
-    let tree_deltas = crate::perf::scope_result("index.pass_tree", serde_json::json!({}), || {
-        tree::pass_tree(repo, prior_head_tree_oid)
+    let mut tree_deltas = crate::perf::scope_result("index.pass_tree", serde_json::json!({}), || {
+        tree::pass_tree(repo, prior_head_tree_oid, &wiki_ignore)
     })?;
+    // Sweep existing Tree-source DB rows and emit Remove deltas for any path
+    // that is now wikiignored but was not touched by the tree diff (e.g. the
+    // wikiignore pattern was introduced in a new commit while the file itself
+    // was unchanged — the diff produces no delta for the file).
+    {
+        let mut stmt = tx.prepare("SELECT path_rel FROM paths WHERE source = ?1")?;
+        let rows: Vec<String> = stmt
+            .query_map(params![source_id(Source::Tree)], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        for row in rows {
+            let pb = std::path::PathBuf::from(&row);
+            if wiki_ignore.is_ignored(&pb) {
+                // Only add a Remove if the diff didn't already emit one.
+                let already_removed = tree_deltas.iter().any(|d| {
+                    d.path == pb && matches!(d.action, DeltaAction::Remove)
+                });
+                if !already_removed {
+                    tree_deltas.push(PassDelta {
+                        path: pb,
+                        source: Source::Tree,
+                        action: DeltaAction::Remove,
+                    });
+                }
+            }
+        }
+    }
 
     // Pass 2: Index file.
     let prior_index_checksum_arr: [u8; 20] = if prior_index_checksum.len() == 20 {
@@ -150,13 +181,12 @@ pub fn refresh(
     };
     let index_deltas =
         crate::perf::scope_result("index.pass_index", serde_json::json!({}), || {
-            index_file::pass_index(dot_git, &prior_index_checksum_arr, &tx)
+            index_file::pass_index(dot_git, &prior_index_checksum_arr, &tx, &wiki_ignore)
         })?;
 
     // Pass 3: Worktree.
     let mut pass3_full_rescans: u64 = 0;
     let mut pass3_dir_walks: u64 = 0;
-    let wiki_ignore = crate::wikiignore::WikiIgnore::load(repo_root)?;
     let worktree_deltas =
         crate::perf::scope_result("index.pass_worktree", serde_json::json!({}), || {
             worktree::pass_worktree(

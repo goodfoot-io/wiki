@@ -17,7 +17,7 @@ See [Wiki Mesh Integration](../architecture/wiki-mesh-integration.md) for the de
 
 **Where:** [`build_mesh_index`](/packages/cli/src/commands/mesh_coverage.rs#L237-L242) reads every mesh in the store directly via `store::read_all_tolerant`; the wiki CLI no longer shells out to `git-mesh list`.
 
-**Invoked by:** the mesh-coverage pass of [`wiki check`](/packages/cli/src/commands/check.rs#L1119-L1123), which calls [`collect_mesh_diagnostics`](/packages/cli/src/commands/mesh_coverage.rs#L102-L105).
+**Invoked by:** the mesh-coverage pass of [`wiki check`](/packages/cli/src/commands/check.rs#L1128-L1132), which calls [`collect_mesh_diagnostics`](/packages/cli/src/commands/mesh_coverage.rs#L102-L105).
 
 **Purpose:** Query all mesh subsystems that include a given file anchor. Used to determine whether a fragment link (`path#Lstart-Lend`) in a wiki article has a covering mesh that also anchors the wiki file itself.
 

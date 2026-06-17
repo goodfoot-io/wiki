@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use crate::index::{BlobOid, Source};
+use crate::wikiignore::WikiIgnore;
 
 use super::{DeltaAction, PassDelta};
 
@@ -17,6 +18,7 @@ const EMPTY_TREE_OID: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 pub fn pass_tree(
     repo: &gix::Repository,
     last_head_tree_oid: Option<gix::ObjectId>,
+    wiki_ignore: &WikiIgnore,
 ) -> Result<Vec<PassDelta>> {
     let new_tree_id = match repo.head_tree_id() {
         Ok(id) => id.detach(),
@@ -57,6 +59,9 @@ pub fn pass_tree(
                 if !is_markdown(&path) {
                     continue;
                 }
+                if wiki_ignore.is_ignored(&path) {
+                    continue;
+                }
                 out.push(PassDelta {
                     path,
                     source: Source::Tree,
@@ -83,6 +88,15 @@ pub fn pass_tree(
                 if !is_markdown(&path) {
                     continue;
                 }
+                if wiki_ignore.is_ignored(&path) {
+                    // Emit a Remove so any previously-indexed row is cleared.
+                    out.push(PassDelta {
+                        path,
+                        source: Source::Tree,
+                        action: DeltaAction::Remove,
+                    });
+                    continue;
+                }
                 out.push(PassDelta {
                     path,
                     source: Source::Tree,
@@ -107,14 +121,23 @@ pub fn pass_tree(
                     // unchanged, so `apply_rename`'s row-level path swap
                     // is sound and avoids a retokenization.
                     (true, true) if source_id == id => {
-                        out.push(PassDelta {
-                            path: to,
-                            source: Source::Tree,
-                            action: DeltaAction::Rename {
-                                from,
-                                oid: BlobOid(id.to_hex().to_string()),
-                            },
-                        });
+                        if wiki_ignore.is_ignored(&to) {
+                            // Renamed into an ignored path — drop the old row.
+                            out.push(PassDelta {
+                                path: from,
+                                source: Source::Tree,
+                                action: DeltaAction::Remove,
+                            });
+                        } else {
+                            out.push(PassDelta {
+                                path: to,
+                                source: Source::Tree,
+                                action: DeltaAction::Rename {
+                                    from,
+                                    oid: BlobOid(id.to_hex().to_string()),
+                                },
+                            });
+                        }
                     }
                     // Rename + edit: the new OID needs a `blobs` row and
                     // the old one needs releasing, so decompose into
@@ -125,15 +148,17 @@ pub fn pass_tree(
                             source: Source::Tree,
                             action: DeltaAction::Remove,
                         });
-                        out.push(PassDelta {
-                            path: to,
-                            source: Source::Tree,
-                            action: DeltaAction::Add {
-                                oid: BlobOid(id.to_hex().to_string()),
-                                blob_bytes: None,
-                                stat_mtime_ns: None,
-                            },
-                        });
+                        if !wiki_ignore.is_ignored(&to) {
+                            out.push(PassDelta {
+                                path: to,
+                                source: Source::Tree,
+                                action: DeltaAction::Add {
+                                    oid: BlobOid(id.to_hex().to_string()),
+                                    blob_bytes: None,
+                                    stat_mtime_ns: None,
+                                },
+                            });
+                        }
                     }
                     // Renamed out of the wiki.
                     (true, false) => {
@@ -145,15 +170,17 @@ pub fn pass_tree(
                     }
                     // Renamed into the wiki.
                     (false, true) => {
-                        out.push(PassDelta {
-                            path: to,
-                            source: Source::Tree,
-                            action: DeltaAction::Add {
-                                oid: BlobOid(id.to_hex().to_string()),
-                                blob_bytes: None,
-                                stat_mtime_ns: None,
-                            },
-                        });
+                        if !wiki_ignore.is_ignored(&to) {
+                            out.push(PassDelta {
+                                path: to,
+                                source: Source::Tree,
+                                action: DeltaAction::Add {
+                                    oid: BlobOid(id.to_hex().to_string()),
+                                    blob_bytes: None,
+                                    stat_mtime_ns: None,
+                                },
+                            });
+                        }
                     }
                     (false, false) => {}
                 }

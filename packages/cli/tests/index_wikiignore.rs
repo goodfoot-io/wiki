@@ -1,13 +1,16 @@
-//! `.wiki/.wikiignore` exclusion at the worktree index pass.
+//! `.wiki/.wikiignore` exclusion across all three index passes.
 //!
-//! A path matched by `.wiki/.wikiignore` must never be carried into
-//! `seen_paths` during `pass_worktree`, so the removal-reconciliation sweep
-//! purges any row that was previously indexed. Un-ignoring a path (removing
-//! its pattern) must restore visibility on the next refresh.
+//! Pass 3 (Worktree): A path matched by `.wiki/.wikiignore` must never be
+//! carried into `seen_paths`, so the removal-reconciliation sweep purges any
+//! previously-indexed row. Un-ignoring a path must restore visibility.
+//!
+//! Pass 1 (Tree / `--source head`) and Pass 2 (Index / `--source index`):
+//! The same filter must apply so wikiignored committed or staged files are
+//! never returned by any wiki CLI surface regardless of the active source.
 
 mod common;
 
-use wiki::index::WikiIndex;
+use wiki::index::{DocSource, WikiIndex};
 
 /// A file already in the index that becomes wikiignored on the next refresh
 /// must be removed (its page no longer resolves).
@@ -92,5 +95,87 @@ fn test_pass_worktree_uningnore_restores_visibility() {
     assert!(
         index.resolve_page("Draft").expect("resolve").is_some(),
         "un-ignored file must become visible again"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Pass 1 (Tree / --source head) exclusion tests
+// ---------------------------------------------------------------------------
+
+/// A committed wikiignored file must be absent from the Tree-source index
+/// (`--source head`): `pass_tree` must not insert it into the DB.
+#[test]
+fn test_pass_tree_excludes_wikiignored_committed_file() {
+    let repo = common::FixtureRepo::new();
+
+    // Write the wikiignore BEFORE committing so it is present from the start.
+    repo.write_file(".wiki/.wikiignore", "drafts/\n");
+    repo.write_wiki_md("drafts/secret.md", "Secret", "Hidden draft.", "body");
+    repo.git_add(".wiki/.wikiignore");
+    repo.git_add("drafts/secret.md");
+    repo.git_commit("add secret and wikiignore");
+
+    let index =
+        WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Head).expect("prepare head");
+    assert!(
+        index.resolve_page("Secret").expect("resolve").is_none(),
+        "wikiignored committed file must be absent from --source head"
+    );
+}
+
+/// A committed wikiignored file that was indexed BEFORE the wikiignore was
+/// introduced must be removed from the Tree-source index on the next refresh.
+#[test]
+fn test_pass_tree_removes_newly_wikiignored_committed_file() {
+    let repo = common::FixtureRepo::new();
+
+    // First commit: file is not wikiignored.
+    repo.write_wiki_md("drafts/secret.md", "Secret", "Hidden draft.", "body");
+    repo.git_add("drafts/secret.md");
+    repo.git_commit("add secret");
+
+    // Populate the index for the Tree source so a row exists for this file.
+    let index =
+        WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Head).expect("prepare head");
+    assert!(
+        index.resolve_page("Secret").expect("resolve").is_some(),
+        "file is visible before wikiignore"
+    );
+    drop(index);
+
+    // Second commit: introduce the wikiignore.
+    repo.write_file(".wiki/.wikiignore", "drafts/\n");
+    repo.git_add(".wiki/.wikiignore");
+    repo.git_commit("add wikiignore");
+
+    let index =
+        WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Head).expect("prepare head after ignore");
+    assert!(
+        index.resolve_page("Secret").expect("resolve").is_none(),
+        "wikiignored committed file must be removed from --source head after wikiignore commit"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Pass 2 (Index / --source index) exclusion tests
+// ---------------------------------------------------------------------------
+
+/// A staged wikiignored file must be absent from the Index-source index
+/// (`--source index`): `pass_index` must not insert it into the DB.
+#[test]
+fn test_pass_index_excludes_wikiignored_staged_file() {
+    let repo = common::FixtureRepo::new();
+
+    repo.write_file(".wiki/.wikiignore", "drafts/\n");
+    repo.write_wiki_md("drafts/secret.md", "Secret", "Hidden draft.", "body");
+    // Stage both — but do NOT commit, keeping them Index-only.
+    repo.git_add(".wiki/.wikiignore");
+    repo.git_add("drafts/secret.md");
+
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Index)
+        .expect("prepare index");
+    assert!(
+        index.resolve_page("Secret").expect("resolve").is_none(),
+        "wikiignored staged file must be absent from --source index"
     );
 }

@@ -6,4 +6,5 @@ packages/cli/src/commands/mesh_coverage.rs#L102-L105 rk64:79285d100df3bb22
 packages/cli/src/commands/mesh_coverage.rs#L228-L233 rk64:9537de17c9a609bf
 packages/cli/src/commands/mesh_coverage.rs#L237-L242 rk64:9537de17c9a609bf
 wiki/reference/git-mesh-usage.md#L16-L30 rk64:0650f373e61a1a48
+packages/cli/src/commands/check.rs#L1128-L1132 rk64:8809d3df785c2930
 

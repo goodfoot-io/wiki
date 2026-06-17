@@ -8,6 +8,7 @@ use anyhow::Result;
 use rusqlite::params;
 
 use crate::index::{BlobOid, Source};
+use crate::wikiignore::WikiIgnore;
 
 use super::{DeltaAction, PassDelta, source_id};
 
@@ -15,6 +16,7 @@ pub fn pass_index(
     dot_git: &Path,
     last_index_checksum: &[u8; 20],
     tx: &rusqlite::Transaction,
+    wiki_ignore: &WikiIgnore,
 ) -> Result<Vec<PassDelta>> {
     let index_path = dot_git.join("index");
     if !index_path.exists() {
@@ -64,6 +66,11 @@ pub fn pass_index(
         let p = entry.path(&file);
         let path = PathBuf::from(p.to_string());
         if !is_markdown(&path) {
+            continue;
+        }
+        // Wikiignored paths are never indexed; treat as absent so any
+        // previously-indexed row is purged by the removal sweep below.
+        if wiki_ignore.is_ignored(&path) {
             continue;
         }
         on_disk.insert(path.clone());
