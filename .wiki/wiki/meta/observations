@@ -1,5 +1,5 @@
-wiki/meta/wiki-feedback.md#L21-L26 rk64:95b48421959b17ad
 packages/cli/src/commands/search.rs#L61-L90 rk64:d51de129dae8d7df
-packages/cli/src/main.rs#L117-L130 rk64:d9cf10f637ec9355
 packages/cli/src/commands/summary.rs#L130-L158 rk64:8bf836f32d95d741
+packages/cli/src/main.rs#L117-L130 rk64:a0b6a1813fe17ac4
+wiki/meta/wiki-feedback.md#L21-L26 rk64:95b48421959b17ad
 
