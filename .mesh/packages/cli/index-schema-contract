@@ -1,6 +1,6 @@
-packages/cli/logging.wiki.md rk64:86b6fde722bb8303
-packages/cli/src/index/passes/mod.rs#L8-L470 rk64:de3b70203ff38f8d
-packages/cli/src/index/schema.rs#L8-L165 rk64:5ff35230fadfcccc
+packages/cli/logging.wiki.md rk64:3e89e8d8ff9f087a
+packages/cli/src/index/passes/mod.rs#L8-L470 rk64:fe5d484ab86fb4e9
+packages/cli/src/index/schema.rs#L8-L165 rk64:c76057ac01c76347
 packages/cli/tests/index_blob_readd.rs rk64:3651c9f8c47bdf33
 packages/cli/tests/index_rename_edit.rs rk64:b9feacf0e4b329f0
 packages/cli/tests/index_schema_rebuild.rs rk64:90c8689df8b82ab0

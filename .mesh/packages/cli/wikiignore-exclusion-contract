@@ -3,13 +3,14 @@ packages/cli/src/commands/check.rs#L1004-L1009 rk64:f72ce367c68106bc
 packages/cli/src/commands/check_fix.rs#L1424-L1441 rk64:11f8683bbdc9ef09
 packages/cli/src/commands/mod.rs#L220-L230 rk64:915fc4410ff7c163
 packages/cli/src/index/freshness.rs#L218-L234 rk64:26604bd6a5914c56
-packages/cli/src/index/passes/index_file.rs#L4-L98 rk64:229ff3b47e32556d
-packages/cli/src/index/passes/mod.rs#L138-L200 rk64:5f97382115fbc96b
+packages/cli/src/index/passes/index_file.rs#L4-L98 rk64:c213c1a03b006252
+packages/cli/src/index/passes/mod.rs#L138-L245 rk64:b4402e69e8280270
 packages/cli/src/index/passes/tree.rs#L60-L92 rk64:947a636e09af19d4
+packages/cli/src/index/passes/tree.rs#L192-L242 rk64:ec9af879d3b632ab
 packages/cli/src/index/passes/worktree.rs#L20-L44 rk64:93cb3e5d19e23ace
 packages/cli/src/lib.rs#L16-L18 rk64:ead7a117c4a33d6e
 packages/cli/src/main.rs#L7-L9 rk64:cb6c25825ba57174
 packages/cli/src/wikiignore.rs rk64:7b91d3352102a8f7
-packages/cli/tests/index_wikiignore.rs rk64:04f6a85441c68ff1
+packages/cli/tests/index_wikiignore.rs rk64:aa490a552b626bb9
 
-.wiki/.wikiignore exclusion subsystem: a single repo-root-anchored matcher (fail-closed on malformed patterns and on parent-exclusion re-include) that all three index passes and command-level discovery apply identically, plus the freshness gate's mtime fold that busts the fast gate when the ignore list changes.
+.wiki/.wikiignore exclusion subsystem: a single repo-root-anchored matcher (fail-closed on malformed patterns and on parent-exclusion re-include) that all three index passes and the check/discovery surfaces apply identically. Two freshness signals keep it honest: the worktree fast-gate folds the .wikiignore mtime, and a persisted state-row content hash triggers bidirectional Tree reconciliation (via head_tree_markdown_entries) so an un-ignore re-adds paths to --source head/index as well as ignore removing them.
