@@ -1,5 +1,5 @@
 .devcontainer/Dockerfile#L114-L117 rk64:a234c0f99b549401
-.devcontainer/docker-compose.yml#L9-L26 rk64:ae386b257037c596
-.devcontainer/post-create.sh#L56-L96 rk64:b8ec69dc09ea7fc2
+.devcontainer/docker-compose.yml#L9-L16 rk64:0aac557e81cc0bd1
+.devcontainer/post-create.sh#L64-L105 rk64:3a611dd38364eb00
 
-Tailscale integration wiring the devcontainer: docker-compose mounts the persistent state volume, Dockerfile installs the tailscale/tailscaled binaries, and post-create.sh configures and starts the daemon in userspace-networking mode.
+Tailscale integration wiring the devcontainer: docker-compose supplies the .env auth vars and the host-backed /home/node bind mount that persists Tailscale state across rebuilds, the Dockerfile installs the tailscale/tailscaled binaries, and post-create.sh configures and starts the daemon in userspace-networking mode.

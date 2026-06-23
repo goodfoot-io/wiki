@@ -200,11 +200,20 @@ export async function installManagedWikiBinary(
     return inflight;
   }
 
-  const promise = installManagedWikiBinaryInner(fetchImpl, params, target);
+  // Fold the inflight-map cleanup into the single returned promise via
+  // try/finally so it runs whether the install resolves or rejects, without
+  // spawning a second promise chain.  A detached `.finally()`/`.then()` would
+  // re-propagate the install's rejection into a floating promise that nobody
+  // awaits, surfacing as an unhandled rejection; here the rejection flows
+  // straight through this promise to the caller.
+  const promise = (async () => {
+    try {
+      return await installManagedWikiBinaryInner(fetchImpl, params, target);
+    } finally {
+      inflightInstalls.delete(installKey);
+    }
+  })();
   inflightInstalls.set(installKey, promise);
-  void promise.finally(() => {
-    inflightInstalls.delete(installKey);
-  });
 
   return promise;
 }

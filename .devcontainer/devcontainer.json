@@ -2,7 +2,10 @@
   "name": "Wiki",
   "dockerComposeFile": "docker-compose.yml",
   "service": "app",
-  "workspaceFolder": "/home/node/wiki",
+  "workspaceFolder": "/workspace",
+  // Build the shared local base image (devcontainer-base:node24.16-trixie) if it
+  // isn't already present, before the compose build references it as its FROM.
+  "initializeCommand": "bash ${localWorkspaceFolder}/../devcontainer-base/ensure-base.sh",
   "customizations": {
     "vscode": {
       "extensions": [
@@ -34,8 +37,7 @@
   "remoteUser": "node",
   "mounts": [
     "source=claude-code-bashhistory,target=/commandhistory,type=volume",
-    "source=claude-code-config,target=/home/node/.claude,type=volume",
-    "source=${localWorkspaceFolder}/.git,target=/home/node/wiki/.git,type=bind,consistency=cached"
+    "source=${localWorkspaceFolder}/.git,target=/workspace/.git,type=bind,consistency=cached"
   ],
   "remoteEnv": {
     "TZ": "America/New_York",
@@ -43,9 +45,9 @@
     "CLAUDE_CONFIG_DIR": "/home/node/.claude",
     "POWERLEVEL9K_DISABLE_GITSTATUS": "true",
     "VSCODE_RECONNECTION_GRACE_TIME": "60000",
-    "PATH": "${containerEnv:PATH}:/home/node/.local/bin:/home/node/wiki/.devcontainer/utilities"
+    "PATH": "${containerEnv:PATH}:/home/node/.cargo/bin:/home/node/.local/bin:/workspace/.devcontainer/utilities"
   },
-  "workspaceMount": "source=${localWorkspaceFolder},target=/home/node/wiki,type=bind,consistency=delegated",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
   "forwardPorts": [8080],
   "postCreateCommand": "bash .devcontainer/post-create.sh"
 }
