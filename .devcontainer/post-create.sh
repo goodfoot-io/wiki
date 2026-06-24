@@ -48,11 +48,9 @@ echo "Configuring git hooks path..."
 git config core.hooksPath .githooks
 echo "Git hooks path set to .githooks"
 
-# Bring up Tailscale in TUN mode (MagicDNS) — shared routine from the base image.
-# Reads $TS_HOSTNAME / $TS_AUTHKEY from .devcontainer/.env.
-/usr/local/share/devcontainer/tailscale-up.sh
+# Note: Tailscale and the rootless sshd are now started automatically by the base
+# image's entrypoint on every container start, so they are no longer invoked here.
 
 # Shared runtime setup from the base image: Rust (latest stable) + clippy/rustfmt,
-# uv, Antigravity, the zsh theme, and a rootless sshd — all installed into the
-# persisted /home/node.
+# uv, Antigravity, and the zsh theme — all installed into the persisted /home/node.
 /usr/local/share/devcontainer/post-create-common.sh
