@@ -1,4 +1,4 @@
-packages/cli/Cargo.toml#L1-L5 rk64:a6fd385ea4188fc1
+packages/cli/Cargo.toml#L1-L1 rk64:716ea6ec56ba27ff
 packages/cli/src/index/fs_class.rs#L34-L37 rk64:0dc3f659016d9ecc
-wiki/guides/benchmarking-wiki-cli-performance.md#L25-L31 rk64:eeae50f369afdd82
+wiki/guides/benchmarking-wiki-cli-performance.md#L25-L31 rk64:54381c1e68614ede
 

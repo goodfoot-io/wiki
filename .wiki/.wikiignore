@@ -1,0 +1,7 @@
+# Wiki surfaces (check, search, list) ignore these repo-relative paths.
+# Patterns are anchored at the repo root and follow gitignore(5) syntax.
+
+# Test fixtures: intentionally-broken wiki pages and dangling fragment links
+# used by the CLI's integration tests. They are not real documentation and must
+# not surface in `wiki check`/`search`/`list`.
+packages/cli/tests/fixtures/

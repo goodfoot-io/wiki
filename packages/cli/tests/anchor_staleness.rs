@@ -1172,3 +1172,157 @@ fn anchor_fix_unrecoverable_history_fails_closed_distinctly() {
         "must NOT misclassify unrecoverable drift as a meaning-changing diff; got:\n{combined}"
     );
 }
+
+// ── Test 23 (F-SELF-INFLICTED) ───────────────────────────────────────────────
+
+/// A page that links into code AND is mesh-anchored over the line range holding
+/// that link. When the code drifts, `--fix` rewrites the link *inside* the
+/// anchored region — which would stale that region's anchor. The same pass must
+/// re-anchor the region (its only change is the self-inflicted line-ref rewrite),
+/// so the immediately-following bare `wiki check` PASSES. Without the fix the
+/// `--fix`/`check` pair is non-convergent and blocks every commit through the
+/// pre-commit hook.
+#[test]
+fn anchor_fix_self_inflicted_region_reanchor_converges() {
+    let tmp = init_repo();
+    let root = tmp.path();
+
+    // code.txt's target lives at L5; the page links it and is anchored over the
+    // region (L8-L11) that contains the link (page line 9).
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/code.txt"),
+        "line1\nline2\nline3\nline4\nTARGET_CONTENT_X\nline6\nline7\nline8\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::write(
+        root.join("wiki/notes.md"),
+        "---\ntitle: Notes\nsummary: Links into code and is mesh-anchored over the holding region.\n---\n\n\
+         # Notes\n\n\
+         Intro prose on the first content line of the anchored region.\n\
+         The target lives at [target](../src/code.txt#L5-L5) — inside the meshed region.\n\
+         More prose to round out the anchored region.\n\
+         Closing prose line of the region.\n",
+    )
+    .unwrap();
+    // One mesh anchors BOTH the code target and the page region holding the link.
+    mesh_add(root, "demo/region", &["src/code.txt#L5-L5", "wiki/notes.md#L8-L11"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "seed"]);
+
+    // Drift the code so the linked target moves L5 → L7; commit.
+    std::fs::write(
+        root.join("src/code.txt"),
+        "NEW_A\nNEW_B\nline1\nline2\nline3\nline4\nTARGET_CONTENT_X\nline6\nline7\nline8\n",
+    )
+    .unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "drift"]);
+
+    let fixed = wiki_check(root, &["--fix", "--source=worktree"]);
+    assert_eq!(
+        fixed.status.code(),
+        Some(0),
+        "--fix must rewrite the link AND re-anchor the region → exit 0; stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&fixed.stdout),
+        String::from_utf8_lossy(&fixed.stderr)
+    );
+
+    // The crux: the tree --fix produced must PASS the very next bare check.
+    let gate = wiki_check(root, &[]);
+    assert_eq!(
+        gate.status.code(),
+        Some(0),
+        "the gate check after --fix must pass (convergent); stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&gate.stdout),
+        String::from_utf8_lossy(&gate.stderr)
+    );
+
+    // Both the code anchor (relocated to L7) and the page region anchor remain.
+    let mesh = std::fs::read_to_string(root.join(".wiki/demo/region")).unwrap();
+    assert!(
+        mesh.contains("code.txt#L7-L7") && mesh.contains("notes.md#L8-L11"),
+        "code anchor must follow to L7 and the page region must stay anchored:\n{mesh}"
+    );
+}
+
+// ── Test 24 (F-SELF-INFLICTED, fail-closed guard) ─────────────────────────────
+
+/// The self-inflicted re-anchor must NOT mask a GENUINE meaning change to the
+/// anchored region. If the page region carries a real prose edit (stale at plan
+/// time) in addition to the self-inflicted link rewrite, `--fix` stays
+/// fail-closed: exit 1 with the re-anchor command, and a bare check still fails.
+#[test]
+fn anchor_fix_self_inflicted_does_not_mask_genuine_region_drift() {
+    let tmp = init_repo();
+    let root = tmp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/code.txt"),
+        "line1\nline2\nline3\nline4\nTARGET_CONTENT_X\nline6\nline7\nline8\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::write(
+        root.join("wiki/notes.md"),
+        "---\ntitle: Notes\nsummary: Links into code and is mesh-anchored over the holding region.\n---\n\n\
+         # Notes\n\n\
+         Intro prose on the first content line of the anchored region.\n\
+         The target lives at [target](../src/code.txt#L5-L5) — inside the meshed region.\n\
+         More prose to round out the anchored region.\n\
+         Closing prose line of the region.\n",
+    )
+    .unwrap();
+    mesh_add(root, "demo/region", &["src/code.txt#L5-L5", "wiki/notes.md#L8-L11"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "seed"]);
+
+    // Drift the code (forces the self-inflicted link rewrite); commit.
+    std::fs::write(
+        root.join("src/code.txt"),
+        "NEW_A\nNEW_B\nline1\nline2\nline3\nline4\nTARGET_CONTENT_X\nline6\nline7\nline8\n",
+    )
+    .unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "drift"]);
+
+    // GENUINE meaning change to a NON-link line inside the region (worktree only).
+    std::fs::write(
+        root.join("wiki/notes.md"),
+        "---\ntitle: Notes\nsummary: Links into code and is mesh-anchored over the holding region.\n---\n\n\
+         # Notes\n\n\
+         Intro prose on the first content line of the anchored region.\n\
+         The target lives at [target](../src/code.txt#L5-L5) — inside the meshed region.\n\
+         GENUINELY DIFFERENT PROSE that changes the region's meaning.\n\
+         Closing prose line of the region.\n",
+    )
+    .unwrap();
+
+    let fixed = wiki_check(root, &["--fix", "--source=worktree"]);
+    assert_eq!(
+        fixed.status.code(),
+        Some(1),
+        "genuine region drift must stay fail-closed → exit 1; stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&fixed.stdout),
+        String::from_utf8_lossy(&fixed.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&fixed.stdout),
+        String::from_utf8_lossy(&fixed.stderr)
+    );
+    assert!(
+        combined.contains("wiki mesh add demo/region wiki/notes.md#L8-L11"),
+        "must surface the region re-anchor command (not silently refresh); got:\n{combined}"
+    );
+
+    let gate = wiki_check(root, &[]);
+    assert_eq!(
+        gate.status.code(),
+        Some(1),
+        "bare check must still fail on the un-acknowledged genuine drift; stderr=\n{}",
+        String::from_utf8_lossy(&gate.stderr)
+    );
+}

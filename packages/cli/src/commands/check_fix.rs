@@ -1,6 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -2107,6 +2107,15 @@ pub fn run_fix_pass(
     // Build the MeshIndex using all in-scope files.
     let mesh_index_opt = build_mesh_index(repo_root, files)?;
 
+    // (wiki-page repo-relative path, 1-based line) of every link href Fix #2
+    // rewrites below. A rewrite mutates the page's own text; when a mesh anchors
+    // a line range of that SAME page that contains the rewritten link, the edit
+    // stales that anchor — a self-inflicted change, not a meaning change. We
+    // collect the touched lines here and re-anchor those regions after the
+    // patches land (Fix #2b), so `--fix` converges instead of staling a region
+    // it just edited.
+    let mut self_inflicted_link_edits: Vec<(String, usize)> = Vec::new();
+
     // For each wiki file, rewrite broken line-range links that are now covered
     // by the updated mesh.
     for file in files {
@@ -2234,6 +2243,9 @@ pub fn run_fix_pass(
                 confidence: Confidence::High,
             });
             file_patches.push((link.href_byte_start, link.href_byte_end, new_href));
+            // Record the page line we are about to rewrite so Fix #2b can
+            // re-anchor any same-page mesh region that contains it.
+            self_inflicted_link_edits.push((file_rel.clone(), link.source_line));
 
             // Relocate the stored mesh anchor in place so it points at the
             // content's new location with a refreshed hash. Without this the
@@ -2550,6 +2562,81 @@ pub fn run_fix_pass(
                         d.mesh_name, d.mesh_name, d.mesh_name
                     ),
                 });
+            }
+        }
+    }
+
+    // ── Fix #2b: re-anchor regions our own link rewrites perturbed ────────────
+    //
+    // Fix #2 rewrote code-fragment links *inside* wiki pages (`#L5-L5` → `#L7-L7`).
+    // When a mesh anchors a line range of that same page which CONTAINS the
+    // rewritten link, the rewrite changed the region's bytes and staled the
+    // anchor. `plan_mesh_follows` ran on the pre-fix tree, so that anchor was
+    // fresh then and never entered `drifted`; nothing above refreshes it. Left
+    // alone, `--fix` exits 0 but produces a tree the next `wiki check` rejects
+    // (`Anchor Stale`), and a second `--fix` misclassifies its own diff as
+    // "meaning-changing" — non-convergent, blocking every commit through the hook.
+    //
+    // Refresh only anchors that (a) were fresh at plan time (not already stale —
+    // genuine pre-existing drift stays fail-closed via Fix #6) and (b) cover a
+    // line we just rewrote. Such an anchor's sole change is our own line-ref
+    // rewrite, so a hash-only re-anchor is safe and the gate goes green.
+    if !dry_run && !self_inflicted_link_edits.is_empty() {
+        // Anchors already stale before our edits — never silently refresh these.
+        let mut stale_at_plan: HashSet<(String, u32, u32)> = HashSet::new();
+        for p in &move_plans {
+            stale_at_plan.insert((
+                p.old_path.to_string_lossy().into_owned(),
+                p.old_start,
+                p.old_end,
+            ));
+        }
+        for d in &drifted {
+            stale_at_plan.insert((d.path.clone(), d.start, d.end));
+        }
+        for c in &mesh_conflicts {
+            stale_at_plan.insert((c.path.to_string_lossy().into_owned(), c.start, c.end));
+        }
+
+        let (meshes, _skipped) = store::read_all_tolerant(repo_root)?;
+        for (slug, mesh) in &meshes {
+            for anchor in &mesh.anchors {
+                // Only line-range anchors over a page Fix #2 rewrote, whose range
+                // contains a rewritten line.
+                if anchor.start_line == 0 {
+                    continue;
+                }
+                let touched = self_inflicted_link_edits.iter().any(|(page, line)| {
+                    *page == anchor.path
+                        && (*line as u32) >= anchor.start_line
+                        && (*line as u32) <= anchor.end_line
+                });
+                if !touched {
+                    continue;
+                }
+                if stale_at_plan.contains(&(
+                    anchor.path.clone(),
+                    anchor.start_line,
+                    anchor.end_line,
+                )) {
+                    continue;
+                }
+                // Self-inflicted: refresh the hash in place against the page we
+                // just wrote (same coords → hash-only).
+                let refreshed = store::relocate_anchor(
+                    repo_root,
+                    slug,
+                    &anchor.path,
+                    anchor.start_line,
+                    anchor.end_line,
+                    &anchor.path,
+                    anchor.start_line,
+                    anchor.end_line,
+                )?;
+                let applied = format!(".wiki/{slug}");
+                if refreshed && !anchor_refresh_applied.contains(&applied) {
+                    anchor_refresh_applied.push(applied);
+                }
             }
         }
     }
