@@ -1,0 +1,4 @@
+.githooks/pre-commit.wiki.sh#L10-L21 rk64:5e688a9502a18ed4
+plugins/wiki/skills/wiki/examples/pre-commit.wiki.sh#L10-L21 rk64:5e688a9502a18ed4
+
+Pre-commit wiki hook implementations in main .githooks location and skill documentation examples must remain identical.
