@@ -6,7 +6,7 @@ It is a **local development guard, not a hard commit gate.** Errors `--fix` can'
 
 ## The hook
 
-`.githooks/pre-commit.wiki.sh`:
+`.githooks/pre-commit.wiki.sh`, reproduced verbatim at [`./examples/pre-commit.wiki.sh`](../examples/pre-commit.wiki.sh) so it can be copied straight into a repo:
 
 ```bash
 #!/bin/bash
@@ -17,13 +17,32 @@ WIKI_BIN=$(command -v wiki)
 
 # --fix rewrites in place (needs --source=worktree) and creates mesh coverage;
 # --print-applied prints created/renamed mesh paths to stdout; --no-exit-code = advisory.
+#
+# wiki check --fix has no flag reporting which .md files it rewrote (only
+# --print-applied's mesh paths are machine-readable), so snapshot every
+# tracked .md file's content hash before running --fix and re-stage only
+# the ones whose hash changed as a result.
+BEFORE_HASHES=$(mktemp)
+trap 'rm -f "$BEFORE_HASHES"' EXIT
+git ls-files -z -- '*.md' | while IFS= read -r -d '' f; do
+    printf '%s %s\n' "$(git hash-object "$f")" "$f"
+done > "$BEFORE_HASHES"
+
 APPLIED=$("$WIKI_BIN" check --fix --print-applied --no-exit-code --source=worktree)
 
-WIKI_FIXED=$(git diff --name-only --diff-filter=d -- '*.md')
-if [ -n "$WIKI_FIXED" ]; then
-    # shellcheck disable=SC2086
-    git add $WIKI_FIXED
-    echo "Re-staged wiki-fixed files:"; echo "$WIKI_FIXED"
+WIKI_FIXED=()
+while IFS=' ' read -r before_hash f; do
+    [ -n "$f" ] || continue
+    [ -f "$f" ] || continue
+    after_hash=$(git hash-object "$f")
+    [ "$after_hash" != "$before_hash" ] && WIKI_FIXED+=("$f")
+done < "$BEFORE_HASHES"
+rm -f "$BEFORE_HASHES"
+trap - EXIT
+
+if [ ${#WIKI_FIXED[@]} -gt 0 ]; then
+    git add "${WIKI_FIXED[@]}"
+    echo "Re-staged wiki-fixed files:"; printf '%s\n' "${WIKI_FIXED[@]}"
 fi
 
 if [ -n "$APPLIED" ]; then
@@ -38,8 +57,14 @@ exit 0
 ## Why each flag is load-bearing
 
 - **`--fix`** — rewrites drifted links/anchors/frontmatter **and** creates coverage for uncovered links. Requires `--source=worktree` (you can only rewrite files read from the worktree).
-- **`--print-applied`** — prints one repo-relative path per mesh this run created or renamed to **stdout** (advisories/rename notices → stderr). The hook stages **exactly** those paths — never a blanket `git add .wiki/` — so unrelated working-tree `.wiki/` edits aren't swept in. After `--fix` rewrites `.md` files, the hook re-stages those too, so fixes land in the same commit.
+- **`--print-applied`** — prints one repo-relative path per mesh this run created or renamed to **stdout** (advisories/rename notices → stderr). The hook stages **exactly** those paths — never a blanket `git add .wiki/` — so unrelated working-tree `.wiki/` edits aren't swept in.
 - **`--no-exit-code`** — repair-and-continue instead of rejecting the commit.
+
+## Why the `.md` re-stage is hash-based, not a blanket `git diff`
+
+`wiki check --fix` has no flag that reports *which page files it rewrote* — only mesh paths are machine-readable, via `--print-applied`. An earlier version of this hook used `git diff --name-only --diff-filter=d -- '*.md'` after `--fix` ran, which is **not** scoped to files `--fix` touched — it's every modified `.md` file anywhere in the working tree at that moment. An unrelated markdown edit sitting dirty in the worktree got swept into the commit alongside the intended changes. That was a **githook defect, not a `wiki` CLI defect** — the CLI behaved correctly; the hook's staging heuristic was just too broad.
+
+The current hook snapshots the content hash of every tracked `.md` file *before* invoking `--fix`, then re-stages only the files whose hash differs afterward — precisely the set `--fix` actually rewrote, regardless of what else was dirty in the tree. If you're on an older copy of this hook (predating the hash-snapshot approach) and see unrelated `.md` changes appear in a commit, that's the blanket-sweep defect — replace the hook with [`./examples/pre-commit.wiki.sh`](../examples/pre-commit.wiki.sh).
 
 ## Why check the whole corpus, not just staged files
 

@@ -21,7 +21,7 @@ For anything beyond these, route by condition:
 - **A `mesh_uncovered` diagnostic, or covering new fragment links: `--fix`, `--fix-dry-run`, `--print-applied`, and what the pre-commit hook does automatically**: Read `./sections/fixing-mesh-coverage.md`
 - **`wiki check --fix` fail-closed and named a `wiki mesh …` command, or an anchor drifted and a decision is needed (re-hash, re-anchor, delete) — the judgment lives here, not in the command**: Read `./sections/resolving-skipped-fixes.md`
 - **Exact subcommand, flag, anchor grammar, reserved-name, or `wiki mesh show/add/remove` semantics lookup**: Read `./sections/command-reference.md`
-- **Wiring `wiki` into a repo's pre-commit hook for the first time, or debugging why files were re-staged / meshes auto-created on commit**: Read `./sections/git-hook-setup.md`
+- **Wiring `wiki` into a repo's pre-commit hook for the first time (copyable script at `./examples/pre-commit.wiki.sh`), or debugging why files were re-staged / meshes auto-created on commit — including an unrelated `.md` file getting swept into a commit (older hooks had this defect; it's a hook bug, not a CLI bug)**: Read `./sections/git-hook-setup.md`
 
 **Mesh-only changes (`.wiki/` edits) don't require full codebase validation.**
 
