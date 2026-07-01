@@ -54,6 +54,17 @@ fi
 exit 0
 ```
 
+## Wiring it in
+
+Two one-time, per-clone setup steps — the hook itself no longer does either automatically:
+
+1. Copy [`./examples/pre-commit.wiki.sh`](../examples/pre-commit.wiki.sh) to `.githooks/pre-commit.wiki.sh` (or wherever your `core.hooksPath` points) and make it executable.
+2. Register the wiki-mesh merge driver:
+   ```bash
+   git config merge.wiki-mesh.driver 'wiki mesh merge %O %A %B %L'
+   ```
+   See [Optional merge driver](#optional-merge-driver) below for what this does and why it's per-clone, not committed.
+
 ## Why each flag is load-bearing
 
 - **`--fix`** — rewrites drifted links/anchors/frontmatter **and** creates coverage for uncovered links. Requires `--source=worktree` (you can only rewrite files read from the worktree).
@@ -74,13 +85,9 @@ Preview before wiring it in: `wiki check --fix --fix-dry-run` shows created mesh
 
 ## Optional merge driver
 
-The `.gitattributes` file includes `.wiki/** merge=wiki-mesh` — committed and shared by everyone — but the merge driver itself is a **per-clone** registration. The hook's first run registers it automatically:
+The `.gitattributes` file includes `.wiki/** merge=wiki-mesh` — committed and shared by everyone — but the merge driver itself is a **per-clone** registration (see [Wiring it in](#wiring-it-in) above for the command). It used to be registered automatically on the hook's first run; that auto-registration was removed because a pre-commit hook is the wrong place to mutate clone-local git config on every commit; it's now a one-time manual step.
 
-```bash
-git config merge.wiki-mesh.driver 'wiki mesh merge %O %A %B %L'
-```
-
-This makes git call `wiki mesh merge` as the merge driver for `.wiki/` files when they conflict during a merge. It collapses easy conflicts mid-merge so they never leave markers in the first place.
+Registering it makes git call `wiki mesh merge` as the merge driver for `.wiki/` files when they conflict during a merge. It collapses easy conflicts mid-merge so they never leave markers in the first place.
 
 **What it does:** When both sides touch disjoint anchors, or one side touches anchors while the other only changes the `--why` rationale, the driver combines them without conflict markers. When both sides touch the same anchor, markers remain — and `--fix` handles the rest.
 
