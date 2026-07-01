@@ -1,0 +1,4 @@
+plugins/wiki/skills/wiki/SKILL.md#L24-L24 rk64:e329971c397e6eae
+plugins/wiki/skills/wiki/sections/git-hook-setup.md#L1-L93 rk64:9072a432b074916d
+
+Routing line in SKILL.md documentation points to the git hook setup section and must stay synchronized when either is edited.
