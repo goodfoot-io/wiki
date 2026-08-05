@@ -1,4 +1,4 @@
-packages/cli/src/commands/mesh/manage.rs rk64:57da258ceefa84cd
+packages/cli/src/commands/mesh/manage.rs rk64:8a8aa5b78afd0dd1
 packages/cli/src/commands/mesh/store.rs#L368-L485 rk64:c54d23b9258b6e21
 plugins/wiki/skills/wiki/sections/fixing-mesh-coverage.md rk64:24fc8815cfce42ca
 
