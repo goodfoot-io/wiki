@@ -1,6 +1,6 @@
 packages/cli/src/commands/mesh_coverage.rs#L22-L354 rk64:a5c613920c394dc6
 wiki/architecture/wiki-mesh-integration.md rk64:30ea0d10dd017e1b
 wiki/guides/adding-mesh-coverage.md rk64:4e89b14a7bc13393
-wiki/reference/git-mesh-usage.md rk64:631ad94ce399b3d8
+wiki/reference/git-mesh-usage.md rk64:110eb21f9d9fed74
 
 The wiki corpus documenting the mesh coverage detection subsystem — architecture, workflow guide, and reference — and the MeshIndex-based implementation (containment-based anchor matching, coverage diagnostics, index builder). A change to containment semantics, coverage queries, or diagnostic surface must keep these pages accurate.

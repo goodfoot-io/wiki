@@ -1,6 +1,6 @@
-.devcontainer/Dockerfile#L55-L69 rk64:d1b424597ba721b6
-.devcontainer/devcontainer.json#L5-L47 rk64:93cbe5b4450391b8
+.devcontainer/Dockerfile#L23-L24 rk64:d5a967288c91ab23
+.devcontainer/devcontainer.json#L5-L50 rk64:b4ec1f4d2a818728
 .devcontainer/docker-compose.yml#L16-L21 rk64:91d94fe827c8e23c
 .devcontainer/post-create.sh#L6-L8 rk64:04fbe4df6eb60128
 
-Devcontainer filesystem layout that all four config files must agree on: the repo binds to /workspace (devcontainer.json workspaceFolder/workspaceMount/.git mount/PATH, Dockerfile mkdir+WORKDIR+YARN_* paths, docker-compose ..:/workspace bind, post-create utilities path) and /home/node is a host-backed bind mount persisting the toolchain and config across rebuilds. Diverge any one site and VSCode opens the wrong folder or scripts resolve dead paths, with nothing mechanical to catch it.
+Devcontainer filesystem layout that all four config files must agree on: the repo binds to /workspace (devcontainer.json workspaceFolder/workspaceMount/.git mount/PATH, Dockerfile YARN_* cache paths, docker-compose ..:/workspace bind, post-create utilities path) and /home/node is a host-backed bind mount persisting the toolchain and config across rebuilds. The Dockerfile's own mkdir+WORKDIR for /workspace moved into the shared devcontainer-base image (external repo, built via devcontainer.json's initializeCommand) and is no longer tracked here. Diverge any one site and VSCode opens the wrong folder or scripts resolve dead paths, with nothing mechanical to catch it.
