@@ -1,7 +1,7 @@
 //! In-process `wiki mesh` subcommand: show, add, remove.
 //!
 //! Provides operator-facing mesh reconciliation so that any `wiki check`
-//! failure is resolvable without the `git mesh` binary. All three verbs
+//! failure is resolvable without the `git span` binary. All three verbs
 //! operate on the `.wiki/` store via [`super::store`].
 
 use std::io::Write as _;
@@ -131,7 +131,7 @@ fn show(slug: &str, patch: bool, repo_root: &Path) -> Result<i32> {
             "  {} {}  stored={}  {}",
             anchor.path,
             range_label,
-            &anchor.content_hash.chars().take(8).collect::<String>(),
+            anchor.content_hash.chars().take(8).collect::<String>(),
             freshness
         );
 

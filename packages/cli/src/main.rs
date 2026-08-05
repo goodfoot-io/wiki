@@ -169,7 +169,7 @@ enum Commands {
     /// Inspect and manage `.wiki/` mesh anchors.
     ///
     /// Provides three verbs for in-process mesh reconciliation so that any
-    /// `wiki check` failure can be resolved without the `git mesh` binary.
+    /// `wiki check` failure can be resolved without the `git span` binary.
     ///
     ///   wiki mesh show <slug> [--patch]   — inspect anchors; diff on --patch
     ///   wiki mesh add  <slug> <anchor>... — upsert anchor(s) into a mesh

@@ -31,7 +31,7 @@ See [Wiki Mesh Integration](../architecture/wiki-mesh-integration.md) for the de
 
 ### `git-mesh add <name> <anchor>...` *(generated, not invoked)*
 
-**Where:** [`create_mesh_coverage`](/packages/cli/src/commands/mesh/scaffold.rs#L164-L205) — anchors are added to the in-process store directly; no `git mesh add` command is shelled out or rendered.
+**Where:** [`create_mesh_coverage`](/packages/cli/src/commands/mesh/scaffold.rs#L164-L205) — anchors are added to the in-process store directly; no `git span add` command is shelled out or rendered.
 
 **Invoked by:** [`wiki check --fix`](/packages/cli/src/commands/mesh/scaffold.rs#L164-L205) — creates meshes directly, does **not** shell out to `git-mesh`.
 
@@ -41,7 +41,7 @@ See [Wiki Mesh Integration](../architecture/wiki-mesh-integration.md) for the de
 
 ### `git-mesh why <name> -m "<message>"` *(generated, not invoked)*
 
-**Where:** [`scaffold.rs`](/packages/cli/src/commands/mesh/scaffold.rs#L164-L205) — `why` text is now set inline via the `--why` flag on `wiki mesh add`; a standalone `git mesh why` command is no longer generated.
+**Where:** [`scaffold.rs`](/packages/cli/src/commands/mesh/scaffold.rs#L164-L205) — `why` text is now set inline via the `--why` flag on `wiki mesh add`; a standalone `git span why` command is no longer generated.
 
 **Invoked by:** [`wiki check --fix`](/packages/cli/src/commands/mesh/scaffold.rs#L164-L205) — creates meshes directly, does **not** shell out to `git-mesh`.
 

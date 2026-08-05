@@ -1,6 +1,6 @@
 ---
 title: Adding Mesh Coverage
-summary: Workflow for establishing baseline git mesh coverage across uncovered wiki pages — creating meshes with wiki check --fix, rewriting whys to be idiomatic, consolidating anchors, and pitfalls to avoid.
+summary: Workflow for establishing baseline git span coverage across uncovered wiki pages — creating meshes with wiki check --fix, rewriting whys to be idiomatic, consolidating anchors, and pitfalls to avoid.
 tags:
   - wiki
   - git-mesh
@@ -64,15 +64,15 @@ Worked examples from this baseline pass:
 
 ## 4. Consolidate anchors that share a relationship
 
-The fix pass creates one mesh per uncovered link. The handbook says **one relationship per mesh** — not one anchor per mesh. When two or more anchors form a single subsystem, fold them into a single `git mesh add` call:
+The fix pass creates one mesh per uncovered link. The handbook says **one relationship per mesh** — not one anchor per mesh. When two or more anchors form a single subsystem, fold them into a single `git span add` call:
 
 ```bash
 # Two auto-created meshes about incremental WikiIndex sync — one subsystem, one mesh
-git mesh add wiki/perf/incremental-indexing \
+git span add wiki/perf/incremental-indexing \
   wiki/guides/wiki-performance-optimization.md \
   packages/cli/src/index.rs#L945-L945 \
   packages/cli/src/index.rs#L960-L960
-git mesh why wiki/perf/incremental-indexing -m "Incremental WikiIndex sync that detects changes by probing Git state (HEAD SHA, wiki dir, working-tree status) so only added, modified, or deleted pages are re-parsed."
+git span why wiki/perf/incremental-indexing -m "Incremental WikiIndex sync that detects changes by probing Git state (HEAD SHA, wiki dir, working-tree status) so only added, modified, or deleted pages are re-parsed."
 ```
 
 Same applies when one auto-created relationship appears twice on the same page (e.g. once in a "what to update" section and again in an "update order" checklist) — collapse to one mesh per unique anchor.
@@ -86,7 +86,7 @@ Avoid auto-generated defaults like `wiki/cli/command-1` or `wiki/files`. Pick a 
 ## 6. Commit each mesh
 
 ```bash
-git mesh commit wiki/perf/incremental-indexing
+git span commit wiki/perf/incremental-indexing
 ```
 
 A first-time commit fails if no `why` is staged — that's the normal flow. Errors of the form `error: path not in tree: <file> at <sha>` mean the anchored file is staged but not present in HEAD; commit (or stash) the file first, then retry.
@@ -105,7 +105,7 @@ Expect zero `mesh_uncovered` findings on real wiki pages. Test fixtures that int
 - **Duplicate anchors on the same page are a signal, not an error.** Both findings should be one mesh; the page itself is structured to point at the same code from two angles (e.g. "what" + "update order").
 - **Multiple anchors can belong to one mesh.** Resist the one-mesh-per-anchor framing whenever the relationship is single.
 - **Whole-file anchors are the recommended default for prose meshes.** This baseline pass kept line-range anchors because the wiki pages already used them and the targets are stable, but expect editorial drift on prose to push some of them toward whole-file form. See `responding-to-drift.md` in the git-mesh handbook.
-- **`git mesh add` resolves anchors against HEAD at commit time.** A newly authored wiki page must be committed before its meshes can commit. Stage the file and create a normal commit first; mesh commits will then succeed.
+- **`git span add` resolves anchors against HEAD at commit time.** A newly authored wiki page must be committed before its meshes can commit. Stage the file and create a normal commit first; mesh commits will then succeed.
 - **Mesh commits and source commits are independent.** You can establish baseline coverage as a standalone exercise — no source change is required, no source commit is produced.
 - **Don't mesh test fixtures.** Fixtures that intentionally simulate "uncovered" state to exercise the integration are not a coverage gap; meshing them defeats the test.
 - **The handbook is the authority on naming and whys.** When in doubt, re-read `creating-a-mesh.md` from the git-mesh handbook skill rather than guessing.

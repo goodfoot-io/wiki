@@ -5,7 +5,7 @@ tags:
   - tooling
 ---
 
-The wiki CLI validates and maintains fragment links between wiki pages and source code. For the maintenance map of every operator-facing doc and automation prompt that should be checked when CLI behavior changes, see [Wiki Documentation Touchpoints](../meta/wiki-documentation-touchpoints.md). For the git mesh integration that replaces SHA-pinned staleness detection, see [Wiki Mesh Integration](./wiki-mesh-integration.md).
+The wiki CLI validates and maintains fragment links between wiki pages and source code. For the maintenance map of every operator-facing doc and automation prompt that should be checked when CLI behavior changes, see [Wiki Documentation Touchpoints](../meta/wiki-documentation-touchpoints.md). For the git span integration that replaces SHA-pinned staleness detection, see [Wiki Mesh Integration](./wiki-mesh-integration.md).
 
 ## Fragment Link Parsing
 

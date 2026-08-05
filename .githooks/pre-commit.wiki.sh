@@ -1,6 +1,6 @@
 #!/bin/bash
 # Single wiki concern, single invocation:
-#   wiki check --fix creates/renames git meshes for uncovered fragment links and
+#   wiki check --fix creates/renames git spans for uncovered fragment links and
 #   auto-fixes drifted wiki links/anchors/frontmatter in the working tree.
 # --no-exit-code makes this best-effort: the hook never aborts a commit.
 # --print-applied routes created/renamed mesh paths to stdout; everything else

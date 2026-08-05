@@ -32,7 +32,7 @@ impl MeshIndex {
         // is the whole-file sentinel (0-0) or contains the link range
         // (`anchor.start <= start && end <= anchor.end`). Containment (rather
         // than exact-range matching) keeps `wiki check --fix` from re-splitting
-        // ranges that `git mesh stale --fix` has already coalesced.
+        // ranges that `git span drift --fix` has already coalesced.
         let normalized = normalize_path(code_path);
         let Some(entries) = self.by_anchor.get(&normalized) else {
             return false;

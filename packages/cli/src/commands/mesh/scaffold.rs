@@ -1013,7 +1013,7 @@ pub(crate) fn normalize_heading_text(s: &str) -> String {
 /// meshes (in per-page declaration order) ready for shell rendering.
 /// Coalesce overlapping or contiguous line-range anchors on the same path into
 /// one covering anchor, matching `git-mesh-core`'s coalesce_line_ranges so
-/// `wiki check --fix` and `git mesh stale --fix` settle on a byte-identical
+/// `wiki check --fix` and `git span drift --fix` settle on a byte-identical
 /// fixed point.
 ///
 /// Whole-file anchors (`0-0`) are inert — they are never merged and pass
@@ -2657,7 +2657,7 @@ mod tests {
     /// on the same path within a section — matching `git-mesh-core`'s rule (merge
     /// when `next.start <= current.end + 1`). Without coalescing, a section linking
     /// `card.ts#L69-L95`, `card.ts#L75-L75`, `card.ts#L81-L81` emits three
-    /// separate anchors that `git mesh stale --fix` re-collapses into one
+    /// separate anchors that `git span drift --fix` re-collapses into one
     /// `card.ts#L69-L95`, so the two tools oscillate forever.
     #[test]
     fn build_meshes_coalesces_overlapping_ranges_per_path() {

@@ -1,17 +1,17 @@
 ---
 title: Wiki Mesh Integration
-summary: Design for wiki check and wiki check --fix — commands that bridge wiki fragment links with git mesh drift detection.
+summary: Design for wiki check and wiki check --fix — commands that bridge wiki fragment links with git span drift detection.
 tags:
   - tooling
   - git-mesh
 ---
 
-Wiki fragment links (`[label](path#L10-L20)`) are navigation — they point at code but carry no staleness signal of their own. The mesh integration closes that gap by requiring every fragment link to have a corresponding [git mesh](https://github.com/git-mesh/git-mesh) anchor. `git mesh` then handles drift detection independently: when anchored content changes, `git mesh stale` reports it.
+Wiki fragment links (`[label](path#L10-L20)`) are navigation — they point at code but carry no staleness signal of their own. The mesh integration closes that gap by requiring every fragment link to have a corresponding [git span](https://github.com/git-mesh/git-mesh) anchor. `git span` then handles drift detection independently: when anchored content changes, `git span drift` reports it.
 
 Two commands implement this:
 
 - **`wiki check`** — validates that each fragment link has a covering mesh anchor; fails if any are missing.
-- **`wiki check --fix`** — in addition to repairing drifted links, anchors, and frontmatter, creates git meshes for all fragment links not yet covered by a mesh.
+- **`wiki check --fix`** — in addition to repairing drifted links, anchors, and frontmatter, creates git spans for all fragment links not yet covered by a mesh.
 
 ## wiki check
 
@@ -21,9 +21,9 @@ wiki check wiki/architecture/*.md
 wiki check "packages/auth/**/*.md"
 ```
 
-Extends the existing `wiki check` validation pass with a [mesh coverage check](/packages/cli/src/commands/mesh_coverage.rs#L102-L106). For each internal fragment link with a line range, it [reads the `.wiki/` mesh store in-process](/packages/cli/src/commands/mesh_coverage.rs#L237-L241) (via `store::read_all_tolerant` — it never shells out to `git mesh`) and [verifies that some mesh anchors both the link's code range and the wiki file](/packages/cli/src/commands/mesh_coverage.rs#L46-L50) containing the link. Any uncovered link is [reported as a `mesh_uncovered` error](/packages/cli/src/commands/mesh_coverage.rs#L211-L220) (which drives a non-zero exit).
+Extends the existing `wiki check` validation pass with a [mesh coverage check](/packages/cli/src/commands/mesh_coverage.rs#L102-L106). For each internal fragment link with a line range, it [reads the `.wiki/` mesh store in-process](/packages/cli/src/commands/mesh_coverage.rs#L237-L241) (via `store::read_all_tolerant` — it never shells out to `git span`) and [verifies that some mesh anchors both the link's code range and the wiki file](/packages/cli/src/commands/mesh_coverage.rs#L46-L50) containing the link. Any uncovered link is [reported as a `mesh_uncovered` error](/packages/cli/src/commands/mesh_coverage.rs#L211-L220) (which drives a non-zero exit).
 
-Mesh coverage is always on; `git mesh` must be installed or `wiki check` fails fast. Glob targeting follows the same rules as bare `wiki check`: a markdown file is treated as a wiki page only when its frontmatter has both a non-empty `title` and `summary`; omitting globs walks all `.md` files under `$WIKI_DIR` (defaulting to `wiki`) applying that filter.
+Mesh coverage is always on; `git span` must be installed or `wiki check` fails fast. Glob targeting follows the same rules as bare `wiki check`: a markdown file is treated as a wiki page only when its frontmatter has both a non-empty `title` and `summary`; omitting globs walks all `.md` files under `$WIKI_DIR` (defaulting to `wiki`) applying that filter.
 
 ## wiki check --fix (mesh coverage)
 
@@ -33,7 +33,7 @@ wiki check --fix wiki/architecture/*.md
 wiki check --fix "packages/auth/**/*.md"
 ```
 
-[Scans the same file set as `wiki check`](/packages/cli/src/commands/mesh/scaffold.rs#L164-L171) and creates a `git mesh` for every fragment link not yet covered. Runs as Fix #4 within the `--fix` pipeline, after link and anchor repairs. The meshes are created with anchors only (no why); the author is expected to add a `git mesh why` before or after committing (see [Adding Mesh Coverage](../guides/adding-mesh-coverage.md)).
+[Scans the same file set as `wiki check`](/packages/cli/src/commands/mesh/scaffold.rs#L164-L171) and creates a `git span` for every fragment link not yet covered. Runs as Fix #4 within the `--fix` pipeline, after link and anchor repairs. The meshes are created with anchors only (no why); the author is expected to add a `git span why` before or after committing (see [Adding Mesh Coverage](../guides/adding-mesh-coverage.md)).
 
 ### Mesh naming
 
@@ -46,7 +46,7 @@ Names are topical, not path-derived: one wiki page will typically produce severa
 
 ### Why generation
 
-When `--fix` creates a mesh, the `why` is extracted from the prose sentence containing the link, with all markdown syntax stripped. This produces a first-draft definition of the subsystem the anchors collectively form. Per the git mesh handbook:
+When `--fix` creates a mesh, the `why` is extracted from the prose sentence containing the link, with all markdown syntax stripped. This produces a first-draft definition of the subsystem the anchors collectively form. Per the git span handbook:
 
 > Write the **why** as a definition: name the subsystem the anchors collectively form and say plainly what it does across them.
 
@@ -84,8 +84,8 @@ wiki check
 # 2. Create mesh coverage in one pass
 wiki check --fix
 
-# 3. Review auto-created meshes; add git mesh why for each
-git mesh why wiki/<slug> -m "Definition of what this mesh covers."
+# 3. Review auto-created meshes; add git span why for each
+git span why wiki/<slug> -m "Definition of what this mesh covers."
 
 # 4. Validate coverage
 wiki check
