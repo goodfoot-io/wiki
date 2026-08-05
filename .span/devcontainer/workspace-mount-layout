@@ -1,6 +1,6 @@
 .devcontainer/Dockerfile#L55-L69 rk64:d1b424597ba721b6
 .devcontainer/devcontainer.json#L5-L47 rk64:93cbe5b4450391b8
-.devcontainer/docker-compose.yml#L11-L16 rk64:91d94fe827c8e23c
+.devcontainer/docker-compose.yml#L16-L21 rk64:91d94fe827c8e23c
 .devcontainer/post-create.sh#L6-L8 rk64:04fbe4df6eb60128
 
 Devcontainer filesystem layout that all four config files must agree on: the repo binds to /workspace (devcontainer.json workspaceFolder/workspaceMount/.git mount/PATH, Dockerfile mkdir+WORKDIR+YARN_* paths, docker-compose ..:/workspace bind, post-create utilities path) and /home/node is a host-backed bind mount persisting the toolchain and config across rebuilds. Diverge any one site and VSCode opens the wrong folder or scripts resolve dead paths, with nothing mechanical to catch it.
