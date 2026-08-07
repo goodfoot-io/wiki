@@ -1,72 +1,54 @@
 {
   "env": {
-    "MAX_MCP_OUTPUT_TOKENS": "100000",
-    "CLAUDE_CODE_NO_FLICKER": "1",
-    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "100000",
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
-    "CLAUDE_CODE_API_HOOKS_LOG_FILE": "/workspace/.cards/logs/claude-code-cards-api-hooks.log",
-    "CARDS_CLAUDE_CODE_HOOKS_LOG_FILE": "/home/node/wiki/.cards/logs/claude-code-cards-api-hooks.log"
+    "VOICE_SERVER_HTTP_PORT": "5555",
+    "VOICE_SERVER_START_BY_DEFAULT": "0",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "250000"
+  },
+  "attribution": {
+    "commit": "",
+    "pr": "",
+    "sessionUrl": false
   },
   "permissions": {
     "allow": [],
     "deny": [
-      "NotebookRead",
-      "NotebookEdit",
       "EnterPlanMode",
       "ExitPlanMode",
-      "EnterWorktree",
-      "ExitWorktree",
-      "LSP",
-      "Read(.worktrees/)",
-      "Read(./packages/extension/dist/)"
+      "DesignSync",
+      "NotebookEdit",
+      "PushNotification",
+      "RemoteTrigger",
+      "ReportFindings"
     ],
     "defaultMode": "bypassPermissions",
     "disableAutoMode": "disable"
   },
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "printf '\\a'"
-          }
-        ]
-      }
-    ]
+  "disableClaudeAiConnectors": true,
+  "disableBundledSkills": true,
+  "worktree": {
+    "bgIsolation": "none"
   },
+  "disableWorkflows": true,
+  "disableArtifact": false,
   "enabledPlugins": {
-    "typescript-lsp@claude-plugins-official": false,
+    "typescript-lsp@claude-plugins-official": true,
     "typescript-hooks@goodfoot": true,
-    "typescript-claude-code-for-web-setup@goodfoot": false,
-    "project@goodfoot": false,
-    "vscode@goodfoot": true,
     "goodfoot@goodfoot": true,
     "jsdoczoom@goodfoot": true,
-    "expansion@goodfoot": true,
-    "browser@goodfoot": true,
-    "github@goodfoot": false,
-    "code-simplifier@claude-plugins-official": false,
-    "impeccable@impeccable": false,
     "frontend-design@claude-plugins-official": false,
-    "plugin-dev@claude-plugins-official": true,
-    "claude-code-hooks@goodfoot": true,
-    "last30days@last30days-skill": false,
+    "plugin-dev@claude-plugins-official": false,
+    "claude-code-hooks@goodfoot": false,
+    "codex-hooks@goodfoot": false,
+    "git-span@git-span": true,
     "wiki@goodfoot-wiki": true,
-    "cards@cards.management": true,
-    "git-span@git-span": true
+    "cards-sdk@cards.management": true
   },
   "extraKnownMarketplaces": {
-    "last30days-skill": {
+    "git-span": {
       "source": {
         "source": "github",
-        "repo": "mvanhorn/last30days-skill"
-      }
-    },
-    "impeccable": {
-      "source": {
-        "source": "github",
-        "repo": "pbakaus/impeccable"
+        "repo": "goodfoot-io/git-span"
       }
     },
     "goodfoot": {
@@ -86,18 +68,9 @@
         "source": "directory",
         "path": "/home/node/wiki"
       }
-    },
-    "cards.management": {
-      "source": {
-        "source": "directory",
-        "path": "/home/node/.vscode-server/data/User/globalStorage/goodfoot.cards/marketplace"
-      }
-    },
-    "git-span": {
-      "source": {
-        "source": "github",
-        "repo": "goodfoot-io/git-span"
-      }
     }
-  }
+  },
+  "effortLevel": "medium",
+  "askUserQuestionTimeout": "never",
+  "autoMemoryEnabled": false
 }
