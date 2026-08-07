@@ -1,0 +1,4 @@
+.claude/agents/design-critic.md rk64:eb4cdf543db4d372
+.claude/skills/browser/SKILL.md rk64:a2b91373b8249257
+
+design-critic.md invokes the browser skill by its `name: browser` frontmatter identifier; renaming that identifier in SKILL.md silently breaks the agent's Load instruction with no compiler or test catching it.

@@ -1,0 +1,4 @@
+.claude/skills/browser/SKILL.md rk64:a2b91373b8249257
+.claude/skills/browser/bin/install-agent-browser.sh rk64:6f7172abe534e005
+
+SKILL.md documents `bash bin/install-agent-browser.sh` as the setup command relative to the skill's base directory; moving or renaming the script breaks that documented path with nothing mechanical to catch it.
