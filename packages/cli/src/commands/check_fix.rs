@@ -2492,6 +2492,46 @@ pub fn run_fix_pass(
     // `--print-applied`. Extended into `mesh.applied` once `mesh` exists below.
     let mut anchor_refresh_applied: Vec<String> = Vec::new();
 
+    // ── Fix #2c: relocate move plans with no citing wiki link ────────────────
+    //
+    // Fix #2 above only calls `store::relocate_anchor` for a move plan when
+    // some wiki page's markdown link href literally cites the plan's exact
+    // OLD (path, start, end) with a line-range fragment. Mesh anchors do not
+    // have to correspond to a literal markdown link — they can encode
+    // code-to-code or other implicit couplings — so a confidently single-hit
+    // move plan with no citing link never gets applied via Fix #2, and the
+    // mesh's stored anchor coordinates/hash stay stale forever even though
+    // `wiki check --fix` reports a clean run.
+    //
+    // Walk every plan in `move_plans` (not just the ones reachable via a
+    // citing link) and relocate it unconditionally. `store::relocate_anchor`
+    // looks up the anchor by its OLD (path, start, end) and is a no-op
+    // (`Ok(false)`) when no matching anchor is found, so calling it again for
+    // a plan already relocated by the link loop above is harmless — that
+    // anchor's coordinates have already changed, so the old-key lookup simply
+    // won't match. This mirrors the "moved anchors are intentionally silent"
+    // design used for whitespace-only auto-refresh below: a confidently
+    // single-hit move is kept in sync without being surfaced as a
+    // diagnostic/skipped fix.
+    if !dry_run {
+        for p in &move_plans {
+            let relocated = store::relocate_anchor(
+                repo_root,
+                &p.mesh_name,
+                &p.old_path.to_string_lossy(),
+                p.old_start,
+                p.old_end,
+                &p.new_path.to_string_lossy(),
+                p.new_start,
+                p.new_end,
+            )?;
+            let applied = format!(".wiki/{}", p.mesh_name);
+            if relocated && !anchor_refresh_applied.contains(&applied) {
+                anchor_refresh_applied.push(applied);
+            }
+        }
+    }
+
     for d in &drifted {
         let anchor_arg = if d.start == 0 {
             d.path.clone()
