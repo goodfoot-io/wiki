@@ -2977,6 +2977,148 @@ mod tests {
         );
     }
 
+    /// Reproduces the silent-under-report bug: a stale anchor whose stored
+    /// content is found at exactly one other location in its own file (a
+    /// genuine single-hit "move") is classified into `plan_mesh_follows`'s
+    /// `plans` (auto-follow candidate), never into `drifted`. `run_fix_pass`'s
+    /// Fix #2 loop only calls `store::relocate_anchor` for a plan when some
+    /// wiki page's markdown link href literally cites the anchor's exact old
+    /// `(path, start, end)` — see the `eligible.get(&(resolved.clone(),
+    /// old_start, old_end))` lookup around check_fix.rs:2173. A mesh anchor is
+    /// not required to correspond to a literal markdown link (mesh anchors can
+    /// couple code-to-code), so when no such link exists the plan is computed
+    /// but never applied, and — because it was classified as a move plan, not
+    /// drift — it is also never surfaced as a diagnostic, a `SkippedFix`, or
+    /// counted in `anchor_stale_count`. `wiki check --fix` therefore reports
+    /// success while the mesh's stored anchor keeps its stale coordinates and
+    /// hash forever, even though `wiki mesh show` (mesh/manage.rs::show,
+    /// which independently re-hashes the anchor's *stored* coordinates with no
+    /// move-follow exemption) would correctly report it STALE.
+    #[test]
+    fn plan_mesh_follows_orphans_single_hit_move_without_citing_link() {
+        use crate::commands::mesh::store;
+        use git_mesh_core::AnchorExtent;
+        use git_mesh_core::mesh_file::MeshFile;
+
+        let repo = TestRepo::new();
+
+        // Code file with a distinctive block at lines 1-3.
+        repo.write("src/lib.rs", "fn foo() {\n    42\n}\n");
+        // A wiki page exists in the repo, but it does NOT cite this anchor's
+        // line range anywhere — no markdown link's href fragment matches
+        // (src/lib.rs, 1, 3).
+        repo.write(
+            "wiki/page.md",
+            &wiki_page("Page", "Unrelated content; no link to src/lib.rs here.\n"),
+        );
+        repo.commit("seed");
+
+        // Mesh anchors ONLY the code block (a code-to-code style coupling —
+        // mesh anchors need not correspond to a literal markdown link).
+        let code_extent = AnchorExtent::LineRange { start: 1, end: 3 };
+        let mut cache = store::FileContentCache::new();
+        let code_hash =
+            store::hash_anchor(repo.path(), "src/lib.rs", code_extent, &mut cache).unwrap();
+        let code_anchor =
+            store::anchor_record("src/lib.rs".to_string(), code_extent, code_hash);
+        let mesh = MeshFile {
+            anchors: vec![code_anchor],
+            why: "code-to-code coupling with no citing markdown link".to_string(),
+        };
+        store::write(repo.path(), "orphan-mesh", &mesh).unwrap();
+        repo.commit("add mesh");
+
+        // Shift the anchored block down by one line: the original block at
+        // lines 1-3 now lives at lines 2-4 — a genuine single-hit move
+        // (own_hits total == 1), byte-for-byte recoverable.
+        repo.write("src/lib.rs", "// header\nfn foo() {\n    42\n}\n");
+        // Leave uncommitted (dirty) so `plan_mesh_follows` actually runs.
+
+        // Confirm the hypothesis: this classifies as a move plan, NOT drift.
+        let outcome = plan_mesh_follows(repo.path(), crate::index::DocSource::WorkingTree)
+            .expect("plan");
+        assert!(
+            outcome.drifted.is_empty(),
+            "expected the single-hit move to classify as a plan, not drift; got drifted={:?}",
+            outcome.drifted
+        );
+        assert_eq!(
+            outcome.plans.len(),
+            1,
+            "expected exactly one auto-follow move plan for the shifted anchor; got {:?}",
+            outcome.plans
+        );
+
+        // Run `wiki check --fix`. Since no markdown link anywhere cites the
+        // anchor's exact old (path, start, end), Fix #2's link-rewrite loop
+        // never finds this plan in `eligible`, so `store::relocate_anchor` is
+        // never invoked for it.
+        let wiki_abs = repo.path().join("wiki/page.md");
+        let lib_abs = repo.path().join("src/lib.rs");
+        let mut content_cache = ContentCache::new();
+        let plan = run_fix_pass(
+            &[wiki_abs, lib_abs],
+            repo.path(),
+            repo.path(),
+            &[],
+            crate::index::DocSource::WorkingTree,
+            /* dry_run */ false,
+            &mut content_cache,
+            None,
+        )
+        .expect("fix pass");
+
+        // Sanity check on the bug's visible symptom: `--fix` reports nothing
+        // for this anchor at all (no fix applied, nothing counted as stale).
+        assert!(
+            plan.fixes.is_empty() && plan.anchor_stale_count == 0,
+            "sanity check on current (buggy) behavior: expected a fully silent \
+             --fix run for this anchor; got fixes={:?} anchor_stale_count={}",
+            plan.fixes,
+            plan.anchor_stale_count,
+        );
+
+        // The actual bug assertion: read the mesh back and recompute
+        // freshness exactly as `wiki mesh show` does (mesh/manage.rs::show) —
+        // hash the anchor's STORED coordinates against current content, with
+        // no move-follow exemption. After a `--fix` run that reported success
+        // (no fixes, no skips, anchor_stale_count == 0), the stored anchor
+        // should no longer be stale. It still is, because the move-plan
+        // above was computed but never applied (no citing markdown link) and
+        // never reported as drift (it was classified as an auto-follow
+        // candidate instead) — so this fails against the current code.
+        let stored = store::read_one(repo.path(), "orphan-mesh")
+            .unwrap()
+            .expect("mesh still exists");
+        let stored_anchor = &stored.anchors[0];
+        let mut verify_cache = store::FileContentCache::new();
+        let current_hash = store::hash_anchor(
+            repo.path(),
+            &stored_anchor.path,
+            AnchorExtent::LineRange {
+                start: stored_anchor.start_line,
+                end: stored_anchor.end_line,
+            },
+            &mut verify_cache,
+        )
+        .unwrap();
+
+        assert_eq!(
+            current_hash, stored_anchor.content_hash,
+            "mesh anchor `orphan-mesh` at {}#L{}-L{} is STILL STALE after `wiki check --fix` \
+             reported a clean run (fixes={:?}, anchor_stale_count={}) — the move-plan was \
+             computed (asserted above) but never applied because no markdown link cited the \
+             exact old (path, start, end), and it was never reported as drift because it was \
+             classified as an auto-follow candidate instead of drift. `wiki mesh show \
+             orphan-mesh` would independently and correctly report this anchor STALE.",
+            stored_anchor.path,
+            stored_anchor.start_line,
+            stored_anchor.end_line,
+            plan.fixes,
+            plan.anchor_stale_count,
+        );
+    }
+
     // ── mesh staleness fixture (shared with phase-2 move/conflict tests) ─────
 
     /// Build a git repo with a `.wiki/` mesh whose anchor points at `src/lib.rs`
