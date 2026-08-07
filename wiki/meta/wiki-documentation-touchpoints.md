@@ -19,8 +19,7 @@ The primary source of truth for top-level CLI behavior is the [Clap configuratio
 
 These files are the public guidance surfaces most likely to drift when the CLI contract changes:
 
-- The [repository `CLAUDE.md` wiki instructions](/CLAUDE.md#L83-L94) shape how agents in this workspace are told to search and read wiki content.
-- The [wiki skill instructions](/plugins/wiki/skills/wiki/SKILL.md) are the highest-leverage agent workflow contract for discovering pages, choosing where to write, validating fragment links, and updating related pages.
+- The [wiki skill instructions](/plugins/wiki/skills/wiki/SKILL.md) are the highest-leverage agent workflow contract for discovering pages, choosing where to write, validating fragment links, and updating related pages — `CLAUDE.md` itself no longer carries wiki-specific instructions.
 - The [advanced usage page](../reference/wiki-cli-advanced-usage.md) holds the less common CLI behaviors such as stdin handling, file paths, explicit glob targeting, and JSON output.
 - The [feedback log](./wiki-feedback.md) is where observed friction from doc or CLI mismatches should be recorded after the change is understood.
 
@@ -37,10 +36,9 @@ The [wiki skill's skipped-fix resolution section](/plugins/wiki/skills/wiki/sect
 When wiki documentation behavior changes, use this order:
 
 1. Confirm the implementation in [CLI parsing and dispatch](/packages/cli/src/main.rs#L31-L87) and [top-level command routing](/packages/cli/src/main.rs#L365-L456).
-2. Update the primary user docs in [CLAUDE.md](/CLAUDE.md#L83-L94).
-3. Update the agent workflow contract in [the wiki skill](/plugins/wiki/skills/wiki/SKILL.md).
-4. Update secondary references such as [Wiki CLI Advanced Usage](../reference/wiki-cli-advanced-usage.md), [Wiki CLI Feedback](./wiki-feedback.md), and [the Gemini maintenance example](/examples/githooks/scripts/gemini-wiki-gap-detection.sh).
-5. Run `wiki check --fix` on the touched pages so the fragment links pin.
+2. Update the agent workflow contract in [the wiki skill](/plugins/wiki/skills/wiki/SKILL.md).
+3. Update secondary references such as [Wiki CLI Advanced Usage](../reference/wiki-cli-advanced-usage.md), [Wiki CLI Feedback](./wiki-feedback.md), and [the Gemini maintenance example](/examples/githooks/scripts/gemini-wiki-gap-detection.sh).
+4. Run `wiki check --fix` on the touched pages so the fragment links pin.
 
 ## References
 
