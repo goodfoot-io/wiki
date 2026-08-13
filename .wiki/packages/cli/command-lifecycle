@@ -1,4 +1,5 @@
 packages/cli/logging.wiki.md#L20-L24 rk64:aaaaf360781d69c2
-packages/cli/src/main.rs#L351-L354 rk64:406b0977e4e16869
-packages/cli/src/main.rs#L366-L369 rk64:97e8273eb8a6574f
+packages/cli/src/main.rs#L358-L361 rk64:406b0977e4e16869
+packages/cli/src/main.rs#L366-L369 rk64:30e4d736c425bb33
+packages/cli/src/main.rs#L372-L375 rk64:97e8273eb8a6574f
 

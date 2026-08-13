@@ -1,5 +1,5 @@
 packages/cli/src/commands/mesh/manage.rs rk64:8a8aa5b78afd0dd1
-packages/cli/src/main.rs#L169-L259 rk64:7d880839673650df
+packages/cli/src/main.rs#L175-L265 rk64:7d880839673650df
 plugins/wiki/skills/wiki/sections/command-reference.md rk64:08f913c7b67d671a
 
 The wiki mesh command surface (show/add/remove/merge): its clap definition and dispatch in main.rs, its implementation in manage.rs, and its documentation in the command-reference.md handbook section must all agree on verbs, flags, and semantics.

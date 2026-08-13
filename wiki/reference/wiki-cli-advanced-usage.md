@@ -56,11 +56,24 @@ When multiple inputs are provided via stdin, the exit code reflects the worst re
 
 ## Targeting Specific Files
 
-All commands accept explicit glob patterns instead of scanning [the current working directory](/packages/cli/src/main.rs#L374-L377):
+All commands accept explicit glob patterns instead of scanning [the current working directory](/packages/cli/src/main.rs#L380-L383):
 
 ```bash
 wiki check wiki/some-section/**/*.md
 ```
+
+## Excluding Non-Wiki Files
+
+[`.wiki/.wikiignore`](/packages/cli/src/wikiignore.rs) excludes paths from `wiki check` entirely — before frontmatter parsing, link validation, or mesh-coverage checks ever run. It lives at `.wiki/.wikiignore` (repo root), uses gitignore syntax, and patterns are matched relative to the repository root. Every discovery path — [`discover_files`](/packages/cli/src/commands/mod.rs#L202-L276), [`discover_files_by_parallel_walk`](/packages/cli/src/commands/mod.rs#L541-L613), and [`discover_files_by_glob_in_source`](/packages/cli/src/commands/mod.rs#L458-L493) — consults it before any file is treated as a wiki page, for `--source=worktree`, `index`, and `head` alike, and regardless of whether an explicit glob is passed.
+
+This is the escape hatch for Markdown that lives in the repo but isn't a wiki page — agent instructions, changelogs, vendored docs — so it never needs frontmatter and never counts against link or mesh-coverage validation.
+
+```bash
+# .wiki/.wikiignore
+CLAUDE.md
+```
+
+With that entry in place, `wiki check CLAUDE.md` (or a glob that happens to match it, e.g. `wiki check '**/*.md'`) skips the file silently instead of failing with a missing-frontmatter diagnostic.
 
 ## JSON Output
 

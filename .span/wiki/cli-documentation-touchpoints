@@ -1,5 +1,5 @@
 packages/cli/src/main.rs#L31-L87 rk64:5d2fc566cc638adc
-packages/cli/src/main.rs#L365-L456 rk64:0adba297091943b1
+packages/cli/src/main.rs#L371-L462 rk64:0adba297091943b1
 wiki/meta/wiki-documentation-touchpoints.md#L16-L39 rk64:34305b14f58f8ee4
 
 Maintenance map that ties the wiki CLI command surface (clap config and top-level dispatch in main.rs) to the operator-facing documents that must be revisited when that surface changes.

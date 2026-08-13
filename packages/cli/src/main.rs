@@ -112,6 +112,12 @@ enum Commands {
     /// - Diverged `--why` rationale: anchors resolve cleanly but the
     ///   why line retains "<<<<<<<" / ">>>>>>>" markers for manual
     ///   reconciliation. In both cases the mesh is NOT re-staged.
+    ///
+    /// Files matched by `.wiki/.wikiignore` (gitignore-syntax, one
+    /// pattern per line, matched relative to the repo root) are
+    /// excluded from discovery entirely, before frontmatter or link
+    /// validation ever runs. Use it to keep non-wiki Markdown (e.g.
+    /// `CLAUDE.md`) out of `wiki check`.
     Check {
         /// Glob patterns to match wiki pages (default: `**/*.md` under the current directory)
         #[arg(value_name = "glob")]

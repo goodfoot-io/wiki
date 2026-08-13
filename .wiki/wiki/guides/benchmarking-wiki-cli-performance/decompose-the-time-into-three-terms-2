@@ -3,8 +3,9 @@ packages/cli/src/index/freshness.rs#L143-L147 rk64:ed07e862e24878a3
 packages/cli/src/index/freshness.rs#L152-L207 rk64:89dd5e06bf1506f6
 packages/cli/src/index/mod.rs#L247-L247 rk64:97aefce64ad77fa6
 packages/cli/src/index/mod.rs#L324-L330 rk64:3419a2a9bdd8f21d
-packages/cli/src/main.rs#L373-L391 rk64:08557e7661844388
-packages/cli/src/main.rs#L374-L391 rk64:8a99a8423e47f4c7
-packages/cli/src/main.rs#L384-L390 rk64:f4899370093f41d7
+packages/cli/src/main.rs#L373-L391 rk64:5c8390fa4773deff
+packages/cli/src/main.rs#L379-L397 rk64:08557e7661844388
+packages/cli/src/main.rs#L380-L397 rk64:8a99a8423e47f4c7
+packages/cli/src/main.rs#L390-L396 rk64:f4899370093f41d7
 wiki/guides/benchmarking-wiki-cli-performance.md#L75-L90 rk64:5d6d65cd687a884c
 

@@ -929,7 +929,7 @@ fn collect_for_files(
                         file: path.display().to_string(),
                         line: 1,
                         message:
-                            "Add a `---` frontmatter block. `title` and `summary` are required."
+                            "Add a `---` frontmatter block (`title` and `summary` are required), or add this path to `.wiki/.wikiignore` if it isn't a wiki page."
                                 .into(),
                     });
                 }

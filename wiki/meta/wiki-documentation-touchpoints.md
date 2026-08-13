@@ -13,7 +13,7 @@ For the CLI architecture itself, see [Wiki CLI](../architecture/wiki-cli.md). Fo
 
 ## Command Behavior Source Of Truth
 
-The primary source of truth for top-level CLI behavior is the [Clap configuration and dispatch in `packages/cli/src/main.rs`](/packages/cli/src/main.rs#L31-L87). That block defines the help text, the `query` positional argument, and the wiring to the reserved subcommand set. The [top-level `run(...)` match in the same file](/packages/cli/src/main.rs#L365-L456) is what decides that bare `wiki [query]` executes ranked lookup rather than page printing.
+The primary source of truth for top-level CLI behavior is the [Clap configuration and dispatch in `packages/cli/src/main.rs`](/packages/cli/src/main.rs#L31-L87). That block defines the help text, the `query` positional argument, and the wiring to the reserved subcommand set. The [top-level `run(...)` match in the same file](/packages/cli/src/main.rs#L371-L462) is what decides that bare `wiki [query]` executes ranked lookup rather than page printing.
 
 ## Operator-Facing Documentation
 
@@ -35,7 +35,7 @@ The [wiki skill's skipped-fix resolution section](/plugins/wiki/skills/wiki/sect
 
 When wiki documentation behavior changes, use this order:
 
-1. Confirm the implementation in [CLI parsing and dispatch](/packages/cli/src/main.rs#L31-L87) and [top-level command routing](/packages/cli/src/main.rs#L365-L456).
+1. Confirm the implementation in [CLI parsing and dispatch](/packages/cli/src/main.rs#L31-L87) and [top-level command routing](/packages/cli/src/main.rs#L371-L462).
 2. Update the agent workflow contract in [the wiki skill](/plugins/wiki/skills/wiki/SKILL.md).
 3. Update secondary references such as [Wiki CLI Advanced Usage](../reference/wiki-cli-advanced-usage.md), [Wiki CLI Feedback](./wiki-feedback.md), and [the Gemini maintenance example](/examples/githooks/scripts/gemini-wiki-gap-detection.sh).
 4. Run `wiki check --fix` on the touched pages so the fragment links pin.
