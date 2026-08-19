@@ -460,6 +460,13 @@ struct CertifiedLink {
     fragment: String,
 }
 
+/// True when `content` contains at least one line-range fragment link — the
+/// population the whole-page certification covers. Pages without one need no
+/// `links-reviewed:` field: there is nothing to vouch for.
+pub fn has_line_range_links(content: &str) -> bool {
+    !parse_line_range_links(content).is_empty()
+}
+
 /// Parse every line-range fragment link in `content`, in document order.
 /// Plain paths and heading-slug fragments are outside this system's scope.
 fn parse_line_range_links(content: &str) -> Vec<ParsedLink> {

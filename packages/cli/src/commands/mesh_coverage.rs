@@ -1,12 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-
-use crate::commands::resolve_link_path;
-use crate::parser::{LinkKind, parse_fragment_links};
-
-use super::check::{CheckDiagnostic, ContentCache};
-use super::locate_existing_suffix;
 use super::mesh::store;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -93,135 +87,6 @@ impl MeshIndex {
 
 // ── Public surface ────────────────────────────────────────────────────────────
 
-/// Collect `mesh_uncovered` diagnostics for the given wiki files.
-///
-/// Reads `.wiki/<slug>` files in-process via [`store::read_all_tolerant`]
-/// (skipping files that fail to parse), then performs all coverage lookups
-/// in memory. Coverage is always computed — there is no external binary to
-/// be unavailable.
-pub(super) fn collect_mesh_diagnostics(
-    files: &[PathBuf],
-    repo_root: &Path,
-    content_cache: &mut ContentCache,
-) -> Result<Vec<CheckDiagnostic>, miette::Error> {
-    let mut out: Vec<CheckDiagnostic> = Vec::new();
-
-    if files.is_empty() {
-        return Ok(out);
-    }
-
-    let rel_paths: Vec<PathBuf> = files
-        .iter()
-        .map(|p| {
-            p.strip_prefix(repo_root)
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|_| p.clone())
-        })
-        .collect();
-
-    let index = build_mesh_index(repo_root, &rel_paths)?.expect("always Some");
-
-    // Candidate `mesh_uncovered` diagnostics, deferred until after the
-    // gitignore filter is applied below.
-    struct Pending {
-        file: String,
-        line: usize,
-        link_path: String,
-        target: String,
-        start: u32,
-        end: u32,
-    }
-    let mut pending: Vec<Pending> = Vec::new();
-
-    for wiki_path in files {
-        let content = match content_cache
-            .get_or_try_read(wiki_path, || std::fs::read_to_string(wiki_path))
-        {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let wiki_rel = wiki_path
-            .strip_prefix(repo_root)
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|_| wiki_path.clone());
-
-        for link in parse_fragment_links(content) {
-            if link.kind == LinkKind::External {
-                continue;
-            }
-            let Some(start) = link.start_line else {
-                continue;
-            };
-            let end = link.end_line.unwrap_or(start);
-            let target = resolve_link_path(&link.path, wiki_path, repo_root);
-
-            // Apply locate_existing_suffix salvage to match the same path
-            // resolution that scaffold uses: when the resolved path doesn't
-            // exist on disk, peel back directory components to find an
-            // existing file whose suffix matches (e.g. the link path
-            // `deep/path/src/code.rs` resolves to `src/code.rs`).
-            let target = {
-                let target_str = target.to_string_lossy().replace('\\', "/");
-                locate_existing_suffix(&target_str, repo_root)
-                    .map_or(target, PathBuf::from)
-            };
-
-            // Skip if target is a directory (consistent with the missing_file check)
-            let abs_target = repo_root.join(&target);
-            if abs_target.is_dir() {
-                continue;
-            }
-
-            if !index.is_covered(&target, start, end, &wiki_rel) {
-                pending.push(Pending {
-                    file: wiki_path.display().to_string(),
-                    line: link.source_line,
-                    link_path: link.path.clone(),
-                    target: target.to_string_lossy().replace('\\', "/"),
-                    start,
-                    end,
-                });
-            }
-        }
-    }
-
-    // A fragment link into a gitignored path (a generated build artifact) is
-    // exempt from the mesh-coverage contract: a path git never sees cannot be
-    // anchored, so demanding coverage would be unsatisfiable and `wiki check`
-    // would fail closed forever. Mirrors the
-    // existing exemptions for external links and links without a line range.
-    // Untracked-but-not-ignored targets are NOT exempt — they resolve once
-    // committed, so a missing mesh for them is a real, fixable finding.
-    let candidate_targets: Vec<String> = pending.iter().map(|p| p.target.clone()).collect();
-    let ignored = crate::git::ignored_paths(repo_root, &candidate_targets)?;
-    // A fragment link into a wikiignored path is likewise exempt: the target is
-    // invisible at every wiki surface, so demanding mesh coverage for it would
-    // be unsatisfiable.
-    let wiki_ignore =
-        crate::wikiignore::WikiIgnore::load(repo_root).map_err(|e| miette::miette!("{e}"))?;
-
-    for p in pending {
-        if ignored.contains(&p.target) {
-            continue;
-        }
-        if wiki_ignore.is_ignored(Path::new(&p.target)) {
-            continue;
-        }
-        out.push(CheckDiagnostic {
-            kind: "mesh_uncovered".into(),
-            file: p.file,
-            line: p.line,
-            message: format!(
-                "fragment link `{}#L{}-L{}` has no covering mesh",
-                p.link_path, p.start, p.end
-            ),
-        });
-    }
-
-    Ok(out)
-}
-
 /// Build a `MeshIndex` by reading `.wiki/<slug>` files in-process via
 /// [`store::read_all_tolerant`] (skips files that fail to parse, e.g. due to
 /// git conflict markers).
@@ -231,9 +96,7 @@ pub(super) fn collect_mesh_diagnostics(
 /// `scaffold.rs` that previously handled `None` (binary missing) should treat
 /// `Some` as the only variant.
 ///
-/// Files that fail to parse are skipped and logged to stderr. In non-fix
-/// mode, `check.rs` independently detects and reports conflict-markered
-/// meshes so the fail-closed guarantee is preserved at the caller level.
+/// Files that fail to parse are skipped and logged to stderr.
 pub(crate) fn build_mesh_index(
     repo_root: &Path,
     _files: &[PathBuf],
@@ -423,38 +286,6 @@ mod tests {
     ///
     /// This test **fails** until `mesh_contains_anchor` (or its call site in
     /// `apply_section_extension`) adopts containment semantics.
-    #[test]
-    fn test_mesh_uncovered_exempts_wikiignored_target() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::process::Command::new("git")
-            .arg("init")
-            .arg("-q")
-            .current_dir(root)
-            .status()
-            .unwrap();
-        // A live wiki page with a fragment link into a wikiignored source file.
-        std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::write(root.join("src/foo.rs"), "fn a() {}\nfn b() {}\n").unwrap();
-        std::fs::create_dir_all(root.join("wiki")).unwrap();
-        std::fs::write(
-            root.join("wiki/page.md"),
-            "---\ntitle: Page\nsummary: P.\n---\n\n[foo](../src/foo.rs#L1-L2)\n",
-        )
-        .unwrap();
-        // No mesh covers src/foo.rs — without the exemption this is mesh_uncovered.
-        std::fs::create_dir_all(root.join(".wiki")).unwrap();
-        std::fs::write(root.join(".wiki/.wikiignore"), "src/foo.rs\n").unwrap();
-
-        let files = vec![root.join("wiki/page.md")];
-        let mut cache = ContentCache::new();
-        let diags = collect_mesh_diagnostics(&files, root, &mut cache).expect("collect");
-        assert!(
-            diags.iter().all(|d| d.kind != "mesh_uncovered"),
-            "wikiignored target must be exempt from mesh_uncovered: {diags:?}"
-        );
-    }
-
     #[test]
     fn mesh_contains_anchor_uses_containment_not_exact_match() {
         let dir = tempfile::tempdir().unwrap();

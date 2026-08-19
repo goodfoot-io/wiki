@@ -6,11 +6,11 @@ tags:
   - git-mesh
 ---
 
-Wiki fragment links (`[label](path#L10-L20)`) are navigation — they point at code but carry no staleness signal of their own. The mesh integration closes that gap by requiring every fragment link to have a corresponding [git span](https://github.com/git-mesh/git-mesh) anchor. `git span` then handles drift detection independently: when anchored content changes, `git span drift` reports it.
+Wiki fragment links (`[label](path#L10-L20)`) are navigation — they point at code but carry no staleness signal of their own. Read-only `wiki check` closes that gap with a git-history-derived [drift classification](/packages/cli/src/commands/drift.rs): every page with line-range links carries a `links-reviewed` certification, and each link is re-verified against the code content that certification recorded. The mesh integration covers the `--fix` side: `wiki check --fix` creates a corresponding [git span](https://github.com/git-mesh/git-mesh) anchor for every fragment link not yet covered by a mesh. `git span` then handles drift detection independently: when anchored content changes, `git span drift` reports it.
 
 Two commands implement this:
 
-- **`wiki check`** — validates that each fragment link has a covering mesh anchor; fails if any are missing.
+- **`wiki check`** — classifies each line-range link against its page's `links-reviewed` certification; Healthy links pass, and Uncertified, Drift, Broken, or unresolved links fail the check.
 - **`wiki check --fix`** — in addition to repairing drifted links, anchors, and frontmatter, creates git spans for all fragment links not yet covered by a mesh.
 
 ## wiki check
@@ -21,9 +21,9 @@ wiki check wiki/architecture/*.md
 wiki check "packages/auth/**/*.md"
 ```
 
-Extends the existing `wiki check` validation pass with a [mesh coverage check](/packages/cli/src/commands/mesh_coverage.rs#L102-L106). For each internal fragment link with a line range, it [reads the `.wiki/` mesh store in-process](/packages/cli/src/commands/mesh_coverage.rs#L237-L241) (via `store::read_all_tolerant` — it never shells out to `git span`) and [verifies that some mesh anchors both the link's code range and the wiki file](/packages/cli/src/commands/mesh_coverage.rs#L46-L50) containing the link. Any uncovered link is [reported as a `mesh_uncovered` error](/packages/cli/src/commands/mesh_coverage.rs#L211-L220) (which drives a non-zero exit).
+Classifies every internal fragment link with a line range through the [drift engine](/packages/cli/src/commands/drift.rs): the page's `links-reviewed` field selects its certification commit from git history, and each link's target range is compared against the content that certification recorded. Healthy links pass; Uncertified, Drift, Broken, and unresolved links are [reported as diagnostics](/packages/cli/src/commands/check.rs#L788) (`link_uncertified`, `link_drift`, `link_broken`, `link_unverified`), which drive a non-zero exit.
 
-Mesh coverage is always on; `git span` must be installed or `wiki check` fails fast. Glob targeting follows the same rules as bare `wiki check`: a markdown file is treated as a wiki page only when its frontmatter has both a non-empty `title` and `summary`; omitting globs walks all `.md` files under `$WIKI_DIR` (defaulting to `wiki`) applying that filter.
+The drift pass reads git history directly — no `git span` binary involved — and fails closed on shallow clones. Glob targeting follows the same rules as bare `wiki check`: a markdown file is treated as a wiki page only when its frontmatter has both a non-empty `title` and `summary`; omitting globs walks all `.md` files under `$WIKI_DIR` (defaulting to `wiki`) applying that filter.
 
 ## wiki check --fix (mesh coverage)
 
@@ -78,7 +78,7 @@ Use `wiki check --fix --fix-dry-run` to preview what would be created and any pl
 ## Workflow
 
 ```bash
-# 1. Check for uncovered links
+# 1. Check for drifted, broken, or uncertified links
 wiki check
 
 # 2. Create mesh coverage in one pass
@@ -87,7 +87,7 @@ wiki check --fix
 # 3. Review auto-created meshes; add git span why for each
 git span why wiki/<slug> -m "Definition of what this mesh covers."
 
-# 4. Validate coverage
+# 4. Re-run the check
 wiki check
 ```
 

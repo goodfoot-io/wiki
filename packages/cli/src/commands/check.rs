@@ -14,9 +14,7 @@ use crate::index::DocSource;
 use crate::parser::{LinkKind, parse_fragment_links};
 
 use super::check_fix;
-use super::locate_existing_suffix;
-use super::mesh::store;
-use super::mesh_coverage;
+use super::drift;
 
 /// Per-run content cache that avoids re-reading the same file from disk.
 ///
@@ -471,13 +469,14 @@ pub fn run(
     // pass, and the post-fix re-check.
     let mut content_cache = ContentCache::new();
 
-    let mut diagnostics = match collect_for_files(
+    let diagnostics = match collect_for_files(
         &files,
         &index_files,
         repo_root,
         source,
         git_reader.as_ref(),
         &mut content_cache,
+        !fix,
     ) {
         Ok(d) => d,
         Err(e) => {
@@ -489,94 +488,6 @@ pub fn run(
             return Ok(2);
         }
     };
-
-    // ── Conflict-marker detection (non-fix mode) ────────────────────────────
-    //
-    // `build_mesh_index` now uses `read_all_tolerant` which skips unparseable
-    // meshes instead of failing. In non-fix mode we need to detect and report
-    // conflicted meshes explicitly to preserve the fail-closed guarantee. In
-    // fix mode, the resolution pre-pass above already handled them.
-    if !fix {
-        match store::find_conflicted_meshes(repo_root) {
-            Ok(conflicted) => {
-                for (slug, _) in &conflicted {
-                    diagnostics.push(CheckDiagnostic {
-                        kind: "mesh_conflict".into(),
-                        file: format!(".wiki/{slug}"),
-                        line: 1,
-                        message: format!(
-                            "mesh `{slug}` has unresolved git conflict markers — run `wiki check --fix`"
-                        ),
-                    });
-                }
-            }
-            Err(e) => {
-                eprintln!("error: failed to scan for conflicted meshes: {e}");
-            }
-        }
-    }
-
-    // ── Anchor-staleness detection (non-fix mode) ───────────────────────────
-    //
-    // A cited anchor whose stored hash no longer matches its current content is
-    // stale. Moved anchors are intentionally silent in bare `wiki check` (their
-    // bytes are intact, only coordinates drifted — `--fix` auto-settles them).
-    // Only `outcome.drifted` (Changed/Deleted) drives a non-zero exit here.
-    if !fix {
-        match check_fix::plan_mesh_follows(repo_root, source) {
-            Ok(outcome) => {
-                for d in &outcome.drifted {
-                    let anchor_arg = if d.start == 0 {
-                        d.path.clone()
-                    } else {
-                        format!("{}#L{}-L{}", d.path, d.start, d.end)
-                    };
-                    let (description, fix_hint) = match &d.kind {
-                        check_fix::AnchorDriftKind::Changed { whitespace_only: true } => (
-                            "whitespace-only drift",
-                            "run `wiki check --fix` to re-anchor automatically".to_string(),
-                        ),
-                        check_fix::AnchorDriftKind::Changed { whitespace_only: false } => (
-                            "changed in place",
-                            format!("wiki mesh add {} {anchor_arg}", d.mesh_name),
-                        ),
-                        check_fix::AnchorDriftKind::Unrecoverable => (
-                            "drifted; pre-edit content unrecoverable (shallow clone or \
-                             history older than the scan limit), cannot auto-classify",
-                            format!("wiki mesh add {} {anchor_arg}", d.mesh_name),
-                        ),
-                        check_fix::AnchorDriftKind::Deleted => (
-                            "deleted or out of bounds",
-                            // wiki mesh remove drops the dead anchor; wiki mesh
-                            // add (optional) re-anchors the relocated content.
-                            // Order matters: remove first.
-                            format!(
-                                "wiki mesh remove {} {anchor_arg}\n  \
-                                 # then optionally: wiki mesh add {} <new-location>",
-                                d.mesh_name, d.mesh_name
-                            ),
-                        ),
-                    };
-                    diagnostics.push(CheckDiagnostic {
-                        kind: "anchor_stale".into(),
-                        file: format!(".wiki/{}", d.mesh_name),
-                        line: 0,
-                        message: format!(
-                            "anchor `{anchor_arg}` in mesh `{}` is stale ({description}); \
-                             re-anchor with:\n  {fix_hint}",
-                            d.mesh_name
-                        ),
-                    });
-                }
-            }
-            Err(e) => {
-                // Fail-closed: a staleness-check failure must not silently
-                // produce exit 0. exit 2 matches other runtime errors here.
-                eprintln!("error: anchor staleness check failed: {e}");
-                return Ok(2);
-            }
-        }
-    }
 
     // ── Fix pass (only in --fix mode) ────────────────────────────────────────
     if fix {
@@ -706,6 +617,10 @@ pub fn run(
             source,
             git_reader.as_ref(),
             &mut content_cache,
+            // Phase 2 flips this to true: the post-fix re-check then includes
+            // the drift pass, whose pending-bump rule keeps the just-applied
+            // fixes green.
+            false,
         ) {
             Ok(d) => d,
             Err(e) => {
@@ -810,6 +725,7 @@ pub fn collect_with_source(
         source,
         git_reader.as_ref(),
         &mut content_cache,
+        true,
     )
 }
 
@@ -859,8 +775,115 @@ fn hex_val(b: u8) -> Option<u8> {
 
 /// Cached content and parsed data for a single link target file.
 struct CachedTarget {
-    line_count: u32,
     headings: Vec<Heading>,
+}
+
+/// The drift pass (plan Decision 7): classify every line-range link on each
+/// in-scope page against the page's anchor epoch and emit one diagnostic per
+/// non-`Healthy`, non-`Moved` outcome. `Moved` is silent in read-only mode —
+/// the content is intact, only coordinates drifted, and `--fix` relocates it.
+/// A page with range links but no epoch anywhere is `anchor_epoch_missing`
+/// (fail-closed); epoch-resolution failures (shallow clone, git errors)
+/// propagate as hard errors (exit 2).
+fn collect_drift_diagnostics(
+    files: &[PathBuf],
+    repo_root: &Path,
+    source: DocSource,
+    git_reader: Option<&GitReader>,
+    content_cache: &mut ContentCache,
+) -> Result<Vec<CheckDiagnostic>> {
+    let mut out = Vec::new();
+    for path in files {
+        let content = match content_cache
+            .get_or_try_read(path, || read_via_source(path, repo_root, source, git_reader))
+        {
+            Ok(c) => c,
+            Err(_) => continue, // already reported by the main pass
+        };
+        if !drift::has_line_range_links(content) {
+            continue;
+        }
+        // The engine speaks repo-relative paths; `discover_files` hands us
+        // repo-root-joined (absolute) ones.
+        let page_path = path
+            .strip_prefix(repo_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let current_value = drift::extract_links_reviewed(content);
+        // The newest committed value is the page blob at HEAD; a page absent
+        // at HEAD (new file) has none.
+        let committed_value = match read_via_source(path, repo_root, DocSource::Head, git_reader) {
+            Ok(head_content) => drift::extract_links_reviewed(&head_content),
+            Err(_) => None,
+        };
+        let epoch = drift::find_anchor_commit(
+            repo_root,
+            &page_path,
+            current_value.as_deref(),
+            committed_value.as_deref(),
+        )
+        .map_err(|e| miette::miette!("{e}"))?;
+        if matches!(&epoch, drift::LinkEpoch::Missing) {
+            out.push(CheckDiagnostic {
+                kind: "anchor_epoch_missing".into(),
+                file: page_path.clone(),
+                line: 1,
+                message: "page has line-range links but no `links-reviewed:` frontmatter \
+                          value — run `wiki check --fix` to initialize it, or add the \
+                          field by hand"
+                    .into(),
+            });
+            continue;
+        }
+        let classes = drift::classify_page(repo_root, source, &page_path, content, &epoch)
+            .map_err(|e| miette::miette!("{e}"))?;
+        for c in classes {
+            let (kind, message) = match &c.outcome {
+                drift::DriftOutcome::Healthy | drift::DriftOutcome::Moved { .. } => continue,
+                drift::DriftOutcome::Uncertified => (
+                    "link_uncertified",
+                    format!(
+                        "line-range link `{}` was not present at the page's anchor epoch — \
+                         bump `links-reviewed:` after reviewing it",
+                        c.original_href
+                    ),
+                ),
+                drift::DriftOutcome::Drift => (
+                    "link_drift",
+                    format!(
+                        "content at `{}#L{}-L{}` changed since the anchor epoch — bump \
+                         `links-reviewed:` after reviewing it",
+                        c.target_path, c.start_line, c.end_line
+                    ),
+                ),
+                drift::DriftOutcome::Broken => (
+                    "link_broken",
+                    format!(
+                        "line-range link `{}` is broken: target `{}` is missing or the \
+                         line range no longer fits its current line count",
+                        c.original_href, c.target_path
+                    ),
+                ),
+                drift::DriftOutcome::Unknown => (
+                    "link_unverified",
+                    format!(
+                        "could not verify line-range link `{}`: the certified content \
+                         occurs at multiple locations — re-anchor the link and bump \
+                         `links-reviewed:`",
+                        c.original_href
+                    ),
+                ),
+            };
+            out.push(CheckDiagnostic {
+                kind: kind.into(),
+                file: page_path.clone(),
+                line: c.source_line,
+                message,
+            });
+        }
+    }
+    Ok(out)
 }
 
 fn collect_for_files(
@@ -870,6 +893,7 @@ fn collect_for_files(
     source: DocSource,
     git_reader: Option<&GitReader>,
     content_cache: &mut ContentCache,
+    drift_pass: bool,
 ) -> Result<Vec<CheckDiagnostic>> {
     let wiki_ignore =
         crate::wikiignore::WikiIgnore::load(repo_root).map_err(|e| miette::miette!("{e}"))?;
@@ -983,22 +1007,16 @@ fn collect_for_files(
             if link.original_href.starts_with("mailto:") {
                 continue;
             }
+            // Line-range links are the drift pass's sole authority (plan
+            // Decision 7): it classifies them against the page's anchor
+            // epoch — including its own target resolution and suffix
+            // salvage — so the generic pass must not report them.
+            if link.start_line.is_some() {
+                continue;
+            }
 
             let decoded_path = percent_decode(&link.path);
             let resolved = crate::commands::resolve_link_path(&decoded_path, path, repo_root);
-            // Apply suffix salvage for fragment links with a line range —
-            // scaffold only processes these (it skips links without line
-            // numbers), so the salvage is only needed where scaffold and the
-            // coverage checker must agree. Bare image paths resolve
-            // page-relative by design and salvage would subvert the
-            // page-relative vs repo-relative diagnostic.
-            let resolved = if link.start_line.is_some() {
-                let resolved_str = resolved.to_string_lossy().replace('\\', "/");
-                locate_existing_suffix(&resolved_str, repo_root)
-                    .map_or(resolved, PathBuf::from)
-            } else {
-                resolved
-            };
             let abs = repo_root.join(&resolved);
 
             // A link whose target is wikiignored is exempt from broken-link and
@@ -1019,11 +1037,7 @@ fn collect_for_files(
                     {
                         Ok(c) => {
                             let headings = extract_headings(c);
-                            let line_count = c.lines().count() as u32;
-                            Some(v.insert(CachedTarget {
-                                line_count,
-                                headings,
-                            }))
+                            Some(v.insert(CachedTarget { headings }))
                         }
                         Err(_) => {
                             if source_aware_is_dir(repo_root, source, &resolved, git_reader) {
@@ -1064,46 +1078,9 @@ fn collect_for_files(
                 }
             };
 
-            // Anchor validation: line range OR heading slug.
-            if let Some(start) = link.start_line {
-                if let Some(ref cached) = cached {
-                    if start == 0 {
-                        diagnostics.push(CheckDiagnostic {
-                            kind: "broken_anchor".into(),
-                            file: path.display().to_string(),
-                            line: link.source_line,
-                            message: format!(
-                                "Line numbers are 1-based. Replace `L0` with `L1` in `{}`.",
-                                link.path
-                            ),
-                        });
-                    } else {
-                        let line_count = cached.line_count;
-                        let end = link.end_line.unwrap_or(start);
-                        if start > line_count || end > line_count {
-                            diagnostics.push(CheckDiagnostic {
-                                kind: "broken_anchor".into(),
-                                file: path.display().to_string(),
-                                line: link.source_line,
-                                message: format!(
-                                    "Line range `L{start}–L{end}` exceeds `{}` ({line_count} lines).",
-                                    link.path
-                                ),
-                            });
-                        } else if start > end {
-                            diagnostics.push(CheckDiagnostic {
-                                kind: "broken_anchor".into(),
-                                file: path.display().to_string(),
-                                line: link.source_line,
-                                message: format!(
-                                    "Line range start (`L{start}`) must not exceed end (`L{end}`) in `{}`.",
-                                    link.path
-                                ),
-                            });
-                        }
-                    }
-                }
-            } else if let Some(anchor) = anchor_of(&link.original_href)
+            // Anchor validation: heading slugs only — line-range links left
+            // the loop above (the drift pass owns them).
+            if let Some(anchor) = anchor_of(&link.original_href)
                 && !anchor.is_empty()
                 && let Some(ref cached) = cached
             {
@@ -1124,11 +1101,21 @@ fn collect_for_files(
     // Soft check that git is callable.
     let _ = resolve_ref(repo_root, "HEAD");
 
-    // ── Mesh coverage pass ────────────────────────────────────────────────────
-    if matches!(source, DocSource::WorkingTree) {
-        let mesh_diags =
-            mesh_coverage::collect_mesh_diagnostics(files, repo_root, content_cache)?;
-        diagnostics.extend(mesh_diags);
+    // ── Drift pass ─────────────────────────────────────────────────────────────
+    //
+    // The sole authority for line-range links (plan Decision 7): each range
+    // link is classified against its page's anchor epoch and reported with
+    // one of the new kinds. `--fix` runs its own drift phase (Phase 2), so
+    // the pass is off during fix-mode pre/post checks for now.
+    if drift_pass {
+        let drift_diags = collect_drift_diagnostics(
+            files,
+            repo_root,
+            source,
+            git_reader,
+            content_cache,
+        )?;
+        diagnostics.extend(drift_diags);
     }
 
     Ok(diagnostics)
@@ -1151,23 +1138,6 @@ mod tests {
     /// Serialize tests that share process-level state (e.g. PATH or env vars).
     static PATH_MUTEX: Mutex<()> = Mutex::new(());
 
-    fn make_anchor(path: &str, start: u32, end: u32) -> AnchorRecord {
-        AnchorRecord {
-            path: path.to_string(),
-            start_line: start,
-            end_line: end,
-            algorithm: "sha256".to_string(),
-            content_hash: "deadbeef".to_string(),
-        }
-    }
-
-    fn make_mesh(anchors: Vec<AnchorRecord>) -> MeshFile {
-        MeshFile {
-            anchors,
-            why: "test".to_string(),
-        }
-    }
-
     fn diag(kind: &str, line: usize) -> CheckDiagnostic {
         CheckDiagnostic {
             kind: kind.into(),
@@ -1179,7 +1149,7 @@ mod tests {
 
     #[test]
     fn render_diagnostics_has_no_trailing_separator() {
-        let rendered = render_diagnostics(&[diag("mesh_uncovered", 1), diag("broken_link", 2)]);
+        let rendered = render_diagnostics(&[diag("link_drift", 1), diag("broken_link", 2)]);
         assert!(
             !rendered.ends_with("---\n\n") && !rendered.trim_end().ends_with("---"),
             "separator must not appear after the last error: {rendered:?}"
@@ -1189,7 +1159,7 @@ mod tests {
             1,
             "separator must appear exactly once, between the two errors: {rendered:?}"
         );
-        assert!(rendered.starts_with("Error: Mesh Uncovered\n"));
+        assert!(rendered.starts_with("Error: Link Drift\n"));
     }
 
     #[test]
@@ -1262,6 +1232,14 @@ mod tests {
 
     fn make_wiki_page(title: &str, body: &str) -> String {
         format!("---\ntitle: {title}\nsummary: A page about {title}.\n---\n{body}")
+    }
+
+    /// A wiki page carrying a `links-reviewed:` value — the drift pass's
+    /// certified-page shape.
+    fn make_wiki_page_with_links_reviewed(title: &str, body: &str, value: &str) -> String {
+        format!(
+            "---\ntitle: {title}\nsummary: A page about {title}.\nlinks-reviewed: {value}\n---\n{body}"
+        )
     }
 
     #[test]
@@ -1351,24 +1329,6 @@ mod tests {
     }
 
     #[test]
-    fn line_range_out_of_bounds_emits_broken_anchor() {
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        let repo = TestRepo::new();
-        repo.create_file("src/code.rs", "fn a() {}\n");
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", "See [code](/src/code.rs#L100-L200)."),
-        );
-        repo.commit("add files");
-
-        let diags = collect(&[], repo.path()).expect("collect");
-        assert!(
-            diags.iter().any(|d| d.kind == "broken_anchor"),
-            "expected broken_anchor: {diags:?}"
-        );
-    }
-
-    #[test]
     fn heading_anchor_resolves_when_present() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
@@ -1453,10 +1413,13 @@ mod tests {
         );
     }
 
-    // ── Mesh coverage tests ───────────────────────────────────────────────────
+    // ── Drift pass tests ──────────────────────────────────────────────────────
 
+    /// A page carrying a line-range link but no `links-reviewed:` field
+    /// anywhere fails closed with `anchor_epoch_missing` (plan Decision 5
+    /// step 1): the check cannot vouch for the link, so it must not pass.
     #[test]
-    fn mesh_uncovered_link_exits_1() {
+    fn range_link_without_field_emits_anchor_epoch_missing() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
         repo.create_file("src/code.rs", "fn a() {}\n");
@@ -1467,14 +1430,11 @@ mod tests {
         repo.commit("add files");
 
         let diagnostics = collect(&[], repo.path()).expect("collect");
-        let mesh_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.kind == "mesh_uncovered")
-            .collect();
-        assert_eq!(
-            mesh_diags.len(),
-            1,
-            "expected one mesh_uncovered: {diagnostics:?}"
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.kind == "anchor_epoch_missing"),
+            "expected anchor_epoch_missing: {diagnostics:?}"
         );
         let code = run(
             &[],
@@ -1491,154 +1451,79 @@ mod tests {
         assert_eq!(code, 1);
     }
 
+    /// A certified page whose link range overhangs its target's line count is
+    /// `link_broken` — the drift engine's `Broken` replaces the old generic
+    /// `broken_anchor` (plan Decision 7: the drift pass is the sole authority
+    /// for line-range links).
     #[test]
-    fn mesh_covered_link_exits_0() {
+    fn line_range_out_of_bounds_emits_link_broken() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
         repo.create_file("src/code.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
-            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
+            &make_wiki_page_with_links_reviewed(
+                "Page",
+                "See [code](/src/code.rs#L1-L1).",
+                "1",
+            ),
         );
-        repo.commit("add files");
-
-        // Seed coverage via store::write — reads now come from .wiki/<slug>.
-        let mesh = make_mesh(vec![
-            make_anchor("src/code.rs", 1, 1),
-            make_anchor("wiki/page.md", 1, 1),
-        ]);
-        store::write(repo.path(), "test-mesh", &mesh).expect("store::write");
-
-        let diagnostics = collect(&[], repo.path()).expect("collect");
-        let mesh_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.kind == "mesh_uncovered")
-            .collect();
-        assert!(
-            mesh_diags.is_empty(),
-            "covered link must not produce mesh_uncovered: {diagnostics:?}"
-        );
-        let code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false,
-            crate::index::DocSource::WorkingTree,
-            false,
-            false,
-            false,
-        )
-        .expect("run");
-        assert_eq!(code, 0);
-    }
-
-    #[test]
-    fn mesh_skips_links_without_line_range() {
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        let repo = TestRepo::new();
-        repo.create_file("src/code.rs", "fn a() {}\n");
+        repo.commit("certify the link");
+        // The href now overhangs the target; the field value is unchanged, so
+        // the anchor epoch is the certification commit.
         repo.create_file(
             "wiki/page.md",
-            &make_wiki_page("Page", "See [code](/src/code.rs)."),
+            &make_wiki_page_with_links_reviewed(
+                "Page",
+                "See [code](/src/code.rs#L100-L200).",
+                "1",
+            ),
         );
-        repo.commit("add files");
 
         let diagnostics = collect(&[], repo.path()).expect("collect");
-        let mesh_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.kind == "mesh_uncovered")
-            .collect();
         assert!(
-            mesh_diags.is_empty(),
-            "links without line range must not produce mesh_uncovered: {diagnostics:?}"
+            diagnostics.iter().any(|d| d.kind == "link_broken"),
+            "expected link_broken: {diagnostics:?}"
         );
     }
 
-    /// A fragment link into a gitignored (generated) file is exempt from the
-    /// mesh-coverage contract: a path git never sees cannot be anchored, so
-    /// demanding coverage would fail closed forever. `wiki check` must not emit
-    /// `mesh_uncovered` for it and must exit 0.
-    #[test]
-    fn mesh_skips_gitignored_target() {
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        let repo = TestRepo::new();
-        repo.create_file("src/generated.rs", "fn a() {}\n");
-        repo.create_file(".gitignore", "src/generated.rs\n");
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", "See [code](/src/generated.rs#L1-L1)."),
-        );
-        repo.commit("add files");
-
-        let diagnostics = collect(&[], repo.path()).expect("collect");
-        let mesh_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.kind == "mesh_uncovered")
-            .collect();
-        assert!(
-            mesh_diags.is_empty(),
-            "gitignored target must not produce mesh_uncovered: {diagnostics:?}"
-        );
-        let code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false,
-            crate::index::DocSource::WorkingTree,
-            false,
-            false,
-            false,
-        )
-        .expect("run");
-        assert_eq!(code, 0, "gitignored citation must not fail closed");
-    }
-
-    /// Contrast with the exemption above: an untracked-but-NOT-ignored target
-    /// still requires coverage — it resolves once committed, so a missing mesh
-    /// is a real, fixable finding.
-    #[test]
-    fn mesh_uncovered_for_untracked_not_ignored_target() {
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        let repo = TestRepo::new();
-        repo.create_file("wiki/page.md", &make_wiki_page("Page", "No links."));
-        repo.commit("baseline");
-        // Present on disk, never committed, not gitignored.
-        repo.create_file("src/new.rs", "fn a() {}\n");
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", "See [code](/src/new.rs#L1-L1)."),
-        );
-
-        let diagnostics = collect(&[], repo.path()).expect("collect");
-        let mesh_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.kind == "mesh_uncovered")
-            .collect();
-        assert_eq!(
-            mesh_diags.len(),
-            1,
-            "untracked-not-ignored target must still require coverage: {diagnostics:?}"
-        );
-    }
-
-    /// `--source=index` must validate staged content; broken anchor staged but
-    /// worktree clean → must report from index.
+    /// `--source=index` must validate staged content; broken link staged but
+    /// worktree clean → must report from index. The drift pass reads the
+    /// field from the index blob and walks the same history either way.
     #[test]
     fn source_index_validates_staged_broken_when_worktree_clean() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
         repo.create_file("src/code.rs", "fn a() {}\n");
-        repo.create_file("wiki/page.md", &make_wiki_page("Page", "No links."));
-        repo.commit("clean baseline");
-
         repo.create_file(
             "wiki/page.md",
-            &make_wiki_page("Page", "See [code](/src/code.rs#L100-L100)."),
+            &make_wiki_page_with_links_reviewed(
+                "Page",
+                "See [code](/src/code.rs#L1-L1).",
+                "1",
+            ),
+        );
+        repo.commit("certified baseline");
+
+        // Stage a version whose range overhangs the target; restore the
+        // worktree to the healthy version.
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page_with_links_reviewed(
+                "Page",
+                "See [code](/src/code.rs#L100-L100).",
+                "1",
+            ),
         );
         repo.git(&["add", "wiki/page.md"]);
-        repo.create_file("wiki/page.md", &make_wiki_page("Page", "No links."));
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page_with_links_reviewed(
+                "Page",
+                "See [code](/src/code.rs#L1-L1).",
+                "1",
+            ),
+        );
 
         let diags_wt = collect_with_source(&[], repo.path(), crate::index::DocSource::WorkingTree)
             .expect("collect wt");
@@ -1651,8 +1536,8 @@ mod tests {
         let diags_idx = collect_with_source(&[], repo.path(), crate::index::DocSource::Index)
             .expect("collect idx");
         assert!(
-            diags_idx.iter().any(|d| d.kind == "broken_anchor"),
-            "index should see staged broken anchor, got: {:?}",
+            diags_idx.iter().any(|d| d.kind == "link_broken"),
+            "index should see staged broken link, got: {:?}",
             diags_idx
         );
     }
@@ -1733,6 +1618,10 @@ mod tests {
     }
 
     /// Fix 1 skip: when the rename target was deleted (not moved), skip the fix.
+    ///
+    /// Phase 1 interim: the href is a plain path — line-range links are the
+    /// drift pass's sole authority, and its `Broken` routing into
+    /// `BrokenLinkRename` lands in Phase 2 (plan Decision 6).
     #[test]
     fn fix1_skips_when_target_deleted() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
@@ -1740,7 +1629,7 @@ mod tests {
         repo.create_file("src/gone.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
-            &make_wiki_page("Page", "See [gone](/src/gone.rs#L1)."),
+            &make_wiki_page("Page", "See [gone](/src/gone.rs)."),
         );
         repo.commit("baseline");
 
@@ -1757,6 +1646,9 @@ mod tests {
     }
 
     /// Fix 1 skip: when a path maps to multiple rename targets, skip (ambiguous).
+    ///
+    /// Phase 1 interim: plain-path href — range-link `Broken` routing into
+    /// `BrokenLinkRename` lands in Phase 2 (plan Decision 6).
     #[test]
     fn fix1_skips_when_rename_ambiguous() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
@@ -1764,7 +1656,7 @@ mod tests {
         repo.create_file("src/shared.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
-            &make_wiki_page("Page", "See [shared](/src/shared.rs#L1)."),
+            &make_wiki_page("Page", "See [shared](/src/shared.rs)."),
         );
         repo.commit("baseline");
 
@@ -2751,74 +2643,40 @@ mod tests {
         );
     }
 
-    /// Reproduction: suffix salvage gap between scaffold and coverage checker.
-    ///
-    /// When a fragment link resolves to a non-existent path whose suffix
-    /// exists in the repo, scaffold applies `locate_existing_suffix` and
-    /// creates a mesh for the found file. But `collect_mesh_diagnostics`
-    /// does not apply suffix salvage, so it resolves only through
-    /// `resolve_link_path` and checks coverage against the unsalvaged
-    /// (non-existent) path — even when a mesh covering the suffix path
-    /// is present. This prevents `check --fix` from converging: the fix
-    /// pass creates a mesh for the suffix path, but the post-fix coverage
-    /// check still reports `mesh_uncovered`.
-    ///
-    /// THIS TEST FAILS against the current unfixed code. When suffix
-    /// salvage is added to `collect_mesh_diagnostics`, the mesh covering
-    /// `src/code.rs` should satisfy coverage for the link, and this
-    /// assertion should pass.
+    /// End-to-end: the drift pass applies suffix salvage to a stale href
+    /// prefix (plan Decision 5). A certified page whose link gains a
+    /// nonexistent directory prefix classifies Healthy against the salvaged
+    /// target — the read-only check reports nothing.
     #[test]
-    fn mesh_uncovered_suffix_salvage_gap() {
+    fn drift_pass_salvages_stale_href_prefix() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let repo = TestRepo::new();
-
-        // The actual file exists at `src/code.rs`.
-        repo.create_file("src/code.rs", "fn a() {}\n");
-
-        // Wiki page links to a non-existent nested path whose suffix
-        // (`src/code.rs`) exists.  `resolve_link_path` resolves the bare
-        // path `deep/path/src/code.rs` relative to `wiki/` and produces
-        // `wiki/deep/path/src/code.rs`.  Scaffold's `locate_existing_suffix`
-        // would peel back directory components to find `src/code.rs`, but
-        // `collect_mesh_diagnostics` only calls `resolve_link_path`.
+        repo.create_file("target.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
-            &make_wiki_page(
+            &make_wiki_page_with_links_reviewed(
                 "Page",
-                "See [code](deep/path/src/code.rs#L1-L1).",
+                "See [code](../target.rs#L1-L1).",
+                "1",
             ),
         );
-        repo.commit("add files");
+        repo.commit("certified baseline");
 
-        // Seed a mesh that covers the suffix path + wiki page — exactly
-        // what scaffold would create after applying locate_existing_suffix.
-        let mesh = make_mesh(vec![
-            make_anchor("src/code.rs", 1, 1),
-            make_anchor("wiki/page.md", 1, 1),
-        ]);
-        store::write(repo.path(), "suffix-salvage-mesh", &mesh)
-            .expect("store::write");
+        // The href gains a directory prefix that does not exist; suffix
+        // salvage falls back to `target.rs` at the repo root.
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page_with_links_reviewed(
+                "Page",
+                "See [code](dir/target.rs#L1-L1).",
+                "1",
+            ),
+        );
 
         let diagnostics = collect(&[], repo.path()).expect("collect");
-        let mesh_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.kind == "mesh_uncovered")
-            .collect();
-
-        // If suffix salvage were applied in collect_mesh_diagnostics, the
-        // link would resolve to `src/code.rs` and the seeded mesh would
-        // satisfy coverage.  Currently the coverage checker only calls
-        // `resolve_link_path` (no suffix matching), so `mesh_uncovered`
-        // fires even though a covering mesh exists for the suffix path.
-        //
-        // THIS ASSERTION FAILS against the current unfixed code.  When
-        // suffix salvage is added to the coverage checker, this assertion
-        // will pass.
         assert!(
-            mesh_diags.is_empty(),
-            "expected NO mesh_uncovered with suffix-matching mesh present, \
-             got {} mesh_uncovered: {diagnostics:?}",
-            mesh_diags.len(),
+            diagnostics.is_empty(),
+            "salvaged link must classify Healthy: {diagnostics:?}"
         );
     }
 

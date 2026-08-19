@@ -1,5 +1,5 @@
-packages/cli/src/commands/check.rs#L643-L649 rk64:0d5ebf023c6e8b36
-packages/cli/src/commands/check.rs#L742-L748 rk64:f12e6cb1a2374c3c
+packages/cli/src/commands/check.rs#L554-L560 rk64:0d5ebf023c6e8b36
+packages/cli/src/commands/check.rs#L657-L663 rk64:f12e6cb1a2374c3c
 packages/cli/src/commands/check_fix.rs#L131-L142 rk64:bc080e64696010f0
 packages/cli/src/commands/check_fix.rs#L2072-L2090 rk64:32eabba663835c6c
 
