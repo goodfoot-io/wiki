@@ -849,9 +849,17 @@ fn move_scan_outcome(
 /// The fuzzy tier's at-threshold for multiset-Jaccard window similarity.
 /// Tuned against real wiki markdown and code excerpts in the P2 acceptance
 /// test `fuzzy_threshold_separates_real_content`, not inherited from
-/// git-span's 0.95/0.50 pair: a window reaches the tier when its similarity
-/// with the certified content is at least this value.
+/// git-span's 0.95/0.50 pair: a window reaches the tier when its
+/// [`fuzzy_window_score`] with the certified content is at least this value.
 const FUZZY_JACCARD_THRESHOLD: f64 = 0.7;
+
+/// The per-line match threshold inside [`fuzzy_window_score`]'s containment
+/// weighting: a window line counts as matched when its token multiset
+/// Jaccard with at least one certified line reaches this value. Low enough
+/// that a moved block's edited line still counts as the block's own (a
+/// replaced line typically shares ~0.5–0.6 of its tokens), high enough that
+/// filler lines sharing a couple of tokens do not.
+const FUZZY_LINE_MATCH_THRESHOLD: f64 = 0.5;
 
 /// Multiset Jaccard similarity between two line groups: tokenize every line
 /// on whitespace, count duplicate tokens on both sides, and divide the
@@ -861,9 +869,21 @@ fn window_jaccard(a_lines: &[&str], b_lines: &[&str]) -> f64 {
     todo!("fuzzy tier lands in P3")
 }
 
+/// The fuzzy-tier window score: token multiset Jaccard
+/// ([`window_jaccard`]) weighted by line containment — the fraction of the
+/// window's lines that match some certified line at the line-match
+/// threshold. The weighting keeps sliding windows that merely *overlap* a
+/// moved block (high token similarity plus foreign filler lines) below the
+/// tier threshold: only a window made of the moved block's own lines scores
+/// at or above it.
+fn fuzzy_window_score(a_lines: &[&str], b_lines: &[&str]) -> f64 {
+    let _ = (a_lines, b_lines);
+    todo!("fuzzy tier lands in P3")
+}
+
 /// The fuzzy-tier move scan: every window of the certified span's height in
 /// every candidate file (the link's own target first, then the cross-file
-/// candidate set, page excluded) whose [`window_jaccard`] similarity with the
+/// candidate set, page excluded) whose [`fuzzy_window_score`] with the
 /// certified content reaches [`FUZZY_JACCARD_THRESHOLD`]. Callers turn the
 /// list into Moved / Unknown / zero-matches per Decision 5 step 4.
 fn fuzzy_locations(
@@ -1033,6 +1053,65 @@ mod tests {
     use super::*;
 
     const BLOCK: &str = "block-line-1\nblock-line-2\nblock-line-3";
+
+    /// A six-line code block for the fuzzy-tier tests. Six lines (not three,
+    /// like `BLOCK`) because the 0.7 tier threshold is deliberately out of
+    /// reach for a whole-line replacement in a short block — see
+    /// `fuzzy_window_score_three_line_whole_edit_stays_below`.
+    const FUZZY_BLOCK: &str = "\
+fn resolve_target_path(root: &Path, page: &str, href: &str) -> String {
+    let joined = root.join(page).join(href);
+    let normalized = normalize_segments(&joined);
+    assert!(normalized.is_relative(), \"target escaped the repo\");
+    normalized
+}";
+
+    /// `FUZZY_BLOCK` with the third line's call renamed — a whole-line edit
+    /// that the exact tier cannot follow but the fuzzy tier must.
+    const FUZZY_BLOCK_EDITED: &str = "\
+fn resolve_target_path(root: &Path, page: &str, href: &str) -> String {
+    let joined = root.join(page).join(href);
+    let normalized = canonicalize_segments(&joined);
+    assert!(normalized.is_relative(), \"target escaped the repo\");
+    normalized
+}";
+
+    /// Real corpus excerpt: the `collect_with_source` declaration block in
+    /// check.rs as it reads at the Phase 1c commit.
+    const REAL_COLLECT_WITH_SOURCE: &str = "/// Collect diagnostics with an explicit `DocSource`.
+pub fn collect_with_source(
+    globs: &[String],
+    repo_root: &Path,
+    source: DocSource,
+) -> Result<Vec<CheckDiagnostic>> {
+    // This entry point (hook/tests) scans from the repo root rather than a
+    // narrower working directory.  discover_files returns Ok(vec![]) for an
+    // empty corpus; propagate that as an error so the caller sees \"no wiki
+    // pages found\" rather than an empty diagnostic list with exit 0.";
+
+    /// The same block with one comment word changed — the move-and-edit
+    /// shape the fuzzy tier exists for.
+    const REAL_COLLECT_WITH_SOURCE_EDITED: &str = "/// Collect diagnostics with a specific `DocSource`.
+pub fn collect_with_source(
+    globs: &[String],
+    repo_root: &Path,
+    source: DocSource,
+) -> Result<Vec<CheckDiagnostic>> {
+    // This entry point (hook/tests) scans from the repo root rather than a
+    // narrower working directory.  discover_files returns Ok(vec![]) for an
+    // empty corpus; propagate that as an error so the caller sees \"no wiki
+    // pages found\" rather than an empty diagnostic list with exit 0.";
+
+    /// Real corpus excerpt: the drift-check paragraph of
+    /// wiki-mesh-integration.md (conformed in Phase 1c).
+    const REAL_WIKI_DRIFT_PARAGRAPH: &str = "Classifies every internal fragment link with a line range through the drift engine: the page's `links-reviewed` field selects its certification commit from git history, and each link's target range is compared against the content that certification recorded.";
+
+    /// The same paragraph with one phrase swapped.
+    const REAL_WIKI_DRIFT_PARAGRAPH_EDITED: &str = "Classifies every internal fragment link with a line range through the drift engine: the page's `links-reviewed` field selects its certification commit from git history, and each link's target range is compared against the content that review recorded.";
+
+    /// Real corpus excerpt from another page: the wikiignore exclusion
+    /// paragraph of wiki-cli-advanced-usage.md.
+    const REAL_WIKIIGNORE_PARAGRAPH: &str = "excludes paths from `wiki check` entirely — before frontmatter parsing, link validation, or line-range drift classification ever runs.";
 
     fn make_wiki_page(title: &str, body: &str, links_reviewed: Option<&str>) -> String {
         let field = links_reviewed
@@ -1653,6 +1732,236 @@ mod tests {
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes[0].outcome, DriftOutcome::Unknown);
+    }
+
+    // ── Fuzzy Jaccard tier (Phase 1d, P2 acceptance checks — all pending) ──
+
+    #[test]
+    #[ignore = "P3 implements the fuzzy tier"]
+    fn jaccard_identical_groups_are_one() {
+        let lines: Vec<&str> = FUZZY_BLOCK.lines().collect();
+        assert_eq!(window_jaccard(&lines, &lines), 1.0);
+    }
+
+    #[test]
+    #[ignore = "P3 implements the fuzzy tier"]
+    fn jaccard_disjoint_groups_are_zero() {
+        let a: Vec<&str> = vec!["alpha beta gamma"];
+        let b: Vec<&str> = vec!["delta epsilon zeta"];
+        assert_eq!(window_jaccard(&a, &b), 0.0);
+    }
+
+    #[test]
+    #[ignore = "P3 implements the fuzzy tier"]
+    fn jaccard_duplicate_tokens_weight_the_multiset() {
+        // intersection = 1·a + 1·b = 2; union = 3 + 3 − 2 = 4.
+        let a: Vec<&str> = vec!["a a b"];
+        let b: Vec<&str> = vec!["a b b"];
+        assert_eq!(window_jaccard(&a, &b), 0.5);
+    }
+
+    #[test]
+    #[ignore = "P3 implements the fuzzy tier"]
+    fn jaccard_empty_groups_are_zero() {
+        assert_eq!(window_jaccard(&[], &[]), 0.0);
+        let b: Vec<&str> = vec!["x"];
+        assert_eq!(window_jaccard(&[], &b), 0.0);
+    }
+
+    #[test]
+    #[ignore = "P3 implements the fuzzy tier"]
+    fn fuzzy_window_score_rejects_overlap_windows_accepts_the_block() {
+        // The design contract behind the containment weighting: a window
+        // made of the moved block's own lines (one line edited) reaches the
+        // threshold, while every overlapping window that includes filler
+        // lines stays below it — sliding-window neighbors must not turn a
+        // single move into an ambiguous multi-match.
+        let cert: Vec<&str> = FUZZY_BLOCK.lines().collect();
+        let edited: Vec<&str> = FUZZY_BLOCK_EDITED.lines().collect();
+        assert!(fuzzy_window_score(&cert, &edited) >= FUZZY_JACCARD_THRESHOLD);
+
+        // The strongest overlap window: one filler line plus five block lines.
+        let overlap: Vec<&str> = ["A3"]
+            .iter()
+            .copied()
+            .chain(FUZZY_BLOCK_EDITED.lines().take(5))
+            .collect();
+        assert!(
+            fuzzy_window_score(&cert, &overlap) < FUZZY_JACCARD_THRESHOLD,
+            "overlap window must stay below the threshold"
+        );
+    }
+
+    #[test]
+    #[ignore = "P3 implements the fuzzy tier"]
+    fn fuzzy_window_score_three_line_whole_edit_stays_below() {
+        // Replacing one of three single-token lines keeps 2/4 of the token
+        // multiset shared; the containment weighting leaves the score well
+        // under 0.7. The tier deliberately misses short-block whole-line
+        // edits — a false Moved relocates a link, a false Drift just
+        // re-certifies.
+        let a: Vec<&str> = vec!["l1", "l2", "l3"];
+        let b: Vec<&str> = vec!["l1", "X", "l3"];
+        assert!(fuzzy_window_score(&a, &b) < FUZZY_JACCARD_THRESHOLD);
+    }
+
+    #[test]
+    #[ignore = "P3 implements the fuzzy tier"]
+    fn fuzzy_threshold_separates_real_content() {
+        // The threshold's tuning evidence: real wiki markdown and code from
+        // this corpus. Moved-and-lightly-edited excerpts must score at or
+        // above the threshold; unrelated excerpts must stay below it.
+        let a: Vec<&str> = REAL_COLLECT_WITH_SOURCE.lines().collect();
+        let b: Vec<&str> = REAL_COLLECT_WITH_SOURCE_EDITED.lines().collect();
+        assert!(
+            fuzzy_window_score(&a, &b) >= FUZZY_JACCARD_THRESHOLD,
+            "real code with one comment word changed must reach the tier"
+        );
+        let a: Vec<&str> = REAL_WIKI_DRIFT_PARAGRAPH.lines().collect();
+        let b: Vec<&str> = REAL_WIKI_DRIFT_PARAGRAPH_EDITED.lines().collect();
+        assert!(
+            fuzzy_window_score(&a, &b) >= FUZZY_JACCARD_THRESHOLD,
+            "real wiki prose with one phrase swapped must reach the tier"
+        );
+
+        let a: Vec<&str> = REAL_WIKI_DRIFT_PARAGRAPH.lines().collect();
+        let b: Vec<&str> = REAL_WIKIIGNORE_PARAGRAPH.lines().collect();
+        assert!(
+            fuzzy_window_score(&a, &b) < FUZZY_JACCARD_THRESHOLD,
+            "unrelated wiki paragraphs must stay below the tier"
+        );
+        let a: Vec<&str> = REAL_COLLECT_WITH_SOURCE.lines().collect();
+        let b: Vec<&str> = "pub fn insert_links_reviewed(content: &str) -> Option<String> {\n    if !frontmatter::has_wiki_frontmatter(content) {\n        return None;\n    }\n    let (yaml_start, yaml_end, _) = frontmatter::yaml_block_bounds(content)?;"
+            .lines()
+            .collect();
+        assert!(
+            fuzzy_window_score(&a, &b) < FUZZY_JACCARD_THRESHOLD,
+            "unrelated code blocks must stay below the tier"
+        );
+    }
+
+    /// The fuzzy fixture: a certified link `[b](target.md#L2-L7)` whose range
+    /// covers `FUZZY_BLOCK`.
+    fn repo_with_certified_fuzzy_block() -> (TestRepo, String) {
+        let repo = TestRepo::new();
+        repo.create_file("wiki/target.md", &format!("T0\n{FUZZY_BLOCK}\nT1\n"));
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "[b](target.md#L2-L7)\n", Some("1")),
+        );
+        let c1 = repo.commit("certified page and target");
+        (repo, c1)
+    }
+
+    #[test]
+    #[ignore = "P3 implements the fuzzy tier"]
+    fn fuzzy_moved_within_target_after_small_edit() {
+        let (repo, c1) = repo_with_certified_fuzzy_block();
+        // The edited block moves down three lines; the href range L2-L7 now
+        // covers unrelated filler, so both exact tiers find nothing and the
+        // fuzzy tier must relocate the link to the edited block.
+        repo.create_file(
+            "wiki/target.md",
+            &format!("T0\nA1\nA2\nA3\n{FUZZY_BLOCK_EDITED}\nT1\n"),
+        );
+        repo.commit("block edited and moved down");
+        let epoch = LinkEpoch::Commit {
+            sha: c1,
+            path_at_commit: "wiki/page.md".into(),
+            value: "1".into(),
+        };
+        let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
+        assert_eq!(
+            classes[0].outcome,
+            DriftOutcome::Moved {
+                new_path: "wiki/target.md".into(),
+                new_start: 5,
+                new_end: 10
+            }
+        );
+    }
+
+    #[test]
+    #[ignore = "P3 implements the fuzzy tier"]
+    fn fuzzy_moved_cross_file_after_small_edit() {
+        // Cross-file Moved arises when the target is gone; the edited block
+        // lives in another file, and the fuzzy tier is what finds it.
+        let (repo, c1) = repo_with_certified_fuzzy_block();
+        repo.remove_file("wiki/target.md");
+        repo.create_file("wiki/other.md", &format!("H\n{FUZZY_BLOCK_EDITED}\nF\n"));
+        repo.commit("block edited and moved to other.md");
+        let epoch = LinkEpoch::Commit {
+            sha: c1,
+            path_at_commit: "wiki/page.md".into(),
+            value: "1".into(),
+        };
+        let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
+        assert_eq!(
+            classes[0].outcome,
+            DriftOutcome::Moved {
+                new_path: "wiki/other.md".into(),
+                new_start: 2,
+                new_end: 7
+            }
+        );
+    }
+
+    #[test]
+    #[ignore = "P3 implements the fuzzy tier"]
+    fn fuzzy_two_candidates_is_unknown() {
+        // The edited block appears in two files: two at-threshold windows →
+        // Unknown, per the card's unconditional multi-match rule.
+        let (repo, c1) = repo_with_certified_fuzzy_block();
+        repo.remove_file("wiki/target.md");
+        repo.create_file("wiki/other.md", &format!("H\n{FUZZY_BLOCK_EDITED}\nF\n"));
+        repo.create_file("wiki/also.md", &format!("X\n{FUZZY_BLOCK_EDITED}\nY\n"));
+        repo.commit("edited block duplicated across two files");
+        let epoch = LinkEpoch::Commit {
+            sha: c1,
+            path_at_commit: "wiki/page.md".into(),
+            value: "1".into(),
+        };
+        let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
+        assert_eq!(classes[0].outcome, DriftOutcome::Unknown);
+    }
+
+    #[test]
+    #[ignore = "P3 implements the fuzzy tier"]
+    fn fuzzy_no_match_stays_drift() {
+        let (repo, c1) = repo_with_certified_fuzzy_block();
+        // The certified range now covers unrelated filler and nothing in the
+        // repo resembles the block → the tier's zero-matches outcome (Drift
+        // on the range-equal path).
+        repo.create_file(
+            "wiki/target.md",
+            "T0\nX1\nX2\nX3\nX4\nX5\nX6\nT1\n",
+        );
+        repo.commit("range content replaced by unrelated lines");
+        let epoch = LinkEpoch::Commit {
+            sha: c1,
+            path_at_commit: "wiki/page.md".into(),
+            value: "1".into(),
+        };
+        let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
+        assert_eq!(classes[0].outcome, DriftOutcome::Drift);
+    }
+
+    #[test]
+    #[ignore = "P3 implements the fuzzy tier"]
+    fn fuzzy_no_match_missing_target_stays_broken() {
+        let (repo, c1) = repo_with_certified_fuzzy_block();
+        // Target deleted and nothing resembles the block → Broken on the
+        // missing-target path.
+        repo.remove_file("wiki/target.md");
+        repo.create_file("wiki/unrelated.md", "Y0\nY1\nY2\nY3\nY4\nY5\nY6\nY7\n");
+        repo.commit("target deleted, nothing similar remains");
+        let epoch = LinkEpoch::Commit {
+            sha: c1,
+            path_at_commit: "wiki/page.md".into(),
+            value: "1".into(),
+        };
+        let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
+        assert_eq!(classes[0].outcome, DriftOutcome::Broken);
     }
 
     #[test]
