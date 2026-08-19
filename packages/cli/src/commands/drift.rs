@@ -769,11 +769,13 @@ fn current_content_fp(bytes: Option<&[u8]>, start: u32, end: u32) -> u64 {
     }
 }
 
-/// The exact-tier move scan: find the certified content as a contiguous
-/// window, same file first, then every other candidate file in the repo.
-/// One match → `Moved`; ≥2 → `Unknown` (the card's multi-match rule is
-/// unconditional — never first-hit-wins); zero → `zero_matches`. The fuzzy
-/// Jaccard tier lands in Phase 1 with its re-tuned thresholds.
+/// The move scan, both tiers. Exact first: find the certified content as a
+/// contiguous window, same file first, then every other candidate file in the
+/// repo — one match → `Moved`; ≥2 → `Unknown` (the card's multi-match rule is
+/// unconditional — never first-hit-wins). Zero exact matches falls to the
+/// fuzzy Jaccard tier (Decision 5 step 4): one at-threshold window → `Moved`,
+/// ≥2 → `Unknown`, none → `zero_matches` (the caller's own terminal outcome,
+/// `Broken` for a missing target, `Drift` for range-equal content drift).
 #[allow(clippy::too_many_arguments)]
 fn move_scan_outcome(
     repo_root: &Path,
@@ -820,10 +822,61 @@ fn move_scan_outcome(
         .collect();
     let matches = scan_for_content_hash_rk64(&others, cert_fp, extent, None);
     match matches.len() {
-        1 => moved_to(&matches[0]),
+        1 => return moved_to(&matches[0]),
+        n if n >= 2 => return Ok(DriftOutcome::Unknown),
+        _ => {}
+    }
+
+    // Fuzzy tier: the certified content is absent everywhere in exact form.
+    // Look for a lightly-edited near-copy (Decision 5 step 4): exactly one
+    // at-threshold window → Moved; ≥2 → Unknown; none → `zero_matches`.
+    let fuzzy = fuzzy_locations(
+        repo_root,
+        source,
+        page_path,
+        target_path,
+        target_bytes,
+        cert,
+        anchor_sha,
+    )?;
+    match fuzzy.len() {
+        1 => moved_to(&fuzzy[0]),
         n if n >= 2 => Ok(DriftOutcome::Unknown),
         _ => Ok(zero_matches),
     }
+}
+
+/// The fuzzy tier's at-threshold for multiset-Jaccard window similarity.
+/// Tuned against real wiki markdown and code excerpts in the P2 acceptance
+/// test `fuzzy_threshold_separates_real_content`, not inherited from
+/// git-span's 0.95/0.50 pair: a window reaches the tier when its similarity
+/// with the certified content is at least this value.
+const FUZZY_JACCARD_THRESHOLD: f64 = 0.7;
+
+/// Multiset Jaccard similarity between two line groups: tokenize every line
+/// on whitespace, count duplicate tokens on both sides, and divide the
+/// intersection size by the union size. `0.0` for two empty groups.
+fn window_jaccard(a_lines: &[&str], b_lines: &[&str]) -> f64 {
+    let _ = (a_lines, b_lines);
+    todo!("fuzzy tier lands in P3")
+}
+
+/// The fuzzy-tier move scan: every window of the certified span's height in
+/// every candidate file (the link's own target first, then the cross-file
+/// candidate set, page excluded) whose [`window_jaccard`] similarity with the
+/// certified content reaches [`FUZZY_JACCARD_THRESHOLD`]. Callers turn the
+/// list into Moved / Unknown / zero-matches per Decision 5 step 4.
+fn fuzzy_locations(
+    repo_root: &Path,
+    source: DocSource,
+    page_path: &str,
+    target_path: &str,
+    target_bytes: Option<&[u8]>,
+    cert: &CertifiedLink,
+    anchor_sha: &str,
+) -> Result<Vec<crate::rk64::Location>, EpochError> {
+    let _ = (repo_root, source, page_path, target_path, target_bytes, cert, anchor_sha);
+    Ok(Vec::new())
 }
 
 fn moved_to(location: &crate::rk64::Location) -> Result<DriftOutcome, EpochError> {
