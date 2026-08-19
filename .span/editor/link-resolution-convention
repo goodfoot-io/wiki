@@ -1,4 +1,4 @@
-packages/cli/src/commands/mod.rs#L78-L114 rk64:e1adb803e55848c1
+packages/cli/src/commands/mod.rs#L82-L118 rk64:e1adb803e55848c1
 packages/extension/src/providers/WikiEditorProvider.ts#L38-L44 rk64:f70fa1999a2f1134
 packages/extension/src/providers/WikiLanguageFeatures.ts#L57-L70 rk64:2e4fc2dd94195afd
 

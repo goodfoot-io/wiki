@@ -5,6 +5,10 @@ mod headings;
 mod index;
 mod parser;
 mod perf;
+// Phase 0 tdd-bootstrap stubs — first consumers land in Phases 1–2, which
+// removes the allow.
+#[allow(dead_code)]
+mod rk64;
 mod version;
 mod wikiignore;
 

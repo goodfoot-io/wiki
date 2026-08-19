@@ -1,5 +1,9 @@
 pub mod check;
 pub mod check_fix;
+// Phase 0 tdd-bootstrap stubs — first consumers land in Phases 1–2, which
+// removes the allow.
+#[allow(dead_code)]
+pub mod drift;
 pub mod list;
 pub mod mesh;
 pub(crate) mod mesh_coverage;

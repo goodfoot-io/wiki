@@ -1,4 +1,4 @@
-packages/cli/logging.wiki.md#L40-L45 rk64:49364da3badbf6b1
-packages/cli/src/commands/mod.rs#L199-L266 rk64:1fbb8569e96e0e09
-packages/cli/src/commands/mod.rs#L207-L282 rk64:e41377e24291c145
+packages/cli/logging.wiki.md#L40-L45 rk64:0c32cea382f32865
+packages/cli/src/commands/mod.rs#L203-L270 rk64:1fbb8569e96e0e09
+packages/cli/src/commands/mod.rs#L211-L286 rk64:e41377e24291c145
 
