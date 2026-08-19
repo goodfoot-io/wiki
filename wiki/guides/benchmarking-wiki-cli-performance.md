@@ -1,6 +1,7 @@
 ---
 title: Benchmarking Wiki CLI Performance
 summary: How to run repeatable, source-pinned latency benchmarks of the everyday wiki commands and decompose where the time goes.
+links-reviewed: 1
 ---
 
 This guide describes how to measure the per-operation latency of the everyday `wiki` commands — the default search (`wiki "query"`), `list`, `summary`, and `check` — in a way whose numbers are trustworthy. The goal is a repeatable measurement, not a single eyeballed sample: build the binary from the source under test, run each command enough times to report a distribution, and attribute the cost to the right term (process startup, index preparation, or the command body).

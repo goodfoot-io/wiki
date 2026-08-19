@@ -3,6 +3,7 @@ title: Wiki CLI Advanced Usage
 summary: Advanced wiki CLI usage including glob targeting, JSON output, and stdin/path input.
 tags:
   - reference
+links-reviewed: 1
 ---
 
 # Wiki CLI Advanced Usage

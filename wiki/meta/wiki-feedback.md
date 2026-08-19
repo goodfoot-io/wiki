@@ -6,6 +6,7 @@ aliases:
 tags:
   - meta
   - tooling
+links-reviewed: 1
 ---
 
 Living record of feedback on the `wiki` CLI utility. Updated after each wiki session with any friction, surprises, or requests encountered in practice.

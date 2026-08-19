@@ -1,6 +1,7 @@
 ---
 title: Wiki Logging and Perf Instrumentation
 summary: Documents all logging and performance tracing points in the wiki CLI. 
+links-reviewed: 1
 ---
 
 ## Overview
