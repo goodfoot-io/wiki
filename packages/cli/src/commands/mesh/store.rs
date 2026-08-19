@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use miette::Result;
 use walkdir::WalkDir;
 
-use git_mesh_core::mesh_file::{AnchorRecord, MeshFile, has_conflict_markers};
+use git_mesh_core::mesh_file::{AnchorRecord, MeshFile};
 use git_mesh_core::{AnchorExtent, RK64_ALGORITHM, cheap_fingerprint_with_extent, rk64_to_hex};
 
 /// Per-run file-content cache that avoids re-reading the same file when
@@ -75,14 +75,7 @@ impl FileContentCache {
         })
     }
 
-    /// Insert pre-read content into the cache. Used when content was read from
-    /// a non-filesystem source (e.g. git objects) so subsequent
-    /// [`get_or_read`] calls find it.
-    pub(crate) fn insert(&mut self, abs_path: PathBuf, bytes: Vec<u8>) {
-        self.entries
-            .entry(abs_path)
-            .or_insert(CachedFile { bytes });
-    }
+
 }
 
 /// The fixed mesh storage directory: `repo_root/.wiki`.
@@ -139,19 +132,6 @@ pub(crate) fn slice_lines(content: &str, start: u32, end: u32) -> String {
             }
         })
         .collect()
-}
-
-/// Extract the text for `extent` from raw `bytes` (lossily decoded as UTF-8).
-///
-/// `WholeFile` returns the whole content; `LineRange { start, end }` returns
-/// lines `start..=end` via [`slice_lines`]. Used by the staleness classifier to
-/// compare an anchor's old and current content for whitespace equivalence.
-pub(crate) fn slice_at_extent(bytes: &[u8], extent: &AnchorExtent) -> String {
-    let text = String::from_utf8_lossy(bytes);
-    match extent {
-        AnchorExtent::WholeFile => text.into_owned(),
-        AnchorExtent::LineRange { start, end } => slice_lines(&text, *start, *end),
-    }
 }
 
 /// Whether a filename under `.wiki/` is a non-mesh runtime artifact written by
@@ -309,100 +289,7 @@ pub(crate) fn hash_anchor(
     )))
 }
 
-/// Read all meshes, skipping files that fail to parse (e.g. due to git conflict
-/// markers). Returns the parsed meshes alongside a list of skipped slugs so the
-/// caller can print a single consolidated warning.
-///
-/// Skips dotfiles and runtime artifacts (same filter as [`read_all`]). A missing
-/// `.wiki/` directory returns an empty vector and an empty skip list.
-#[allow(clippy::type_complexity)]
-pub(crate) fn read_all_tolerant(
-    repo_root: &Path,
-) -> Result<(Vec<(String, MeshFile)>, Vec<String>)> {
-    let root = wiki_dir(repo_root);
-    if !root.exists() {
-        return Ok((Vec::new(), Vec::new()));
-    }
 
-    let mut out = Vec::new();
-    let mut skipped = Vec::new();
-    for entry in WalkDir::new(&root).sort_by_file_name() {
-        let entry = entry.map_err(|e| miette::miette!("failed to walk {}: {e}", root.display()))?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.starts_with('.') || is_runtime_artifact(n))
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        let Some(slug) = slug_for(&root, path) else {
-            continue;
-        };
-        let text = match fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(e) => {
-                skipped.push(format!(
-                    "failed to read mesh `{}`: {e}",
-                    path.display()
-                ));
-                continue;
-            }
-        };
-        match MeshFile::parse(&text) {
-            Ok(mesh) => out.push((slug, mesh)),
-            Err(e) => {
-                skipped.push(format!(
-                    "skipping unparseable mesh `{slug}`: {e}"
-                ));
-            }
-        }
-    }
-    Ok((out, skipped))
-}
-
-/// Walk `.wiki/` and return `(slug, raw_text)` for every mesh file whose content
-/// contains git conflict markers.
-///
-/// Skips dotfiles and runtime artifacts (same filter as [`read_all`]). A missing
-/// `.wiki/` directory returns an empty `Vec` (not an error).
-pub(crate) fn find_conflicted_meshes(repo_root: &Path) -> Result<Vec<(String, String)>> {
-    let root = wiki_dir(repo_root);
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut out = Vec::new();
-    for entry in WalkDir::new(&root).sort_by_file_name() {
-        let entry =
-            entry.map_err(|e| miette::miette!("failed to walk {}: {e}", root.display()))?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.starts_with('.') || is_runtime_artifact(n))
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        let Some(slug) = slug_for(&root, path) else {
-            continue;
-        };
-        let text = fs::read_to_string(path)
-            .map_err(|e| miette::miette!("failed to read mesh `{}`: {e}", path.display()))?;
-        if has_conflict_markers(&text) {
-            out.push((slug, text));
-        }
-    }
-    Ok(out)
-}
 
 /// Build an [`AnchorRecord`] from a path, extent, and bare-hex content hash.
 ///
@@ -638,59 +525,6 @@ pub(crate) fn remove_anchor(
     Ok(true)
 }
 
-/// Relocate an anchor in place within the `.wiki/<slug>` mesh file.
-///
-/// Finds the [`AnchorRecord`] matching the old `(old_path, old_start, old_end)`
-/// triple, replaces its path/coordinates with the new location, recomputes its
-/// `content_hash` by re-reading the worktree bytes at the new location, and
-/// writes the mesh back. The whole-file sentinel (`0/0`) is handled by reading
-/// the new extent directly from the new coordinates.
-///
-/// This is the move-follow writeback: it keeps the stored anchor pointing at the
-/// content's current location so it is not re-detected as stale on the next run,
-/// and so coverage queries reflect the new range. Returns `Ok(false)` when no
-/// matching anchor or mesh is found (nothing relocated).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn relocate_anchor(
-    repo_root: &Path,
-    slug: &str,
-    old_path: &str,
-    old_start: u32,
-    old_end: u32,
-    new_path: &str,
-    new_start: u32,
-    new_end: u32,
-) -> Result<bool> {
-    let Some(mut mesh) = read_one(repo_root, slug)? else {
-        return Ok(false);
-    };
-
-    let Some(anchor) = mesh
-        .anchors
-        .iter_mut()
-        .find(|a| a.path == old_path && a.start_line == old_start && a.end_line == old_end)
-    else {
-        return Ok(false);
-    };
-
-    let new_extent = if new_start == 0 && new_end == 0 {
-        AnchorExtent::WholeFile
-    } else {
-        AnchorExtent::LineRange {
-            start: new_start,
-            end: new_end,
-        }
-    };
-    let new_hash = hash_anchor(repo_root, new_path, new_extent, &mut FileContentCache::new())?;
-
-    anchor.path = new_path.to_string();
-    anchor.start_line = new_start;
-    anchor.end_line = new_end;
-    anchor.content_hash = new_hash;
-
-    write(repo_root, slug, &mesh)?;
-    Ok(true)
-}
 
 #[cfg(test)]
 mod tests {
@@ -893,60 +727,6 @@ mod tests {
     }
 
     #[test]
-    fn find_conflicted_meshes_returns_conflicted_slug_and_raw_text() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-
-        // Write a clean mesh (no conflict markers).
-        write(root, "goodslug", &sample_mesh()).unwrap();
-
-        // Write a mesh with git conflict markers.
-        let wiki = wiki_dir(root);
-        let conflicted_text = "<<<<<<< HEAD\nsrc/a.rs rk64:abc123\n=======\nsrc/a.rs rk64:def456\n>>>>>>> other\n\nwhy";
-        fs::write(wiki.join("conflicted"), conflicted_text.as_bytes()).unwrap();
-
-        // find_conflicted_meshes must return only the conflicted file.
-        let results = find_conflicted_meshes(root).unwrap();
-        assert_eq!(results.len(), 1, "expected exactly one conflicted mesh");
-        assert_eq!(results[0].0, "conflicted");
-        assert_eq!(results[0].1, conflicted_text);
-    }
-
-    #[test]
-    fn find_conflicted_meshes_missing_dir_is_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let results = find_conflicted_meshes(dir.path()).unwrap();
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn find_conflicted_meshes_skips_clean_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        write(root, "clean1", &sample_mesh()).unwrap();
-        write(root, "clean2", &sample_mesh()).unwrap();
-        let results = find_conflicted_meshes(root).unwrap();
-        assert!(results.is_empty(), "expected no conflicted meshes");
-    }
-
-    #[test]
-    fn find_conflicted_meshes_skips_dotfiles_and_runtime_artifacts() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let wiki = wiki_dir(root);
-
-        // Create the .wiki directory.
-        fs::create_dir_all(&wiki).unwrap();
-
-        // Write a runtime artifact with marker-looking content — must be skipped.
-        fs::write(wiki.join("wiki-index.sqlite"), b"<<<<<<< HEAD\nsqlite junk\n=======\nmore junk\n>>>>>>> other\n").unwrap();
-        fs::write(wiki.join(".DS_Store"), b"<<<<<<< HEAD\n").unwrap();
-
-        let results = find_conflicted_meshes(root).unwrap();
-        assert!(results.is_empty(), "expected no conflicted meshes from dotfiles/artifacts");
-    }
-
-    #[test]
     fn read_all_fails_closed_on_non_dot_prose_file() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -967,106 +747,6 @@ mod tests {
             msg.contains("README"),
             "error message must name the offending file: {msg}"
         );
-    }
-
-    #[test]
-    fn relocate_anchor_in_place_refreshes_hash_no_duplicate() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-
-        // Seed source + mesh anchoring line 1.
-        fs::write(root.join("code.rs"), b"fn a() {}\n").unwrap();
-        let h1 = hash_anchor(
-            root,
-            "code.rs",
-            AnchorExtent::LineRange { start: 1, end: 1 },
-            &mut FileContentCache::new(),
-        )
-        .unwrap();
-        write(
-            root,
-            "m",
-            &MeshFile {
-                anchors: vec![anchor_record(
-                    "code.rs".to_string(),
-                    AnchorExtent::LineRange { start: 1, end: 1 },
-                    h1,
-                )],
-                why: "w.".to_string(),
-            },
-        )
-        .unwrap();
-
-        // The block drifts to line 2.
-        fs::write(root.join("code.rs"), b"// pre\nfn a() {}\n").unwrap();
-
-        let moved = relocate_anchor(root, "m", "code.rs", 1, 1, "code.rs", 2, 2).unwrap();
-        assert!(moved);
-
-        let mesh = read_one(root, "m").unwrap().unwrap();
-        assert_eq!(mesh.anchors.len(), 1, "must relocate in place, not append");
-        let a = &mesh.anchors[0];
-        assert_eq!((a.start_line, a.end_line), (2, 2));
-        let expected = hash_anchor(
-            root,
-            "code.rs",
-            AnchorExtent::LineRange { start: 2, end: 2 },
-            &mut FileContentCache::new(),
-        )
-        .unwrap();
-        assert_eq!(a.content_hash, expected, "hash must match the NEW range");
-    }
-
-    #[test]
-    fn relocate_anchor_cross_file_and_whole_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        fs::write(root.join("a.rs"), b"x\n").unwrap();
-        fs::write(root.join("b.rs"), b"y\nx\n").unwrap();
-        write(
-            root,
-            "m",
-            &MeshFile {
-                anchors: vec![anchor_record(
-                    "a.rs".to_string(),
-                    AnchorExtent::WholeFile,
-                    "stale".to_string(),
-                )],
-                why: "w.".to_string(),
-            },
-        )
-        .unwrap();
-
-        // Whole-file anchor relocates to b.rs whole-file (0/0 handled).
-        let moved = relocate_anchor(root, "m", "a.rs", 0, 0, "b.rs", 0, 0).unwrap();
-        assert!(moved);
-        let mesh = read_one(root, "m").unwrap().unwrap();
-        assert_eq!(mesh.anchors.len(), 1);
-        let a = &mesh.anchors[0];
-        assert_eq!(a.path, "b.rs");
-        assert_eq!((a.start_line, a.end_line), (0, 0));
-        let expected = hash_anchor(
-            root,
-            "b.rs",
-            AnchorExtent::WholeFile,
-            &mut FileContentCache::new(),
-        )
-        .unwrap();
-        assert_eq!(a.content_hash, expected);
-    }
-
-    #[test]
-    fn relocate_anchor_no_match_is_noop() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        fs::write(root.join("a.rs"), b"x\n").unwrap();
-        write(root, "m", &sample_mesh()).unwrap();
-        // No anchor matches (1,1) in foo.rs (sample has 2-4).
-        let moved = relocate_anchor(root, "m", "src/foo.rs", 1, 1, "src/foo.rs", 9, 9).unwrap();
-        assert!(!moved);
-        // Missing mesh.
-        let moved = relocate_anchor(root, "absent", "p", 1, 1, "p", 2, 2).unwrap();
-        assert!(!moved);
     }
 
     #[test]

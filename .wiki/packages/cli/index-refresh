@@ -1,5 +1,5 @@
-packages/cli/logging.wiki.md#L26-L38 rk64:a83c18233f20a4bf
-packages/cli/src/index/mod.rs#L348-L368 rk64:2f1db1754d4dcb4a
+packages/cli/logging.wiki.md#L26-L38 rk64:2f1a4f1bd8e8c037
+packages/cli/src/index/mod.rs#L346-L366 rk64:2f1db1754d4dcb4a
 packages/cli/src/index/passes/mod.rs#L175-L177 rk64:8bef1a6308aedee2
 packages/cli/src/index/passes/mod.rs#L255-L258 rk64:b049a9165cbfe4b7
 packages/cli/src/index/passes/mod.rs#L263-L272 rk64:add2ff56fe1afbd0

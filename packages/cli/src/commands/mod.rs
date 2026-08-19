@@ -6,7 +6,6 @@ pub mod check_fix;
 pub mod drift;
 pub mod list;
 pub mod mesh;
-pub(crate) mod mesh_coverage;
 pub mod search;
 pub mod summary;
 

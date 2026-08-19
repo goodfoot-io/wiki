@@ -298,13 +298,12 @@ pub fn run(
     //
     // In `--fix` mode an empty discovered set is NOT an error: the user may
     // have deleted the last wiki page (or demoted it to plain markdown), and
-    // cleanup_orphaned_meshes must still run over an empty corpus to delete
-    // the now-orphaned scaffold meshes. In non-fix mode we keep the existing
-    // exit-2 "no wiki pages found" signal — it is a useful diagnostic.
-    // discover_files returns Ok(vec![]) for an empty corpus (no wiki pages
-    // found) and Err only for genuine infrastructure failures.  Non-fix mode
-    // treats an empty corpus as a fatal diagnostic (exit 2); fix mode degrades
-    // gracefully so cleanup_orphaned_meshes still runs over the empty set.
+    // the fix pass is a no-op over an empty corpus. In non-fix mode we keep
+    // the existing exit-2 "no wiki pages found" signal — it is a useful
+    // diagnostic. discover_files returns Ok(vec![]) for an empty corpus (no
+    // wiki pages found) and Err only for genuine infrastructure failures.
+    // Non-fix mode treats an empty corpus as a fatal diagnostic (exit 2); fix
+    // mode degrades gracefully over the empty set.
     // The resolution/collision corpus is the entire wiki, scanned from the
     // repo root, so a subtree check resolves titles and detects collisions
     // against every page — making a subdirectory run equivalent to the same
@@ -406,8 +405,7 @@ pub fn run(
 
     // Empty-corpus semantics: in non-fix mode an empty scoped selection is the
     // "no wiki pages found" fatal diagnostic (exit 2). In `--fix` mode it
-    // degrades gracefully so cleanup_orphaned_meshes still runs over the empty
-    // set.
+    // degrades gracefully: the fix pass is a no-op over an empty set.
     if files.is_empty() && !fix {
         let msg = "no wiki pages found (no .md files matched)";
         if json {
@@ -418,55 +416,10 @@ pub fn run(
         return Ok(2);
     }
 
-    // ── Conflict resolution pre-pass ─────────────────────────────────────────
-    //
-    // Resolve any `.wiki/` mesh files that carry git conflict markers BEFORE
-    // running the mesh coverage check (which parses all meshes via
-    // store::read_all and fails closed on conflict-markered files) and BEFORE
-    // the main fix pass. Fully resolved meshes are written clean and staged so
-    // the coverage check sees valid data. Conflicted meshes that cannot be
-    // resolved are surfaced as skips; the coverage check skips their slugs so
-    // remaining diagnostics are still reported for clean meshes.
-    let mut conflict_resolution_incomplete = false;
-    if fix {
-        match check_fix::resolve_conflicted_meshes(repo_root) {
-            Ok(report) => {
-                if !report.resolved.is_empty() || !report.partial.is_empty() || !report.skipped.is_empty() {
-                    if !report.resolved.is_empty() {
-                        eprintln!(
-                            "resolved {} conflicted mesh(es)",
-                            report.resolved.len()
-                        );
-                    }
-                    if !report.partial.is_empty() {
-                        eprintln!(
-                            "partially resolved {} mesh(es) with residue",
-                            report.partial.len()
-                        );
-                    }
-                    for (slug, reason) in &report.skipped {
-                        eprintln!("skipped mesh `{slug}`: {reason}");
-                    }
-                }
-                if !report.skipped.is_empty() || !report.partial.is_empty() {
-                    conflict_resolution_incomplete = true;
-                }
-            }
-            Err(e) => {
-                if json {
-                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
-                } else {
-                    eprintln!("error: conflict resolution failed: {e}");
-                }
-                return Ok(2);
-            }
-        }
-    }
-
     // Per-run content cache: avoids re-reading wiki pages (frontmatter loop,
-    // link loop, mesh coverage, and fix passes all read the same files).  In
-    // fix mode the same cache instance is shared across the pre-check, the fix
-    // pass, and the post-fix re-check.
+    // link loop, and fix passes all read the same files). In fix mode the
+    // same cache instance is shared across the pre-check, the fix pass, and
+    // the post-fix re-check.
     let mut content_cache = ContentCache::new();
 
     let diagnostics = match collect_for_files(
@@ -494,12 +447,9 @@ pub fn run(
         let plan = match check_fix::run_fix_pass(
             &files,
             repo_root,
-            scan_root,
-            globs,
             source,
             fix_dry_run,
             &mut content_cache,
-            git_reader.as_ref(),
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -519,17 +469,13 @@ pub fn run(
                     serde_json::to_string_pretty(&serde_json::json!({
                         "fixes": plan.fixes,
                         "skipped": plan.skipped,
-                        "plannedMeshes": plan.mesh.planned,
-                        "plannedDeletions": plan.mesh.planned_deletions,
+                        "unverified": plan.unverified,
+                        "certificationSkips": plan.certification_skips,
                         "errors": diagnostics,
                     }))
                     .unwrap()
                 );
-            } else if plan.fixes.is_empty()
-                && plan.skipped.is_empty()
-                && plan.mesh.planned.is_empty()
-                && plan.mesh.planned_deletions.is_empty()
-            {
+            } else if plan.fixes.is_empty() && plan.skipped.is_empty() {
                 println!("no fixes to apply");
             } else {
                 for f in &plan.fixes {
@@ -541,20 +487,10 @@ pub fn run(
                 for s in &plan.skipped {
                     println!("skip: {} line {}: {}", s.file, s.line, s.reason);
                 }
-                for m in &plan.mesh.planned {
-                    println!("create mesh: {m}");
-                }
-                for m in &plan.mesh.planned_deletions {
-                    println!("delete mesh: {m}");
-                }
-                if !plan.mesh.advisories.is_empty() {
-                    print!("{}", plan.mesh.advisories);
-                }
             }
             if (!diagnostics.is_empty()
-                || plan.mesh_conflicts > 0
-                || plan.anchor_stale_count > 0
-                || conflict_resolution_incomplete)
+                || plan.unverified > 0
+                || plan.certification_skips > 0)
                 && !no_exit_code
             {
                 return Ok(1);
@@ -563,11 +499,8 @@ pub fn run(
         }
 
         if print_applied {
-            for m in &plan.mesh.applied {
-                println!("{m}");
-            }
-            for m in &plan.mesh.deleted {
-                println!("{m}");
+            for path in &plan.applied_paths {
+                println!("{path}");
             }
         }
 
@@ -594,19 +527,6 @@ pub fn run(
                     println!("{line}");
                 }
             }
-            if !plan.mesh.advisories.is_empty() {
-                if print_applied {
-                    eprint!("{}", plan.mesh.advisories);
-                } else {
-                    print!("{}", plan.mesh.advisories);
-                }
-            }
-        }
-        for failure in &plan.mesh.failures {
-            eprintln!(
-                "wiki check --fix: could not create mesh `{}` (see error output above)",
-                failure.slug
-            );
         }
 
         content_cache = ContentCache::new();
@@ -617,10 +537,10 @@ pub fn run(
             source,
             git_reader.as_ref(),
             &mut content_cache,
-            // Phase 2 flips this to true: the post-fix re-check then includes
-            // the drift pass, whose pending-bump rule keeps the just-applied
-            // fixes green.
-            false,
+            // Include the drift pass: the pending-bump rule (current field
+            // value differs from the newest committed value) keeps the
+            // just-applied relocations and field initializations green.
+            true,
         ) {
             Ok(d) => d,
             Err(e) => {
@@ -639,8 +559,9 @@ pub fn run(
                 serde_json::to_string_pretty(&serde_json::json!({
                     "fixes": plan.fixes,
                     "skipped": plan.skipped,
-                    "appliedMeshes": plan.mesh.applied,
-                    "deletedMeshes": plan.mesh.deleted,
+                    "appliedPaths": plan.applied_paths,
+                    "unverified": plan.unverified,
+                    "certificationSkips": plan.certification_skips,
                     "errors": post_diagnostics,
                 }))
                 .unwrap()
@@ -655,9 +576,8 @@ pub fn run(
         }
 
         if (!post_diagnostics.is_empty()
-            || plan.mesh_conflicts > 0
-            || plan.anchor_stale_count > 0
-            || conflict_resolution_incomplete)
+            || plan.unverified > 0
+            || plan.certification_skips > 0)
             && !no_exit_code
         {
             return Ok(1);
@@ -1131,10 +1051,6 @@ mod tests {
     use std::sync::Mutex;
     use tempfile::TempDir;
 
-    use crate::commands::mesh::store;
-    use git_mesh_core::AnchorExtent;
-    use git_mesh_core::mesh_file::{AnchorRecord, MeshFile};
-
     /// Serialize tests that share process-level state (e.g. PATH or env vars).
     static PATH_MUTEX: Mutex<()> = Mutex::new(());
 
@@ -1581,6 +1497,10 @@ mod tests {
     // ── Fix pass integration tests (all #[ignore] until fix logic is implemented) ──
 
     /// Fix 1: when a link target was renamed in git, --fix rewrites the path.
+    ///
+    /// Plain-path href: line-range links are the drift phase's sole authority,
+    /// and its `Broken` routing into `BrokenLinkRename` lands in Phase 2 (plan
+    /// Decision 6) with its own tests.
     #[test]
     fn fix1_broken_link_rewrites_renamed_path() {
         let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
@@ -1588,7 +1508,7 @@ mod tests {
         repo.create_file("src/old.rs", "fn a() {}\n");
         repo.create_file(
             "wiki/page.md",
-            &make_wiki_page("Page", "See [old](/src/old.rs#L1)."),
+            &make_wiki_page("Page", "See [old](/src/old.rs)."),
         );
         repo.commit("baseline");
 
@@ -1680,487 +1600,6 @@ mod tests {
         .expect("run");
         // Link is still broken → exit 1.
         assert_eq!(code, 1);
-    }
-
-    /// Seed a `.wiki/<slug>` mesh directly via `store::write`, with each
-    /// anchor's stored hash computed from the current worktree content via
-    /// `store::hash_anchor`.
-    fn seed_mesh(repo: &TestRepo, slug: &str, anchors: &[(&str, AnchorExtent)]) {
-        let mut cache = store::FileContentCache::new();
-        let records: Vec<AnchorRecord> = anchors
-            .iter()
-            .map(|(path, extent)| {
-                let hash = store::hash_anchor(repo.path(), path, *extent, &mut cache)
-                    .unwrap_or_else(|e| panic!("hash_anchor {path}: {e}"));
-                store::anchor_record(path.to_string(), *extent, hash)
-            })
-            .collect();
-        let mesh = MeshFile {
-            anchors: records,
-            why: "Test mesh.".to_string(),
-        };
-        store::write(repo.path(), slug, &mesh).unwrap_or_else(|e| panic!("seed {slug}: {e}"));
-    }
-
-    /// Fix 2: an in-file line shift relocates the anchor uniquely. The anchored
-    /// block (`fn a() {}`) drifts down one line when a preamble is inserted;
-    /// `--fix` rewrites the wiki link to the new range.
-    #[test]
-    fn fix2_in_file_shift_relocates() {
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        let repo = TestRepo::new();
-        repo.create_file("src/code.rs", "fn a() {}\n");
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
-        );
-        repo.commit("baseline");
-
-        // Seed the mesh against the baseline content, then introduce the shift
-        // as a working-tree change so it lands in the change set.
-        seed_mesh(
-            &repo,
-            "fix2-mesh",
-            &[
-                ("wiki/page.md", AnchorExtent::WholeFile),
-                ("src/code.rs", AnchorExtent::LineRange { start: 1, end: 1 }),
-            ],
-        );
-        repo.create_file("src/code.rs", "// preamble\nfn a() {}\n");
-
-        let _code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            true,
-            crate::index::DocSource::WorkingTree,
-            true,
-            false,
-            false,
-        )
-        .expect("run");
-
-        let content = std::fs::read_to_string(repo.path().join("wiki/page.md")).expect("read page");
-        assert!(
-            content.contains("#L2-L2"),
-            "expected anchor updated to L2-L2, got:\n{content}"
-        );
-    }
-
-    /// Fix 2: when the anchored content moves to a different file in the change
-    /// set, `--fix` relocates the link to the new file/range.
-    #[test]
-    fn fix2_cross_file_move_relocates() {
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        let repo = TestRepo::new();
-        repo.create_file("src/code.rs", "fn a() {}\n");
-        repo.create_file("src/other.rs", "// nothing here\n");
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
-        );
-        repo.commit("baseline");
-
-        seed_mesh(
-            &repo,
-            "fix2-move-mesh",
-            &[
-                ("wiki/page.md", AnchorExtent::WholeFile),
-                ("src/code.rs", AnchorExtent::LineRange { start: 1, end: 1 }),
-            ],
-        );
-
-        // Move the anchored line out of code.rs into other.rs (both changed).
-        repo.create_file("src/code.rs", "// emptied\n");
-        repo.create_file("src/other.rs", "// header\nfn a() {}\n");
-
-        let _code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            true,
-            crate::index::DocSource::WorkingTree,
-            true,
-            false,
-            false,
-        )
-        .expect("run");
-
-        let content = std::fs::read_to_string(repo.path().join("wiki/page.md")).expect("read page");
-        assert!(
-            content.contains("/src/other.rs#L2-L2"),
-            "expected anchor relocated to src/other.rs#L2-L2, got:\n{content}"
-        );
-    }
-
-    /// Fix 2 (fail-closed): when the anchored content appears in two files in
-    /// the change set, the match is ambiguous and the link is left untouched.
-    #[test]
-    fn fix2_two_matches_conflict_no_rewrite() {
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        let repo = TestRepo::new();
-        repo.create_file("src/code.rs", "fn a() {}\n");
-        repo.create_file("src/dup.rs", "// nothing\n");
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
-        );
-        repo.commit("baseline");
-
-        seed_mesh(
-            &repo,
-            "fix2-conflict-mesh",
-            &[("src/code.rs", AnchorExtent::LineRange { start: 1, end: 1 })],
-        );
-
-        // Empty the original and place the same block in TWO change-set files.
-        repo.create_file("src/code.rs", "// emptied\n");
-        repo.create_file("src/dup.rs", "fn a() {}\nfn a() {}\n");
-
-        let _code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            true,
-            crate::index::DocSource::WorkingTree,
-            true,
-            false,
-            false,
-        )
-        .expect("run");
-
-        let content = std::fs::read_to_string(repo.path().join("wiki/page.md")).expect("read page");
-        assert!(
-            content.contains("/src/code.rs#L1-L1"),
-            "expected link left untouched on ambiguous match, got:\n{content}"
-        );
-    }
-
-    /// F3: a followed in-file move relocates the stored mesh anchor in place
-    /// (refreshed hash), leaves exactly one anchor, and is idempotent across a
-    /// second `--fix` (no duplicate accumulation, no further change).
-    #[test]
-    fn fix2_followed_move_relocates_stored_anchor_idempotently() {
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        let repo = TestRepo::new();
-        repo.create_file("src/code.rs", "fn a() {}\n");
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
-        );
-        repo.commit("baseline");
-
-        seed_mesh(
-            &repo,
-            "fix2-writeback-mesh",
-            &[
-                ("wiki/page.md", AnchorExtent::WholeFile),
-                ("src/code.rs", AnchorExtent::LineRange { start: 1, end: 1 }),
-            ],
-        );
-        // Shift the anchored block down one line in the working tree.
-        repo.create_file("src/code.rs", "// preamble\nfn a() {}\n");
-
-        let run_fix = || {
-            run(
-                &[],
-                false,
-                repo.path(),
-                repo.path(),
-                true,
-                crate::index::DocSource::WorkingTree,
-                true,
-                false,
-                false,
-            )
-            .expect("run")
-        };
-
-        run_fix();
-
-        // The stored anchor moved in place: exactly one src anchor at L2-L2 with
-        // a hash matching the new range.
-        let mesh = store::read_one(repo.path(), "fix2-writeback-mesh")
-            .expect("read")
-            .expect("mesh");
-        let src_anchors: Vec<_> = mesh
-            .anchors
-            .iter()
-            .filter(|a| a.path == "src/code.rs")
-            .collect();
-        assert_eq!(
-            src_anchors.len(),
-            1,
-            "expected exactly one src anchor after follow, got: {src_anchors:?}"
-        );
-        assert_eq!((src_anchors[0].start_line, src_anchors[0].end_line), (2, 2));
-        let expected = store::hash_anchor(
-            repo.path(),
-            "src/code.rs",
-            AnchorExtent::LineRange { start: 2, end: 2 },
-            &mut store::FileContentCache::new(),
-        )
-        .expect("hash");
-        assert_eq!(
-            src_anchors[0].content_hash, expected,
-            "stored hash must match the new range"
-        );
-
-        let serialized_after_first = store::read_one(repo.path(), "fix2-writeback-mesh")
-            .unwrap()
-            .unwrap();
-
-        // Second --fix: anchor is now fresh, nothing changes (idempotent).
-        run_fix();
-        let serialized_after_second = store::read_one(repo.path(), "fix2-writeback-mesh")
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            serialized_after_first, serialized_after_second,
-            "second --fix must not mutate the mesh (no accumulation)"
-        );
-    }
-
-    /// F3: a cross-file followed move relocates the stored anchor to the new
-    /// file with a refreshed hash, leaving exactly one anchor for that content.
-    #[test]
-    fn fix2_followed_cross_file_move_relocates_stored_anchor() {
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        let repo = TestRepo::new();
-        repo.create_file("src/code.rs", "fn a() {}\n");
-        repo.create_file("src/other.rs", "// nothing here\n");
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
-        );
-        repo.commit("baseline");
-
-        seed_mesh(
-            &repo,
-            "fix2-xfile-mesh",
-            &[
-                ("wiki/page.md", AnchorExtent::WholeFile),
-                ("src/code.rs", AnchorExtent::LineRange { start: 1, end: 1 }),
-            ],
-        );
-        repo.create_file("src/code.rs", "// emptied\n");
-        repo.create_file("src/other.rs", "// header\nfn a() {}\n");
-
-        run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            true,
-            crate::index::DocSource::WorkingTree,
-            true,
-            false,
-            false,
-        )
-        .expect("run");
-
-        let mesh = store::read_one(repo.path(), "fix2-xfile-mesh")
-            .unwrap()
-            .unwrap();
-        let movable: Vec<_> = mesh
-            .anchors
-            .iter()
-            .filter(|a| a.path == "src/code.rs" || a.path == "src/other.rs")
-            .collect();
-        assert_eq!(
-            movable.len(),
-            1,
-            "expected exactly one relocated anchor, got: {movable:?}"
-        );
-        assert_eq!(movable[0].path, "src/other.rs");
-        assert_eq!((movable[0].start_line, movable[0].end_line), (2, 2));
-        let expected = store::hash_anchor(
-            repo.path(),
-            "src/other.rs",
-            AnchorExtent::LineRange { start: 2, end: 2 },
-            &mut store::FileContentCache::new(),
-        )
-        .expect("hash");
-        assert_eq!(movable[0].content_hash, expected);
-    }
-
-    /// F5: an ambiguous (≥ 2-match) move is reported as a conflict, leaves the
-    /// link untouched, and makes `--fix` exit non-zero so it fails CI/pre-commit.
-    /// Under `--no-exit-code` the conflict still reports but the exit is 0.
-    #[test]
-    fn fix2_conflict_reports_and_exits_nonzero() {
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        let repo = TestRepo::new();
-        repo.create_file("src/code.rs", "fn a() {}\n");
-        repo.create_file("src/dup.rs", "// nothing\n");
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
-        );
-        repo.commit("baseline");
-
-        seed_mesh(
-            &repo,
-            "fix2-conflict-exit-mesh",
-            &[("src/code.rs", AnchorExtent::LineRange { start: 1, end: 1 })],
-        );
-        // Empty the original; place the same block in TWO change-set files.
-        repo.create_file("src/code.rs", "// emptied\n");
-        repo.create_file("src/dup.rs", "fn a() {}\nfn a() {}\n");
-
-        // The conflict is carried in the FixPlan; assert it surfaces a skip and
-        // counts the conflict.
-        let plan = check_fix::run_fix_pass(
-            &discover_files(
-                &[],
-                repo.path(),
-                repo.path(),
-                crate::index::DocSource::WorkingTree,
-                None,
-            )
-            .unwrap(),
-            repo.path(),
-            repo.path(),
-            &[],
-            crate::index::DocSource::WorkingTree,
-            false,
-            &mut ContentCache::new(),
-            None,
-        )
-        .expect("fix pass");
-        assert_eq!(plan.mesh_conflicts, 1, "expected one conflict recorded");
-        assert!(
-            plan.skipped
-                .iter()
-                .any(|s| s.reason.contains("candidate locations")
-                    && s.reason.contains("wiki mesh remove")
-                    && s.reason.contains("wiki mesh add")),
-            "expected an actionable conflict skip message with wiki mesh commands, got: {:?}",
-            plan.skipped
-        );
-
-        // Re-seed (the pass above already ran writeback for nothing here) and
-        // drive the full `run` to assert exit code behavior.
-        let code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false, // no_exit_code = false
-            crate::index::DocSource::WorkingTree,
-            true,
-            false,
-            false,
-        )
-        .expect("run");
-        assert_eq!(code, 1, "conflict must drive a non-zero exit");
-
-        // The link was left untouched.
-        let content = std::fs::read_to_string(repo.path().join("wiki/page.md")).expect("read");
-        assert!(
-            content.contains("/src/code.rs#L1-L1"),
-            "conflict must leave the link untouched, got:\n{content}"
-        );
-
-        // Under --no-exit-code the conflict still reports but exit is 0.
-        let code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            true, // no_exit_code = true
-            crate::index::DocSource::WorkingTree,
-            true,
-            false,
-            false,
-        )
-        .expect("run");
-        assert_eq!(code, 0, "--no-exit-code suppresses the conflict exit");
-    }
-
-    /// Fix 2: a fresh anchor (content unchanged) produces no plan, so the link
-    /// is not rewritten.
-    #[test]
-    fn fix2_fresh_anchor_unchanged() {
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        let repo = TestRepo::new();
-        repo.create_file("src/code.rs", "fn a() {}\n");
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
-        );
-        repo.commit("baseline");
-
-        seed_mesh(
-            &repo,
-            "fix2-fresh-mesh",
-            &[("src/code.rs", AnchorExtent::LineRange { start: 1, end: 1 })],
-        );
-
-        // Touch an unrelated file so the tree is "changed" (the gate does not
-        // short-circuit) but the anchored content itself is untouched.
-        repo.create_file("src/unrelated.rs", "// noise\n");
-
-        let outcome =
-            check_fix::plan_mesh_follows(repo.path(), crate::index::DocSource::WorkingTree)
-                .expect("plan");
-        assert!(
-            outcome.plans.is_empty(),
-            "fresh anchor must yield no move plan, got: {:?}",
-            outcome.plans
-        );
-        assert!(
-            outcome.drifted.is_empty(),
-            "fresh anchor must not drift, got: {:?}",
-            outcome.drifted
-        );
-    }
-
-    /// Anchor staleness on an otherwise-unchanged tree is detected: the
-    /// freshness re-hash always runs (no stat gate), so a wrong stored hash is
-    /// surfaced as drift even when the working tree is clean and the index is
-    /// primed. This replaces the old `tree_unchanged` short-circuit behavior.
-    #[test]
-    fn fix2_unchanged_tree_skips_rehash() {
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        let repo = TestRepo::new();
-        repo.create_file("src/code.rs", "fn a() {}\n");
-        repo.create_file(
-            "wiki/page.md",
-            &make_wiki_page("Page", "See [code](/src/code.rs#L1-L1)."),
-        );
-        repo.commit("baseline");
-
-        // Seed a mesh whose stored hash is deliberately wrong but is a VALID
-        // 16-hex rk64 value, so `rk64_from_hex` parses it and the freshness
-        // comparison runs (a 64-char placeholder would be skipped vacuously).
-        let mesh = MeshFile {
-            anchors: vec![store::anchor_record(
-                "src/code.rs".to_string(),
-                AnchorExtent::LineRange { start: 1, end: 1 },
-                "deadbeef00000000".to_string(),
-            )],
-            why: "Test mesh.".to_string(),
-        };
-        store::write(repo.path(), "fix2-gate-mesh", &mesh).expect("seed");
-        repo.git(&["add", "-A"]);
-        repo.commit("commit mesh");
-
-        // Prime the index so the state row matches the on-disk triple, then run
-        // with a genuinely unchanged tree. The gate is gone — drift is detected.
-        crate::index::WikiIndex::prepare(repo.path()).expect("prepare index");
-
-        let outcome =
-            check_fix::plan_mesh_follows(repo.path(), crate::index::DocSource::WorkingTree)
-                .expect("plan");
-        assert!(
-            !outcome.drifted.is_empty(),
-            "wrong stored hash on an unchanged tree must be detected as drift, got: {:?}",
-            outcome.drifted
-        );
     }
 
     /// Fix 3: when an inbound link uses an aliased slug, --fix rewrites it to the

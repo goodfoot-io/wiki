@@ -1,4 +1,0 @@
-packages/cli/src/commands/check_fix.rs#L2077-L2203 rk64:7ab8c551414a4d80
-packages/cli/src/commands/mesh/render.rs#L32-L171 rk64:b776ca78036c817d
-
-Skip and advisory renderers that emit copy-pasteable wiki mesh add/remove commands for every unfixable wiki check failure; the emitted command strings must stay runnable against the wiki mesh CLI surface, since nothing type-checks these format strings against the command definition.

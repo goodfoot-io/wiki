@@ -741,7 +741,7 @@ mod tests {
         // A sequence is not a scalar — fail closed with a page-level
         // validation error rather than inventing a value.
         let content = "---\ntitle: Page\nsummary: S.\nlinks-reviewed:\n  - 1\n  - 2\n---\n";
-        let err = parse_frontmatter(&content, &p("page.md")).unwrap_err();
+        let err = parse_frontmatter(content, &p("page.md")).unwrap_err();
         assert!(matches!(err, FrontmatterError::InvalidLinksReviewed { .. }));
     }
 

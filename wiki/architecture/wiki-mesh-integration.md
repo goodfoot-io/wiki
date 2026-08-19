@@ -21,7 +21,7 @@ wiki check wiki/architecture/*.md
 wiki check "packages/auth/**/*.md"
 ```
 
-Classifies every internal fragment link with a line range through the [drift engine](/packages/cli/src/commands/drift.rs): the page's `links-reviewed` field selects its certification commit from git history, and each link's target range is compared against the content that certification recorded. Healthy links pass; Uncertified, Drift, Broken, and unresolved links are [reported as diagnostics](/packages/cli/src/commands/check.rs#L788) (`link_uncertified`, `link_drift`, `link_broken`, `link_unverified`), which drive a non-zero exit.
+Classifies every internal fragment link with a line range through the [drift engine](/packages/cli/src/commands/drift.rs): the page's `links-reviewed` field selects its certification commit from git history, and each link's target range is compared against the content that certification recorded. Healthy links pass; Uncertified, Drift, Broken, and unresolved links are [reported as diagnostics](/packages/cli/src/commands/check.rs#L708-L708) (`link_uncertified`, `link_drift`, `link_broken`, `link_unverified`), which drive a non-zero exit.
 
 The drift pass reads git history directly — no `git span` binary involved — and fails closed on shallow clones. Glob targeting follows the same rules as bare `wiki check`: a markdown file is treated as a wiki page only when its frontmatter has both a non-empty `title` and `summary`; omitting globs walks all `.md` files under `$WIKI_DIR` (defaulting to `wiki`) applying that filter.
 
@@ -54,7 +54,7 @@ Generated whys require author review — sentences that started with a backtick 
 
 ### Default glob behavior
 
-Omitting globs walks all `.md` files and treats those whose frontmatter has both a non-empty `title` and `summary` as wiki pages. `$WIKI_DIR` defaults to `wiki`. This matches the default discovery behavior used by all other wiki commands (see [discover_files](/packages/cli/src/commands/mod.rs#L217-L243)).
+Omitting globs walks all `.md` files and treats those whose frontmatter has both a non-empty `title` and `summary` as wiki pages. `$WIKI_DIR` defaults to `wiki`. This matches the default discovery behavior used by all other wiki commands (see [discover_files](/packages/cli/src/commands/mod.rs#L216-L242)).
 
 ### Missing-path filtering
 
@@ -93,4 +93,4 @@ wiki check
 
 ## References
 
-- [discover_files](/packages/cli/src/commands/mod.rs#L217-L243)
+- [discover_files](/packages/cli/src/commands/mod.rs#L216-L242)

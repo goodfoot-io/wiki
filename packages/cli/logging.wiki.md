@@ -25,7 +25,7 @@ Perf scope events measure execution time and record success/error status. They a
 
 ### Index Refresh
 
-These scopes cover the cold-cache path: when the stat-only freshness gate misses, [`WikiIndex::prepare_for_source`](./src/index/mod.rs#L348-L368) opens the repository and drives the three-pass refresh.
+These scopes cover the cold-cache path: when the stat-only freshness gate misses, [`WikiIndex::prepare_for_source`](./src/index/mod.rs#L346-L366) opens the repository and drives the three-pass refresh.
 
 | Location | Scope Name | Measures | Metadata |
 |----------|-----------|----------|----------|
@@ -41,7 +41,7 @@ These scopes cover the cold-cache path: when the stat-only freshness gate misses
 
 | Location | Scope Name | Measures | Metadata |
 |----------|-----------|----------|----------|
-| [commands/mod.rs](./src/commands/mod.rs#L242-L317) | `discover_files` | Time to resolve glob patterns and find wiki markdown files | `globs` (array of glob patterns) |
+| [commands/mod.rs](./src/commands/mod.rs#L241-L316) | `discover_files` | Time to resolve glob patterns and find wiki markdown files | `globs` (array of glob patterns) |
 | [commands/mod.rs](./src/commands/mod.rs#L253-L260) | `discover_files_result` | Zero-duration marker carrying the discovered-file count | `count` |
 
 ## Direct Output Points (println! and eprintln!)

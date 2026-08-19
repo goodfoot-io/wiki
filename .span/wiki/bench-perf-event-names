@@ -1,6 +1,6 @@
 packages/cli/scripts/bench.mjs#L160-L160 rk64:171f496903a953df
 packages/cli/scripts/bench.mjs#L198-L199 rk64:17b822e943d0c225
-packages/cli/src/index/mod.rs#L324-L353 rk64:e4e8155207ddb2f7
+packages/cli/src/index/mod.rs#L322-L351 rk64:e4e8155207ddb2f7
 packages/cli/src/main.rs#L394-L399 rk64:710ac1ba83a81034
 packages/cli/src/perf.rs#L99-L99 rk64:ea06ccad2bedd9c4
 

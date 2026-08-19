@@ -88,10 +88,8 @@ pub(crate) fn index_db_path(repo_root: &Path) -> PathBuf {
 /// missing `.git`, or stale state returns `false` (fail-open toward doing the
 /// work — callers must re-hash when this is `false`).
 ///
-/// No longer consulted by `plan_mesh_follows` (the anchor-staleness pass must
-/// re-hash even on a stat-clean tree, since committed source edits to non-`.md`
-/// files are invisible to this markdown-mtime gate). Retained as a public stat
-/// helper and exercised by the worktree-freshness integration tests.
+/// Retained as a public stat helper and exercised by the worktree-freshness
+/// integration tests.
 #[allow(dead_code)]
 pub fn tree_unchanged(repo_root: &Path) -> bool {
     let Some(dot_git) = find_dot_git(repo_root) else {
@@ -115,8 +113,8 @@ const SUGGESTION_LIMIT: i64 = 3;
 /// Selects which git snapshot `WikiIndex` reads from.
 ///
 /// The variants are preserved verbatim from the pre-rewrite surface so
-/// `commands/{search,summary,check,check_fix,mesh/scaffold,list,mod}.rs`
-/// keep compiling unchanged.
+/// `commands/{search,summary,check,check_fix,list,mod}.rs` keep compiling
+/// unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocSource {
     /// Read from the working tree (default, existing behaviour).
