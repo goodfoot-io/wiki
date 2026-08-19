@@ -1,0 +1,6 @@
+packages/cli/src/commands/drift.rs rk64:3fd7ff16a5341787
+plugins/wiki/skills/wiki/sections/fragment-links-and-coverage.md rk64:56c41f7fdd7c472b
+plugins/wiki/skills/wiki/sections/resolving-skipped-fixes.md rk64:ee18583b09a683ac
+plugins/wiki/skills/wiki/sections/running-wiki-check.md rk64:876932e98f4893cb
+
+drift.rs is the ground truth for the drift engine's behavior — how the `links-reviewed:` epoch selects its certification commit, what classifies a link healthy/uncertified/broken/drifted/moved/unverifiable, and which outcomes `--fix` relocates versus skips; the fragment-links-and-coverage, resolving-skipped-fixes, and running-wiki-check sections describe that behavior for operators, so a change to the classification or skip semantics must be re-verified against all three descriptions, and a doc that re-describes the contract must stay true of the implementation.
