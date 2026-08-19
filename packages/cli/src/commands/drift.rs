@@ -865,20 +865,68 @@ const FUZZY_LINE_MATCH_THRESHOLD: f64 = 0.5;
 /// on whitespace, count duplicate tokens on both sides, and divide the
 /// intersection size by the union size. `0.0` for two empty groups.
 fn window_jaccard(a_lines: &[&str], b_lines: &[&str]) -> f64 {
-    let _ = (a_lines, b_lines);
-    todo!("fuzzy tier lands in P3")
+    let a = token_counts(a_lines);
+    let b = token_counts(b_lines);
+    let a_total: u64 = a.values().map(|&c| u64::from(c)).sum();
+    let b_total: u64 = b.values().map(|&c| u64::from(c)).sum();
+    if a_total == 0 && b_total == 0 {
+        return 0.0;
+    }
+    let inter: u64 = a
+        .iter()
+        .map(|(t, &ca)| {
+            b.get(t)
+                .map(|&cb| u64::from(ca.min(cb)))
+                .unwrap_or(0)
+        })
+        .sum();
+    let union = a_total + b_total - inter;
+    inter as f64 / union as f64
+}
+
+/// Token multisets of a line group, keyed by whitespace token.
+fn token_counts<'a>(lines: &[&'a str]) -> HashMap<&'a str, u32> {
+    let mut counts: HashMap<&str, u32> = HashMap::new();
+    for line in lines {
+        for token in line.split_whitespace() {
+            *counts.entry(token).or_insert(0) += 1;
+        }
+    }
+    counts
 }
 
 /// The fuzzy-tier window score: token multiset Jaccard
-/// ([`window_jaccard`]) weighted by line containment — the fraction of the
-/// window's lines that match some certified line at the line-match
-/// threshold. The weighting keeps sliding windows that merely *overlap* a
-/// moved block (high token similarity plus foreign filler lines) below the
-/// tier threshold: only a window made of the moved block's own lines scores
-/// at or above it.
+/// ([`window_jaccard`]) weighted by line containment — the line-level
+/// Jaccard `matched / (|a| + |b| − matched)`, where a window line counts as
+/// matched when its token multiset Jaccard with at least one certified line
+/// reaches [`FUZZY_LINE_MATCH_THRESHOLD`] (blank lines match blanks). The
+/// weighting keeps sliding windows that merely *overlap* a moved block (high
+/// token similarity plus foreign filler lines) below the tier threshold:
+/// only a window made of the moved block's own lines scores at or above it.
 fn fuzzy_window_score(a_lines: &[&str], b_lines: &[&str]) -> f64 {
-    let _ = (a_lines, b_lines);
-    todo!("fuzzy tier lands in P3")
+    let token = window_jaccard(a_lines, b_lines);
+    if token == 0.0 {
+        return 0.0;
+    }
+    let mut matched = 0usize;
+    for b_line in b_lines {
+        let b_blank = b_line.split_whitespace().next().is_none();
+        let hit = a_lines.iter().any(|a_line| {
+            let a_blank = a_line.split_whitespace().next().is_none();
+            (a_blank && b_blank)
+                || (!a_blank
+                    && !b_blank
+                    && window_jaccard(&[a_line], &[b_line]) >= FUZZY_LINE_MATCH_THRESHOLD)
+        });
+        if hit {
+            matched += 1;
+        }
+    }
+    if matched == 0 {
+        return 0.0;
+    }
+    let union = a_lines.len() + b_lines.len() - matched;
+    token * matched as f64 / union as f64
 }
 
 /// The fuzzy-tier move scan: every window of the certified span's height in
@@ -895,8 +943,67 @@ fn fuzzy_locations(
     cert: &CertifiedLink,
     anchor_sha: &str,
 ) -> Result<Vec<crate::rk64::Location>, EpochError> {
-    let _ = (repo_root, source, page_path, target_path, target_bytes, cert, anchor_sha);
-    Ok(Vec::new())
+    let span = line_range_span(cert.start, cert.end);
+    if span == 0 {
+        return Ok(Vec::new());
+    }
+    // The certified lines at the anchor commit, clamped like the kernel's
+    // canonical content. The range was valid when certified, so the clamp
+    // only fires on a corrupt or hand-edited anchor file.
+    let Some(blob) = read_blob_at(repo_root, anchor_sha, &cert.target_path)? else {
+        return Ok(Vec::new());
+    };
+    let text = String::from_utf8_lossy(&blob);
+    let lines: Vec<&str> = text.lines().collect();
+    let start = cert.start as usize;
+    if start == 0 || start > lines.len() {
+        return Ok(Vec::new());
+    }
+    let end = (cert.end as usize).min(lines.len());
+    if end < start {
+        return Ok(Vec::new());
+    }
+    let cert_lines = &lines[start - 1..end];
+
+    let mut hits = Vec::new();
+    // Same-file tier: the link's own target.
+    if let Some(bytes) = target_bytes {
+        collect_fuzzy_hits(bytes, target_path, cert_lines, span, &mut hits);
+    }
+    // Cross-file tier: every candidate minus the target and the page itself.
+    for (path, bytes) in candidate_files(repo_root, source)? {
+        if path == target_path || path == page_path {
+            continue;
+        }
+        collect_fuzzy_hits(&bytes, &path, cert_lines, span, &mut hits);
+    }
+    Ok(hits)
+}
+
+/// Slide a window of the certified span's height over one candidate file and
+/// collect every at-threshold location.
+fn collect_fuzzy_hits(
+    bytes: &[u8],
+    path: &str,
+    cert_lines: &[&str],
+    span: usize,
+    hits: &mut Vec<crate::rk64::Location>,
+) {
+    let text = String::from_utf8_lossy(bytes);
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() < span {
+        return;
+    }
+    for start in 0..=lines.len() - span {
+        let window = &lines[start..start + span];
+        if fuzzy_window_score(cert_lines, window) >= FUZZY_JACCARD_THRESHOLD {
+            hits.push(crate::rk64::Location {
+                path: path.to_string(),
+                start_line: (start + 1) as u32,
+                end_line: (start + span) as u32,
+            });
+        }
+    }
 }
 
 fn moved_to(location: &crate::rk64::Location) -> Result<DriftOutcome, EpochError> {
@@ -1737,14 +1844,12 @@ pub fn collect_with_source(
     // ── Fuzzy Jaccard tier (Phase 1d, P2 acceptance checks — all pending) ──
 
     #[test]
-    #[ignore = "P3 implements the fuzzy tier"]
     fn jaccard_identical_groups_are_one() {
         let lines: Vec<&str> = FUZZY_BLOCK.lines().collect();
         assert_eq!(window_jaccard(&lines, &lines), 1.0);
     }
 
     #[test]
-    #[ignore = "P3 implements the fuzzy tier"]
     fn jaccard_disjoint_groups_are_zero() {
         let a: Vec<&str> = vec!["alpha beta gamma"];
         let b: Vec<&str> = vec!["delta epsilon zeta"];
@@ -1752,7 +1857,6 @@ pub fn collect_with_source(
     }
 
     #[test]
-    #[ignore = "P3 implements the fuzzy tier"]
     fn jaccard_duplicate_tokens_weight_the_multiset() {
         // intersection = 1·a + 1·b = 2; union = 3 + 3 − 2 = 4.
         let a: Vec<&str> = vec!["a a b"];
@@ -1761,7 +1865,6 @@ pub fn collect_with_source(
     }
 
     #[test]
-    #[ignore = "P3 implements the fuzzy tier"]
     fn jaccard_empty_groups_are_zero() {
         assert_eq!(window_jaccard(&[], &[]), 0.0);
         let b: Vec<&str> = vec!["x"];
@@ -1769,7 +1872,6 @@ pub fn collect_with_source(
     }
 
     #[test]
-    #[ignore = "P3 implements the fuzzy tier"]
     fn fuzzy_window_score_rejects_overlap_windows_accepts_the_block() {
         // The design contract behind the containment weighting: a window
         // made of the moved block's own lines (one line edited) reaches the
@@ -1793,7 +1895,6 @@ pub fn collect_with_source(
     }
 
     #[test]
-    #[ignore = "P3 implements the fuzzy tier"]
     fn fuzzy_window_score_three_line_whole_edit_stays_below() {
         // Replacing one of three single-token lines keeps 2/4 of the token
         // multiset shared; the containment weighting leaves the score well
@@ -1806,7 +1907,6 @@ pub fn collect_with_source(
     }
 
     #[test]
-    #[ignore = "P3 implements the fuzzy tier"]
     fn fuzzy_threshold_separates_real_content() {
         // The threshold's tuning evidence: real wiki markdown and code from
         // this corpus. Moved-and-lightly-edited excerpts must score at or
@@ -1854,7 +1954,6 @@ pub fn collect_with_source(
     }
 
     #[test]
-    #[ignore = "P3 implements the fuzzy tier"]
     fn fuzzy_moved_within_target_after_small_edit() {
         let (repo, c1) = repo_with_certified_fuzzy_block();
         // The edited block moves down three lines; the href range L2-L7 now
@@ -1882,7 +1981,6 @@ pub fn collect_with_source(
     }
 
     #[test]
-    #[ignore = "P3 implements the fuzzy tier"]
     fn fuzzy_moved_cross_file_after_small_edit() {
         // Cross-file Moved arises when the target is gone; the edited block
         // lives in another file, and the fuzzy tier is what finds it.
@@ -1907,7 +2005,6 @@ pub fn collect_with_source(
     }
 
     #[test]
-    #[ignore = "P3 implements the fuzzy tier"]
     fn fuzzy_two_candidates_is_unknown() {
         // The edited block appears in two files: two at-threshold windows →
         // Unknown, per the card's unconditional multi-match rule.
@@ -1926,7 +2023,6 @@ pub fn collect_with_source(
     }
 
     #[test]
-    #[ignore = "P3 implements the fuzzy tier"]
     fn fuzzy_no_match_stays_drift() {
         let (repo, c1) = repo_with_certified_fuzzy_block();
         // The certified range now covers unrelated filler and nothing in the
@@ -1947,7 +2043,6 @@ pub fn collect_with_source(
     }
 
     #[test]
-    #[ignore = "P3 implements the fuzzy tier"]
     fn fuzzy_no_match_missing_target_stays_broken() {
         let (repo, c1) = repo_with_certified_fuzzy_block();
         // Target deleted and nothing resembles the block → Broken on the
