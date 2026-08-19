@@ -470,7 +470,13 @@ pub fn has_line_range_links(content: &str) -> bool {
 /// Parse every line-range fragment link in `content`, in document order.
 /// Plain paths and heading-slug fragments are outside this system's scope.
 fn parse_line_range_links(content: &str) -> Vec<ParsedLink> {
-    let bytes = content.as_bytes();
+    // Blank code blocks, inline code, and HTML comments with spaces of equal
+    // length before scanning: the drift pass must parse the same link
+    // population the main parser sees, and a placeholder example inside a
+    // code span is not a link. Equal-length blanking keeps byte offsets and
+    // line numbers aligned with the original content.
+    let scrubbed = crate::parser::scrub_non_content(content);
+    let bytes = scrubbed.as_bytes();
     let line_starts = line_start_offsets(bytes);
     let mut links = Vec::new();
     let mut i = 0usize;
@@ -485,7 +491,7 @@ fn parse_line_range_links(content: &str) -> Vec<ParsedLink> {
             continue;
         };
         let href_end = href_start + href_len;
-        let href = &content[href_start..href_end];
+        let href = &scrubbed[href_start..href_end];
         let Some((path_part, fragment)) = href.split_once('#') else {
             i = href_end + 1;
             continue;
@@ -503,7 +509,7 @@ fn parse_line_range_links(content: &str) -> Vec<ParsedLink> {
             fragment: fragment.to_string(),
             start,
             end,
-            label: content[label_start + 1..i].to_string(),
+            label: scrubbed[label_start + 1..i].to_string(),
             source_line: line_of(&line_starts, i),
             href_byte_start: href_start,
             href_byte_end: href_end,
@@ -1372,6 +1378,24 @@ pub fn collect_with_source(
         // A field-looking line in the BODY is not frontmatter.
         let body = "links-reviewed: 5\n";
         assert_eq!(field_value(&make_wiki_page("P", body, None)), None);
+    }
+
+    // ── parse_line_range_links: non-content scrubbing ──
+
+    #[test]
+    fn range_links_inside_inline_code_are_not_parsed() {
+        let content = "See `[x](path#L10-L20)` and a real [y](./target.rs#L2-L4).\n";
+        let links = parse_line_range_links(content);
+        assert_eq!(links.len(), 1, "inline-code link must not parse: {links:?}");
+        assert_eq!(links[0].original_href, "./target.rs#L2-L4");
+    }
+
+    #[test]
+    fn range_links_inside_code_blocks_are_not_parsed() {
+        let content = "```rust\n[x](path#L10-L20)\n```\nReal [y](./target.rs#L2-L4).\n";
+        let links = parse_line_range_links(content);
+        assert_eq!(links.len(), 1, "code-block link must not parse: {links:?}");
+        assert_eq!(links[0].original_href, "./target.rs#L2-L4");
     }
 
     // ── insert_links_reviewed ──
