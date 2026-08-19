@@ -1,4 +1,4 @@
 packages/cli/src/commands/mesh/scaffold.rs#L153-L160 rk64:26818bad22575d9a
-wiki/architecture/wiki-mesh-integration.md rk64:497cc861cbf4c9a9
+wiki/architecture/wiki-mesh-integration.md rk64:9e61a942e5e88325
 
 create_mesh_coverage entry point in scaffold.rs covers the same file set as wiki check, referenced by the wiki mesh integration architecture docs.

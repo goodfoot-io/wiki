@@ -1,5 +1,5 @@
 packages/cli/src/commands/mesh_coverage.rs#L22-L354 rk64:066b7e6982d0a993
-wiki/architecture/wiki-mesh-integration.md rk64:497cc861cbf4c9a9
+wiki/architecture/wiki-mesh-integration.md rk64:9e61a942e5e88325
 wiki/guides/adding-mesh-coverage.md rk64:a9713003374359c5
 wiki/reference/git-mesh-usage.md rk64:b16bc65bb7d802de
 
