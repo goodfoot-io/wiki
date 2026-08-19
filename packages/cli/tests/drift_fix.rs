@@ -2,11 +2,11 @@
 //! Decision 6): relocations, fail-closed counts driving the exit gates,
 //! field initialization, and `--print-applied` output.
 //!
-//! P2 skipped checks — unignored one at a time in P3 as the implementation
-//! lands. The composed scenarios mirror the reviewer round-4 sub-blocking
-//! case: a `--fix` relocation must leave the post-fix re-check green via the
-//! relocation clause (same label + target-range content equality), not exit
-//! 1 on its own fix.
+//! Written as P2 skipped checks and unignored one at a time in P3 as the
+//! implementation landed. The composed scenarios mirror the reviewer
+//! round-4 sub-blocking case: a `--fix` relocation must leave the post-fix
+//! re-check green via the relocation clause (same label + target-range
+//! content equality), not exit 1 on its own fix.
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -61,6 +61,11 @@ fn write_certified_page(root: &Path, name: &str, value: &str, body: &str) {
 
 const BLOCK: &str = "fn canonical() {\n    compute()\n    resolve()\n}\n";
 
+/// An emptied target that keeps four lines: the certified range L2-L4 still
+/// fits, so a cross-file move reaches the move scan instead of classifying
+/// Broken on the extent check.
+const EMPTIED: &str = "// emptied\n// emptied\n// emptied\n// emptied\n";
+
 /// Commit the certified fixture: `[code](../src/target.rs#L2-L4)` covering
 /// the block at `src/target.rs` lines 2-4, page field `1`.
 fn seed_certified(root: &Path) {
@@ -86,15 +91,15 @@ fn combined(out: &Output) -> String {
 /// post-fix re-check certifies it via the relocation clause, and the run
 /// exits 0.
 #[test]
-#[ignore = "P3: drift fix phase implementation"]
 fn fix_relocates_cross_file_and_exits_zero() {
     let tmp = init_repo();
     let root = tmp.path();
     seed_certified(root);
 
     // The block moves verbatim to src/moved.rs; the original target is
-    // emptied.
-    std::fs::write(root.join("src/target.rs"), "// target emptied\n").unwrap();
+    // emptied but keeps the range's line count (an out-of-range target is
+    // Broken by contract and never reaches the move scan).
+    std::fs::write(root.join("src/target.rs"), EMPTIED).unwrap();
     std::fs::write(
         root.join("src/moved.rs"),
         format!("// preamble\n// x\n{BLOCK}"),
@@ -123,7 +128,6 @@ fn fix_relocates_cross_file_and_exits_zero() {
 /// Drift with an unreviewed content edit: `--fix` cannot settle it — the
 /// skip count drives exit 1 and the bump remedy names the field.
 #[test]
-#[ignore = "P3: drift fix phase implementation"]
 fn fix_drift_with_unreviewed_edit_exits_1() {
     let tmp = init_repo();
     let root = tmp.path();
@@ -153,13 +157,12 @@ fn fix_drift_with_unreviewed_edit_exits_1() {
 /// Unknown (ambiguous move): `--fix` never first-hit-wins — the unverified
 /// count drives exit 1.
 #[test]
-#[ignore = "P3: drift fix phase implementation"]
 fn fix_unknown_ambiguous_move_exits_1() {
     let tmp = init_repo();
     let root = tmp.path();
     seed_certified(root);
 
-    std::fs::write(root.join("src/target.rs"), "// target emptied\n").unwrap();
+    std::fs::write(root.join("src/target.rs"), EMPTIED).unwrap();
     std::fs::write(root.join("src/a.rs"), BLOCK).unwrap();
     std::fs::write(root.join("src/b.rs"), BLOCK).unwrap();
     git(root, &["add", "-A"]);
@@ -183,7 +186,6 @@ fn fix_unknown_ambiguous_move_exits_1() {
 /// A field-less page gets `links-reviewed: 1` through `--fix` and the run
 /// exits 0; a second run stays green and leaves the value alone.
 #[test]
-#[ignore = "P3: drift fix phase implementation"]
 fn fix_initializes_missing_field_and_exits_zero() {
     let tmp = init_repo();
     let root = tmp.path();
@@ -215,13 +217,12 @@ fn fix_initializes_missing_field_and_exits_zero() {
 /// `--print-applied` prints exactly the repo-relative paths the run wrote —
 /// the rewritten page — with advisories staying off stdout.
 #[test]
-#[ignore = "P3: drift fix phase implementation"]
 fn fix_print_applied_lists_rewritten_paths() {
     let tmp = init_repo();
     let root = tmp.path();
     seed_certified(root);
 
-    std::fs::write(root.join("src/target.rs"), "// target emptied\n").unwrap();
+    std::fs::write(root.join("src/target.rs"), EMPTIED).unwrap();
     std::fs::write(
         root.join("src/moved.rs"),
         format!("// preamble\n// x\n{BLOCK}"),

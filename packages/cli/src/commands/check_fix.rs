@@ -8,6 +8,7 @@ use miette::Result;
 use serde::Serialize;
 
 use super::check::ContentCache;
+use super::drift;
 use crate::frontmatter::parse_frontmatter;
 use crate::headings::{extract_headings, github_slug, resolve_heading, Heading};
 use crate::index::DocSource;
@@ -1236,7 +1237,10 @@ pub(crate) struct DriftFixPhaseOutcome {
 /// machinery, skip `Drift`/`Uncertified`/`Unknown` with fail-closed counts,
 /// and initialize the `links-reviewed` field on pages that lack one.
 ///
-/// P1 stub — implemented in P3.
+/// The phase only writes into `patches` in memory; [`run_fix_pass`] is the
+/// sole materializer. Href patches carry byte offsets against the page's
+/// original content, so they are applied first; the field insertion lands
+/// last because it shifts every offset after the YAML block.
 #[allow(clippy::too_many_arguments)]
 fn run_drift_fix_phase(
     files: &[PathBuf],
@@ -1248,19 +1252,243 @@ fn run_drift_fix_phase(
     fixes: &mut Vec<Fix>,
     skipped: &mut Vec<SkippedFix>,
 ) -> Result<DriftFixPhaseOutcome> {
-    let _ = (
-        files,
-        repo_root,
-        source,
-        content_cache,
-        rename_map,
-        patches,
-        fixes,
-        skipped,
-    );
+    // Fix mode is worktree-only by construction: the CLI guard rejects it
+    // under a non-worktree source, and `run()` must not mutate files either
+    // (pinned by `wiki_check_fix_rejects_non_worktree_source`).
+    if source != DocSource::WorkingTree {
+        return Ok(DriftFixPhaseOutcome {
+            unverified: 0,
+            certification_skips: 0,
+        });
+    }
+
+    let mut unverified = 0;
+    let mut certification_skips = 0;
+
+    for file in files {
+        let content = match content_cache
+            .get_or_try_read(file, || std::fs::read_to_string(file))
+        {
+            Ok(c) => c.to_string(),
+            Err(_) => continue,
+        };
+        if !drift::has_line_range_links(&content) {
+            continue;
+        }
+        let file_rel = file
+            .strip_prefix(repo_root)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| file.to_string_lossy().into_owned());
+        let page_path = file_rel.replace('\\', "/");
+
+        let current_value = drift::extract_links_reviewed(&content);
+        let committed_value = match DocSource::Head.read(repo_root, &page_path) {
+            Ok(Some(head_content)) => drift::extract_links_reviewed(&head_content),
+            _ => None,
+        };
+        let epoch = drift::find_anchor_commit(
+            repo_root,
+            &page_path,
+            current_value.as_deref(),
+            committed_value.as_deref(),
+        )
+        .map_err(|e| miette::miette!("{e}"))?;
+
+        // A field-less page self-heals under `--fix`: initialize the field,
+        // then classify under a pending epoch — certification outcomes are
+        // suppressed (the page is under review) while `Broken` still flags.
+        // Without a frontmatter block the insert is impossible; the page then
+        // falls through with no patch and the post-fix re-check flags it
+        // `anchor_epoch_missing`, so nothing is silently passed.
+        let (classify_epoch, field_init) = match &epoch {
+            drift::LinkEpoch::Missing => (
+                drift::LinkEpoch::Current {
+                    value: Some("1".to_string()),
+                },
+                drift::insert_links_reviewed(&content),
+            ),
+            other => (other.clone(), None),
+        };
+        let classes =
+            drift::classify_page(repo_root, source, &page_path, &content, &classify_epoch)
+                .map_err(|e| miette::miette!("{e}"))?;
+
+        let mut file_patches: Vec<(usize, usize, String)> = Vec::new();
+        for c in &classes {
+            match &c.outcome {
+                drift::DriftOutcome::Moved {
+                    new_path,
+                    new_start,
+                    new_end,
+                } => {
+                    // Follow the move: rewrite path and range together as the
+                    // full href (round-4 review: never path-only).
+                    let fragment = if new_start == new_end {
+                        format!("L{new_start}")
+                    } else {
+                        format!("L{new_start}-L{new_end}")
+                    };
+                    let new_href = rewrite_href(
+                        &c.original_href,
+                        Some(&fragment),
+                        Path::new(new_path),
+                        file,
+                        repo_root,
+                    );
+                    fixes.push(Fix {
+                        file: file_rel.clone(),
+                        line: c.source_line,
+                        kind: FixKind::LinkRelocate,
+                        byte_start: c.href_byte_start,
+                        byte_end: c.href_byte_end,
+                        old_href: c.original_href.clone(),
+                        new_href: new_href.clone(),
+                        reason: format!(
+                            "certified content moved to {new_path} lines {new_start}-{new_end}"
+                        ),
+                        confidence: Confidence::High,
+                    });
+                    file_patches.push((c.href_byte_start, c.href_byte_end, new_href));
+                }
+                drift::DriftOutcome::Broken => {
+                    // A renamed-but-unrecognizable target routes through the
+                    // rename machinery; the range fragment is preserved
+                    // verbatim — only the path part was renamed.
+                    match rename_map.successor(Path::new(&c.target_path)) {
+                        SuccessorResult::Unique(new_rel) => {
+                            let new_abs = repo_root.join(&new_rel);
+                            if !new_abs.exists() {
+                                skipped.push(SkippedFix {
+                                    file: file_rel.clone(),
+                                    line: c.source_line,
+                                    kind: FixKind::BrokenLinkRename,
+                                    reason: format!(
+                                        "target deleted; no successor (rename destination {} \
+                                         missing)",
+                                        new_rel.display()
+                                    ),
+                                });
+                                continue;
+                            }
+                            let fragment = c
+                                .original_href
+                                .find('#')
+                                .map(|i| &c.original_href[i + 1..]);
+                            let new_href = rewrite_href(
+                                &c.original_href,
+                                fragment,
+                                &new_rel,
+                                file,
+                                repo_root,
+                            );
+                            fixes.push(Fix {
+                                file: file_rel.clone(),
+                                line: c.source_line,
+                                kind: FixKind::BrokenLinkRename,
+                                byte_start: c.href_byte_start,
+                                byte_end: c.href_byte_end,
+                                old_href: c.original_href.clone(),
+                                new_href: new_href.clone(),
+                                reason: format!("renamed to {}", new_rel.display()),
+                                confidence: Confidence::High,
+                            });
+                            file_patches.push((c.href_byte_start, c.href_byte_end, new_href));
+                        }
+                        SuccessorResult::Ambiguous(candidates) => {
+                            let names: Vec<String> =
+                                candidates.iter().map(|p| p.display().to_string()).collect();
+                            skipped.push(SkippedFix {
+                                file: file_rel.clone(),
+                                line: c.source_line,
+                                kind: FixKind::BrokenLinkRename,
+                                reason: format!("ambiguous rename candidates: {}", names.join(", ")),
+                            });
+                        }
+                        SuccessorResult::None => {
+                            skipped.push(SkippedFix {
+                                file: file_rel.clone(),
+                                line: c.source_line,
+                                kind: FixKind::BrokenLinkRename,
+                                reason: "target deleted; no successor".to_string(),
+                            });
+                        }
+                    }
+                }
+                drift::DriftOutcome::Drift => {
+                    // Only a `links-reviewed` bump certifies content edited in
+                    // place — `--fix` never settles Drift on its own.
+                    certification_skips += 1;
+                    skipped.push(SkippedFix {
+                        file: file_rel.clone(),
+                        line: c.source_line,
+                        kind: FixKind::LinkRelocate,
+                        reason: format!(
+                            "content at `{}#L{}-L{}` changed since the anchor epoch — bump \
+                             `links-reviewed:` after reviewing it",
+                            c.target_path, c.start_line, c.end_line
+                        ),
+                    });
+                }
+                drift::DriftOutcome::Uncertified => {
+                    certification_skips += 1;
+                    skipped.push(SkippedFix {
+                        file: file_rel.clone(),
+                        line: c.source_line,
+                        kind: FixKind::LinkRelocate,
+                        reason: format!(
+                            "line-range link `{}` was not present at the page's anchor epoch — \
+                             bump `links-reviewed:` after reviewing it",
+                            c.original_href
+                        ),
+                    });
+                }
+                drift::DriftOutcome::Unknown => {
+                    // Ambiguous move: never first-hit-wins.
+                    unverified += 1;
+                    skipped.push(SkippedFix {
+                        file: file_rel.clone(),
+                        line: c.source_line,
+                        kind: FixKind::LinkRelocate,
+                        reason: format!(
+                            "could not verify line-range link `{}`: the certified content \
+                             occurs at multiple locations — re-anchor the link and bump \
+                             `links-reviewed:`",
+                            c.original_href
+                        ),
+                    });
+                }
+                drift::DriftOutcome::Healthy => {}
+            }
+        }
+
+        if file_patches.is_empty() && field_init.is_none() {
+            continue;
+        }
+
+        // Href patches first (offsets are against the original content), the
+        // field insertion last (it shifts every offset after the YAML block).
+        let patched = if file_patches.is_empty() {
+            content
+        } else {
+            let mut sorted = file_patches;
+            sorted.sort_by_key(|p| Reverse(p.0));
+            let mut patched = content;
+            for (start, end, replacement) in sorted {
+                patched.replace_range(start..end, &replacement);
+            }
+            patched
+        };
+        let final_content = if field_init.is_some() {
+            drift::insert_links_reviewed(&patched).unwrap_or(patched)
+        } else {
+            patched
+        };
+        patches.insert(file.clone(), final_content);
+    }
+
     Ok(DriftFixPhaseOutcome {
-        unverified: 0,
-        certification_skips: 0,
+        unverified,
+        certification_skips,
     })
 }
 
@@ -1321,6 +1549,15 @@ mod tests {
 
     fn wiki_page(title: &str, body: &str) -> String {
         format!("---\ntitle: {title}\nsummary: A page about {title}.\n---\n{body}")
+    }
+
+    /// A wiki page carrying `links-reviewed: 1` — a certified page, so the
+    /// drift engine anchors at its commit instead of taking the field-init
+    /// path.
+    fn certified_wiki_page(title: &str, body: &str) -> String {
+        format!(
+            "---\ntitle: {title}\nsummary: A page about {title}.\nlinks-reviewed: 1\n---\n{body}"
+        )
     }
 
     /// Fix #5 walks HEAD history to recover the prior heading slug after the
@@ -1480,13 +1717,19 @@ mod tests {
 
     // ── Drift fix phase (plan Decision 6) ──────────────────────────────────────
     //
-    // P2 skipped checks — the executable spec for `run_drift_fix_phase`.
-    // Unignored one at a time in P3 as each behavior lands. The phase writes
-    // into `patches` in memory; `run_fix_pass` materializes to disk.
+    // The P3 acceptance checks for `run_drift_fix_phase` — written as P2
+    // skipped checks, unignored one at a time as the implementation landed.
+    // The phase writes into `patches` in memory; `run_fix_pass` materializes
+    // to disk.
 
     /// Certified block used by the drift-fix fixtures: distinctive enough
     /// that an edit to it can never rk64-collide with another file's content.
     const BLOCK: &str = "fn canonical() {\n    compute()\n    resolve()\n}\n";
+
+    /// An emptied target that keeps four lines: the certified range L2-L4
+    /// still fits, so a cross-file move reaches the move scan instead of
+    /// classifying Broken on the extent check.
+    const EMPTIED: &str = "// emptied\n// emptied\n// emptied\n// emptied\n";
 
     /// Fixture: a repo whose committed HEAD carries `wiki/page.md` with
     /// `links-reviewed: 1` and one line-range link to `src/target.rs` lines
@@ -1497,7 +1740,7 @@ mod tests {
         repo.write("src/target.rs", &format!("// preamble\n{BLOCK}"));
         repo.write(
             "wiki/page.md",
-            &wiki_page("Page", "See [target](../src/target.rs#L2-L4)."),
+            &certified_wiki_page("Page", "See [target](../src/target.rs#L2-L4)."),
         );
         repo.commit("certified baseline");
         let page = repo.path().join("wiki/page.md");
@@ -1536,7 +1779,6 @@ mod tests {
     /// Moved same-file: the block shifts down one line; the phase rewrites
     /// the full href (same path, new range) as a `LinkRelocate` fix.
     #[test]
-    #[ignore = "P3: drift fix phase implementation"]
     fn drift_fix_relocates_moved_same_file() {
         let (repo, page) = certified_page_repo();
         repo.write(
@@ -1565,10 +1807,12 @@ mod tests {
     /// Moved cross-file: the block disappears from the target and reappears
     /// verbatim in another file; the phase rewrites path and range together.
     #[test]
-    #[ignore = "P3: drift fix phase implementation"]
     fn drift_fix_relocates_moved_cross_file() {
         let (repo, page) = certified_page_repo();
-        repo.write("src/target.rs", "// target emptied\n");
+        // The emptied target keeps the range's line count: an out-of-range
+        // target is Broken by contract (round-1 finding 5) and never reaches
+        // the move scan.
+        repo.write("src/target.rs", EMPTIED);
         repo.write("src/moved.rs", &format!("// preamble\n// x\n{BLOCK}"));
         repo.commit("move block cross-file");
 
@@ -1586,13 +1830,12 @@ mod tests {
     /// A staged rename with intact content classifies `Moved` (the move scan
     /// finds the block at the renamed path) and relocates the full href.
     #[test]
-    #[ignore = "P3: drift fix phase implementation"]
-    fn drift_fix_renamed_target_relocates_via_move_scan() {
+        fn drift_fix_renamed_target_relocates_via_move_scan() {
         let repo = TestRepo::new();
         repo.write("src/old.rs", BLOCK);
         repo.write(
             "wiki/page.md",
-            &wiki_page("Page", "See [old](../src/old.rs#L1-L4)."),
+            &certified_wiki_page("Page", "See [old](../src/old.rs#L1-L4)."),
         );
         repo.commit("certified baseline");
         repo.git(&["mv", "src/old.rs", "src/new.rs"]);
@@ -1610,13 +1853,12 @@ mod tests {
     /// machinery: a unique successor applies as a `BrokenLinkRename` fix
     /// that preserves the range fragment verbatim.
     #[test]
-    #[ignore = "P3: drift fix phase implementation"]
-    fn drift_fix_broken_routes_through_rename_map() {
+        fn drift_fix_broken_routes_through_rename_map() {
         let repo = TestRepo::new();
         repo.write("src/old.rs", BLOCK);
         repo.write(
             "wiki/page.md",
-            &wiki_page("Page", "See [old](../src/old.rs#L1-L4)."),
+            &certified_wiki_page("Page", "See [old](../src/old.rs#L1-L4)."),
         );
         repo.commit("certified baseline");
         repo.git(&["mv", "src/old.rs", "src/new.rs"]);
@@ -1636,13 +1878,12 @@ mod tests {
     /// Broken with no rename successor stays a skipped `Broken` — fail-closed,
     /// no invented destination.
     #[test]
-    #[ignore = "P3: drift fix phase implementation"]
-    fn drift_fix_broken_no_successor_is_skipped() {
+        fn drift_fix_broken_no_successor_is_skipped() {
         let repo = TestRepo::new();
         repo.write("src/old.rs", BLOCK);
         repo.write(
             "wiki/page.md",
-            &wiki_page("Page", "See [old](../src/old.rs#L1-L4)."),
+            &certified_wiki_page("Page", "See [old](../src/old.rs#L1-L4)."),
         );
         repo.commit("certified baseline");
         repo.git(&["rm", "src/old.rs"]);
@@ -1657,8 +1898,7 @@ mod tests {
     /// Drift (content edited in place, no move match) skips with the
     /// `links-reviewed:` bump remedy and counts into `certification_skips`.
     #[test]
-    #[ignore = "P3: drift fix phase implementation"]
-    fn drift_fix_skips_drift_with_bump_remedy() {
+        fn drift_fix_skips_drift_with_bump_remedy() {
         let (repo, page) = certified_page_repo();
         repo.write(
             "src/target.rs",
@@ -1680,8 +1920,7 @@ mod tests {
     /// Uncertified (a link added since the anchor commit) skips with the
     /// bump remedy and counts into `certification_skips`.
     #[test]
-    #[ignore = "P3: drift fix phase implementation"]
-    fn drift_fix_skips_uncertified_with_bump_remedy() {
+        fn drift_fix_skips_uncertified_with_bump_remedy() {
         let (repo, page) = certified_page_repo();
         repo.write("src/extra.rs", "fn extra() {}\n");
         let mut content = std::fs::read_to_string(&page).expect("read page");
@@ -1702,10 +1941,9 @@ mod tests {
     /// Unknown (the certified content occurs at ≥2 locations) skips and
     /// counts into `unverified` — never first-hit-wins.
     #[test]
-    #[ignore = "P3: drift fix phase implementation"]
-    fn drift_fix_skips_unknown_with_unverified_count() {
+        fn drift_fix_skips_unknown_with_unverified_count() {
         let (repo, page) = certified_page_repo();
-        repo.write("src/target.rs", "// target emptied\n");
+        repo.write("src/target.rs", EMPTIED);
         repo.write("src/a.rs", BLOCK);
         repo.write("src/b.rs", BLOCK);
         repo.commit("duplicate block, original gone");
@@ -1722,8 +1960,7 @@ mod tests {
     /// outcomes, and a second run produces no patch (never rewrites the
     /// value).
     #[test]
-    #[ignore = "P3: drift fix phase implementation"]
-    fn drift_fix_initializes_field_once() {
+        fn drift_fix_initializes_field_once() {
         let repo = TestRepo::new();
         repo.write("src/target.rs", &format!("// preamble\n{BLOCK}"));
         repo.write(
@@ -1743,6 +1980,9 @@ mod tests {
             patched.contains("links-reviewed: 1"),
             "field must be initialized: {patched}"
         );
+        // Materialize the first run's patch (run_fix_pass would have written
+        // it) so the second run sees the field in the worktree.
+        std::fs::write(&page, patched).expect("materialize patch");
 
         // Second run: the field exists in the worktree (committed side still
         // absent) → pending-bump epoch → no patch, no counts.
@@ -1761,8 +2001,7 @@ mod tests {
     /// value) suppresses certification outcomes: drifted content produces
     /// no skips, no counts, and no patch.
     #[test]
-    #[ignore = "P3: drift fix phase implementation"]
-    fn drift_fix_pending_bump_suppresses_certification_work() {
+        fn drift_fix_pending_bump_suppresses_certification_work() {
         let (repo, page) = certified_page_repo();
         repo.write(
             "src/target.rs",
