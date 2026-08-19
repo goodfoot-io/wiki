@@ -24,7 +24,7 @@ use std::process::Command;
 
 use thiserror::Error;
 
-use crate::frontmatter;
+use crate::frontmatter::{self, scalar_to_string};
 use crate::index::DocSource;
 use crate::rk64::{
     Extent, LineIndex, cheap_fingerprint_with_extent, scan_for_content_hash_rk64, scan_indexed_rk64,
@@ -137,18 +137,6 @@ pub fn extract_links_reviewed(content: &str) -> Option<String> {
     let parsed: serde_yaml::Value = serde_yaml::from_str(yaml).ok()?;
     let value = parsed.get("links-reviewed")?;
     scalar_to_string(value)
-}
-
-/// The string form of a YAML scalar. `null`, sequences, and maps have no
-/// scalar string form and read as absent (fail-closed: the field's change
-/// detection must never silently collapse distinct values into one string).
-fn scalar_to_string(value: &serde_yaml::Value) -> Option<String> {
-    match value {
-        serde_yaml::Value::String(s) => Some(s.clone()),
-        serde_yaml::Value::Number(n) => Some(n.to_string()),
-        serde_yaml::Value::Bool(b) => Some(b.to_string()),
-        _ => None,
-    }
 }
 
 /// Resolve the page's anchor epoch per plan Decision 2.

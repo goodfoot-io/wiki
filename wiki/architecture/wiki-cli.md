@@ -13,7 +13,7 @@ The [parser](/packages/cli/src/parser.rs#L6-L12) extracts fragment links from ma
 
 ## Validation Pipeline
 
-The [check command](/packages/cli/src/commands/check.rs#L283-L297) runs a full validation pass: [frontmatter parsing](/packages/cli/src/frontmatter.rs#L109-L121), title/alias collision detection, wikilink resolution, and fragment link verification (file existence and line range bounds at the pinned SHA). With `--fix`, unpinned fragment links are pinned automatically rather than reported as errors — already-pinned links are never touched.
+The [check command](/packages/cli/src/commands/check.rs#L283-L297) runs a full validation pass: [frontmatter parsing](/packages/cli/src/frontmatter.rs#L123-L135), title/alias collision detection, wikilink resolution, and fragment link verification (file existence and line range bounds at the pinned SHA). With `--fix`, unpinned fragment links are pinned automatically rather than reported as errors — already-pinned links are never touched.
 
 ## PostToolUse Hook
 
@@ -33,4 +33,4 @@ The CLI does not render markdown. HTML rendering is owned entirely by the VS Cod
 
 ## Frontmatter
 
-The [frontmatter module](/packages/cli/src/frontmatter.rs#L109-L121) parses and validates YAML frontmatter from wiki pages. It [reserves certain titles](/packages/cli/src/frontmatter.rs#L45-L48) (`check`, `list`, `summary`, `mesh`) to prevent ambiguity with command-line dispatch.
+The [frontmatter module](/packages/cli/src/frontmatter.rs#L123-L135) parses and validates YAML frontmatter from wiki pages. It [reserves certain titles](/packages/cli/src/frontmatter.rs#L48-L51) (`check`, `list`, `summary`, `mesh`) to prevent ambiguity with command-line dispatch.

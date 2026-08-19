@@ -26,6 +26,9 @@ pub enum FrontmatterError {
     #[error("`keywords` must be an array of non-empty strings.")]
     InvalidKeywords { path: PathBuf },
 
+    #[error("`links-reviewed` must be a scalar, not a collection.")]
+    InvalidLinksReviewed { path: PathBuf },
+
     #[error("Add a `summary` field — a one-line description of the page.")]
     MissingSummary { path: PathBuf },
 
@@ -57,6 +60,8 @@ struct RawFrontmatter {
     tags: Option<serde_yaml::Value>,
     keywords: Option<serde_yaml::Value>,
     summary: Option<serde_yaml::Value>,
+    #[serde(rename = "links-reviewed")]
+    links_reviewed: Option<serde_yaml::Value>,
 }
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -69,6 +74,9 @@ pub struct Frontmatter {
     pub tags: Vec<String>,
     pub keywords: Vec<String>,
     pub summary: String,
+    /// The `links-reviewed:` certification value (card main-3), coerced to
+    /// its string form — `None` when the field is absent.
+    pub links_reviewed: Option<String>,
 }
 
 // ── Parsing ───────────────────────────────────────────────────────────────────
@@ -96,8 +104,14 @@ pub fn has_wiki_frontmatter(content: &str) -> bool {
     };
     // Parseable YAML: include only if it has wiki-specific keys.  Skill files
     // (name/description) and config files (paths) are not wiki pages.
+    // `links-reviewed` is a wiki-only certification field (card main-3), so
+    // its presence is a third wiki marker.
     match serde_yaml::from_str::<serde_yaml::Value>(yaml) {
-        Ok(value) => value.get("title").is_some() || value.get("summary").is_some(),
+        Ok(value) => {
+            value.get("title").is_some()
+                || value.get("summary").is_some()
+                || value.get("links-reviewed").is_some()
+        }
         Err(_) => true, // Broken YAML — might be a malformed wiki page
     }
 }
@@ -243,13 +257,39 @@ pub fn parse_frontmatter(
         }
     };
 
+    // Validate links-reviewed (card main-3): a scalar coerced to its string
+    // form via the same coercion the drift engine's epoch comparison uses,
+    // so page validation and certification can never disagree about a value.
+    let links_reviewed = match raw.links_reviewed {
+        None => None,
+        Some(value) => Some(scalar_to_string(&value).ok_or_else(|| {
+            FrontmatterError::InvalidLinksReviewed {
+                path: path.to_path_buf(),
+            }
+        })?),
+    };
+
     Ok(Some(Frontmatter {
         title,
         aliases,
         tags,
         keywords,
         summary,
+        links_reviewed,
     }))
+}
+
+/// The string form of a YAML scalar: quoted strings unquote, numbers and
+/// booleans render as written. `null`, sequences, and maps have no scalar
+/// string form (fail-closed: the drift engine's change detection must never
+/// silently collapse distinct values into one string).
+pub(crate) fn scalar_to_string(value: &serde_yaml::Value) -> Option<String> {
+    match value {
+        serde_yaml::Value::String(s) => Some(s.clone()),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
 }
 
 /// Byte bounds of the leading `---` YAML block in `content`: `(yaml_start,
@@ -552,6 +592,7 @@ mod tests {
                 tags: vec![],
                 keywords: vec![],
                 summary: "Summary.".into(),
+                links_reviewed: None,
             },
         )];
         let (idx, collisions) = build_index(&pages);
@@ -571,6 +612,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
+                    links_reviewed: None,
                 },
             ),
             (
@@ -581,6 +623,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
+                    links_reviewed: None,
                 },
             ),
         ];
@@ -603,6 +646,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
+                    links_reviewed: None,
                 },
             ),
             (
@@ -613,6 +657,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
+                    links_reviewed: None,
                 },
             ),
         ];
@@ -634,6 +679,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
+                    links_reviewed: None,
                 },
             ),
             (
@@ -644,6 +690,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
+                    links_reviewed: None,
                 },
             ),
         ];
@@ -667,6 +714,46 @@ mod tests {
         let content = "---\ntitle: Page\nsummary: Summary.\nkeywords:\n  - cards-create\n  - CardsCreatePanel\n---\nbody\n";
         let fm = parse_frontmatter(content, &p("page.md")).unwrap().unwrap();
         assert_eq!(fm.keywords, vec!["cards-create", "CardsCreatePanel"]);
+    }
+
+    #[test]
+    fn test_links_reviewed_scalar_forms_coerce_to_string() {
+        for (yaml, expected) in [
+            ("links-reviewed: 1", Some("1")),
+            ("links-reviewed: 2", Some("2")),
+            ("links-reviewed: \"quoted value\"", Some("quoted value")),
+        ] {
+            let content = format!("---\ntitle: Page\nsummary: S.\n{yaml}\n---\n");
+            let fm = parse_frontmatter(&content, &p("page.md")).unwrap().unwrap();
+            assert_eq!(fm.links_reviewed.as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn test_links_reviewed_absent_is_none() {
+        let content = "---\ntitle: Page\nsummary: S.\n---\n";
+        let fm = parse_frontmatter(content, &p("page.md")).unwrap().unwrap();
+        assert_eq!(fm.links_reviewed, None);
+    }
+
+    #[test]
+    fn test_links_reviewed_non_scalar_error() {
+        // A sequence is not a scalar — fail closed with a page-level
+        // validation error rather than inventing a value.
+        let content = "---\ntitle: Page\nsummary: S.\nlinks-reviewed:\n  - 1\n  - 2\n---\n";
+        let err = parse_frontmatter(&content, &p("page.md")).unwrap_err();
+        assert!(matches!(err, FrontmatterError::InvalidLinksReviewed { .. }));
+    }
+
+    #[test]
+    fn test_links_reviewed_bare_null_reads_as_absent() {
+        // serde_yaml deserializes a bare `links-reviewed:` (YAML null) into
+        // `None` for an Option field — indistinguishable from absent. That is
+        // still fail-closed: the drift engine reads the same null as no
+        // epoch, so read-only checks hard-error until a human fixes the page.
+        let content = "---\ntitle: Page\nsummary: S.\nlinks-reviewed:\n---\n";
+        let fm = parse_frontmatter(content, &p("page.md")).unwrap().unwrap();
+        assert_eq!(fm.links_reviewed, None);
     }
 
     #[test]
@@ -694,6 +781,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
+                    links_reviewed: None,
                 },
             ),
             (
@@ -704,6 +792,7 @@ mod tests {
                     tags: vec![],
                     keywords: vec![],
                     summary: "Summary.".into(),
+                    links_reviewed: None,
                 },
             ),
         ];

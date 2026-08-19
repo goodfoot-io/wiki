@@ -641,6 +641,7 @@ mod tests {
             tags: vec![],
             keywords: vec![],
             summary: "A summary.".into(),
+            links_reviewed: None,
         }
     }
 
