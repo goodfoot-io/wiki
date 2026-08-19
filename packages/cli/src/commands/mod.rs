@@ -138,6 +138,37 @@ pub fn resolve_link_path(link_path: &str, source_file: &Path, repo_root: &Path) 
         .unwrap_or(normalized)
 }
 
+/// Suffix salvage for a repo-relative path that does not exist as written:
+/// the longest repo-relative suffix of the path that DOES exist. A href like
+/// `wiki/deep/path/src/code.rs` whose real file is `src/code.rs` resolves
+/// to the existing suffix. Moved here from `mesh/scaffold.rs` — the drift
+/// engine uses it for target resolution (plan Decision 5), and the mesh
+/// modules are deleted in a later phase.
+pub(crate) fn locate_existing_suffix(rel_path: &str, repo_root: &Path) -> Option<String> {
+    // If the path is an absolute path that resolves entirely outside the
+    // repo, do not attempt suffix matching — a coincidental in-repo suffix
+    // (e.g. `src/lib.rs`) would produce the wrong file.
+    let p = Path::new(rel_path);
+    if p.is_absolute() && !p.starts_with(repo_root) {
+        return None;
+    }
+
+    if repo_root.join(rel_path).exists() {
+        return Some(rel_path.to_string());
+    }
+    let parts: Vec<&str> = rel_path.split('/').collect();
+    for start in 1..parts.len() {
+        let candidate = parts[start..].join("/");
+        if candidate.is_empty() {
+            continue;
+        }
+        if repo_root.join(&candidate).exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 /// Find a discovered page whose file path corresponds to `path_str`.
 ///
@@ -657,6 +688,36 @@ mod tests {
             result,
             PathBuf::from("wiki/guides/packages/wiki/src/commands/serve.rs"),
             "bare path must be resolved relative to the source page's directory"
+        );
+    }
+
+    // ── locate_existing_suffix salvage boundary ──────────────────────────────
+
+    #[test]
+    fn locate_existing_suffix_matches_outside_repo_suffix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(repo_root.join("src")).unwrap();
+        std::fs::write(repo_root.join("src/lib.rs"), "x").unwrap();
+
+        // Simulate a link that resolves to a path outside the repo,
+        // e.g. `../other-repo/src/lib.rs` from a wiki page at
+        // `<repo>/wiki/page.md`. The resolved absolute path is
+        // `<tmpdir>/other-repo/src/lib.rs`.
+        let outside_path = tmp.path().join("other-repo/src/lib.rs");
+        let outside_str = outside_path.to_string_lossy().replace('\\', "/");
+
+        // The suffix `src/lib.rs` exists inside the repo at
+        // `<repo_root>/src/lib.rs`. locate_existing_suffix must
+        // NOT match it — the original path is completely outside
+        // the repo and shares the suffix only by coincidence.
+        let result = locate_existing_suffix(&outside_str, &repo_root);
+
+        assert_eq!(
+            result,
+            None,
+            "locate_existing_suffix must not match in-repo files \
+             for paths that resolve outside the repo"
         );
     }
 

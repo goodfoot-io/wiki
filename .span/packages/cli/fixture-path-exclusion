@@ -1,4 +1,4 @@
 packages/cli/src/commands/mesh/scaffold.rs#L172-L181 rk64:a8cc061a7a4ec7e1
-packages/cli/src/commands/mod.rs#L449-L456 rk64:d183be074387c442
+packages/cli/src/commands/mod.rs#L480-L487 rk64:d183be074387c442
 
 mod.rs#is_fixture_path defines the canonical /tests/fixtures/ exclusion rule (forward- and back-slash) that default wiki discovery applies. scaffold.rs#create_mesh_coverage hand-rolls a byte-identical copy of the same string match to keep its produced mesh set aligned with default discovery. The two are duplicated literals with no shared helper or test tying them together: changing the fixture-directory convention in is_fixture_path silently leaves scaffold's copy stale, so meshes would be scaffolded for fixture pages that discovery excludes.

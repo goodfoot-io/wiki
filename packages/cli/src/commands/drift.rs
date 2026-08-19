@@ -405,7 +405,9 @@ pub fn classify_page(
 
     let mut classes = Vec::new();
     for link in parse_line_range_links(page_content) {
-        let outcome = classify_link(
+        // The effective path is the resolved path after suffix salvage, so
+        // `target_path` reports where the link was actually judged against.
+        let (outcome, target_path) = classify_link(
             repo_root,
             source,
             page_path,
@@ -414,7 +416,7 @@ pub fn classify_page(
             anchor.map(|(sha, _)| sha),
         )?;
         classes.push(LinkClass {
-            target_path: resolve_target_path(repo_root, page_path, &link.target_path_raw),
+            target_path,
             start_line: link.start,
             end_line: link.end,
             source_line: link.source_line,
@@ -582,7 +584,10 @@ fn resolve_target_path(repo_root: &Path, page_path: &str, path_part: &str) -> St
         .into_owned()
 }
 
-/// Classify one link per the Decision 5 flowchart.
+/// Classify one link per the Decision 5 flowchart, returning the outcome
+/// together with the effective target path — the resolved path after suffix
+/// salvage — so the caller reports where the link was actually judged
+/// against, not where the stale href happened to point.
 fn classify_link(
     repo_root: &Path,
     source: DocSource,
@@ -590,19 +595,22 @@ fn classify_link(
     link: &ParsedLink,
     certified: &[CertifiedLink],
     anchor_sha: Option<&str>,
-) -> Result<DriftOutcome, EpochError> {
-    let target_path = resolve_target_path(repo_root, page_path, &link.target_path_raw);
+) -> Result<(DriftOutcome, String), EpochError> {
+    // Decision 5 target resolution: resolve the href path part, then salvage
+    // the longest existing repo-relative suffix when the direct read misses.
+    let (target_path, target_bytes) =
+        read_target(repo_root, source, page_path, &link.target_path_raw)?;
 
     let Some(anchor_sha) = anchor_sha else {
         // Pending-bump override (Decision 2): the anchor epoch IS the current
         // state, so certification outcomes are suppressed and only structural
         // failure still flags.
-        let bytes = read_current(repo_root, source, &target_path)?;
-        return Ok(match bytes {
+        let outcome = match &target_bytes {
             None => DriftOutcome::Broken,
-            Some(b) if !extent_fits(&b, link.start, link.end) => DriftOutcome::Broken,
+            Some(b) if !extent_fits(b, link.start, link.end) => DriftOutcome::Broken,
             Some(_) => DriftOutcome::Healthy,
-        });
+        };
+        return Ok((outcome, target_path));
     };
 
     // Decision 4 presence: identity-based — same resolved target path AND
@@ -612,7 +620,7 @@ fn classify_link(
     // rk64 comparison, so a CRLF checkout cannot regress it.
     let mut matched: Vec<&CertifiedLink> = Vec::new();
     let mut memo: HashMap<(String, u32, u32), u64> = HashMap::new();
-    let current_fp = current_content_fp(repo_root, source, &target_path, link.start, link.end)?;
+    let current_fp = current_content_fp(target_bytes.as_deref(), link.start, link.end);
     for c in certified {
         let identity_arm =
             c.target_path == target_path && (c.label == link.label || c.fragment == link.fragment);
@@ -626,13 +634,13 @@ fn classify_link(
         }
     }
     if matched.is_empty() {
-        return Ok(DriftOutcome::Uncertified);
+        return Ok((DriftOutcome::Uncertified, target_path));
     }
     let cert = primary_cert(&matched, &target_path, link.start, link.end);
 
     // Step 3: target present at the current side, extent still fitting.
-    let Some(bytes) = read_current(repo_root, source, &target_path)? else {
-        return move_scan_outcome(
+    let Some(bytes) = target_bytes.as_deref() else {
+        let outcome = move_scan_outcome(
             repo_root,
             source,
             page_path,
@@ -642,12 +650,13 @@ fn classify_link(
             anchor_sha,
             &mut memo,
             DriftOutcome::Broken,
-        );
+        )?;
+        return Ok((outcome, target_path));
     };
-    if !extent_fits(&bytes, link.start, link.end) {
+    if !extent_fits(bytes, link.start, link.end) {
         // Any part of the recorded range beyond the current line count is
         // Broken (round-1 finding 5): the content comparison is uncomputable.
-        return Ok(DriftOutcome::Broken);
+        return Ok((DriftOutcome::Broken, target_path));
     }
 
     // Step 4: the href's range equals a certified range — the fingerprint
@@ -658,26 +667,27 @@ fn classify_link(
     {
         let cert_fp = certified_content_fp(repo_root, anchor_sha, cert, &mut memo)?;
         let cur_fp = cheap_fingerprint_with_extent(
-            &bytes,
+            bytes,
             &Extent::LineRange {
                 start: link.start,
                 end: link.end,
             },
         );
         if cur_fp == cert_fp {
-            return Ok(DriftOutcome::Healthy);
+            return Ok((DriftOutcome::Healthy, target_path));
         }
-        return move_scan_outcome(
+        let outcome = move_scan_outcome(
             repo_root,
             source,
             page_path,
             &target_path,
-            Some(&bytes),
+            Some(bytes),
             cert,
             anchor_sha,
             &mut memo,
             DriftOutcome::Drift,
-        );
+        )?;
+        return Ok((outcome, target_path));
     }
 
     // Step 5: the href's range differs from every certified range (the href
@@ -685,7 +695,7 @@ fn classify_link(
     // relocated); different → Uncertified (the as-written locator was never
     // reviewed).
     let cur_fp = cheap_fingerprint_with_extent(
-        &bytes,
+        bytes,
         &Extent::LineRange {
             start: link.start,
             end: link.end,
@@ -693,10 +703,10 @@ fn classify_link(
     );
     for c in &matched {
         if certified_content_fp(repo_root, anchor_sha, c, &mut memo)? == cur_fp {
-            return Ok(DriftOutcome::Healthy);
+            return Ok((DriftOutcome::Healthy, target_path));
         }
     }
-    Ok(DriftOutcome::Uncertified)
+    Ok((DriftOutcome::Uncertified, target_path))
 }
 
 /// The matched certified link that anchors the comparison: prefer the one
@@ -742,21 +752,13 @@ fn certified_content_fp(
     Ok(fp)
 }
 
-/// The canonical rk64 fingerprint of the current link's target range at the
-/// current side; `0` when the target is absent (no content at all).
-fn current_content_fp(
-    repo_root: &Path,
-    source: DocSource,
-    target_path: &str,
-    start: u32,
-    end: u32,
-) -> Result<u64, EpochError> {
-    match read_current(repo_root, source, target_path)? {
-        None => Ok(0),
-        Some(bytes) => Ok(cheap_fingerprint_with_extent(
-            &bytes,
-            &Extent::LineRange { start, end },
-        )),
+/// The canonical rk64 fingerprint of the current link's target range from
+/// bytes already read at the current side; `0` when the target is absent
+/// (no content at all).
+fn current_content_fp(bytes: Option<&[u8]>, start: u32, end: u32) -> u64 {
+    match bytes {
+        None => 0,
+        Some(bytes) => cheap_fingerprint_with_extent(bytes, &Extent::LineRange { start, end }),
     }
 }
 
@@ -888,6 +890,33 @@ fn read_current(
     }
 }
 
+/// Decision 5 target resolution: resolve the href's path part against the
+/// page's directory, read it from the current side, and — for `WorkingTree`
+/// sources, when the direct read misses — salvage the longest existing
+/// repo-relative suffix (`old/dir/file.md` → `file.md`). The effective path
+/// comes back alongside the bytes; a target that stays missing yields the
+/// resolved path with `None`, so callers still report where the link
+/// pointed. The blob layers (`Head`/`Index`) never salvage: there is no
+/// worktree filesystem to consult, so they stay fail-closed.
+fn read_target(
+    repo_root: &Path,
+    source: DocSource,
+    page_path: &str,
+    path_part: &str,
+) -> Result<(String, Option<Vec<u8>>), EpochError> {
+    let target_path = resolve_target_path(repo_root, page_path, path_part);
+    if let Some(bytes) = read_current(repo_root, source, &target_path)? {
+        return Ok((target_path, Some(bytes)));
+    }
+    if source == DocSource::WorkingTree
+        && let Some(salvaged) = super::locate_existing_suffix(&target_path, repo_root)
+        && let Some(bytes) = read_current(repo_root, source, &salvaged)?
+    {
+        return Ok((salvaged, Some(bytes)));
+    }
+    Ok((target_path, None))
+}
+
 /// The repo's first frontmatter writer: return `content` with
 /// `links-reviewed: 1` appended as the last line of the existing YAML block,
 /// just before the closing `---` fence, preserving the rest of the content
@@ -936,7 +965,7 @@ fn line_declares_links_reviewed(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::process::Command;
 
     use tempfile::TempDir;
@@ -1403,6 +1432,101 @@ mod tests {
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes[0].outcome, DriftOutcome::Broken);
+    }
+
+    /// A repo where the certified page at `wiki/page.md` links
+    /// `[b](../target.md#L2-L4)` and the target lives at the repo root — the
+    /// shape the suffix-salvage tests need: a stale href prefix drops
+    /// segment by segment until `target.md` matches.
+    fn repo_with_root_target() -> (TestRepo, String) {
+        let repo = TestRepo::new();
+        repo.create_file(
+            "target.md",
+            "T0\nblock-line-1\nblock-line-2\nblock-line-3\nT1\n",
+        );
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "[b](../target.md#L2-L4)\n", Some("1")),
+        );
+        let c1 = repo.commit("certified page and root target");
+        (repo, c1)
+    }
+
+    #[test]
+    fn working_tree_salvage_reunites_stale_href_with_its_target() {
+        let (repo, c1) = repo_with_root_target();
+        // The href gains a directory prefix that does not exist anywhere:
+        // `wiki/dir/target.md` misses, suffix salvage falls back to
+        // `target.md`, and the link is judged against the certified target —
+        // Healthy, with the effective path reported, not the stale href path.
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "[b](dir/target.md#L2-L4)\n", Some("1")),
+        );
+        let epoch = LinkEpoch::Commit {
+            sha: c1,
+            path_at_commit: "wiki/page.md".into(),
+            value: "1".into(),
+        };
+        let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
+        assert_eq!(classes.len(), 1);
+        assert_eq!(classes[0].outcome, DriftOutcome::Healthy);
+        assert_eq!(classes[0].target_path, "target.md");
+    }
+
+    #[test]
+    fn head_source_skips_worktree_salvage_and_stays_fail_closed() {
+        let (repo, c1) = repo_with_root_target();
+        // The href edit is COMMITTED, so HEAD's page points at
+        // `wiki/dir/target.md`, absent in HEAD. The blob layers have no
+        // worktree filesystem to consult: salvage is skipped, the edited
+        // locator resolves to nothing, and the link is Uncertified rather
+        // than silently blessed via the worktree copy on disk.
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "[b](dir/target.md#L2-L4)\n", Some("1")),
+        );
+        repo.commit("href moved to a nonexistent directory");
+        let epoch = LinkEpoch::Commit {
+            sha: c1,
+            path_at_commit: "wiki/page.md".into(),
+            value: "1".into(),
+        };
+        let page_content = repo.read("wiki/page.md");
+        let classes = classify_page(
+            repo.path(),
+            DocSource::Head,
+            "wiki/page.md",
+            &page_content,
+            &epoch,
+        )
+        .expect("classifies");
+        assert_eq!(classes.len(), 1);
+        assert_eq!(classes[0].outcome, DriftOutcome::Uncertified);
+        // The effective path stays the resolved href path — no salvage.
+        assert_eq!(classes[0].target_path, "wiki/dir/target.md");
+    }
+
+    #[test]
+    fn salvage_yields_to_a_resolved_target_that_exists() {
+        let (repo, c1) = repo_with_root_target();
+        // `wiki/dir/target.md` EXISTS with different content, so the direct
+        // resolution wins and salvage never runs: the link points at real
+        // content that is not the certified block → Uncertified.
+        repo.create_file("wiki/dir/target.md", "X0\nX1\nX2\nX3\nX4\n");
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "[b](dir/target.md#L2-L4)\n", Some("1")),
+        );
+        let epoch = LinkEpoch::Commit {
+            sha: c1,
+            path_at_commit: "wiki/page.md".into(),
+            value: "1".into(),
+        };
+        let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
+        assert_eq!(classes.len(), 1);
+        assert_eq!(classes[0].outcome, DriftOutcome::Uncertified);
+        assert_eq!(classes[0].target_path, "wiki/dir/target.md");
     }
 
     #[test]

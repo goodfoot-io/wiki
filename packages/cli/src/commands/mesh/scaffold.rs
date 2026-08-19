@@ -1125,7 +1125,8 @@ fn build_meshes(
                 let resolved = resolve_link_path(&link.path, &entry.wiki_file, repo_root);
                 let anchor_rel = path_relative_to(&resolved, repo_root);
                 let anchor_rel =
-                    locate_existing_suffix(&anchor_rel, repo_root).unwrap_or(anchor_rel);
+                    super::super::locate_existing_suffix(&anchor_rel, repo_root)
+                        .unwrap_or(anchor_rel);
                 let start = link.start_line.unwrap_or(0);
                 let end = link.end_line.unwrap_or(start);
                 let triple = (anchor_rel.clone(), start, end);
@@ -1711,31 +1712,6 @@ fn count_lines(content: &str) -> u64 {
         n = 1;
     }
     n
-}
-
-pub(crate) fn locate_existing_suffix(rel_path: &str, repo_root: &Path) -> Option<String> {
-    // If the path is an absolute path that resolves entirely outside the
-    // repo, do not attempt suffix matching — a coincidental in-repo suffix
-    // (e.g. `src/lib.rs`) would produce the wrong file.
-    let p = Path::new(rel_path);
-    if p.is_absolute() && !p.starts_with(repo_root) {
-        return None;
-    }
-
-    if repo_root.join(rel_path).exists() {
-        return Some(rel_path.to_string());
-    }
-    let parts: Vec<&str> = rel_path.split('/').collect();
-    for start in 1..parts.len() {
-        let candidate = parts[start..].join("/");
-        if candidate.is_empty() {
-            continue;
-        }
-        if repo_root.join(&candidate).exists() {
-            return Some(candidate);
-        }
-    }
-    None
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -2718,40 +2694,6 @@ See [a](./card.ts#L69-L95), [b](./card.ts#L75-L75), [c](./card.ts#L81-L81).
             code_anchors,
             vec!["card.ts#L69-L95"],
             "overlapping/contiguous ranges on the same path must coalesce into one anchor"
-        );
-    }
-
-    // ── locate_existing_suffix salvage boundary ──────────────────────────────
-
-    #[test]
-    fn locate_existing_suffix_matches_outside_repo_suffix() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo_root = tmp.path().join("repo");
-        std::fs::create_dir_all(repo_root.join("src")).unwrap();
-        std::fs::write(repo_root.join("src/lib.rs"), "x").unwrap();
-
-        // Simulate a link that resolves to a path outside the repo,
-        // e.g. `../other-repo/src/lib.rs` from a wiki page at
-        // `<repo>/wiki/page.md`. The resolved absolute path is
-        // `<tmpdir>/other-repo/src/lib.rs`.
-        let outside_path = tmp.path().join("other-repo/src/lib.rs");
-        let outside_str = outside_path.to_string_lossy().replace('\\', "/");
-
-        // The suffix `src/lib.rs` exists inside the repo at
-        // `<repo_root>/src/lib.rs`. locate_existing_suffix must
-        // NOT match it — the original path is completely outside
-        // the repo and shares the suffix only by coincidence.
-        let result = locate_existing_suffix(&outside_str, &repo_root);
-
-        // BUG: result is Some("src/lib.rs") because the suffix
-        // loop checks in-repo existence without verifying the
-        // candidate is a meaningful suffix of the original path
-        // that also remains within the repo.
-        assert_eq!(
-            result,
-            None,
-            "locate_existing_suffix must not match in-repo files \
-             for paths that resolve outside the repo"
         );
     }
 

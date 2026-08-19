@@ -14,7 +14,7 @@ use crate::index::DocSource;
 use crate::parser::{LinkKind, parse_fragment_links};
 
 use super::check_fix;
-use super::mesh::scaffold::locate_existing_suffix;
+use super::locate_existing_suffix;
 use super::mesh::store;
 use super::mesh_coverage;
 

@@ -6,7 +6,7 @@ use crate::commands::resolve_link_path;
 use crate::parser::{LinkKind, parse_fragment_links};
 
 use super::check::{CheckDiagnostic, ContentCache};
-use super::mesh::scaffold::locate_existing_suffix;
+use super::locate_existing_suffix;
 use super::mesh::store;
 
 // ── Types ─────────────────────────────────────────────────────────────────────

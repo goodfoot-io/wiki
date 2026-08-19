@@ -1,5 +1,5 @@
 packages/cli/src/commands/mesh/draft.rs#L112-L363 rk64:8c02ee8d96f6b75e
-packages/cli/src/commands/mesh/scaffold.rs#L1990-L2122 rk64:a8f0e92848b6497d
-packages/cli/src/commands/mesh/scaffold.rs#L2162-L2186 rk64:70aabcb4056ec2a5
+packages/cli/src/commands/mesh/scaffold.rs#L1966-L2098 rk64:a8f0e92848b6497d
+packages/cli/src/commands/mesh/scaffold.rs#L2138-L2162 rk64:70aabcb4056ec2a5
 
 Removed hardcoded wiki/ prefix from mesh slug generation: the algorithm in draft.rs now composes slugs directly from page subdir and noun, and the collision resolver's tests in scaffold.rs reflect this new format.
