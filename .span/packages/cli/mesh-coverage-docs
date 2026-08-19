@@ -1,6 +1,6 @@
 packages/cli/src/commands/mesh_coverage.rs#L16-L154 rk64:e5735abbbe507701
 wiki/architecture/wiki-mesh-integration.md rk64:cba149bfd840acc8
 wiki/guides/adding-mesh-coverage.md rk64:a9713003374359c5
-wiki/reference/git-mesh-usage.md rk64:b16bc65bb7d802de
+wiki/reference/git-mesh-usage.md rk64:3fecbb8ce6c9de71
 
 The wiki corpus documenting the mesh coverage subsystem — architecture, workflow guide, and reference — and the MeshIndex-based implementation that remains (containment-based anchor matching and the index builder backing wiki check --fix). Read-only check performs no coverage detection since the drift pass replaced it, so the architecture page documents the drift check and the --fix mesh creation flow as the current truth; a change to containment semantics or the fix-side index builder must keep these pages accurate.
