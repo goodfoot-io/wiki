@@ -1239,9 +1239,9 @@ fn extent_fits(bytes: &[u8], start: u32, end: u32) -> bool {
 }
 
 /// Repo candidate files for the cross-file move scan: every tracked file
-/// readable from the current side, excluding wiki-mesh storage and build
-/// output. Read through the source-aware reader so `--source head`/`index`
-/// scan the same layer the targets were read from.
+/// readable from the current side, excluding the tool's `.wiki/` runtime
+/// storage and build output. Read through the source-aware reader so
+/// `--source head`/`index` scan the same layer the targets were read from.
 fn candidate_files(
     repo_root: &Path,
     source: DocSource,
@@ -1413,8 +1413,8 @@ pub fn collect_with_source(
     // empty corpus; propagate that as an error so the caller sees \"no wiki
     // pages found\" rather than an empty diagnostic list with exit 0.";
 
-    /// Real corpus excerpt: the drift-check paragraph of
-    /// wiki-mesh-integration.md (conformed in Phase 1c).
+    /// Real corpus excerpt: a drift-check paragraph taken from the mesh-era
+    /// architecture page (conformed in Phase 1c; the page died with the mesh).
     const REAL_WIKI_DRIFT_PARAGRAPH: &str = "Classifies every internal fragment link with a line range through the drift engine: the page's `links-reviewed` field selects its certification commit from git history, and each link's target range is compared against the content that certification recorded.";
 
     /// The same paragraph with one phrase swapped.

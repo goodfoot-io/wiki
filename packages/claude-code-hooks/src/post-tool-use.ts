@@ -165,14 +165,14 @@ function isLaunchFailure(result: SpawnSyncReturns<string>): boolean {
 
 /**
  * Fail-closed surfacing: when the `wiki` binary cannot be launched, the page's
- * links and mesh coverage went unvalidated. The hook fires after the write, so
+ * links and line-range drift went unvalidated. The hook fires after the write, so
  * it cannot block — but it must make the gap loud rather than passing silently.
  */
 function wikiUnavailableOutput(filePath: string, wikiBin: string, detail: string) {
   const message =
     `wiki validation was SKIPPED — the \`wiki\` binary could not be launched (${detail}).\n` +
     `Resolved binary: ${wikiBin}\n` +
-    `Fragment links and git-mesh coverage for ${filePath} were NOT validated.\n` +
+    `Fragment links and line-range drift for ${filePath} were NOT validated.\n` +
     'Install the wiki CLI on PATH, or set WIKI_BIN to its absolute path, then re-save the file.';
   const block = `<wiki>\n${message}\n</wiki>`;
   return postToolUseOutput({
@@ -191,9 +191,10 @@ export default postToolUseHook({ matcher: 'Edit|Write|NotebookEdit', timeout: 60
 
   const wikiBin = resolveWikiBinary(logger);
 
-  // ── Single invocation: auto-fix links/anchors/frontmatter + mesh coverage.
-  // --fix rewrites in place; a non-zero exit means residual, unfixable wiki
-  // conditions the agent must resolve by hand.
+  // ── Single invocation: auto-fix line-range drift and frontmatter.
+  // --fix relocates drifted links and initializes links-reviewed in place;
+  // a non-zero exit means residual, unfixable wiki conditions the agent must
+  // resolve by hand.
   const sections: string[] = [];
 
   try {
