@@ -1,5 +1,5 @@
 packages/cli/src/commands/mod.rs#L414-L449 rk64:4acbf5b0707bd974
 packages/cli/src/git.rs#L152-L177 rk64:bc30e25c3106e957
-wiki/guides/benchmarking-wiki-cli-performance.md#L19-L80 rk64:e0c44588638f563a
+wiki/guides/benchmarking-wiki-cli-performance.md#L19-L80 rk64:3baa24f4c349e777
 
 Parallelized wiki discovery and repo inventory walks that overlap filesystem stat round-trips on hostile (fuseblk) mounts; both mirror filter/logic identically and must coordinate their parallelism strategy. The guide documents why latencies are high on hostile filesystems and why parallelization is necessary.

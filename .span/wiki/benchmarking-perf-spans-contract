@@ -1,4 +1,4 @@
-packages/cli/logging.wiki.md rk64:1c193433bf2173fc
-wiki/guides/benchmarking-wiki-cli-performance.md rk64:970807b67f077e54
+packages/cli/logging.wiki.md rk64:e90eea84adb83730
+wiki/guides/benchmarking-wiki-cli-performance.md rk64:c4d2a1a300b2f123
 
 Benchmarking guide and perf instrumentation documentation share a contract on span names and log format.
