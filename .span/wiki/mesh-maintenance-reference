@@ -1,5 +1,0 @@
-packages/cli/src/commands/mesh/manage.rs rk64:8a8aa5b78afd0dd1
-packages/cli/src/commands/mesh/store.rs#L270-L314 rk64:aafff9e8162bd698
-plugins/wiki/skills/wiki/sections/fixing-mesh-coverage.md rk64:24fc8815cfce42ca
-
-Maintenance guide documents the wiki mesh add/remove workflow; implementation changes to upsert/remove behavior must reflect in the documented maintenance procedures.

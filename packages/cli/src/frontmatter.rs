@@ -48,7 +48,7 @@ pub enum FrontmatterError {
 /// Command names that cannot be used as page titles or aliases.
 ///
 /// These are reserved to prevent ambiguity with `wiki <title>` default dispatch.
-pub const RESERVED_TITLES: &[&str] = &["check", "list", "summary", "mesh"];
+pub const RESERVED_TITLES: &[&str] = &["check", "list", "summary"];
 
 // ── Raw deserialization helper ────────────────────────────────────────────────
 
@@ -550,21 +550,15 @@ mod tests {
 
     /// Reproduction: RESERVED_TITLES must match the actual CLI subcommands.
     ///
-    /// `mesh` is a real subcommand but is missing from the set;
-    /// `pin`, `stale`, `links`, `print` are dead entries that should be removed.
+    /// `mesh`, `pin`, `stale`, `links`, `print` are dead entries that no
+    /// longer correspond to any subcommand.
     #[test]
     fn test_reserved_titles_matches_cli_surface() {
         let reserved: std::collections::BTreeSet<&str> =
             RESERVED_TITLES.iter().copied().collect();
 
-        // mesh is a real subcommand — must be reserved
-        assert!(
-            reserved.contains("mesh"),
-            "mesh is a CLI subcommand but is missing from RESERVED_TITLES"
-        );
-
         // Dead entries that no longer correspond to any subcommand
-        for dead in &["pin", "stale", "links", "print"] {
+        for dead in &["mesh", "pin", "stale", "links", "print"] {
             assert!(
                 !reserved.contains(dead),
                 "'{dead}' is not a CLI subcommand but is still in RESERVED_TITLES"
@@ -573,7 +567,7 @@ mod tests {
 
         // Exact set must be the current subcommand names
         let expected: std::collections::BTreeSet<&str> =
-            ["check", "list", "summary", "mesh"].into_iter().collect();
+            ["check", "list", "summary"].into_iter().collect();
         assert_eq!(
             reserved, expected,
             "RESERVED_TITLES drifted from the CLI command surface"

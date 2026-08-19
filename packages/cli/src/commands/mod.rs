@@ -1,11 +1,7 @@
 pub mod check;
 pub mod check_fix;
-// Phase 0 tdd-bootstrap stubs — first consumers land in Phases 1–2, which
-// removes the allow.
-#[allow(dead_code)]
 pub mod drift;
 pub mod list;
-pub mod mesh;
 pub mod search;
 pub mod summary;
 
@@ -140,9 +136,8 @@ pub fn resolve_link_path(link_path: &str, source_file: &Path, repo_root: &Path) 
 /// Suffix salvage for a repo-relative path that does not exist as written:
 /// the longest repo-relative suffix of the path that DOES exist. A href like
 /// `wiki/deep/path/src/code.rs` whose real file is `src/code.rs` resolves
-/// to the existing suffix. Moved here from `mesh/scaffold.rs` — the drift
-/// engine uses it for target resolution (plan Decision 5), and the mesh
-/// modules are deleted in a later phase.
+/// to the existing suffix. The drift engine uses it for target resolution
+/// (plan Decision 5).
 pub(crate) fn locate_existing_suffix(rel_path: &str, repo_root: &Path) -> Option<String> {
     // If the path is an absolute path that resolves entirely outside the
     // repo, do not attempt suffix matching — a coincidental in-repo suffix

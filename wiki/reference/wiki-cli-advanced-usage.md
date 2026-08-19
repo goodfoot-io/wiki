@@ -57,7 +57,7 @@ When multiple inputs are provided via stdin, the exit code reflects the worst re
 
 ## Targeting Specific Files
 
-All commands accept explicit glob patterns instead of scanning [the current working directory](/packages/cli/src/main.rs#L384-L387):
+All commands accept explicit glob patterns instead of scanning [the current working directory](/packages/cli/src/main.rs#L281-L284):
 
 ```bash
 wiki check wiki/some-section/**/*.md
@@ -65,7 +65,7 @@ wiki check wiki/some-section/**/*.md
 
 ## Excluding Non-Wiki Files
 
-[`.wiki/.wikiignore`](/packages/cli/src/wikiignore.rs) excludes paths from `wiki check` entirely — before frontmatter parsing, link validation, or line-range drift classification ever runs. It lives at `.wiki/.wikiignore` (repo root), uses gitignore syntax, and patterns are matched relative to the repository root. Every discovery path — [`discover_files`](/packages/cli/src/commands/mod.rs#L236-L310), [`discover_files_by_parallel_walk`](/packages/cli/src/commands/mod.rs#L575-L647), and [`discover_files_by_glob_in_source`](/packages/cli/src/commands/mod.rs#L492-L527) — consults it before any file is treated as a wiki page, for `--source=worktree`, `index`, and `head` alike, and regardless of whether an explicit glob is passed.
+[`.wiki/.wikiignore`](/packages/cli/src/wikiignore.rs) excludes paths from `wiki check` entirely — before frontmatter parsing, link validation, or line-range drift classification ever runs. It lives at `.wiki/.wikiignore` (repo root), uses gitignore syntax, and patterns are matched relative to the repository root. Every discovery path — [`discover_files`](/packages/cli/src/commands/mod.rs#L231-L305), [`discover_files_by_parallel_walk`](/packages/cli/src/commands/mod.rs#L570-L642), and [`discover_files_by_glob_in_source`](/packages/cli/src/commands/mod.rs#L487-L522) — consults it before any file is treated as a wiki page, for `--source=worktree`, `index`, and `head` alike, and regardless of whether an explicit glob is passed.
 
 This is the escape hatch for Markdown that lives in the repo but isn't a wiki page — agent instructions, changelogs, vendored docs — so it never needs frontmatter and never counts against link or drift validation.
 

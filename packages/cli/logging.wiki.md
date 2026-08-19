@@ -22,7 +22,7 @@ Perf scope events measure execution time and record success/error status. They a
 
 | Location | Scope Name | Measures | Metadata |
 |----------|-----------|----------|----------|
-| [main.rs](./src/main.rs#L370-L373) | `command.<name>` | Total wall time of the command (stderr span only; not written to `wiki.log`) | — |
+| [main.rs](./src/main.rs#L267-L270) | `command.<name>` | Total wall time of the command (stderr span only; not written to `wiki.log`) | — |
 
 ### Index Refresh
 
@@ -42,8 +42,8 @@ These scopes cover the cold-cache path: when the stat-only freshness gate misses
 
 | Location | Scope Name | Measures | Metadata |
 |----------|-----------|----------|----------|
-| [commands/mod.rs](./src/commands/mod.rs#L241-L316) | `discover_files` | Time to resolve glob patterns and find wiki markdown files | `globs` (array of glob patterns) |
-| [commands/mod.rs](./src/commands/mod.rs#L253-L260) | `discover_files_result` | Zero-duration marker carrying the discovered-file count | `count` |
+| [commands/mod.rs](./src/commands/mod.rs#L236-L311) | `discover_files` | Time to resolve glob patterns and find wiki markdown files | `globs` (array of glob patterns) |
+| [commands/mod.rs](./src/commands/mod.rs#L248-L255) | `discover_files_result` | Zero-duration marker carrying the discovered-file count | `count` |
 
 ## Direct Output Points (println! and eprintln!)
 

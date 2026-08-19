@@ -38,7 +38,7 @@ enum SourceArg {
     version = crate::version::VERSION,
     before_help = concat!("wiki ", env!("WIKI_VERSION"), "\n"),
     about = "wiki - Read and maintain wiki pages",
-    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, list, summary, mesh) are reserved and cannot be used as page titles.\n\nFile selection follows the current working directory; links, anchors, and mesh coverage resolve against the git repository root.",
+    long_about = "wiki - Read and maintain wiki pages\n\nPass a query to search wiki pages with weighted ranking:\n  wiki [query]\n\nWith no arguments, wiki prints help and the wiki README when available.\n\nStdin is read when no argument is given for commands that accept it:\n  echo wiki/page.md | wiki summary\n\nCommand names (check, list, summary) are reserved and cannot be used as page titles.\n\nFile selection follows the current working directory; links and anchors resolve against the git repository root.",
     disable_help_subcommand = true,
     disable_version_flag = true,
 )]
@@ -98,24 +98,12 @@ enum Commands {
     /// Frontmatter: title required, aliases and tags valid, no title/alias
     /// collisions (case-insensitive).
     ///
-    /// Always verifies that every fragment link with a line range is
-    /// covered by a mesh that anchors both the wiki file and the link
-    /// target (stored under `.wiki/`). With `--fix`, also creates that
-    /// mesh coverage best-effort (the "Fix #4" pass).
-    ///
-    /// With `--fix`, additionally resolves `.wiki/` merge conflicts
-    /// (consuming the git-mesh-core merge_mesh_files kernel). Conflict
-    /// markers in the mesh are collapsed: anchor lines are compared
-    /// against the worktree source and kept or removed so the mesh
-    /// reflects whichever side survived the source merge — but only
-    /// when the source file itself is clean of conflict markers.
-    ///
-    /// Two fail-closed cases produce residue markers:
-    /// - Conflicted source file: mesh markers are left untouched and
-    ///   the report names the file you must resolve first.
-    /// - Diverged `--why` rationale: anchors resolve cleanly but the
-    ///   why line retains "<<<<<<<" / ">>>>>>>" markers for manual
-    ///   reconciliation. In both cases the mesh is NOT re-staged.
+    /// Line-range links are classified against the page's git-derived
+    /// anchor epoch (the `links-reviewed:` frontmatter field): healthy,
+    /// uncertified, broken, drifted, moved, or unverifiable. With `--fix`,
+    /// relocated links are rewritten to follow their content, broken
+    /// targets route through the rename machinery, and field-less pages
+    /// carrying line-range links get the field initialized.
     ///
     /// Files matched by `.wiki/.wikiignore` (gitignore-syntax, one
     /// pattern per line, matched relative to the repo root) are
@@ -129,13 +117,13 @@ enum Commands {
         /// Exit 0 even when validation errors are found (report-only mode)
         #[arg(long = "no-exit-code")]
         no_exit_code: bool,
-        /// Rewrite drifted links and anchors in place (requires --source=worktree).
+        /// Rewrite drifted links in place (requires --source=worktree).
         #[arg(long = "fix")]
         fix: bool,
         /// Print what would be rewritten without modifying any files (requires --fix).
         #[arg(long = "fix-dry-run", requires = "fix")]
         fix_dry_run: bool,
-        /// Print only the repo-relative path of each created or extended mesh to
+        /// Print only the repo-relative path of each file the run rewrote to
         /// stdout (one per line); route the fix/skip summary, advisories, and
         /// diagnostics to stderr. Lets callers stage exactly what this run touched.
         #[arg(
@@ -174,97 +162,6 @@ enum Commands {
         /// Page title, alias, or file path; reads from stdin if omitted
         #[arg(value_name = "title|path")]
         title: Option<String>,
-    },
-
-    /// Inspect and manage `.wiki/` mesh anchors.
-    ///
-    /// Provides three verbs for in-process mesh reconciliation so that any
-    /// `wiki check` failure can be resolved without the `git span` binary.
-    ///
-    ///   wiki mesh show <slug> [--patch]   — inspect anchors; diff on --patch
-    ///   wiki mesh add  <slug> <anchor>... — upsert anchor(s) into a mesh
-    ///   wiki mesh remove <slug> [anchor]  — drop an anchor or the whole mesh
-    Mesh {
-        #[command(subcommand)]
-        command: MeshCommands,
-    },
-}
-
-/// Subcommands for `wiki mesh`.
-#[derive(Debug, Subcommand)]
-enum MeshCommands {
-    /// Show the anchors in a mesh, optionally with a before/after diff.
-    ///
-    /// Prints each anchor's path, line range, stored hash, and fresh/stale
-    /// status (by recomputing the rk64 fingerprint against the worktree).
-    /// With `--patch`, also shows the diff between the committed blob slice
-    /// and the current worktree slice for each stale anchor.
-    Show {
-        /// The mesh slug (e.g. `auth/login-flow`)
-        #[arg(value_name = "slug")]
-        slug: String,
-        /// Show a before/after diff for stale anchors (committed vs worktree)
-        #[arg(long = "patch")]
-        patch: bool,
-    },
-    /// Upsert an anchor into a mesh (create the mesh if it does not exist).
-    ///
-    /// `<anchor>` must be `path#Lstart-Lend` or bare `path` (whole file).
-    /// When the mesh does not yet exist, `--why` is required. When the mesh
-    /// already exists, `--why` is optional and overwrites the stored rationale
-    /// (printing an explicit notice naming the previous rationale).
-    ///
-    /// At least one `<anchor>` OR `--why` must be given. The anchor-less form
-    /// (`wiki mesh add <slug> --why "…"`) is a rationale-only update against an
-    /// existing mesh.
-    Add {
-        /// The mesh slug (e.g. `auth/login-flow`)
-        #[arg(value_name = "slug")]
-        slug: String,
-        /// Anchor(s): `path#Lstart-Lend` or bare `path` (whole file)
-        #[arg(value_name = "anchor", required_unless_present = "why")]
-        anchors: Vec<String>,
-        /// Rationale text (required when creating a new mesh; updates the
-        /// rationale when supplied for an existing mesh)
-        #[arg(long = "why", value_name = "text")]
-        why: Option<String>,
-    },
-    /// Remove an anchor from a mesh, or the whole mesh if no anchor is given.
-    ///
-    /// When an `<anchor>` argument is supplied, only that anchor is removed
-    /// and the mesh file is deleted when the last anchor is dropped. When no
-    /// `<anchor>` is supplied, the entire mesh file is deleted.
-    Remove {
-        /// The mesh slug (e.g. `auth/login-flow`)
-        #[arg(value_name = "slug")]
-        slug: String,
-        /// Anchor to remove: `path#Lstart-Lend` or bare `path` (whole file).
-        /// Omit to remove the entire mesh.
-        #[arg(value_name = "anchor")]
-        anchor: Option<String>,
-    },
-    /// Three-way merge driver for `.wiki/` mesh files.
-    ///
-    /// Reads the base, ours, and theirs mesh file paths, performs a structural
-    /// merge of the anchor records and why text, and writes the result to the
-    /// ours path. Exits 0 on full resolution or 1 on partial resolution
-    /// (conflict markers in output).
-    ///
-    /// Designed for use as a custom git merge driver:
-    ///   git config merge.wiki-mesh.driver "wiki mesh merge %O %A %B %L"
-    Merge {
-        /// Base (merge common ancestor) mesh file path
-        #[arg(value_name = "base")]
-        base: String,
-        /// Ours (current branch) mesh file path — result is written here
-        #[arg(value_name = "ours")]
-        ours: String,
-        /// Theirs (other branch) mesh file path
-        #[arg(value_name = "theirs")]
-        theirs: String,
-        /// Conflict marker length (accepted for git compatibility; always uses 7)
-        #[arg(value_name = "markerlen", default_value = "7")]
-        marker_len: usize,
     },
 }
 
@@ -435,7 +332,6 @@ fn run(
                 false,
             )
         }
-        Some(Commands::Mesh { command }) => commands::mesh::manage::run(command, &repo_root, json),
         None => match query.as_deref() {
             Some(query) => commands::search::run(query, limit, offset, json, &repo_root, source),
             None => {
@@ -471,7 +367,6 @@ fn command_name(command: Option<&Commands>, query: Option<&str>) -> &'static str
         Some(Commands::Check { .. }) => "check",
         Some(Commands::List { .. }) => "list",
         Some(Commands::Summary { .. }) => "summary",
-        Some(Commands::Mesh { .. }) => "mesh",
         None if query.is_some() => "search",
         None => "help",
     }

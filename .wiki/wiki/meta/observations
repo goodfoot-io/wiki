@@ -1,6 +1,5 @@
 packages/cli/src/commands/search.rs#L20-L25 rk64:2b0c3f7188b1ccd5
 packages/cli/src/commands/summary.rs#L72-L100 rk64:5b8345cb489f4ab8
-packages/cli/src/main.rs#L121-L123 rk64:e7c74dc7780e4b55
-packages/cli/src/main.rs#L127-L129 rk64:aad0d7ee89345b91
-wiki/meta/wiki-feedback.md#L22-L27 rk64:65005be81d91f432
+packages/cli/src/main.rs#L109-L111 rk64:e7c74dc7780e4b55
+wiki/meta/wiki-feedback.md#L22-L27 rk64:9472a0a8e148880d
 

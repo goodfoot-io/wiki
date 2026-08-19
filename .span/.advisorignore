@@ -1,7 +1,3 @@
-# wiki CLI's own mesh storage — generated/managed by `wiki mesh add`/`wiki mesh why`,
-# the direct analog of git-span's own .span/; nobody hand-edits it.
-.wiki/**
-
 # Local Claude Code session/preference config; no other file's behavior or
 # accuracy depends on it.
 .claude/settings.json

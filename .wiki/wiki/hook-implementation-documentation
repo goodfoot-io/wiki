@@ -1,4 +1,0 @@
-.githooks/pre-commit.wiki.sh#L10-L21 rk64:5e688a9502a18ed4
-plugins/wiki/skills/wiki/sections/git-hook-setup.md#L15-L94 rk64:6765efe266c47953
-
-Pre-commit hook implementation and its documentation in git-hook-setup must stay in sync for clarity and accuracy.

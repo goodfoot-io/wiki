@@ -473,15 +473,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
 
 [[package]]
-name = "git-mesh-core"
-version = "0.1.0"
-source = "git+https://github.com/goodfoot-io/git-mesh.git?rev=958f3a01045537bdec7fed877e0d26ba957ee3bb#958f3a01045537bdec7fed877e0d26ba957ee3bb"
-dependencies = [
- "sha2",
- "thiserror",
-]
-
-[[package]]
 name = "gix"
 version = "0.84.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2162,7 +2153,6 @@ dependencies = [
  "assert_cmd",
  "clap",
  "fs4",
- "git-mesh-core",
  "gix",
  "globset",
  "ignore",

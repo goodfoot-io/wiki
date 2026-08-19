@@ -1,6 +1,0 @@
-.gitattributes#L19-L20 rk64:8038056521ac9fd4
-packages/cli/src/commands/mesh/manage.rs#L379-L476 rk64:906c83948ef40266
-packages/cli/src/main.rs#L253-L254 rk64:992b3fa86ce0bab6
-plugins/wiki/skills/wiki/sections/git-hook-setup.md#L57-L66 rk64:df74fa3d407a048c
-
-Wiki mesh merge driver that resolves .wiki/ merge conflicts structurally — the gitattributes driver name, the manual per-clone registration step, the merge subcommand implementation, the CLI help text, and the handbook documentation must all agree on the driver name and invocation. Registration moved out of the pre-commit hook in 6e69f54f — it is no longer part of this coupling.

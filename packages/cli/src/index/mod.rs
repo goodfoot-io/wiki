@@ -70,7 +70,7 @@ fn rebuildable_bootstrap_error(e: &rusqlite::Error) -> bool {
 }
 
 /// The `.wiki/` directory anchored at the repo root, where the index cache DB
-/// and its sidecar files live alongside the mesh store.
+/// and its sidecar files live.
 pub(crate) fn wiki_dir(repo_root: &Path) -> PathBuf {
     repo_root.join(".wiki")
 }
@@ -265,8 +265,8 @@ impl WikiIndex {
             )
         })?;
 
-        // The cache DB and its sidecars live under `.wiki/` alongside the mesh
-        // store. Ensure the directory exists before opening for write.
+        // The cache DB and its sidecars live under `.wiki/`. Ensure the
+        // directory exists before opening for write.
         let wiki = wiki_dir(repo_root);
         std::fs::create_dir_all(&wiki)
             .map_err(|e| miette::miette!("failed to create {}: {e}", wiki.display()))?;
