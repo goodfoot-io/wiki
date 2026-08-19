@@ -19,8 +19,8 @@ use super::drift;
 /// Per-run content cache that avoids re-reading the same file from disk.
 ///
 /// Each in-scope wiki page is read at least twice during `collect_for_files`
-/// (once for frontmatter, once for link parsing), and once more by the mesh
-/// coverage pass.  In `--fix` mode `collect_for_files` runs twice and
+/// (once for frontmatter, once for link parsing), and once more by the drift
+/// pass.  In `--fix` mode `collect_for_files` runs twice and
 /// `run_fix_pass` re-reads each file.  This cache collapses redundant reads
 /// into a single read per unique path per run.
 pub(crate) struct ContentCache {
@@ -713,6 +713,9 @@ fn collect_drift_diagnostics(
     content_cache: &mut ContentCache,
 ) -> Result<Vec<CheckDiagnostic>> {
     let mut out = Vec::new();
+    // Shared across pages: the move scan's candidate inventory is loaded once
+    // per run, on the first link that needs it.
+    let mut ctx = drift::MoveScanCtx::new();
     for path in files {
         let content = match content_cache
             .get_or_try_read(path, || read_via_source(path, repo_root, source, git_reader))
@@ -756,7 +759,7 @@ fn collect_drift_diagnostics(
             });
             continue;
         }
-        let classes = drift::classify_page(repo_root, source, &page_path, content, &epoch)
+        let classes = drift::classify_page(repo_root, source, &page_path, content, &epoch, &mut ctx)
             .map_err(|e| miette::miette!("{e}"))?;
         for c in classes {
             let (kind, message) = match &c.outcome {

@@ -1264,6 +1264,9 @@ fn run_drift_fix_phase(
 
     let mut unverified = 0;
     let mut certification_skips = 0;
+    // Shared across files: the move scan's candidate inventory is loaded once
+    // per run, on the first link that needs it.
+    let mut ctx = drift::MoveScanCtx::new();
 
     for file in files {
         let content = match content_cache
@@ -1309,9 +1312,15 @@ fn run_drift_fix_phase(
             ),
             other => (other.clone(), None),
         };
-        let classes =
-            drift::classify_page(repo_root, source, &page_path, &content, &classify_epoch)
-                .map_err(|e| miette::miette!("{e}"))?;
+        let classes = drift::classify_page(
+            repo_root,
+            source,
+            &page_path,
+            &content,
+            &classify_epoch,
+            &mut ctx,
+        )
+        .map_err(|e| miette::miette!("{e}"))?;
 
         let mut file_patches: Vec<(usize, usize, String)> = Vec::new();
         for c in &classes {

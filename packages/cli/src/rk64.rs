@@ -422,17 +422,18 @@ pub fn scan_indexed_rk64(
     }
 }
 
-/// [`scan_indexed_rk64`] over `Vec<u8>` inputs, building each [`LineIndex`]
-/// internally.
-pub fn scan_for_content_hash_rk64(
-    files: &[(String, Vec<u8>)],
+/// [`scan_indexed_rk64`] over borrowed path/bytes pairs, building each
+/// [`LineIndex`] internally. Generic over the borrowed forms so callers with
+/// `Vec`-backed inventories need no per-call clones.
+pub fn scan_for_content_hash_rk64<P: AsRef<str>, B: AsRef<[u8]>>(
+    files: &[(P, B)],
     cheap_fp: u64,
     extent: Extent,
     near: Option<u32>,
 ) -> Vec<Location> {
     let indexed: Vec<(String, LineIndex<'_>)> = files
         .iter()
-        .map(|(path, bytes)| (path.clone(), LineIndex::build(bytes)))
+        .map(|(path, bytes)| (path.as_ref().to_string(), LineIndex::build(bytes.as_ref())))
         .collect();
     scan_indexed_rk64(&indexed, cheap_fp, extent, near)
 }

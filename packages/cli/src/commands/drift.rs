@@ -362,12 +362,40 @@ fn git_output(repo_root: &Path, args: &[&str]) -> Result<String, EpochError> {
 /// fragments are outside this system's scope. The pending-bump override
 /// ([`LinkEpoch::Current`]) suppresses certification outcomes but still flags
 /// `Broken` structural failures.
+/// Per-run move-scan context. The candidate inventory — `git ls-files` plus a
+/// full read of every tracked candidate file — is expensive, and every link's
+/// cross-file move scan needs it. Build it lazily on the first scan that
+/// needs it and reuse it for the rest of the run; runs with no move scans
+/// pay nothing.
+#[derive(Default)]
+pub struct MoveScanCtx {
+    candidates: Option<Vec<(String, Vec<u8>)>>,
+}
+
+impl MoveScanCtx {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn candidates(
+        &mut self,
+        repo_root: &Path,
+        source: DocSource,
+    ) -> Result<&[(String, Vec<u8>)], EpochError> {
+        if self.candidates.is_none() {
+            self.candidates = Some(candidate_files(repo_root, source)?);
+        }
+        Ok(self.candidates.as_deref().expect("just populated"))
+    }
+}
+
 pub fn classify_page(
     repo_root: &Path,
     source: DocSource,
     page_path: &str,
     page_content: &str,
     epoch: &LinkEpoch,
+    ctx: &mut MoveScanCtx,
 ) -> Result<Vec<LinkClass>, EpochError> {
     let anchor = match epoch {
         LinkEpoch::Missing => return Err(EpochError::MissingEpoch),
@@ -414,6 +442,7 @@ pub fn classify_page(
             &link,
             &certified,
             anchor.map(|(sha, _)| sha),
+            ctx,
         )?;
         classes.push(LinkClass {
             target_path,
@@ -608,6 +637,7 @@ fn classify_link(
     link: &ParsedLink,
     certified: &[CertifiedLink],
     anchor_sha: Option<&str>,
+    ctx: &mut MoveScanCtx,
 ) -> Result<(DriftOutcome, String), EpochError> {
     // Decision 5 target resolution: resolve the href path part, then salvage
     // the longest existing repo-relative suffix when the direct read misses.
@@ -663,6 +693,7 @@ fn classify_link(
             anchor_sha,
             &mut memo,
             DriftOutcome::Broken,
+            ctx,
         )?;
         return Ok((outcome, target_path));
     };
@@ -699,6 +730,7 @@ fn classify_link(
             anchor_sha,
             &mut memo,
             DriftOutcome::Drift,
+            ctx,
         )?;
         return Ok((outcome, target_path));
     }
@@ -793,6 +825,7 @@ fn move_scan_outcome(
     anchor_sha: &str,
     memo: &mut HashMap<(String, u32, u32), u64>,
     zero_matches: DriftOutcome,
+    ctx: &mut MoveScanCtx,
 ) -> Result<DriftOutcome, EpochError> {
     let span = line_range_span(cert.start, cert.end);
     if span == 0 {
@@ -805,10 +838,20 @@ fn move_scan_outcome(
         end: span as u32,
     };
 
-    // Same-file tier: the link's own target.
+    // Same-file tier: the link's own target. The window at the certified
+    // range's own coordinates is not a move — the content drifted in place,
+    // and "relocating" there rewrites the href to itself on every run.
     if let Some(bytes) = target_bytes {
         let idx = LineIndex::build(bytes);
-        let matches = scan_indexed_rk64(&[(target_path.to_string(), idx)], cert_fp, extent, None);
+        let matches: Vec<crate::rk64::Location> =
+            scan_indexed_rk64(&[(target_path.to_string(), idx)], cert_fp, extent, None)
+                .into_iter()
+                .filter(|l| {
+                    !(l.path == target_path
+                        && l.start_line == cert.start
+                        && l.end_line == cert.end)
+                })
+                .collect();
         match matches.len() {
             1 => {
                 return moved_to(&matches[0]);
@@ -820,11 +863,15 @@ fn move_scan_outcome(
 
     // Cross-file tier: every other candidate file in the repo. The page
     // itself is excluded — a body quoting the range must not relocate the
-    // link into itself — as is the target (already scanned above).
-    let candidates = candidate_files(repo_root, source)?;
-    let others: Vec<(String, Vec<u8>)> = candidates
-        .into_iter()
+    // link into itself — as is the target (already scanned above). The
+    // candidate inventory comes from the run's shared context: re-reading
+    // every tracked file per link would make each drift link cost the whole
+    // repo again.
+    let others: Vec<(&str, &[u8])> = ctx
+        .candidates(repo_root, source)?
+        .iter()
         .filter(|(path, _)| path != target_path && path != page_path)
+        .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
         .collect();
     let matches = scan_for_content_hash_rk64(&others, cert_fp, extent, None);
     match matches.len() {
@@ -836,7 +883,7 @@ fn move_scan_outcome(
     // Fuzzy tier: the certified content is absent everywhere in exact form.
     // Look for a lightly-edited near-copy (Decision 5 step 4): exactly one
     // at-threshold window → Moved; ≥2 → Unknown; none → `zero_matches`.
-    let fuzzy = fuzzy_locations(
+    let fuzzy: Vec<crate::rk64::Location> = fuzzy_locations(
         repo_root,
         source,
         page_path,
@@ -844,7 +891,15 @@ fn move_scan_outcome(
         target_bytes,
         cert,
         anchor_sha,
-    )?;
+        ctx,
+    )?
+    .into_iter()
+    // Same exclusion as the exact same-file tier: the fuzzy tier's in-place
+    // match at the link's own coordinates is drift, not a relocation.
+    .filter(|l| {
+        !(l.path == target_path && l.start_line == cert.start && l.end_line == cert.end)
+    })
+    .collect();
     match fuzzy.len() {
         1 => moved_to(&fuzzy[0]),
         n if n >= 2 => Ok(DriftOutcome::Unknown),
@@ -909,6 +964,11 @@ fn token_counts<'a>(lines: &[&'a str]) -> HashMap<&'a str, u32> {
 /// weighting keeps sliding windows that merely *overlap* a moved block (high
 /// token similarity plus foreign filler lines) below the tier threshold:
 /// only a window made of the moved block's own lines scores at or above it.
+///
+/// `collect_fuzzy_hits` scores windows through the same formula with a
+/// prefilter, so this direct form is now the test-side oracle — the
+/// brute-force reference the optimized collector must agree with.
+#[cfg(test)]
 fn fuzzy_window_score(a_lines: &[&str], b_lines: &[&str]) -> f64 {
     let token = window_jaccard(a_lines, b_lines);
     if token == 0.0 {
@@ -940,6 +1000,7 @@ fn fuzzy_window_score(a_lines: &[&str], b_lines: &[&str]) -> f64 {
 /// candidate set, page excluded) whose [`fuzzy_window_score`] with the
 /// certified content reaches [`FUZZY_JACCARD_THRESHOLD`]. Callers turn the
 /// list into Moved / Unknown / zero-matches per Decision 5 step 4.
+#[allow(clippy::too_many_arguments)]
 fn fuzzy_locations(
     repo_root: &Path,
     source: DocSource,
@@ -948,6 +1009,7 @@ fn fuzzy_locations(
     target_bytes: Option<&[u8]>,
     cert: &CertifiedLink,
     anchor_sha: &str,
+    ctx: &mut MoveScanCtx,
 ) -> Result<Vec<crate::rk64::Location>, EpochError> {
     let span = line_range_span(cert.start, cert.end);
     if span == 0 {
@@ -971,27 +1033,82 @@ fn fuzzy_locations(
     }
     let cert_lines = &lines[start - 1..end];
 
+    // Certified-line facts, computed once and shared by every candidate file.
+    let cert_data: Vec<CertLine> = cert_lines.iter().map(|l| CertLine::new(l)).collect();
+    let cert_index = cert_token_index(&cert_data);
+
     let mut hits = Vec::new();
     // Same-file tier: the link's own target.
     if let Some(bytes) = target_bytes {
-        collect_fuzzy_hits(bytes, target_path, cert_lines, span, &mut hits);
+        collect_fuzzy_hits(bytes, target_path, cert_lines, &cert_data, &cert_index, span, &mut hits);
     }
     // Cross-file tier: every candidate minus the target and the page itself.
-    for (path, bytes) in candidate_files(repo_root, source)? {
+    for (path, bytes) in ctx.candidates(repo_root, source)? {
         if path == target_path || path == page_path {
             continue;
         }
-        collect_fuzzy_hits(&bytes, &path, cert_lines, span, &mut hits);
+        collect_fuzzy_hits(bytes, path, cert_lines, &cert_data, &cert_index, span, &mut hits);
     }
     Ok(hits)
 }
 
+/// One certified line's fuzzy-tier facts: its token multiset, token count,
+/// and whether it is blank.
+struct CertLine<'a> {
+    counts: HashMap<&'a str, u32>,
+    total: u32,
+    blank: bool,
+}
+
+impl<'a> CertLine<'a> {
+    fn new(line: &'a str) -> Self {
+        let counts = token_counts(&[line]);
+        let total = counts.values().copied().sum();
+        let blank = line.split_whitespace().next().is_none();
+        Self { counts, total, blank }
+    }
+}
+
+/// Token → indices of the certified lines containing it, for the containment
+/// prefilter: a candidate line can only match certified lines that share a
+/// token with it.
+fn cert_token_index<'a>(cert_data: &'a [CertLine<'a>]) -> HashMap<&'a str, Vec<u32>> {
+    let mut index: HashMap<&str, Vec<u32>> = HashMap::new();
+    for (i, cert) in cert_data.iter().enumerate() {
+        for token in cert.counts.keys() {
+            index.entry(token).or_default().push(i as u32);
+        }
+    }
+    index
+}
+
 /// Slide a window of the certified span's height over one candidate file and
 /// collect every at-threshold location.
+///
+/// Naively, every window position re-tokenizes the whole window and compares
+/// every window line against every certified line — O(lines × span²) work per
+/// candidate, which hangs a real repo the moment one link drifts (the
+/// corpus's first genuine Drift link scans ~220k candidate lines). Two
+/// observations make the same judgment cheap:
+///
+/// 1. Line containment (does this line match *any* certified line?) is a
+///    per-line fact, so a window's matched count is a sliding sum over
+///    per-file flags, not a per-window recomputation.
+/// 2. The score is token-Jaccard × containment, and containment ≥ T is a
+///    *necessary* condition for the score to reach FUZZY_JACCARD_THRESHOLD
+///    (token-Jaccard never exceeds 1). The matched-count floor is derived
+///    from the same threshold constant, so no window the old formula could
+///    admit is ever skipped — only windows below the floor, which the old
+///    formula provably scores below the threshold too.
+///
+/// Only the rare windows that clear the floor pay for full token multisets.
+#[allow(clippy::too_many_arguments)]
 fn collect_fuzzy_hits(
     bytes: &[u8],
     path: &str,
     cert_lines: &[&str],
+    cert_data: &[CertLine],
+    cert_index: &HashMap<&str, Vec<u32>>,
     span: usize,
     hits: &mut Vec<crate::rk64::Location>,
 ) {
@@ -1000,9 +1117,40 @@ fn collect_fuzzy_hits(
     if lines.len() < span {
         return;
     }
+
+    // Per-line containment flags, computed once per file.
+    let flags: Vec<bool> = lines
+        .iter()
+        .map(|line| line_matches_any_cert(line, cert_data, cert_index))
+        .collect();
+
+    // Matched-count floor: containment ≥ T requires matched ≥ 2·span·T/(1+T).
+    // Windows below the floor cannot reach FUZZY_JACCARD_THRESHOLD no matter
+    // their token similarity.
+    let floor = ((2.0 * span as f64 * FUZZY_JACCARD_THRESHOLD)
+        / (1.0 + FUZZY_JACCARD_THRESHOLD))
+        .ceil() as usize;
+
+    let mut matched = flags[..span].iter().filter(|&&f| f).count();
     for start in 0..=lines.len() - span {
+        if start > 0 {
+            if flags[start - 1] {
+                matched -= 1;
+            }
+            if flags[start + span - 1] {
+                matched += 1;
+            }
+        }
+        if matched < floor {
+            continue;
+        }
         let window = &lines[start..start + span];
-        if fuzzy_window_score(cert_lines, window) >= FUZZY_JACCARD_THRESHOLD {
+        let token = window_jaccard(cert_lines, window);
+        if token == 0.0 {
+            continue;
+        }
+        let containment = matched as f64 / (2.0 * span as f64 - matched as f64);
+        if token * containment >= FUZZY_JACCARD_THRESHOLD {
             hits.push(crate::rk64::Location {
                 path: path.to_string(),
                 start_line: (start + 1) as u32,
@@ -1010,6 +1158,56 @@ fn collect_fuzzy_hits(
             });
         }
     }
+}
+
+/// The containment half of [`fuzzy_window_score`]: does this candidate line
+/// match at least one certified line — blank against blank, or a token
+/// multiset Jaccard reaching [`FUZZY_LINE_MATCH_THRESHOLD`]? The certified
+/// token index limits full intersections to certified lines that share a
+/// token with the candidate, and the Jaccard bound
+/// `(1+T)·min ≥ T·(|a|+|b|)` (intersection never exceeds either side) skips
+/// the rest.
+fn line_matches_any_cert(
+    line: &str,
+    cert_data: &[CertLine],
+    cert_index: &HashMap<&str, Vec<u32>>,
+) -> bool {
+    let counts = token_counts(&[line]);
+    let a_total: u32 = counts.values().copied().sum();
+    if a_total == 0 {
+        return cert_data.iter().any(|c| c.blank);
+    }
+    let mut seen: Vec<u32> = Vec::new();
+    for token in counts.keys() {
+        let Some(idxs) = cert_index.get(token) else {
+            continue;
+        };
+        for &ci in idxs {
+            if seen.contains(&ci) {
+                continue;
+            }
+            seen.push(ci);
+            let c = &cert_data[ci as usize];
+            if c.blank {
+                continue;
+            }
+            let b_total = c.total;
+            if (1.0 + FUZZY_LINE_MATCH_THRESHOLD) * (a_total.min(b_total) as f64)
+                < FUZZY_LINE_MATCH_THRESHOLD * ((a_total + b_total) as f64)
+            {
+                continue;
+            }
+            let inter: u32 = counts
+                .iter()
+                .map(|(t, &ca)| c.counts.get(t).map(|&cb| ca.min(cb)).unwrap_or(0))
+                .sum();
+            let jaccard = inter as f64 / ((a_total + b_total - inter) as f64);
+            if jaccard >= FUZZY_LINE_MATCH_THRESHOLD {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn moved_to(location: &crate::rk64::Location) -> Result<DriftOutcome, EpochError> {
@@ -1340,6 +1538,7 @@ pub fn collect_with_source(
             page,
             &repo.read(page),
             epoch,
+            &mut MoveScanCtx::new(),
         )
     }
 
@@ -1769,6 +1968,7 @@ pub fn collect_with_source(
             "wiki/page.md",
             &page_content,
             &epoch,
+            &mut MoveScanCtx::new(),
         )
         .expect("classifies");
         assert_eq!(classes.len(), 1);
@@ -2005,6 +2205,25 @@ pub fn collect_with_source(
     }
 
     #[test]
+    fn in_place_edit_is_drift_not_a_self_move() {
+        let (repo, c1) = repo_with_certified_fuzzy_block();
+        // The certified block is lightly edited IN PLACE: the href range still
+        // covers it, so nothing moved. The fuzzy tier's match at the link's
+        // own coordinates must not be treated as a relocation — `--fix` would
+        // rewrite the href to itself on every run. In-place drift classifies
+        // Drift, with the bump-`links-reviewed:` remedy.
+        repo.create_file("wiki/target.md", &format!("T0\n{FUZZY_BLOCK_EDITED}\nT1\n"));
+        repo.commit("block edited in place");
+        let epoch = LinkEpoch::Commit {
+            sha: c1,
+            path_at_commit: "wiki/page.md".into(),
+            value: "1".into(),
+        };
+        let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
+        assert_eq!(classes[0].outcome, DriftOutcome::Drift);
+    }
+
+    #[test]
     fn fuzzy_moved_cross_file_after_small_edit() {
         // Cross-file Moved arises when the target is gone; the edited block
         // lives in another file, and the fuzzy tier is what finds it.
@@ -2081,6 +2300,79 @@ pub fn collect_with_source(
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes[0].outcome, DriftOutcome::Broken);
+    }
+
+    /// Differential test: the optimized sliding collector must agree with the
+    /// brute-force per-window formula on *every* window of a file that mixes
+    /// the certified block, a lightly-edited near-copy, and token-sharing
+    /// filler — the containment prefilter must never skip a window the brute
+    /// force would admit, nor admit one it would not.
+    #[test]
+    fn fuzzy_collector_agrees_with_brute_force_on_every_window() {
+        let cert_lines: Vec<&str> = FUZZY_BLOCK.lines().collect();
+        let span = cert_lines.len();
+        let cert_data: Vec<CertLine> = cert_lines.iter().map(|l| CertLine::new(l)).collect();
+        let cert_index = cert_token_index(&cert_data);
+
+        let candidate = format!(
+            "// filler sharing the block's vocabulary without being it\n{}\n{}\n",
+            FUZZY_BLOCK,
+            FUZZY_BLOCK.replace("fn resolve_target_path", "fn resolve_target_path_edited"),
+        );
+        let bytes = candidate.as_bytes();
+
+        let mut optimized = Vec::new();
+        collect_fuzzy_hits(
+            bytes,
+            "candidate.rs",
+            &cert_lines,
+            &cert_data,
+            &cert_index,
+            span,
+            &mut optimized,
+        );
+
+        let lines: Vec<&str> = candidate.lines().collect();
+        let mut brute: Vec<(u32, u32)> = Vec::new();
+        for start in 0..=lines.len() - span {
+            let window = &lines[start..start + span];
+            if fuzzy_window_score(&cert_lines, window) >= FUZZY_JACCARD_THRESHOLD {
+                brute.push(((start + 1) as u32, (start + span) as u32));
+            }
+        }
+        let optimized_ranges: Vec<(u32, u32)> = optimized
+            .iter()
+            .map(|l| (l.start_line, l.end_line))
+            .collect();
+        assert_eq!(optimized_ranges, brute);
+    }
+
+    /// The prefilter floor admits exactly the windows whose containment can
+    /// reach the tier: every matched count at or above the floor satisfies
+    /// containment ≥ T, and the one below it does not — so the optimized
+    /// collector can never skip a window the brute-force formula admits.
+    #[test]
+    fn fuzzy_collector_floor_bounds_containment_exactly() {
+        for span in 1..40usize {
+            let floor = ((2.0 * span as f64 * FUZZY_JACCARD_THRESHOLD)
+                / (1.0 + FUZZY_JACCARD_THRESHOLD))
+                .ceil() as usize;
+            for matched in floor..=span {
+                let containment = matched as f64 / (2.0 * span as f64 - matched as f64);
+                assert!(
+                    containment >= FUZZY_JACCARD_THRESHOLD,
+                    "span {span} matched {matched}"
+                );
+            }
+            if floor > 0 {
+                let below = floor - 1;
+                let containment = below as f64 / (2.0 * span as f64 - below as f64);
+                assert!(
+                    containment < FUZZY_JACCARD_THRESHOLD,
+                    "span {span} matched {below}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2288,3 +2580,4 @@ pub fn collect_with_source(
         assert_eq!(classes[0].source_line, 8);
     }
 }
+
