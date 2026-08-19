@@ -252,25 +252,37 @@ pub fn parse_frontmatter(
     }))
 }
 
-/// Extract the raw YAML string from the leading `---` block.
-fn extract_yaml_block(content: &str) -> Option<&str> {
-    let content = content.trim_start_matches('\n');
-    if !content.starts_with("---") {
+/// Byte bounds of the leading `---` YAML block in `content`: `(yaml_start,
+/// yaml_end)` bracket the YAML text between the fences, and `close_fence` is
+/// the byte offset where the closing `---` line begins. `None` when there is
+/// no opening fence, the opening fence is not on its own line, or no closing
+/// fence exists. Leading blank lines are skipped exactly like
+/// [`extract_yaml_block`].
+///
+/// `pub(crate)` for the drift engine, which appends a field just before the
+/// closing fence without disturbing the rest of the content byte-for-byte.
+pub(crate) fn yaml_block_bounds(content: &str) -> Option<(usize, usize, usize)> {
+    let trimmed = content.trim_start_matches('\n');
+    let skipped = content.len() - trimmed.len();
+    if !trimmed.starts_with("---") {
         return None;
     }
-    // Move past opening "---" line
-    let after_open = &content["---".len()..];
-    // The opening fence may be followed by a newline
-    let after_open = if let Some(s) = after_open.strip_prefix('\n') {
-        s
+    // The opening fence must be on its own line.
+    let after_fence = &trimmed["---".len()..];
+    let (yaml_start, after_open) = if let Some(s) = after_fence.strip_prefix('\n') {
+        (skipped + "---".len() + 1, s)
     } else {
-        // "---" must be on its own line
-        after_open.strip_prefix("\r\n")?
+        let s = after_fence.strip_prefix("\r\n")?;
+        (skipped + "---".len() + 2, s)
     };
-
-    // Find closing "---" on its own line
     let close = find_close_fence(after_open)?;
-    Some(&after_open[..close])
+    Some((yaml_start, yaml_start + close, yaml_start + close))
+}
+
+/// Extract the raw YAML string from the leading `---` block.
+fn extract_yaml_block(content: &str) -> Option<&str> {
+    let (start, end, _) = yaml_block_bounds(content)?;
+    Some(&content[start..end])
 }
 
 /// Find the byte offset of the start of a `---` close fence within `s`.
