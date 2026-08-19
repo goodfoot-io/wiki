@@ -5,6 +5,8 @@ Single linear pass through `wiki/guides/manual-testing-procedure.md` against
 procedure and counter-intuitive behavior. Steps not listed here behaved exactly
 as documented.
 
+> **Superseded:** this pass predates the git-derived drift engine (0.5.107). Mesh-coverage references below are historical; the mesh is gone and `wiki check --fix` now relocates drifted line-range links and initializes `links-reviewed:`.
+
 ## Counter-intuitive behavior
 
 ### `wiki "Authentication" -l 1 -o 1` returns silently empty (Step 6b)

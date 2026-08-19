@@ -26,7 +26,7 @@ are independently runnable, and `bash -n`-clean. Auto-fixing sub-scripts
 
 | Sub-script | Event | Purpose | Blocking? |
 |---|---|---|---|
-| `pre-commit.wiki.sh` | pre-commit | `wiki check --fix --print-applied --no-exit-code`: auto-fixes drifted links/frontmatter and creates mesh coverage in one pass; re-stages fixed `.md` files and created/renamed meshes | No |
+| `pre-commit.wiki.sh` | pre-commit | `wiki check --fix --print-applied --no-exit-code`: relocates drifted line-range links, initializes `links-reviewed:` on field-less pages, and re-stages exactly the files the run rewrote | No |
 | `pre-commit.biome.sh` | pre-commit | `biome check --fix` on staged TS/JS; re-stage fixes | No |
 | `pre-commit.plugin-version.sh` | pre-commit | Bump changed plugins' versions + sync marketplace.json; re-stage | No |
 | `pre-commit.version-consistency.sh` | pre-commit | Gate: marketplace.json versions must match plugin.json | **Yes** |

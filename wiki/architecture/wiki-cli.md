@@ -3,7 +3,7 @@ title: Wiki CLI
 summary: Fragment link parsing, validation pipeline, and command reference for the wiki CLI tool.
 tags:
   - tooling
-links-reviewed: 1
+links-reviewed: 2
 ---
 
 The wiki CLI validates and maintains fragment links between wiki pages and source code. For the maintenance map of every operator-facing doc and automation prompt that should be checked when CLI behavior changes, see [Wiki Documentation Touchpoints](../meta/wiki-documentation-touchpoints.md).
@@ -14,7 +14,7 @@ The [parser](/packages/cli/src/parser.rs#L6-L12) extracts fragment links from ma
 
 ## Validation Pipeline
 
-The [check command](/packages/cli/src/commands/check.rs#L281-L295) runs a full validation pass: [frontmatter parsing](/packages/cli/src/frontmatter.rs#L123-L135), title/alias collision detection, wikilink resolution, and fragment link verification (file existence and line range bounds at the pinned SHA). With `--fix`, unpinned fragment links are pinned automatically rather than reported as errors — already-pinned links are never touched.
+The [check command](/packages/cli/src/commands/check.rs#L281-L295) runs a full validation pass: [frontmatter parsing](/packages/cli/src/frontmatter.rs#L123-L135), title/alias collision detection, wikilink resolution, and fragment link verification. Line-range links are classified against the page's git-derived anchor epoch — the cited file's content at the commit where the page's `links-reviewed:` value last changed. With `--fix`, links whose certified content moved are relocated automatically and field-less pages get the field initialized; in-place drift is reported and left for review.
 
 ## PostToolUse Hook
 
@@ -34,4 +34,4 @@ The CLI does not render markdown. HTML rendering is owned entirely by the VS Cod
 
 ## Frontmatter
 
-The [frontmatter module](/packages/cli/src/frontmatter.rs#L123-L135) parses and validates YAML frontmatter from wiki pages. It [reserves certain titles](/packages/cli/src/frontmatter.rs#L48-L51) (`check`, `list`, `summary`, `mesh`) to prevent ambiguity with command-line dispatch.
+The [frontmatter module](/packages/cli/src/frontmatter.rs#L123-L135) parses and validates YAML frontmatter from wiki pages. It [reserves certain titles](/packages/cli/src/frontmatter.rs#L48-L51) (`check`, `list`, `summary`) to prevent ambiguity with command-line dispatch.

@@ -8,7 +8,7 @@ wiki -l 10 "auth"         # up to 10 results (default 3)
 wiki -l 10 -o 10 "auth"   # next page
 ```
 
-Search first when authoring — it surfaces the canonical title to link against. An exact title still works as a query, but the output is ranked lookup, not a direct fetch. A query that collides with a subcommand name (`mesh`, `check`, `list`) dispatches to that subcommand instead of searching.
+Search first when authoring — it surfaces the canonical title to link against. An exact title still works as a query, but the output is ranked lookup, not a direct fetch. A query that collides with a subcommand name (`check`, `list`, `summary`) dispatches to that subcommand instead of searching.
 
 ## Orientation
 

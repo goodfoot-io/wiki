@@ -12,12 +12,12 @@ keywords: [rbac, permissions]    # optional
 ---
 ```
 
-`title` and `summary` are the only required fields and define page-hood. `aliases`/`tags`/`keywords` are arrays of non-empty strings.
+`title` and `summary` are the only required fields and define page-hood. `aliases`/`tags`/`keywords` are arrays of non-empty strings. `links-reviewed:` is optional here but required in practice for any page that cites code — see `./fragment-links-and-coverage.md`.
 
 ## Titles: unique and not reserved
 
 - Titles and aliases are unique **case-insensitively** across the whole corpus. A collision is a `wiki check` failure — run `wiki "…"` or `wiki list` first to confirm the name is free.
-- A title/alias may not be a reserved subcommand name: `check`, `pin`, `stale`, `links`, `list`, `summary`, `print`. `wiki <title>` would otherwise dispatch to the subcommand.
+- A title/alias may not be a reserved subcommand name: `check`, `list`, `summary`. `wiki <title>` would otherwise dispatch to the subcommand.
 
 Add aliases for every name a reader might search. The alias is cheaper than a second page.
 
@@ -36,10 +36,10 @@ Jump to [Authorization#Role checks](./authorization.md#role-checks).
 
 - bare (`images/foo.png`), `./`, `../` → relative to the **page's directory**
 - leading `/` (`/packages/api/client.ts`) → relative to the **repo root**
-- `http(s)://` → not validated, no mesh coverage
+- `http(s)://` → not validated
 
-## Don't mesh purely descriptive prose
+## Don't anchor purely descriptive prose
 
-A wiki page earns fragment links (and the mesh coverage they demand) when it is **load-bearing** — a contract, a spec, a runbook, or part of a curated corpus whose accuracy against the code is itself maintained. A tutorial paragraph that just paraphrases code the reader can read directly does not need a fragment link. If you wouldn't want a code change to flag "this article may now be wrong," don't anchor it.
+A wiki page earns fragment links (and the drift surveillance they get) when it is **load-bearing** — a contract, a spec, a runbook, or part of a curated corpus whose accuracy against the code is itself maintained. A tutorial paragraph that just paraphrases code the reader can read directly does not need a fragment link. If you wouldn't want a code change to flag "this article may now be wrong," don't anchor it.
 
 When you do cite code, see `./fragment-links-and-coverage.md`.

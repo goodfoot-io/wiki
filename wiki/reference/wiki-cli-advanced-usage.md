@@ -20,16 +20,17 @@ wiki list
 wiki list --tag api
 ```
 
-## Keeping Fragment Links Pinned
+## Keeping Fragment Links Honest
 
-Run `wiki check --fix` to automatically pin unpinned fragment links:
+Run `wiki check --fix` to repair mechanical drift automatically:
 
 ```bash
-# Pin all unpinned links in the wiki to their latest commit SHA
+# Relocate moved links, route broken targets through renames,
+# initialize links-reviewed on field-less pages
 wiki check --fix
 ```
 
-`--fix` only touches links that have no SHA (`missing_sha`). Already-pinned links are left unchanged.
+`--fix` only rewrites what it can resolve unambiguously: links whose certified content moved are re-pointed, and pages with line-range links but no `links-reviewed:` field get the field initialized. In-place drift, ambiguous moves, and unverifiable links are skipped with a named reason — see the `resolving-skipped-fixes` skill section.
 
 ## Stdin and Path Input
 
@@ -85,7 +86,7 @@ wiki check --format json
 wiki list --format json
 ```
 
-The JSON schema mirrors the human-readable output: `check` emits a `diagnostics` array and `list` emits a page-result array.
+The JSON schema mirrors the human-readable output: `check` emits an `errors` array and `list` emits a page-result array.
 
 ### Command-by-Command Output
 
@@ -129,74 +130,27 @@ If no results are found, text output is empty and JSON output is `[]`.
 Text output:
 
 ```text
-**missing_sha** — `/repo/wiki/page.md:8`
-Fragment link `packages/cli/src/index.rs` has no pinned SHA. Run `wiki check --fix` to add one automatically.
+Error: Link Drift
+- wiki/architecture/wiki-cli.md:37
+- content at `packages/cli/src/frontmatter.rs#L48-L51` changed since the anchor epoch — bump `links-reviewed:` after reviewing it
 ```
 
 JSON output:
 
 ```json
-[
-  {
-    "kind": "missing_sha",
-    "file": "/repo/wiki/page.md",
-    "line": 8,
-    "message": "Fragment link `packages/cli/src/index.rs` has no pinned SHA. Run `wiki check --fix` to add one automatically."
-  }
-]
+{
+  "errors": [
+    {
+      "file": "wiki/architecture/wiki-cli.md",
+      "kind": "link_drift",
+      "line": 37,
+      "message": "content at `packages/cli/src/frontmatter.rs#L48-L51` changed since the anchor epoch — bump `links-reviewed:` after reviewing it"
+    }
+  ]
+}
 ```
 
-#### `wiki pin`
-
-Text output:
-
-```text
-`/repo/wiki/page.md:8` — `packages/cli/src/index.rs`
-`` → ``
-```
-
-JSON output:
-
-```json
-[
-  {
-    "wiki_file": "/repo/wiki/page.md",
-    "source_line": 8,
-    "referenced_path": "packages/cli/src/index.rs",
-    "old_sha": "abc1234",
-    "new_sha": "def5678",
-    "action": "refreshed"
-  }
-]
-```
-
-#### `wiki extract`
-
-Text output:
-
-```text
-**Authorization** — How auth decisions are made across the system.
-**Identity** — How users and service principals are resolved.
-```
-
-JSON output:
-
-```json
-[
-  {
-    "title": "Authorization",
-    "summary": "How auth decisions are made across the system.",
-    "file": "/repo/wiki/security/authorization.md"
-  },
-  {
-    "title": "Identity",
-    "summary": "How users and service principals are resolved.",
-    "file": "/repo/wiki/security/identity.md"
-  }
-]
-```
-
-If no wikilinks are found, text output is empty and JSON output is `[]`.
+`kind` identifies the diagnostic class (`link_drift`, `link_broken`, `link_unverified`, frontmatter kinds); `file`, `line`, and `message` mirror the human-readable report.
 
 #### `wiki list`
 

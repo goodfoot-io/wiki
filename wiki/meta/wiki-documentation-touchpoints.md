@@ -5,7 +5,7 @@ tags:
   - meta
   - wiki
   - tooling
-links-reviewed: 1
+links-reviewed: 2
 ---
 
 This page is the maintenance map for future wiki documentation updates. When command behavior or recommended usage changes, update the implementation-facing source of truth first, then walk the operator-facing documents and automation references listed here so guidance does not drift.
@@ -14,7 +14,7 @@ For the CLI architecture itself, see [Wiki CLI](../architecture/wiki-cli.md). Fo
 
 ## Command Behavior Source Of Truth
 
-The primary source of truth for top-level CLI behavior is the [Clap configuration and dispatch in `packages/cli/src/main.rs`](/packages/cli/src/main.rs#L35-L91). That block defines the help text, the `query` positional argument, and the wiring to the reserved subcommand set. The [top-level `run(...)` match in the same file](/packages/cli/src/main.rs#L375-L466) is what decides that bare `wiki [query]` executes ranked lookup rather than page printing.
+The primary source of truth for top-level CLI behavior is the [Clap configuration and dispatch in `packages/cli/src/main.rs`](/packages/cli/src/main.rs#L35-L91). That block defines the help text, the `query` positional argument, and the wiring to the reserved subcommand set. The [top-level `run(...)` match in the same file](/packages/cli/src/main.rs#L300-L345) is what decides that bare `wiki [query]` executes ranked lookup rather than page printing.
 
 ## Operator-Facing Documentation
 
@@ -30,16 +30,16 @@ If a documentation update changes the recommended operator workflow, all of thes
 
 The [Gemini wiki gap-detection example script](/examples/githooks/scripts/gemini-wiki-gap-detection.sh) embeds wiki search guidance for automated maintenance work. If the preferred search invocation or page-discovery workflow changes, this prompt must stay aligned with the human-facing docs or automation will continue reinforcing stale instructions.
 
-The [wiki skill's skipped-fix resolution section](/plugins/wiki/skills/wiki/sections/resolving-skipped-fixes.md) defines the stale-anchor repair workflow (re-hash, re-anchor, or delete). It is not a user-facing quickstart, but it is part of the operational contract for wiki upkeep and should be checked whenever the update changes validation, pinning, or page-discovery expectations.
+The [wiki skill's skipped-fix resolution section](/plugins/wiki/skills/wiki/sections/resolving-skipped-fixes.md) defines the skipped-fix workflow (re-point the link, fix the prose, or bump `links-reviewed:`). It is not a user-facing quickstart, but it is part of the operational contract for wiki upkeep and should be checked whenever the update changes validation, certification, or page-discovery expectations.
 
 ## Update Order
 
 When wiki documentation behavior changes, use this order:
 
-1. Confirm the implementation in [CLI parsing and dispatch](/packages/cli/src/main.rs#L35-L91) and [top-level command routing](/packages/cli/src/main.rs#L375-L466).
+1. Confirm the implementation in [CLI parsing and dispatch](/packages/cli/src/main.rs#L35-L91) and [top-level command routing](/packages/cli/src/main.rs#L300-L345).
 2. Update the agent workflow contract in [the wiki skill](/plugins/wiki/skills/wiki/SKILL.md).
 3. Update secondary references such as [Wiki CLI Advanced Usage](../reference/wiki-cli-advanced-usage.md), [Wiki CLI Feedback](./wiki-feedback.md), and [the Gemini maintenance example](/examples/githooks/scripts/gemini-wiki-gap-detection.sh).
-4. Run `wiki check --fix` on the touched pages so the fragment links pin.
+4. Run `wiki check --fix` on the touched pages, then bump their `links-reviewed:` fields so the re-anchored links re-certify.
 
 ## References
 

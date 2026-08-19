@@ -1,78 +1,54 @@
 # Resolving skipped fixes
 
-`wiki check --fix` fail-closes on mesh drift it can't resolve automatically and names the exact `wiki mesh` command to run. Three verbs cover every case: `show`, `add`, `remove`.
+`wiki check --fix` relocates line-range links whose certified content *moved*, and refuses to guess at the rest. A skip names the link and the reason. The reason is the *mechanism*, not the *decision*: a drifted link says "the cited bytes changed," not "re-certify me" — the point of the anchor is that a code change surfaces as *this article may now be wrong*. Bumping `links-reviewed:` without reading converts that signal into a green check while the prose silently lies.
 
-The named command is the *mechanism*, not the *decision*. A stale anchor says "the cited bytes changed," not "re-hash me" — and the point of coverage is that a code change surfaces as *this article may now be wrong*. Re-hashing without reading converts that signal into a green check while the prose silently lies.
+## Confirm before you re-certify
 
-## Confirm before you re-anchor
+For each skipped link:
 
-For each drifted anchor, before any `wiki mesh add`:
-
-1. `wiki mesh show <slug> --patch` — read the committed-vs-worktree diff.
+1. Read the cited range's history: `git log -L <start>,<end>:<file>` (or open the file and blame the range).
 2. Read the page prose around the fragment link.
-3. Answer: **does the diff change what the code does, or only how it looks?**
+3. Answer: **does the change alter what the code does, or only how it looks?**
 
-Only then pick a path below. Don't batch-re-add over `show` output to clear the exit code.
+Only then pick a path below. Don't batch-bump fields over skip output to clear the exit code.
 
 ## Classify and act
 
 ```mermaid
 graph TD
-    A[stale / skipped anchor] --> B{what changed?}
-    B -->|behavior: new params, logic,<br/>return values, deleted feature| C[update prose, then re-anchor]
-    B -->|cosmetic: rename, reformat,<br/>reordered tests| D[prose still accurate →<br/>re-anchor only]
-    B -->|content moved: range shifted| E[add new anchor, remove old]
-    B -->|content deleted| F[remove anchor, drop the link]
-    B -->|rewritten in place: same range| G[fix prose, add same anchor = upsert]
+    A[skipped link] --> B{what changed?}
+    B -->|behavior: new params, logic,<br/>return values, deleted feature| C[update prose, then bump links-reviewed]
+    B -->|cosmetic: rename, reformat,<br/>reordered tests| D[prose still accurate →<br/>bump links-reviewed]
+    B -->|content moved: range shifted| E[fix didn't relocate it →<br/>edit the link range, then bump]
+    B -->|content deleted| F[drop the link from the page]
+    B -->|rewritten in place: same range| G[fix prose, then bump links-reviewed]
 ```
 
-**Rewritten in place / cosmetic (range unchanged)** — upsert re-hashes:
-```bash
-wiki mesh add <slug> packages/cli/src/foo.rs#L10-L40
+The field is per-page, not per-link: every line-range link on a page is certified together, so one bump re-certifies the whole page. Bump only after you've confirmed every drifted link on the page.
+
+**Cosmetic or rewritten-in-place (range unchanged)** — review, then bump the page's `links-reviewed:` value (any change re-certifies; increment the number):
+
+```yaml
+links-reviewed: 2   # was 1
 ```
 
-**Moved (range changed)** — add new *then* remove old. This ordering keeps the mesh alive: a single-anchor mesh isn't deleted when the old anchor goes. `remove` is idempotent (missing anchor → `nothing to remove`, exit 0), so the pair is safe to re-run:
-```bash
-wiki mesh add    <slug> <new-anchor>
-wiki mesh remove <slug> <old-anchor>
+**Moved (range changed)** — `--fix` relocates these automatically when the moved content is found unambiguously. When it skips instead (ambiguous match, multi-match, content edited during the move), edit the fragment link's range by hand, then bump:
+
+```markdown
+[parse_args()](./packages/cli/src/main.rs#L40-L80)   # re-point the range
 ```
 
-**Deleted** — drop the anchor and the prose link:
-```bash
-wiki mesh remove <slug> <anchor>   # then delete the fragment link from the page
-```
+**Deleted** — drop the fragment link from the page. No bump is needed when no line-range links remain (an empty page stops being checked), but if other links stay, bump after the edit.
 
-There is **no** `reanchor` or `rebaseline` verb by design: `add` upserts on exact `(path, start, end)` identity, so re-pointing and re-hashing are the same command.
+There is **no** `reanchor` verb by design: the anchor is derived from git history at the commit where `links-reviewed:` last changed. Re-pointing a link and re-certifying the page are page edits, not CLI commands.
 
 ## Update neighbors, then stage together
 
-If your prose edit makes a *linked* page inaccurate too, fix that page before moving on. `wiki mesh` writes directly to `.wiki/`; running it by hand means staging by hand:
+If your prose edit makes a *linked* page inaccurate too, fix that page before moving on. All changes are plain page edits:
 
 ```bash
-git add .wiki/ wiki/
-git commit -m "wiki: re-anchor <slug> after <what changed>"
+git add wiki/
+git commit -m "wiki: re-certify <page> after <what changed>"
 ```
 
-Then `wiki check` to confirm the failure clears. "Just re-add the anchors" / "batch it" removes the *recovery* effort, not the *per-anchor confirmation* — if that shorthand conflicts with the confirm step, surface it rather than dropping the step silently.
-
-## Merge conflict residue
-
-After a merge that touched both sides' `.wiki/` meshes, `wiki check --fix` automatically resolves most conflicts (see `./fixing-mesh-coverage.md`). Two cases produce **residue** — conflict markers that `--fix` cannot collapse — and the mesh is **not** re-staged until manually resolved.
-
-### 1. Conflicted source file
-
-The code file an anchor targets still has `<<<<<<<` / `>>>>>>>` markers. `--fix` cannot hash a conflicted file, so it leaves the entire mesh untouched and names the source file in the report. The fix is plain:
-
-1. Resolve the code file's conflict markers.
-2. Run `wiki check --fix` again — the mesh collapses automatically.
-
-### 2. Diverged `--why` rationale
-
-Both sides changed the mesh's `--why` rationale text differently. Anchor lines resolve cleanly (they point to resolved source), but the `why` line retains `<<<<<<<` / `>>>>>>>` residue. To resolve:
-
-1. Open the `.wiki/<slug>.mesh` file.
-2. Edit the `why:` line to remove the markers and keep the correct rationale.
-3. Stage the mesh: `git add .wiki/<slug>.mesh`
-4. `wiki check --fix` confirms clean state.
-
-Because a mesh with residue still reports as dirty, the commit stays blocked — which is the safe default. The `--fix` pre-pass report lists each mesh's status: fully resolved, partially resolved (with the reason), or skipped.
+Then `wiki check` to confirm the failure clears. "Just bump the field" / "batch it" removes the *recovery* effort, not the *per-link confirmation* — if that shorthand conflicts with the confirm step, surface it rather than dropping the step silently.
