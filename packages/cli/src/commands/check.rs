@@ -708,6 +708,7 @@ fn collect_drift_diagnostics(
         };
         let epoch = drift::find_anchor_commit(
             repo_root,
+            &crate::cache::NoopCache,
             &page_path,
             &current_value,
             &committed_value,
@@ -725,8 +726,16 @@ fn collect_drift_diagnostics(
             });
             continue;
         }
-        let classes = drift::classify_page(repo_root, source, &page_path, content, &epoch, &mut ctx)
-            .map_err(|e| miette::miette!("{e}"))?;
+        let classes = drift::classify_page(
+            repo_root,
+            &crate::cache::NoopCache,
+            source,
+            &page_path,
+            content,
+            &epoch,
+            &mut ctx,
+        )
+        .map_err(|e| miette::miette!("{e}"))?;
         for c in classes {
             let (kind, message) = match &c.outcome {
                 drift::DriftOutcome::Healthy | drift::DriftOutcome::Moved { .. } => continue,

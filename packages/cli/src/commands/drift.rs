@@ -198,8 +198,12 @@ pub fn read_links_reviewed(content: &str) -> LinksReviewedRead {
 /// readable history, skipping unparseable commits entirely. A shallow clone
 /// is detected via `git rev-parse --is-shallow-repository` and fails closed
 /// with [`EpochError::ShallowClone`].
+///
+/// `cache` is the anchor-cache seam (plan Phase 3): threaded into the walk
+/// legs below; Phase 1 accepts it without consulting it.
 pub fn find_anchor_commit(
     repo_root: &Path,
+    cache: &dyn crate::cache::AnchorCache,
     page_path: &str,
     current_value: &LinksReviewedRead,
     committed_value: &LinksReviewedRead,
@@ -226,12 +230,12 @@ pub fn find_anchor_commit(
                 // Both sides absent — the page has no anchor epoch.
                 return Ok(LinkEpoch::Missing);
             };
-            walk_anchor_epoch(repo_root, page_path)
+            walk_anchor_epoch(repo_root, cache, page_path)
         }
         // An unparseable HEAD blob is not a value: the pending rule cannot
         // compare it, and the field is not "missing" — the walk resolves
         // the epoch from the readable history, skipping the broken commit.
-        LinksReviewedRead::Unparseable => walk_anchor_epoch(repo_root, page_path),
+        LinksReviewedRead::Unparseable => walk_anchor_epoch(repo_root, cache, page_path),
     }
 }
 
@@ -246,7 +250,14 @@ pub fn find_anchor_commit(
 /// skipped entirely — they are not values and not epoch events, so a
 /// repair commit compares against the next-older readable value and can
 /// never re-anchor the page at itself.
-fn walk_anchor_epoch(repo_root: &Path, page_path: &str) -> Result<LinkEpoch, EpochError> {
+///
+/// `_cache` is the tier-A seam (plan Phase 3): accepted, not consulted, in
+/// Phase 1.
+fn walk_anchor_epoch(
+    repo_root: &Path,
+    _cache: &dyn crate::cache::AnchorCache,
+    page_path: &str,
+) -> Result<LinkEpoch, EpochError> {
     // The repository state is the authority: a local-path `--depth 1` clone
     // can silently copy full history, so clone flags must not be trusted.
     if git_output(repo_root, &["rev-parse", "--is-shallow-repository"])?.trim() == "true" {
@@ -442,6 +453,10 @@ fn git_output(repo_root: &Path, args: &[&str]) -> Result<String, EpochError> {
 /// fragments are outside this system's scope. The pending-bump override
 /// ([`LinkEpoch::Current`]) suppresses certification outcomes but still flags
 /// `Broken` structural failures.
+///
+/// `cache` is the anchor-cache seam (plan Phase 2): threaded into the
+/// per-link classification and its move scans; Phase 1 accepts it without
+/// consulting it.
 /// Per-run move-scan context. The candidate inventory — `git ls-files` plus a
 /// full read of every tracked candidate file — is expensive, and every link's
 /// cross-file move scan needs it. Build it lazily on the first scan that
@@ -591,6 +606,7 @@ fn has_identity_evidence(
 
 pub fn classify_page(
     repo_root: &Path,
+    cache: &dyn crate::cache::AnchorCache,
     source: DocSource,
     page_path: &str,
     page_content: &str,
@@ -639,6 +655,7 @@ pub fn classify_page(
         // `target_path` reports where the link was actually judged against.
         let (outcome, target_path) = classify_link(
             repo_root,
+            cache,
             source,
             page_path,
             &link,
@@ -864,8 +881,10 @@ fn resolve_target_path(repo_root: &Path, page_path: &str, path_part: &str) -> St
 /// together with the effective target path — the resolved path after suffix
 /// salvage — so the caller reports where the link was actually judged
 /// against, not where the stale href happened to point.
+#[allow(clippy::too_many_arguments)]
 fn classify_link(
     repo_root: &Path,
+    cache: &dyn crate::cache::AnchorCache,
     source: DocSource,
     page_path: &str,
     link: &ParsedLink,
@@ -953,7 +972,9 @@ fn classify_link(
                     return Ok((DriftOutcome::Broken, target_path));
                 }
                 for cand in certified.iter().filter(|c| c.label == link.label) {
-                    if certified_content_fp(repo_root, anchor_sha, cand, &mut memo)? == current_fp {
+                    if certified_content_fp(repo_root, cache, page_path, anchor_sha, cand, &mut memo)?
+                        == current_fp
+                    {
                         return Ok((DriftOutcome::Healthy, target_path));
                     }
                 }
@@ -966,7 +987,8 @@ fn classify_link(
         // equals the certified content.
         if let Some(bytes) = target_bytes.as_deref()
             && extent_fits(bytes, link.start, link.end)
-            && certified_content_fp(repo_root, anchor_sha, cert, &mut memo)? == current_fp
+            && certified_content_fp(repo_root, cache, page_path, anchor_sha, cert, &mut memo)?
+                == current_fp
         {
             return Ok((DriftOutcome::Healthy, target_path));
         }
@@ -981,6 +1003,7 @@ fn classify_link(
         };
         let outcome = move_scan_outcome(
             repo_root,
+            cache,
             source,
             page_path,
             &target_path,
@@ -1000,6 +1023,7 @@ fn classify_link(
     let Some(bytes) = target_bytes.as_deref() else {
         let outcome = move_scan_outcome(
             repo_root,
+            cache,
             source,
             page_path,
             &target_path,
@@ -1024,7 +1048,7 @@ fn classify_link(
         .iter()
         .any(|c| c.start == link.start && c.end == link.end)
     {
-        let cert_fp = certified_content_fp(repo_root, anchor_sha, cert, &mut memo)?;
+        let cert_fp = certified_content_fp(repo_root, cache, page_path, anchor_sha, cert, &mut memo)?;
         let cur_fp = cheap_fingerprint_with_extent(
             bytes,
             &Extent::LineRange {
@@ -1037,6 +1061,7 @@ fn classify_link(
         }
         let outcome = move_scan_outcome(
             repo_root,
+            cache,
             source,
             page_path,
             &target_path,
@@ -1064,12 +1089,13 @@ fn classify_link(
         },
     );
     for c in &matched {
-        if certified_content_fp(repo_root, anchor_sha, c, &mut memo)? == cur_fp {
+        if certified_content_fp(repo_root, cache, page_path, anchor_sha, c, &mut memo)? == cur_fp {
             return Ok((DriftOutcome::Healthy, target_path));
         }
     }
     let outcome = move_scan_outcome(
         repo_root,
+        cache,
         source,
         page_path,
         &target_path,
@@ -1102,8 +1128,14 @@ fn primary_cert<'a>(
 
 /// The canonical rk64 fingerprint of a certified link's target range at the
 /// anchor commit, memoized per (path, range).
+///
+/// `_cache` and `_page_path` are the Phase 2 fingerprint-tier seam: the page
+/// path is one field of the disk tier's key tuple, and the cache wraps this
+/// function's anchor-side read. Phase 1 accepts both without consulting them.
 fn certified_content_fp(
     repo_root: &Path,
+    _cache: &dyn crate::cache::AnchorCache,
+    _page_path: &str,
     anchor_sha: &str,
     cert: &CertifiedLink,
     memo: &mut HashMap<(String, u32, u32), u64>,
@@ -1146,6 +1178,7 @@ fn current_content_fp(bytes: Option<&[u8]>, start: u32, end: u32) -> u64 {
 #[allow(clippy::too_many_arguments)]
 fn move_scan_outcome(
     repo_root: &Path,
+    cache: &dyn crate::cache::AnchorCache,
     source: DocSource,
     page_path: &str,
     target_path: &str,
@@ -1161,7 +1194,7 @@ fn move_scan_outcome(
         // Degenerate certified content never matches a window.
         return Ok(zero_matches);
     }
-    let cert_fp = certified_content_fp(repo_root, anchor_sha, cert, memo)?;
+    let cert_fp = certified_content_fp(repo_root, cache, page_path, anchor_sha, cert, memo)?;
     let extent = Extent::LineRange {
         start: 1,
         end: span as u32,
@@ -1715,6 +1748,7 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use crate::cache::NoopCache;
     use super::*;
 
     const BLOCK: &str = "block-line-1\nblock-line-2\nblock-line-3";
@@ -1895,6 +1929,7 @@ pub fn collect_with_source(
     ) -> Result<Vec<LinkClass>, EpochError> {
         classify_page(
             repo.path(),
+            &NoopCache,
             DocSource::WorkingTree,
             page,
             &repo.read(page),
@@ -2039,7 +2074,7 @@ pub fn collect_with_source(
         repo.create_file("wiki/page.md", &make_wiki_page("P", "body\n", Some("1")));
         repo.commit("field=1");
         repo.create_file("wiki/page.md", &make_wiki_page("P", "body\n", Some("2")));
-        let epoch = find_anchor_commit(repo.path(), "wiki/page.md", &read(Some("2")), &read(Some("1")))
+        let epoch = find_anchor_commit(repo.path(), &NoopCache, "wiki/page.md", &read(Some("2")), &read(Some("1")))
             .expect("resolves");
         assert_eq!(
             epoch,
@@ -2056,7 +2091,7 @@ pub fn collect_with_source(
         repo.commit("no field");
         repo.create_file("wiki/page.md", &make_wiki_page("P", "body\n", Some("1")));
         let epoch =
-            find_anchor_commit(repo.path(), "wiki/page.md", &read(Some("1")), &read(None)).expect("resolves");
+            find_anchor_commit(repo.path(), &NoopCache, "wiki/page.md", &read(Some("1")), &read(None)).expect("resolves");
         assert_eq!(
             epoch,
             LinkEpoch::Current {
@@ -2072,7 +2107,7 @@ pub fn collect_with_source(
         repo.commit("field=1");
         repo.create_file("wiki/page.md", &make_wiki_page("P", "body\n", None));
         let epoch =
-            find_anchor_commit(repo.path(), "wiki/page.md", &read(None), &read(Some("1"))).expect("resolves");
+            find_anchor_commit(repo.path(), &NoopCache, "wiki/page.md", &read(None), &read(Some("1"))).expect("resolves");
         assert_eq!(epoch, LinkEpoch::Current { value: None });
     }
 
@@ -2081,7 +2116,7 @@ pub fn collect_with_source(
         let repo = TestRepo::new();
         repo.create_file("wiki/page.md", &make_wiki_page("P", "body\n", None));
         repo.commit("no field");
-        let epoch = find_anchor_commit(repo.path(), "wiki/page.md", &read(None), &read(None)).expect("resolves");
+        let epoch = find_anchor_commit(repo.path(), &NoopCache, "wiki/page.md", &read(None), &read(None)).expect("resolves");
         assert_eq!(epoch, LinkEpoch::Missing);
     }
 
@@ -2102,7 +2137,7 @@ pub fn collect_with_source(
         );
         repo.commit("body edit after bump");
 
-        let epoch = find_anchor_commit(repo.path(), "wiki/page.md", &read(Some("2")), &read(Some("2")))
+        let epoch = find_anchor_commit(repo.path(), &NoopCache, "wiki/page.md", &read(Some("2")), &read(Some("2")))
             .expect("resolves");
         assert_eq!(
             epoch,
@@ -2122,7 +2157,7 @@ pub fn collect_with_source(
         repo.create_file("wiki/page.md", &make_wiki_page("P", "edited\n", Some("1")));
         repo.commit("body edit");
 
-        let epoch = find_anchor_commit(repo.path(), "wiki/page.md", &read(Some("1")), &read(Some("1")))
+        let epoch = find_anchor_commit(repo.path(), &NoopCache, "wiki/page.md", &read(Some("1")), &read(Some("1")))
             .expect("resolves");
         assert_eq!(
             epoch,
@@ -2149,7 +2184,7 @@ pub fn collect_with_source(
 
         // HEAD is the merge commit; the certification exists only on the
         // feature branch — a --first-parent walk would never see it.
-        let epoch = find_anchor_commit(repo.path(), "wiki/page.md", &read(Some("2")), &read(Some("2")))
+        let epoch = find_anchor_commit(repo.path(), &NoopCache, "wiki/page.md", &read(Some("2")), &read(Some("2")))
             .expect("resolves");
         assert_eq!(
             epoch,
@@ -2171,8 +2206,14 @@ pub fn collect_with_source(
         repo.git(&["mv", "wiki/renamed.md", "wiki/final-name.md"]);
         repo.commit("rename to final-name.md");
 
-        let epoch = find_anchor_commit(repo.path(), "wiki/final-name.md", &read(Some("1")), &read(Some("1")))
-            .expect("resolves");
+        let epoch = find_anchor_commit(
+            repo.path(),
+            &NoopCache,
+            "wiki/final-name.md",
+            &read(Some("1")),
+            &read(Some("1")),
+        )
+        .expect("resolves");
         assert_eq!(
             epoch,
             LinkEpoch::Commit {
@@ -2193,8 +2234,14 @@ pub fn collect_with_source(
         repo.commit("body edit");
 
         let clone = repo.shallow_clone();
-        let err = find_anchor_commit(clone.path(), "wiki/page.md", &read(Some("1")), &read(Some("1")))
-            .expect_err("shallow history cannot resolve an anchor epoch");
+        let err = find_anchor_commit(
+            clone.path(),
+            &NoopCache,
+            "wiki/page.md",
+            &read(Some("1")),
+            &read(Some("1")),
+        )
+        .expect_err("shallow history cannot resolve an anchor epoch");
         assert!(matches!(err, EpochError::ShallowClone), "got {err:?}");
     }
 
@@ -2217,7 +2264,7 @@ pub fn collect_with_source(
         repo.create_file("wiki/page.md", &make_wiki_page("P", "edited\n", Some("1")));
         repo.commit("repair, no bump");
 
-        let epoch = find_anchor_commit(repo.path(), "wiki/page.md", &read(Some("1")), &read(Some("1")))
+        let epoch = find_anchor_commit(repo.path(), &NoopCache, "wiki/page.md", &read(Some("1")), &read(Some("1")))
             .expect("resolves");
         assert_eq!(
             epoch,
@@ -2244,6 +2291,7 @@ pub fn collect_with_source(
         );
         let err = find_anchor_commit(
             repo.path(),
+            &NoopCache,
             "wiki/page.md",
             &field_value(&repo.read("wiki/page.md")),
             &read(Some("1")),
@@ -2267,6 +2315,7 @@ pub fn collect_with_source(
         // readable history.
         let epoch = find_anchor_commit(
             repo.path(),
+            &NoopCache,
             "wiki/page.md",
             &read(Some("1")),
             &LinksReviewedRead::Unparseable,
@@ -2292,6 +2341,7 @@ pub fn collect_with_source(
         repo.commit("broken from the start");
         let err = find_anchor_commit(
             repo.path(),
+            &NoopCache,
             "wiki/page.md",
             &read(Some("1")),
             &LinksReviewedRead::Unparseable,
@@ -2451,6 +2501,7 @@ pub fn collect_with_source(
         let page_content = repo.read("wiki/page.md");
         let classes = classify_page(
             repo.path(),
+            &NoopCache,
             DocSource::Head,
             "wiki/page.md",
             &page_content,

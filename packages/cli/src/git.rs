@@ -81,6 +81,23 @@ pub fn repo_root() -> Result<PathBuf> {
     Ok(repo.workdir().unwrap_or(repo.path()).to_path_buf())
 }
 
+/// Return the absolute, lexically normalized path of the repository's common
+/// git directory (`.git` of the main repository). From a linked worktree
+/// this is the *main* repo's `.git`, so every worktree of one repo shares
+/// one anchor cache under it (plan decision 2).
+///
+/// Discovery honors `GIT_DIR` environment overrides so a bogus `GIT_DIR`
+/// fails the same way git would — fail closed to "cache disabled for the
+/// run". The returned path is normalized because a linked worktree's
+/// `common_dir()` carries `..` segments (spike S2). A discovery failure is
+/// `Err`; the caller disables the anchor cache for the run (uncached
+/// computation is always correct).
+pub fn common_dir() -> Result<PathBuf> {
+    // P1 stub — Phase 1 implements `gix::discover_with_environment_overrides`
+    // + `repository.common_dir()` + lexical `..`-collapse.
+    Ok(PathBuf::new())
+}
+
 /// Resolve a git ref name (branch, tag, `HEAD`, or SHA) to a full commit SHA.
 pub fn resolve_ref(repo: &Path, ref_name: &str) -> Result<String> {
     let repo = open_repo(repo)?;

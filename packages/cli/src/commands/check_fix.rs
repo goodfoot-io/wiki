@@ -1407,6 +1407,7 @@ fn run_drift_fix_phase(
         };
         let epoch = drift::find_anchor_commit(
             repo_root,
+            &crate::cache::NoopCache,
             &page_path,
             &current_value,
             &committed_value,
@@ -1430,6 +1431,7 @@ fn run_drift_fix_phase(
         };
         let classes = drift::classify_page(
             repo_root,
+            &crate::cache::NoopCache,
             source,
             &page_path,
             &content,

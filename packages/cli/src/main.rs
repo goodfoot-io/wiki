@@ -1,4 +1,8 @@
 mod commands;
+// Phase 0 tdd-bootstrap stubs — first consumers land in Phases 1–2, which
+// removes the allow.
+#[allow(dead_code)]
+mod cache;
 mod frontmatter;
 mod git;
 mod headings;

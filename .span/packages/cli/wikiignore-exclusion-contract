@@ -1,5 +1,5 @@
 packages/cli/src/commands/check.rs#L575-L584 rk64:e4979825ce9ee01e
-packages/cli/src/commands/check.rs#L928-L933 rk64:f72ce367c68106bc
+packages/cli/src/commands/check.rs#L937-L942 rk64:f72ce367c68106bc
 packages/cli/src/commands/mod.rs#L249-L259 rk64:915fc4410ff7c163
 packages/cli/src/index/freshness.rs#L218-L234 rk64:26604bd6a5914c56
 packages/cli/src/index/passes/index_file.rs#L4-L98 rk64:c213c1a03b006252
@@ -7,8 +7,8 @@ packages/cli/src/index/passes/mod.rs#L138-L245 rk64:b4402e69e8280270
 packages/cli/src/index/passes/tree.rs#L60-L92 rk64:947a636e09af19d4
 packages/cli/src/index/passes/tree.rs#L192-L242 rk64:ec9af879d3b632ab
 packages/cli/src/index/passes/worktree.rs#L20-L44 rk64:93cb3e5d19e23ace
-packages/cli/src/lib.rs#L16-L18 rk64:ead7a117c4a33d6e
-packages/cli/src/main.rs#L1-L12 rk64:ea0e503a33c88a12
+packages/cli/src/lib.rs#L17-L19 rk64:ead7a117c4a33d6e
+packages/cli/src/main.rs#L1-L12 rk64:754d1e341385cec0
 packages/cli/src/wikiignore.rs rk64:7b91d3352102a8f7
 packages/cli/tests/index_wikiignore.rs rk64:aa490a552b626bb9
 
