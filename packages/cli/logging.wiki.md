@@ -1,7 +1,7 @@
 ---
 title: Wiki Logging and Perf Instrumentation
 summary: Documents all logging and performance tracing points in the wiki CLI. 
-links-reviewed: 1
+links-reviewed: 2
 ---
 
 ## Overview
@@ -44,6 +44,23 @@ These scopes cover the cold-cache path: when the stat-only freshness gate misses
 |----------|-----------|----------|----------|
 | [commands/mod.rs](./src/commands/mod.rs#L236-L311) | `discover_files` | Time to resolve glob patterns and find wiki markdown files | `globs` (array of glob patterns) |
 | [commands/mod.rs](./src/commands/mod.rs#L248-L255) | `discover_files_result` | Zero-duration marker carrying the discovered-file count | `count` |
+
+### Anchor Cache
+
+These cover the disposable anchor-cache tiers inside [`wiki check`](./src/commands/check.rs): the fingerprint tier (per-link rk64 of the certified target range) and the anchor tier (per-page anchor-epoch walk). Every scope below fires only on a cache miss — the served-hit path runs no git leg — so the scope's warm-run absence is exactly the economy the cache buys. All events carry `meta.page` (the page path), and the zero-duration ones have `duration_ms: 0.0`.
+
+| Location | Scope Name | Measures | Metadata |
+|----------|-----------|----------|----------|
+| [drift.rs](./src/commands/drift.rs#L1354-L1358) | `cache.fingerprint` | Tier-F git leg: reads the certified target range's blob at the anchor commit (miss path only) | `page` (page path) |
+| [drift.rs](./src/commands/drift.rs#L338-L404) | `cache.walk` | Tier-A memoized leg: the per-commit blob-read + YAML-parse loop of the anchor-epoch walk (miss path only) | `page` (page path) |
+
+| Location | Event Name | Meaning |
+|----------|-----------|----------|
+| [drift.rs](./src/commands/drift.rs#L1333-L1338) | `cache.fingerprint.hit` | Served a verified fingerprint row |
+| [drift.rs](./src/commands/drift.rs#L1341-L1346) | `cache.fingerprint.miss` | Fingerprint lookup missed; computing the git leg |
+| [drift.rs](./src/commands/drift.rs#L314-L319) | `cache.walk.hit` | Served a verified anchor-walk row |
+| [drift.rs](./src/commands/drift.rs#L326-L331) | `cache.walk.miss` | Anchor-walk lookup missed; computing the memoized leg |
+| [drift.rs](./src/commands/drift.rs#L286-L292) | `cache.walk.bypass` | Shallow clone: the walk tier is bypassed and the run fails closed unchanged |
 
 ## Direct Output Points (println! and eprintln!)
 

@@ -21,9 +21,9 @@ use tempfile::TempDir;
 
 use wiki::cache::key::{fingerprint_key, sha256_hex, walk_key};
 use wiki::cache::schema::{
-    db_path, open_connection, probe, quarantine, ProbeOutcome, SuspectKind, ANCHOR_WALK_DDL,
-    APPLICATION_ID, BUSY_TIMEOUT_MS, DB_FILE_NAME, FINGERPRINT_DDL, META_DDL, SCHEMA_VERSION,
-    SEMANTIC_EPOCH,
+    db_path, init_lock_path, open_connection, probe, quarantine, ProbeOutcome, SuspectKind,
+    ANCHOR_WALK_DDL, APPLICATION_ID, BUSY_TIMEOUT_MS, DB_FILE_NAME, FINGERPRINT_DDL, META_DDL,
+    SCHEMA_VERSION, SEMANTIC_EPOCH,
 };
 use wiki::cache::{AnchorCache, CacheStore, WalkRow};
 
@@ -777,6 +777,99 @@ fn store_walk_tampered_row_digest_is_a_miss() {
         None,
         "a tampered row_digest must never be served"
     );
+}
+
+// ---------------------------------------------------------------------------
+// (b) Clear
+// ---------------------------------------------------------------------------
+
+/// clear() removes the cache entirely (plan decision 8): the database, its
+/// WAL companions, any quarantine asides, the init lock — which lives inside
+/// the deleted directory (plan decision 2) — and the `wiki/` directory
+/// itself. After a clear the cache directory does not exist, and a second
+/// clear on the now-missing cache is still a best-effort success.
+#[test]
+fn clear_deletes_the_cache_directory_lock_and_asides() {
+    let dir = temp_common_dir();
+    let store = open_store(dir.path());
+    let key = fingerprint_key("pages/guide.md", SHA, "pages/other.md", 10, 20);
+    store
+        .upsert_fingerprint(&key, "pages/guide.md", SHA, "pages/other.md", 10, 20, FP)
+        .expect("upsert");
+    // A quarantine rename-aside (as schema::quarantine produces it) must go
+    // with everything else.
+    let cache = db_path(dir.path())
+        .parent()
+        .expect("db path has a parent")
+        .to_path_buf();
+    fs::write(
+        cache.join(format!("{DB_FILE_NAME}.1234567890.quarantine")),
+        b"aside",
+    )
+    .expect("write aside");
+    let lock = init_lock_path(dir.path());
+    assert!(lock.exists(), "the open path leaves the init lock behind");
+
+    store.clear().expect("clear");
+    assert!(!cache.exists(), "the cache directory itself is deleted");
+
+    // Best-effort idempotence: clearing an already-deleted cache still
+    // succeeds (and leaves nothing behind).
+    store.clear().expect("clear again");
+    assert!(!cache.exists());
+}
+
+// ---------------------------------------------------------------------------
+// (b) Open — quarantine rebuilt notice
+// ---------------------------------------------------------------------------
+
+/// `CacheStore::open` on a suspect database quarantines and rebuilds it,
+/// emitting exactly one notice on stderr: `warning: anchor cache was
+/// corrupt; rebuilt` — plain text, no JSON. A subsequent healthy open (the
+/// rebuilt cache probes Valid) emits nothing, and a missing file (fresh
+/// create, not corruption) emits nothing. The notice is process-stderr
+/// output, so this check spawns itself — the test binary — with `--exact`
+/// and `--nocapture` to capture the child's stderr.
+#[test]
+fn open_quarantine_emits_rebuilt_warning_exactly_once() {
+    let exe = std::env::current_exe().expect("test binary path");
+    let out = Command::new(&exe)
+        .args([
+            "--exact",
+            "open_quarantine_rebuilt_warning_helper",
+            "--nocapture",
+        ])
+        .output()
+        .expect("run helper in a child process");
+    assert!(
+        out.status.success(),
+        "helper failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stderr
+            .matches("warning: anchor cache was corrupt; rebuilt")
+            .count(),
+        1,
+        "exactly one rebuilt notice across a corrupt open, a healthy reopen, \
+         and a fresh create; got:\n{stderr}"
+    );
+}
+
+/// Child-process fixture for the notice check: one process, three opens —
+/// the first quarantines the garbage db (one notice), the second probes the
+/// rebuilt cache Valid (no second notice — once-per-run holds without
+/// suppression), and a missing file is a fresh create (no notice).
+#[test]
+fn open_quarantine_rebuilt_warning_helper() {
+    let dir = temp_common_dir();
+    let db = db_path_for(&dir);
+    fs::write(&db, b"this is not a sqlite database file - plain garbage").expect("write garbage");
+    drop(open_store(dir.path()));
+    drop(open_store(dir.path()));
+    let fresh = temp_common_dir();
+    drop(open_store(fresh.path()));
 }
 
 // ---------------------------------------------------------------------------

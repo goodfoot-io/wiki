@@ -127,9 +127,10 @@ pub trait AnchorCache {
         value: Option<&str>,
     ) -> Result<(), CacheError>;
 
-    /// Delete the cache contents — the database file, its WAL sidecars, and
-    /// the `wiki/` directory itself (used by `wiki check --clear-cache`,
-    /// plan decision 8).
+    /// Delete the cache contents — the database file, its WAL sidecars,
+    /// any quarantine asides, the init lock (unlinked while held), and the
+    /// `wiki/` directory itself (used by `wiki check --clear-cache`, plan
+    /// decision 8).
     fn clear(&self) -> Result<(), CacheError>;
 }
 
@@ -187,7 +188,18 @@ impl CacheStore {
                 // Missing is a fresh create, never a quarantine (plan
                 // decision 4); the DDL leg runs under the lock.
                 schema::ProbeOutcome::Missing => drop(schema::open_connection(&db)?),
-                schema::ProbeOutcome::Suspect(_) => schema::quarantine(&db)?,
+                schema::ProbeOutcome::Suspect(_) => {
+                    schema::quarantine(&db)?;
+                    // The rebuild succeeded and this run continues cached —
+                    // a notice, not an unavailability fault (the caller's
+                    // `warning: anchor cache unavailable` line must NOT fire
+                    // for this case). Emitted once per successful
+                    // quarantine-and-recreate, in every mode (plain text,
+                    // no JSON); a quarantine that failed never reaches this
+                    // line — the Err propagation and the caller's fault
+                    // line cover it.
+                    eprintln!("warning: anchor cache was corrupt; rebuilt");
+                }
             }
             // Release the init lock before the working connection opens.
             drop(lock_file);
@@ -446,9 +458,9 @@ impl AnchorCache for CacheStore {
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Err(e.into()),
             Err(e) => return Err(e.into()),
         }
-        // Best-effort deletions: NotFound is fine (the cache may not exist);
-        // anything else surfaces as an error. The directory itself may still
-        // hold quarantine artifacts, so its removal is best-effort too.
+        // Delete the database file and its WAL companions. Best-effort:
+        // NotFound is fine (the cache may not exist); anything else surfaces
+        // as an error.
         for name in [
             schema::DB_FILE_NAME,
             &format!("{}-wal", schema::DB_FILE_NAME),
@@ -460,15 +472,48 @@ impl AnchorCache for CacheStore {
                 Err(e) => return Err(e.into()),
             }
         }
+        // Delete every quarantine rename-aside (`anchor-cache.sqlite.<stamp>.
+        // quarantine`, as produced by schema::quarantine). Best-effort.
+        let aside_prefix = format!("{}.", schema::DB_FILE_NAME);
+        match fs::read_dir(&dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let path = entry.map_err(CacheError::from)?.path();
+                    let name = path.file_name().expect("dir entry has a name").to_string_lossy();
+                    if name.starts_with(&aside_prefix) && name.ends_with(".quarantine") {
+                        match fs::remove_file(&path) {
+                            Ok(()) => {}
+                            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                            Err(e) => return Err(e.into()),
+                        }
+                    }
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        // Unlink the init lock — while still holding the flock on it. The
+        // held flock stays valid on the unlinked inode, so no concurrent
+        // probe/quarantine can interleave with the deletions above; a
+        // concurrent opener can only create a fresh lock file after the
+        // unlink, by which point the db files are gone. The lock lives
+        // inside the deleted directory (plan decision 2), so clearing the
+        // directory inherently removes it (plan decision 8).
+        match fs::remove_file(&lock_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        // The directory itself must go (plan decision 8). DirectoryNotEmpty
+        // and NotFound are the racing exceptions — a concurrent opener may
+        // have recreated the cache after the unlink, or the dir never
+        // existed — never the normal outcome.
         match fs::remove_dir(&dir) {
             Ok(()) => {}
             Err(e)
                 if e.kind() == io::ErrorKind::NotFound
                     || e.kind() == io::ErrorKind::DirectoryNotEmpty =>
-            {
-                // Nothing left, or a quarantine aside remains — either way
-                // the cache contents are gone.
-            }
+            {}
             Err(e) => return Err(e.into()),
         }
         Ok(())

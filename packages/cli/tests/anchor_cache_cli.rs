@@ -127,7 +127,6 @@ fn certified_fixture() -> common::FixtureRepo {
 /// Pending against the P1 stub (which prints the empty common dir): the
 /// real path only exists once Phase 1 resolves `git::common_dir()`.
 #[test]
-#[ignore = "tdd-bootstrap P2: --clear-cache path resolution — unskipped when Phase 1 lands real common_dir"]
 fn clear_cache_prints_resolved_cache_path_and_exits_zero() {
     let repo = plain_fixture();
     let expected = expected_cache_dir(&repo.root);
@@ -169,7 +168,6 @@ fn clear_cache_prints_resolved_cache_path_and_exits_zero() {
 /// `clear()` lands — the P1 stub is a no-op, so this check would fail
 /// today.
 #[test]
-#[ignore = "tdd-bootstrap P2: --clear-cache deletion — unskipped when Phase 1's real store clear() lands"]
 fn clear_cache_deletes_the_cache_directory() {
     let repo = plain_fixture();
     let cache_dir = expected_cache_dir(&repo.root);
@@ -195,7 +193,6 @@ fn clear_cache_deletes_the_cache_directory() {
 /// exits 0, prints no path, and reports the fault exactly once on stderr:
 /// best-effort, and the fault line is never a counted diagnostic.
 #[test]
-#[ignore = "tdd-bootstrap P2: --clear-cache fault path — unskipped when Phase 1 lands real common_dir"]
 fn clear_cache_with_unresolvable_common_dir_warns_once_and_prints_nothing() {
     let repo = plain_fixture();
     let mut cmd = wiki(&repo.root, &["check", "--clear-cache"]);
@@ -228,7 +225,6 @@ fn clear_cache_with_unresolvable_common_dir_warns_once_and_prints_nothing() {
 /// `--format json` + `--clear-cache` still prints the plain path on stdout
 /// — the clear path never emits a JSON envelope (plan decision 8).
 #[test]
-#[ignore = "tdd-bootstrap P2: --clear-cache path resolution — unskipped when Phase 1 lands real common_dir"]
 fn clear_cache_json_mode_still_prints_the_plain_path() {
     let repo = plain_fixture();
     let expected = expected_cache_dir(&repo.root);
@@ -249,7 +245,6 @@ fn clear_cache_json_mode_still_prints_the_plain_path() {
 /// (which serves rows) all agree. The full-corpus oracle is the
 /// drift-wiring peer's test; this is the oracle-lite on a small fixture.
 #[test]
-#[ignore = "tdd-bootstrap P2: kill-switch oracle — unskipped when the cache tiers engage (Phases 2/3)"]
 fn kill_switch_check_is_byte_identical_to_cache_on() {
     let repo = certified_fixture();
 
@@ -296,7 +291,6 @@ fn kill_switch_check_is_byte_identical_to_cache_on() {
 /// run, exit code unchanged. The fault warning is never a counted
 /// diagnostic — it must not touch stdout or the exit code.
 #[test]
-#[ignore = "tdd-bootstrap P2: fault line — unskipped when Phase 1 lands real common_dir"]
 fn check_forced_fault_warns_once_and_keeps_stdout_and_exit_identical() {
     let repo = plain_fixture();
 
@@ -339,7 +333,6 @@ fn check_forced_fault_warns_once_and_keeps_stdout_and_exit_identical() {
 /// envelope — the warning goes to stderr only, so the envelope shape is
 /// untouched.
 #[test]
-#[ignore = "tdd-bootstrap P2: fault line — unskipped when Phase 1 lands real common_dir"]
 fn check_forced_fault_json_stdout_remains_valid_json() {
     let repo = plain_fixture();
     let mut cmd = wiki(&repo.root, &["check", "--format", "json"]);
@@ -371,7 +364,6 @@ fn check_forced_fault_json_stdout_remains_valid_json() {
 /// each construct their own cache handle, but the shared per-run guard
 /// keeps the warning at exactly one line across both construction sites.
 #[test]
-#[ignore = "tdd-bootstrap P2: fix-mode single fault — unskipped when Phase 1 lands real common_dir"]
 fn fix_mode_forced_fault_warns_at_most_once_across_phases() {
     let repo = plain_fixture();
 

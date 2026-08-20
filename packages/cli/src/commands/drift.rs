@@ -199,8 +199,10 @@ pub fn read_links_reviewed(content: &str) -> LinksReviewedRead {
 /// is detected via `git rev-parse --is-shallow-repository` and fails closed
 /// with [`EpochError::ShallowClone`].
 ///
-/// `cache` is the anchor-cache seam (plan Phase 3): threaded into the walk
-/// legs below; Phase 1 accepts it without consulting it.
+/// `cache` is the anchor-cache seam: the walk leg below consults the
+/// anchor tier (Phase 3). The `Current`/`Missing` early returns above
+/// never reach the walk — and therefore never touch the cache and emit
+/// no walk events.
 pub fn find_anchor_commit(
     repo_root: &Path,
     cache: &dyn crate::cache::AnchorCache,
@@ -251,16 +253,42 @@ pub fn find_anchor_commit(
 /// repair commit compares against the next-older readable value and can
 /// never re-anchor the page at itself.
 ///
-/// `_cache` is the tier-A seam (plan Phase 3): accepted, not consulted, in
-/// Phase 1.
+/// The Phase 3 anchor-tier seam (plan decision 5): the disk tier wraps the
+/// memoized leg — the per-commit blob-read + YAML-parse loop — and the
+/// `git log` capture always runs, deliberately outside any span, so the
+/// span's presence on the miss path is exactly the economy the cache
+/// buys. The shallow gate runs first, before any cache consult: a shallow
+/// repo emits `cache.walk.bypass` and fails closed unchanged, so warm rows
+/// from a full-history past are never served. Read: derive the key from
+/// the page path and the exact untrimmed `git log` output (the walk's
+/// entire non-blob input — the commit sequence and rename rows are pinned
+/// by hashing the output itself) → lookup → serve only a verified row; any
+/// miss or lookup error is a miss, never a failure. Write: on a miss the
+/// walk's epoch is upserted under the three-valued availability rule (plan
+/// decision 1): a failed per-commit read is probed — present ⇒ no row
+/// (fail open: object availability can change without the log changing, so
+/// a row written while a blob was unreadable is never served), absent ⇒ a
+/// genuine deletion/rename boundary, a defined walk input whose epoch is
+/// safe to cache, unknown ⇒ no row. The all-unparseable fail-closed
+/// ([`EpochError::UnparseableYaml`]) is never cached. The return value and
+/// error propagation are byte-identical to the uncached walk in every
+/// branch; a cache error is never a serve and never a failure.
 fn walk_anchor_epoch(
     repo_root: &Path,
-    _cache: &dyn crate::cache::AnchorCache,
+    cache: &dyn crate::cache::AnchorCache,
     page_path: &str,
 ) -> Result<LinkEpoch, EpochError> {
     // The repository state is the authority: a local-path `--depth 1` clone
     // can silently copy full history, so clone flags must not be trusted.
+    // The gate runs FIRST, before any cache consult — the bypassed tier
+    // emits `cache.walk.bypass` and the run fails closed unchanged.
     if git_output(repo_root, &["rev-parse", "--is-shallow-repository"])?.trim() == "true" {
+        crate::perf::log_event(
+            "cache.walk.bypass",
+            0.0,
+            "ok",
+            serde_json::json!({ "page": page_path }),
+        );
         return Err(EpochError::ShallowClone);
     }
 
@@ -276,60 +304,137 @@ fn walk_anchor_epoch(
         ],
     )?;
 
-    // Walk newest→oldest: (sha, name in effect at that commit, parsed value).
-    // Every pushed value is readable by construction; absence at a commit is
-    // compared as the field-less state.
-    let mut name = page_path.to_string();
-    let mut walked: Vec<(String, String, LinksReviewedRead)> = Vec::new();
-    for (sha, rows) in parse_name_status_log(&log) {
-        match blob_links_reviewed(repo_root, &sha, &name)? {
-            Some(LinksReviewedRead::Unparseable) => {} // skipped entirely
-            Some(LinksReviewedRead::Readable(v)) => {
-                walked.push((sha.clone(), name.clone(), LinksReviewedRead::Readable(v)));
-            }
-            None => walked.push((sha.clone(), name.clone(), LinksReviewedRead::Readable(None))),
-        }
-        // The pre-commit name for the next (older) commit comes from the
-        // rename row whose new path is the name in effect at this commit.
-        if let Some(row) = rows.iter().find(|r| r.is_rename_to(&name)) {
-            name = row.old_path.clone();
-        }
+    // Tier-A read. The key is the page path plus the exact untrimmed output
+    // the walk parses below (`git_output` returns the lossy stdout verbatim
+    // — its doc comment's "trimmed" claim is stale), so any history change
+    // that moves the commit sequence or rename rows moves the key. Serve
+    // only a verified row; any lookup error is a miss, never a failure.
+    let cache_key = crate::cache::key::walk_key(page_path, &log);
+    if let Some(row) = cache.lookup_walk(&cache_key, page_path, &log).unwrap_or(None) {
+        crate::perf::log_event(
+            "cache.walk.hit",
+            0.0,
+            "ok",
+            serde_json::json!({ "page": page_path }),
+        );
+        return Ok(LinkEpoch::Commit {
+            sha: row.anchor_sha,
+            path_at_commit: row.path_at_commit,
+            value: row.value,
+        });
     }
+    crate::perf::log_event(
+        "cache.walk.miss",
+        0.0,
+        "ok",
+        serde_json::json!({ "page": page_path }),
+    );
 
-    for pair in walked.windows(2) {
-        let (newer, older) = (&pair[0], &pair[1]);
-        if newer.2 != older.2 {
-            // Invariant: unparseable commits were skipped, so both sides of
-            // every pair are readable — the newer side anchors, whether it
-            // carries the field or the field is absent there.
-            return Ok(LinkEpoch::Commit {
-                sha: newer.0.clone(),
-                path_at_commit: newer.1.clone(),
-                value: match &newer.2 {
+    // The memoized leg: the existing per-commit blob-read + YAML-parse loop.
+    // Failed reads are recorded — the walk still treats them as the
+    // field-less state, exactly as uncached — and the availability probe
+    // below decides whether the resulting epoch may be cached.
+    let mut failed_reads: Vec<(String, String)> = Vec::new();
+    let epoch = crate::perf::scope_result(
+        "cache.walk",
+        serde_json::json!({ "page": page_path }),
+        || {
+            // Walk newest→oldest: (sha, name in effect at that commit,
+            // parsed value). Every pushed value is readable by construction;
+            // absence at a commit is compared as the field-less state.
+            let mut name = page_path.to_string();
+            let mut walked: Vec<(String, String, LinksReviewedRead)> = Vec::new();
+            for (sha, rows) in parse_name_status_log(&log) {
+                match blob_links_reviewed(repo_root, &sha, &name)? {
+                    Some(LinksReviewedRead::Unparseable) => {} // skipped entirely
+                    Some(LinksReviewedRead::Readable(v)) => {
+                        walked.push((sha.clone(), name.clone(), LinksReviewedRead::Readable(v)));
+                    }
+                    None => {
+                        failed_reads.push((sha.clone(), name.clone()));
+                        walked.push((sha.clone(), name.clone(), LinksReviewedRead::Readable(None)));
+                    }
+                }
+                // The pre-commit name for the next (older) commit comes from
+                // the rename row whose new path is the name in effect at
+                // this commit.
+                if let Some(row) = rows.iter().find(|r| r.is_rename_to(&name)) {
+                    name = row.old_path.clone();
+                }
+            }
+
+            for pair in walked.windows(2) {
+                let (newer, older) = (&pair[0], &pair[1]);
+                if newer.2 != older.2 {
+                    // Invariant: unparseable commits were skipped, so both
+                    // sides of every pair are readable — the newer side
+                    // anchors, whether it carries the field or the field is
+                    // absent there.
+                    return Ok(LinkEpoch::Commit {
+                        sha: newer.0.clone(),
+                        path_at_commit: newer.1.clone(),
+                        value: match &newer.2 {
+                            LinksReviewedRead::Readable(v) => v.clone(),
+                            LinksReviewedRead::Unparseable => {
+                                unreachable!("unparseable commits are skipped")
+                            }
+                        },
+                    });
+                }
+            }
+            let Some(anchor) = walked.last() else {
+                // Every walked commit carried unparseable YAML: no readable
+                // value exists to anchor on. Fail closed rather than
+                // anchoring at a broken commit.
+                return Err(EpochError::UnparseableYaml {
+                    page: page_path.to_string(),
+                });
+            };
+            Ok(LinkEpoch::Commit {
+                sha: anchor.0.clone(),
+                path_at_commit: anchor.1.clone(),
+                value: match &anchor.2 {
                     LinksReviewedRead::Readable(v) => v.clone(),
                     LinksReviewedRead::Unparseable => {
                         unreachable!("unparseable commits are skipped")
                     }
                 },
-            });
+            })
+        },
+    )?;
+
+    // The write: the walk's epoch is cached only when no failed read probed
+    // present or unknown — an unreadable blob is not a defined walk input,
+    // and its availability can change without the log changing, so the
+    // epoch it produced must never serve. A probed-absent read is a genuine
+    // deletion/rename boundary: the field-less state is the true value at
+    // that commit, and the epoch is a defined computation.
+    let mut cacheable = true;
+    for (sha, name) in &failed_reads {
+        if availability_probe(repo_root, sha, name) != Availability::Absent {
+            cacheable = false;
+            break;
         }
     }
-    let Some(anchor) = walked.last() else {
-        // Every walked commit carried unparseable YAML: no readable value
-        // exists to anchor on. Fail closed rather than anchoring at a
-        // broken commit.
-        return Err(EpochError::UnparseableYaml {
-            page: page_path.to_string(),
-        });
-    };
-    Ok(LinkEpoch::Commit {
-        sha: anchor.0.clone(),
-        path_at_commit: anchor.1.clone(),
-        value: match &anchor.2 {
-            LinksReviewedRead::Readable(v) => v.clone(),
-            LinksReviewedRead::Unparseable => unreachable!("unparseable commits are skipped"),
-        },
-    })
+    if cacheable {
+        let LinkEpoch::Commit {
+            sha,
+            path_at_commit,
+            value,
+        } = &epoch
+        else {
+            unreachable!("the walk resolves to a commit epoch or fails closed")
+        };
+        let _ = cache.upsert_walk(
+            &cache_key,
+            page_path,
+            &crate::cache::key::sha256_hex(log.as_bytes()),
+            sha,
+            path_at_commit,
+            value.as_deref(),
+        );
+    }
+    Ok(epoch)
 }
 
 /// One `--name-status` row: the status token (letter plus informational
@@ -423,6 +528,58 @@ fn read_blob_at(repo_root: &Path, commit: &str, path: &str) -> Result<Option<Vec
     Err(EpochError::GitFailed(
         String::from_utf8_lossy(&output.stderr).trim().to_string(),
     ))
+}
+
+/// The three-valued outcome of the availability probe (plan decision 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Availability {
+    /// The target's tree entry exists at the commit — the failed read was an
+    /// availability failure, so the computed value must not be cached.
+    Present,
+    /// A completed tree read with no entry — genuine absence at the commit;
+    /// the computed value (fp 0) is a defined input and may be cached.
+    Absent,
+    /// The tree itself could not be read, or git failed — no write.
+    Unknown,
+}
+
+/// Classify a completed `git ls-tree <sha> -- :(literal)<path>` output into
+/// the three-valued availability (plan decision 1): exit 0 with a non-empty
+/// listing = present; exit 0 with an empty listing = absent; anything else
+/// — including git's `not a tree object` exit-128 family — = unknown. A
+/// two-valued exit-code reading is unsound: git's `does not exist in
+/// '<sha>'` message also fires when the tree cannot be read, so exit 128 is
+/// not absence.
+fn classify_ls_tree_output(output: &std::process::Output) -> Availability {
+    if output.status.success() {
+        if output.stdout.is_empty() {
+            Availability::Absent
+        } else {
+            Availability::Present
+        }
+    } else {
+        Availability::Unknown
+    }
+}
+
+/// The three-valued availability probe (plan decision 1): `git ls-tree
+/// <anchor_sha> -- :(literal)<target_path>` — the verbatim path the failed
+/// read used (`:(literal)` defeats pathspec glob/magic; a listing works
+/// even when blobs are missing, and partial-clone trees are present when
+/// blobs are not — the `blob:none` case). Runs only after a failed blob
+/// read, on the write path; a spawn failure is unknown — fail open toward
+/// no write, never a failure of the run.
+fn availability_probe(repo_root: &Path, anchor_sha: &str, target_path: &str) -> Availability {
+    let spec = format!(":(literal){target_path}");
+    match Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["ls-tree", anchor_sha, "--", &spec])
+        .output()
+    {
+        Ok(output) => classify_ls_tree_output(&output),
+        Err(_) => Availability::Unknown,
+    }
 }
 
 /// Run git in `repo_root`, returning stdout trimmed of the trailing newline;
@@ -1129,30 +1286,110 @@ fn primary_cert<'a>(
 /// The canonical rk64 fingerprint of a certified link's target range at the
 /// anchor commit, memoized per (path, range).
 ///
-/// `_cache` and `_page_path` are the Phase 2 fingerprint-tier seam: the page
-/// path is one field of the disk tier's key tuple, and the cache wraps this
-/// function's anchor-side read. Phase 1 accepts both without consulting them.
+/// The Phase 2 fingerprint-tier seam (plan decision 5): the disk tier wraps
+/// this function itself, so all five call sites (four in `classify_link`,
+/// one in `move_scan_outcome`) engage it identically. Read: derive the key
+/// from the full queried tuple → lookup → serve only a verified row (the
+/// store re-derives the tuple and `row_digest` itself; any miss or error is
+/// a miss). The in-memory memo sits under the tier — checked only on a disk
+/// miss — so cross-link dedup on a page exists only via the disk tier.
+/// Write: compute strictly outside any cache transaction, then upsert on
+/// the miss path; a failed anchor read (`None` — absent path, unreadable
+/// blob, or unreadable tree, all exit 128) is probed per the three-valued
+/// availability rule (plan decision 1): present ⇒ no write (fail open — a
+/// row written while the blob was unreadable is never served), absent ⇒
+/// `fp = "0000000000000000"` is cached (an absent target at the anchor is a
+/// defined input), unknown ⇒ no write. The return value and error
+/// propagation are byte-identical to the uncached computation in every
+/// branch; a cache error is never a serve and never a failure.
 fn certified_content_fp(
     repo_root: &Path,
-    _cache: &dyn crate::cache::AnchorCache,
-    _page_path: &str,
+    cache: &dyn crate::cache::AnchorCache,
+    page_path: &str,
     anchor_sha: &str,
     cert: &CertifiedLink,
     memo: &mut HashMap<(String, u32, u32), u64>,
 ) -> Result<u64, EpochError> {
     let key = (cert.target_path.clone(), cert.start, cert.end);
+    let cache_key = crate::cache::key::fingerprint_key(
+        page_path,
+        anchor_sha,
+        &cert.target_path,
+        cert.start,
+        cert.end,
+    );
+    if let Some(fp_hex) = cache
+        .lookup_fingerprint(
+            &cache_key,
+            page_path,
+            anchor_sha,
+            &cert.target_path,
+            cert.start,
+            cert.end,
+        )
+        .unwrap_or(None)
+        && let Some(fp) = crate::rk64::rk64_from_hex(&fp_hex)
+    {
+        crate::perf::log_event(
+            "cache.fingerprint.hit",
+            0.0,
+            "ok",
+            serde_json::json!({ "page": page_path }),
+        );
+        return Ok(fp);
+    }
+    crate::perf::log_event(
+        "cache.fingerprint.miss",
+        0.0,
+        "ok",
+        serde_json::json!({ "page": page_path }),
+    );
     if let Some(&fp) = memo.get(&key) {
         return Ok(fp);
     }
-    let fp = match read_blob_at(repo_root, anchor_sha, &cert.target_path)? {
-        None => 0, // no content at all
-        Some(bytes) => cheap_fingerprint_with_extent(
-            &bytes,
-            &Extent::LineRange {
-                start: cert.start,
-                end: cert.end,
-            },
-        ),
+
+    // The tier's git leg — it runs only here, never on a served hit, so the
+    // span (and its warm-run absence) is exactly the economy the cache
+    // buys.
+    let fp = match crate::perf::scope_result(
+        "cache.fingerprint",
+        serde_json::json!({ "page": page_path }),
+        || read_blob_at(repo_root, anchor_sha, &cert.target_path),
+    )? {
+        None => {
+            // The read failed; the probe decides the write.
+            if availability_probe(repo_root, anchor_sha, &cert.target_path) == Availability::Absent {
+                let _ = cache.upsert_fingerprint(
+                    &cache_key,
+                    page_path,
+                    anchor_sha,
+                    &cert.target_path,
+                    cert.start,
+                    cert.end,
+                    "0000000000000000",
+                );
+            }
+            0 // no content at all
+        }
+        Some(bytes) => {
+            let fp = cheap_fingerprint_with_extent(
+                &bytes,
+                &Extent::LineRange {
+                    start: cert.start,
+                    end: cert.end,
+                },
+            );
+            let _ = cache.upsert_fingerprint(
+                &cache_key,
+                page_path,
+                anchor_sha,
+                &cert.target_path,
+                cert.start,
+                cert.end,
+                &crate::rk64::rk64_to_hex(fp),
+            );
+            fp
+        }
     };
     memo.insert(key, fp);
     Ok(fp)
@@ -3222,6 +3459,93 @@ pub fn collect_with_source(
         // lines 1–5, the inserted heading line 6, the blank line 7, the link
         // line 8 — identity is label/range-based, never position-based.
         assert_eq!(classes[0].source_line, 8);
+    }
+
+    // ── Fingerprint tier: the three-valued availability probe (Phase 2) ──
+
+    /// The pure three-valued mapping of a completed `git ls-tree` output
+    /// (plan decision 1), pinned directly — including the unknown branch the
+    /// CLI cannot reach: a destroyed tree kills the page's `--follow` walk
+    /// before the fingerprint tier or the probe ever engages (the P2 check
+    /// `unreadable_target_tree_fails_closed_without_fingerprint_rows` pins
+    /// the CLI-level observables; this pins the probe's own mapping, which
+    /// is where the discrimination lives).
+    #[test]
+    fn ls_tree_availability_mapping_is_three_valued() {
+        let ok = Command::new("true").output().expect("true").status;
+        let fail = Command::new("false").output().expect("false").status;
+        let output = |status: std::process::ExitStatus, stdout: &[u8]| std::process::Output {
+            status,
+            stdout: stdout.to_vec(),
+            stderr: Vec::new(),
+        };
+        let listing = b"100644 blob 8ab686eafeb1f44702738c8b0f24f2567c36da6d\tdocs/target.md\n";
+        assert_eq!(
+            classify_ls_tree_output(&output(ok, listing)),
+            Availability::Present
+        );
+        assert_eq!(
+            classify_ls_tree_output(&output(ok, b"")),
+            Availability::Absent
+        );
+        assert_eq!(
+            classify_ls_tree_output(&output(fail, b"")),
+            Availability::Unknown,
+            "a nonzero exit is unknown, never absent"
+        );
+        assert_eq!(
+            classify_ls_tree_output(&output(fail, listing)),
+            Availability::Unknown,
+            "a listing on a failed exit is still unknown — the exit code rules"
+        );
+        // The `not a tree object` shape the plan names: exit 128. Treated as
+        // a plain nonzero — special-casing 128 as absence is exactly the
+        // two-valued unsoundness the third value closes.
+        let status_128 = std::os::unix::process::ExitStatusExt::from_raw(128 << 8);
+        assert_eq!(
+            classify_ls_tree_output(&output(status_128, b"")),
+            Availability::Unknown,
+            "exit 128 (unreadable tree) is unknown, not absent"
+        );
+    }
+
+    /// The probe against a real repository: present, absent, and unknown —
+    /// the unknown branch via a physically destroyed tree object. Pins the
+    /// plan's claim that `git ls-tree` completes with an empty listing for
+    /// a genuinely absent path and fails for an unreadable tree.
+    #[test]
+    fn availability_probe_on_a_real_repo_is_three_valued() {
+        let repo = TestRepo::new();
+        repo.create_file("docs/target.md", "target content\n");
+        repo.commit("certify");
+        let sha = repo.git(&["rev-parse", "HEAD"]);
+        let target = "docs/target.md";
+
+        assert_eq!(
+            availability_probe(repo.path(), &sha, target),
+            Availability::Present,
+            "a readable tree with the entry is present"
+        );
+        assert_eq!(
+            availability_probe(repo.path(), &sha, "docs/nope.md"),
+            Availability::Absent,
+            "a completed tree read with no entry is absent"
+        );
+
+        // Destroy the tree object containing the target (loose object).
+        // `git ls-tree <sha>` then cannot read it — the unknown branch.
+        let tree_sha = repo.git(&["rev-parse", &format!("{sha}:docs")]);
+        let obj = repo
+            .path()
+            .join(".git/objects")
+            .join(&tree_sha[..2])
+            .join(&tree_sha[2..]);
+        fs::remove_file(&obj).expect("remove tree object");
+        assert_eq!(
+            availability_probe(repo.path(), &sha, target),
+            Availability::Unknown,
+            "an unreadable tree is unknown — neither a listing nor absence"
+        );
     }
 }
 

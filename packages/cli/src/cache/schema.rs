@@ -6,9 +6,12 @@
 //!
 //! Database file: `<common-dir>/wiki/anchor-cache.sqlite`; init lock:
 //! `<common-dir>/wiki/anchor-cache.init.lock` (0-byte, fs4
-//! `try_lock_exclusive` no-wait, held only during probe/quarantine/DDL,
-//! never deleted). One repository — plain checkout or any linked worktree —
-//! resolves one common dir, so worktrees share one cache.
+//! `try_lock_exclusive` no-wait, held only during probe/quarantine/DDL).
+//! The lock is never deleted by the open path, and only by `clear()`: it
+//! lives inside the deleted directory (plan decision 2), so clearing the
+//! cache inherently removes it — `clear()` unlinks it while still holding
+//! the flock (plan decision 8). One repository — plain checkout or any
+//! linked worktree — resolves one common dir, so worktrees share one cache.
 //!
 //! ## Open order (binding)
 //!
