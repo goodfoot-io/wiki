@@ -746,11 +746,18 @@ fn collect_drift_diagnostics(
                         c.target_path, c.start_line, c.end_line
                     ),
                 ),
+                drift::DriftOutcome::RangeDiffered => (
+                    "link_drift",
+                    "the link's range no longer points at the certified block — bump \
+                     `links-reviewed:` after reviewing it"
+                        .to_string(),
+                ),
                 drift::DriftOutcome::Broken => (
                     "link_broken",
                     format!(
-                        "line-range link `{}` is broken: target `{}` is missing or the \
-                         line range no longer fits its current line count",
+                        "line-range link `{}` is broken: the range is malformed, the \
+                         target `{}` is missing, or the range no longer fits the \
+                         target's current line count",
                         c.original_href, c.target_path
                     ),
                 ),
@@ -758,7 +765,7 @@ fn collect_drift_diagnostics(
                     "link_unverified",
                     format!(
                         "could not verify line-range link `{}`: the certified content \
-                         occurs at multiple locations — re-anchor the link and bump \
+                         occurs at multiple locations — re-point the link and bump \
                          `links-reviewed:`",
                         c.original_href
                     ),
@@ -983,14 +990,20 @@ fn collect_for_files(
                 && !anchor.is_empty()
                 && let Some(ref cached) = cached
             {
-                // Non-line-range anchor: validate as heading slug.
+                // Non-line-range anchor: validate as heading slug. A same-page
+                // link has an empty path — name the page itself rather than
+                // printing a bare empty backtick span.
                 let decoded_anchor = percent_decode(anchor);
                 if !resolve_heading(&decoded_anchor, &cached.headings) {
                     diagnostics.push(CheckDiagnostic {
                         kind: "broken_anchor".into(),
                         file: path.display().to_string(),
                         line: link.source_line,
-                        message: format!("Heading `#{anchor}` not found in `{}`.", link.path),
+                        message: if link.path.is_empty() {
+                            format!("Heading `#{anchor}` not found on this page.")
+                        } else {
+                            format!("Heading `#{anchor}` not found in `{}`.", link.path)
+                        },
                     });
                 }
             }

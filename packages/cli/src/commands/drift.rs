@@ -48,6 +48,12 @@ pub enum DriftOutcome {
     /// The target exists but its content changed since the anchor commit.
     /// Remedy: bump `links-reviewed:`.
     Drift,
+    /// The target exists and the link's range fits it, but the range differs
+    /// from the certified range and the move scan found no match — either the
+    /// reviewer hand-edited the href (its range, or its path) or the certified
+    /// block moved without a unique match. Fail-closed; never auto-fixed — the
+    /// remedy is reviewing the link and bumping `links-reviewed:`.
+    RangeDiffered,
     /// The certified content was found at exactly one new location —
     /// `--fix` rewrites the href (path and range) to follow it.
     /// `content_identical` is true for an exact-tier match (the destination
@@ -964,13 +970,14 @@ fn classify_link(
         {
             return Ok((DriftOutcome::Healthy, target_path));
         }
-        // Move scan for the certified content. No match → Drift/Broken per
-        // the existing rules: a missing or overhanging target is Broken, a
-        // present-but-different one is Drift.
+        // Move scan for the certified content. No match → Broken or
+        // RangeDiffered per the rules below: a missing or overhanging target
+        // is Broken; a present target whose locator was not at the epoch
+        // (hand-edited href) is RangeDiffered.
         let zero = match &target_bytes {
             None => DriftOutcome::Broken,
             Some(b) if !extent_fits(b, link.start, link.end) => DriftOutcome::Broken,
-            Some(_) => DriftOutcome::Drift,
+            Some(_) => DriftOutcome::RangeDiffered,
         };
         let outcome = move_scan_outcome(
             repo_root,
@@ -1046,9 +1053,9 @@ fn classify_link(
     // Step 5: the href's range differs from every certified range (the href
     // was edited). Content equal to the certified content → Healthy (already
     // relocated); otherwise the move scan decides — a genuine relocation
-    // wins, and everything else is Drift (bump), never Uncertified: the link
-    // WAS reviewed at the epoch, and the as-written locator is an edit the
-    // reviewer must ratify.
+    // wins, and everything else is RangeDiffered (bump), never Uncertified:
+    // the link WAS reviewed at the epoch, and the as-written locator is an
+    // edit the reviewer must ratify.
     let cur_fp = cheap_fingerprint_with_extent(
         bytes,
         &Extent::LineRange {
@@ -1070,7 +1077,7 @@ fn classify_link(
         cert,
         anchor_sha,
         &mut memo,
-        DriftOutcome::Drift,
+        DriftOutcome::RangeDiffered,
         ctx,
     )?;
     Ok((outcome, target_path))
@@ -2463,7 +2470,8 @@ pub fn collect_with_source(
         // `wiki/dir/target.md` EXISTS with different content, so the direct
         // resolution wins and salvage never runs: the link points at real
         // content that is not the certified block, and the certified block
-        // never moved → Drift (review required).
+        // never moved → RangeDiffered (the hand-edited href no longer points
+        // at the certified block; review required).
         repo.create_file("wiki/dir/target.md", "X0\nX1\nX2\nX3\nX4\n");
         repo.create_file(
             "wiki/page.md",
@@ -2476,7 +2484,7 @@ pub fn collect_with_source(
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes.len(), 1);
-        assert_eq!(classes[0].outcome, DriftOutcome::Drift);
+        assert_eq!(classes[0].outcome, DriftOutcome::RangeDiffered);
         assert_eq!(classes[0].target_path, "wiki/dir/target.md");
     }
 
@@ -3027,12 +3035,13 @@ pub fn collect_with_source(
     }
 
     #[test]
-    fn href_edited_to_different_content_is_drift() {
+    fn href_edited_to_different_content_is_range_differed() {
         // The link's epoch record still matches (same label), and the edited
-        // locator resolves to a range that fits — but the content there is
-        // not the certified block, the certified block never moved, and the
-        // page at the epoch DID review this link → Drift (review required),
-        // never Uncertified for a reviewed link.
+        // locator resolves to a range that fits — but the range differs from
+        // every certified range, the content there is not the certified
+        // block, the certified block never moved, and the page at the epoch
+        // DID review this link → RangeDiffered (review required), never
+        // Uncertified for a reviewed link.
         let (repo, c1) = repo_with_certified_link();
         repo.create_file(
             "wiki/page.md",
@@ -3045,7 +3054,7 @@ pub fn collect_with_source(
             value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
-        assert_eq!(classes[0].outcome, DriftOutcome::Drift);
+        assert_eq!(classes[0].outcome, DriftOutcome::RangeDiffered);
     }
 
     #[test]

@@ -886,11 +886,17 @@ pub fn run_fix_pass(
                     });
                 }
                 SuccessorResult::None => {
+                    // Git documented no rename row at all — either the target
+                    // was deleted outright or the rename fell below git's
+                    // similarity threshold (heavy edits make it look like a
+                    // delete-plus-add).
                     skipped.push(SkippedFix {
                         file: file_rel.clone(),
                         line: link.source_line,
                         kind: FixKind::BrokenLinkRename,
-                        reason: "target deleted; no successor".to_string(),
+                        reason: "no successor in git history — the target was deleted or \
+                                 the rename fell below git's similarity threshold"
+                            .to_string(),
                     });
                 }
             }
@@ -1549,11 +1555,18 @@ fn run_drift_fix_phase(
                             });
                         }
                         SuccessorResult::None => {
+                            // Git documented no rename row at all — either
+                            // the target was deleted outright or the rename
+                            // fell below git's similarity threshold (heavy
+                            // edits make it look like a delete-plus-add).
                             skipped.push(SkippedFix {
                                 file: file_rel.clone(),
                                 line: c.source_line,
                                 kind: FixKind::BrokenLinkRename,
-                                reason: "target deleted; no successor".to_string(),
+                                reason: "no successor in git history — the target was \
+                                         deleted or the rename fell below git's \
+                                         similarity threshold"
+                                    .to_string(),
                             });
                         }
                     }
@@ -1571,6 +1584,21 @@ fn run_drift_fix_phase(
                              `links-reviewed:` after reviewing it",
                             c.target_path, c.start_line, c.end_line
                         ),
+                    });
+                }
+                drift::DriftOutcome::RangeDiffered => {
+                    // A hand-edited href that the move scan cannot settle is
+                    // a reviewer decision, never an auto-fix — same skip
+                    // semantics as Drift: bump `links-reviewed:` after
+                    // reviewing the link.
+                    certification_skips += 1;
+                    skipped.push(SkippedFix {
+                        file: file_rel.clone(),
+                        line: c.source_line,
+                        kind: FixKind::LinkRelocate,
+                        reason: "the link's range no longer points at the certified block — \
+                                 bump `links-reviewed:` after reviewing it"
+                            .to_string(),
                     });
                 }
                 drift::DriftOutcome::Uncertified => {
@@ -1595,7 +1623,7 @@ fn run_drift_fix_phase(
                         kind: FixKind::LinkRelocate,
                         reason: format!(
                             "could not verify line-range link `{}`: the certified content \
-                             occurs at multiple locations — re-anchor the link and bump \
+                             occurs at multiple locations — re-point the link and bump \
                              `links-reviewed:`",
                             c.original_href
                         ),

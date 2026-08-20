@@ -115,6 +115,69 @@ fn drift_committed_content_change_exits_nonzero() {
     );
 }
 
+// ── RangeDiffered: a hand-edited href, the certified block untouched ─────────
+
+/// A deliberate re-point of the href with the certified block untouched is
+/// RangeDiffered, not Drift: the range no longer points at the certified
+/// block, so "content changed since the anchor epoch" would misdescribe it.
+/// The check reports it (kind `link_drift`, exit 1) and `--fix` skips it —
+/// the href stays byte-untouched; only a `links-reviewed` bump settles it.
+#[test]
+fn drift_repointed_href_prints_range_message_and_skips_fix() {
+    let tmp = init_repo();
+    let root = tmp.path();
+    seed_certified(root);
+
+    // Re-point the href to a different range; the certified block at L1-L3
+    // never moves.
+    std::fs::write(
+        root.join("wiki/page.md"),
+        "---\ntitle: page\nsummary: A page about page.\nlinks-reviewed: 1\n---\n\n\
+         See [code](/src/lib.rs#L1-L1).\n",
+    )
+    .unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "re-point href"]);
+
+    let out = wiki_check(root, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "range-differed href must exit 1; stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = combined(&out);
+    assert!(
+        text.contains("the link's range no longer points at the certified block"),
+        "RangeDiffered diagnostic must name the range remedy; got:\n{text}"
+    );
+    assert!(
+        !text.contains("changed since the anchor epoch"),
+        "RangeDiffered must not reuse the in-place Drift message; got:\n{text}"
+    );
+
+    // `--fix` skips the link: the href must stay byte-untouched.
+    let page = std::fs::read_to_string(root.join("wiki/page.md")).unwrap();
+    let fix_out = wiki_check(root, &["--fix"]);
+    assert_eq!(
+        fix_out.status.code(),
+        Some(1),
+        "unreviewed range edit must keep exiting 1; got:\n{}",
+        combined(&fix_out)
+    );
+    assert!(
+        combined(&fix_out).contains("the link's range no longer points at the certified block"),
+        "--fix skip must name the range remedy; got:\n{}",
+        combined(&fix_out)
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("wiki/page.md")).unwrap(),
+        page,
+        "--fix must leave the re-pointed href byte-untouched"
+    );
+}
+
 // ── Pending-bump override (Decision 2) ───────────────────────────────────────
 
 #[test]
