@@ -55,6 +55,42 @@ pub fn fingerprint_key(
     sha256_hex(&out)
 }
 
+/// The canonical length-tagged byte encoding of a tuple — the same field
+/// framing the key digests hash (u64 LE length + bytes, in field order).
+/// [`row_digest`] reuses it so the row digest covers the exact bytes the key
+/// names.
+pub(crate) fn canonical_fields(fields: &[&str]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for field in fields {
+        push_field(&mut out, field);
+    }
+    out
+}
+
+/// The row integrity digest: raw 32 sha256 bytes over the canonical
+/// (tuple + value) encoding, so every stored row carries a self-check and a
+/// served row is re-derived and re-verified, never trusted blind (plan
+/// decision 5).
+///
+/// Exact byte layout (length-tagged like every key field, with a tag byte so
+/// `None` is distinct from an empty `Some("")`):
+///
+/// * tuple — each field as its u64 LE byte length + bytes, in key field
+///   order: tier F is (page, anchor_sha, target, start, end), tier A is
+///   (page, log_output_sha, anchor_sha, path_at_commit);
+/// * value — `0x00` for `None`, or `0x01` + u64 LE byte length + bytes.
+pub(crate) fn row_digest(tuple: &[&str], value: Option<&str>) -> Vec<u8> {
+    let mut out = canonical_fields(tuple);
+    match value {
+        None => out.push(0x00),
+        Some(v) => {
+            out.push(0x01);
+            push_field(&mut out, v);
+        }
+    }
+    Sha256::digest(&out).to_vec()
+}
+
 /// Derive the anchor-walk-tier key digest from its canonical tuple (field
 /// order: page, log_output).
 ///

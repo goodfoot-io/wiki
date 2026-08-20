@@ -22,7 +22,12 @@
 pub mod key;
 pub mod schema;
 
+use std::fs::{self, OpenOptions};
+use std::io;
 use std::path::{Path, PathBuf};
+
+use fs4::fs_std::FileExt;
+use rusqlite::params;
 
 /// One cached tier-A row: the anchor epoch (`LinkEpoch::Commit` in the drift
 /// engine) of a page's `git log --follow --name-status` walk.
@@ -132,12 +137,8 @@ pub trait AnchorCache {
 /// git directory, shared by every linked worktree of one repo (plan
 /// decision 2). See [`schema`] for the storage layout and the
 /// probe/quarantine/open ordering.
-//
-// P1 stub: the fields are first read by Phase 1's open/probe/quarantine
-// path; the allow is removed there.
-#[allow(dead_code)]
 pub struct CacheStore {
-    /// Open SQLite connection; `None` while the P1 stub is in effect.
+    /// Open SQLite connection (always `Some` after [`CacheStore::open`]).
     conn: Option<rusqlite::Connection>,
     /// Common git dir — derives the db and init-lock paths via [`schema`].
     common_dir: PathBuf,
@@ -153,72 +154,323 @@ impl CacheStore {
     /// * `Err` — the cache is unavailable for the run (one diagnostic, then
     ///   uncached computation).
     ///
-    /// P1 stub: returns an unopened store. Phase 1 implements the
-    /// probe → quarantine → open ordering of plan decision 4.
+    /// The whole sequence runs under the bounded `SQLITE_BUSY` retry wrapper
+    /// (plan decision 6). The no-wait init lock is held only across
+    /// probe/quarantine/DDL (git-span's shape), then released before the
+    /// working connection opens; a held lock means another process is mid-
+    /// init, so this run serves uncached rather than waiting.
     pub fn open(common_dir: &Path) -> Result<Option<Self>, CacheError> {
-        Ok(Some(CacheStore {
-            conn: None,
-            common_dir: common_dir.to_path_buf(),
-        }))
+        let dir = schema::cache_dir(common_dir);
+        fs::create_dir_all(&dir)?;
+        let lock_path = schema::init_lock_path(common_dir);
+        let db = schema::db_path(common_dir);
+        schema::retry_busy(|| {
+            let lock_file = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)?;
+            let held = match lock_file.try_lock_exclusive() {
+                Ok(true) => true,
+                Ok(false) => false,
+                // Some platforms surface `WouldBlock` as Err instead of
+                // Ok(false) (index/lock.rs precedent).
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => false,
+                Err(e) => return Err(e.into()),
+            };
+            if !held {
+                return Ok(None);
+            }
+            match schema::probe(&db)? {
+                schema::ProbeOutcome::Valid => {}
+                // Missing is a fresh create, never a quarantine (plan
+                // decision 4); the DDL leg runs under the lock.
+                schema::ProbeOutcome::Missing => drop(schema::open_connection(&db)?),
+                schema::ProbeOutcome::Suspect(_) => schema::quarantine(&db)?,
+            }
+            // Release the init lock before the working connection opens.
+            drop(lock_file);
+            let conn = schema::open_connection(&db)?;
+            Ok(Some(CacheStore {
+                conn: Some(conn),
+                common_dir: common_dir.to_path_buf(),
+            }))
+        })
     }
 }
 
 impl AnchorCache for CacheStore {
     fn lookup_fingerprint(
         &self,
-        _key: &str,
-        _page_path: &str,
-        _anchor_sha: &str,
-        _target_path: &str,
-        _range_start: u32,
-        _range_end: u32,
+        key: &str,
+        page_path: &str,
+        anchor_sha: &str,
+        target_path: &str,
+        range_start: u32,
+        range_end: u32,
     ) -> Result<Option<String>, CacheError> {
-        // P1 stub — Phase 2 compares the stored tuple field-by-field and
-        // verifies row_digest on serve; any mismatch is a miss.
-        Ok(None)
+        let Some(conn) = self.conn.as_ref() else {
+            return Ok(None);
+        };
+        let row = conn.query_row(
+            "SELECT page_path, anchor_sha, target_path, range_start, range_end, fp, row_digest
+               FROM fingerprint WHERE key_digest = ?1",
+            [key],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Vec<u8>>(6)?,
+                ))
+            },
+        );
+        // Any error — a missing row included — is a miss, never an error
+        // (plan decision 5).
+        let (stored_page, stored_anchor, stored_target, stored_start, stored_end, fp, row_digest) =
+            match row {
+                Ok(row) => row,
+                Err(_) => return Ok(None),
+            };
+        // The stored tuple must match the queried tuple field by field...
+        if stored_page != page_path
+            || stored_anchor != anchor_sha
+            || stored_target != target_path
+            || stored_start != range_start as i64
+            || stored_end != range_end as i64
+        {
+            return Ok(None);
+        }
+        // ... and its row_digest must re-derive over (tuple + fp).
+        let digest = key::row_digest(
+            &[
+                page_path,
+                anchor_sha,
+                target_path,
+                &range_start.to_string(),
+                &range_end.to_string(),
+            ],
+            Some(&fp),
+        );
+        if digest != row_digest {
+            return Ok(None);
+        }
+        Ok(Some(fp))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn upsert_fingerprint(
         &self,
-        _key: &str,
-        _page_path: &str,
-        _anchor_sha: &str,
-        _target_path: &str,
-        _range_start: u32,
-        _range_end: u32,
-        _fp: &str,
+        key: &str,
+        page_path: &str,
+        anchor_sha: &str,
+        target_path: &str,
+        range_start: u32,
+        range_end: u32,
+        fp: &str,
     ) -> Result<(), CacheError> {
-        // P1 stub.
-        Ok(())
+        let Some(conn) = self.conn.as_ref() else {
+            return Ok(());
+        };
+        let digest = key::row_digest(
+            &[
+                page_path,
+                anchor_sha,
+                target_path,
+                &range_start.to_string(),
+                &range_end.to_string(),
+            ],
+            Some(fp),
+        );
+        // Last-write-wins on the key; the row_digest covers the whole row so
+        // a served row always re-derives (plan decision 5).
+        schema::retry_busy(|| {
+            conn.execute(
+                "INSERT INTO fingerprint
+                     (key_digest, page_path, anchor_sha, target_path, range_start, range_end,
+                      fp, row_digest)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(key_digest) DO UPDATE SET
+                     page_path = excluded.page_path,
+                     anchor_sha = excluded.anchor_sha,
+                     target_path = excluded.target_path,
+                     range_start = excluded.range_start,
+                     range_end = excluded.range_end,
+                     fp = excluded.fp,
+                     row_digest = excluded.row_digest",
+                params![
+                    key,
+                    page_path,
+                    anchor_sha,
+                    target_path,
+                    range_start as i64,
+                    range_end as i64,
+                    fp,
+                    digest
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     fn lookup_walk(
         &self,
-        _key: &str,
-        _page_path: &str,
-        _log_output: &str,
+        key: &str,
+        page_path: &str,
+        log_output: &str,
     ) -> Result<Option<WalkRow>, CacheError> {
-        // P1 stub — Phase 3 compares the stored page_path/log_output_sha and
-        // verifies row_digest on serve; any mismatch is a miss.
-        Ok(None)
+        let Some(conn) = self.conn.as_ref() else {
+            return Ok(None);
+        };
+        let row = conn.query_row(
+            "SELECT page_path, log_output_sha, anchor_sha, path_at_commit, value, row_digest
+               FROM anchor_walk WHERE key_digest = ?1",
+            [key],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                ))
+            },
+        );
+        // Any error — a missing row included — is a miss, never an error
+        // (plan decision 5).
+        let (stored_page, log_sha, anchor, path_at_commit, value, row_digest) = match row {
+            Ok(row) => row,
+            Err(_) => return Ok(None),
+        };
+        // The stored tuple must match the queried tuple: page_path verbatim,
+        // log_output re-derived to its sha (the full log output is never
+        // stored)...
+        if stored_page != page_path || log_sha != key::sha256_hex(log_output.as_bytes()) {
+            return Ok(None);
+        }
+        // ... and the row_digest must re-derive over (tuple + value).
+        let digest = key::row_digest(
+            &[
+                page_path,
+                &log_sha,
+                &anchor,
+                &path_at_commit,
+            ],
+            value.as_deref(),
+        );
+        if digest != row_digest {
+            return Ok(None);
+        }
+        Ok(Some(WalkRow {
+            anchor_sha: anchor,
+            path_at_commit,
+            value,
+        }))
     }
 
     fn upsert_walk(
         &self,
-        _key: &str,
-        _page_path: &str,
-        _log_output_sha: &str,
-        _anchor_sha: &str,
-        _path_at_commit: &str,
-        _value: Option<&str>,
+        key: &str,
+        page_path: &str,
+        log_output_sha: &str,
+        anchor_sha: &str,
+        path_at_commit: &str,
+        value: Option<&str>,
     ) -> Result<(), CacheError> {
-        // P1 stub.
-        Ok(())
+        let Some(conn) = self.conn.as_ref() else {
+            return Ok(());
+        };
+        let digest = key::row_digest(
+            &[page_path, log_output_sha, anchor_sha, path_at_commit],
+            value,
+        );
+        // Last-write-wins on the key; the row_digest covers the whole row so
+        // a served row always re-derives (plan decision 5).
+        schema::retry_busy(|| {
+            conn.execute(
+                "INSERT INTO anchor_walk
+                     (key_digest, page_path, log_output_sha, anchor_sha, path_at_commit, value,
+                      row_digest)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(key_digest) DO UPDATE SET
+                     page_path = excluded.page_path,
+                     log_output_sha = excluded.log_output_sha,
+                     anchor_sha = excluded.anchor_sha,
+                     path_at_commit = excluded.path_at_commit,
+                     value = excluded.value,
+                     row_digest = excluded.row_digest",
+                params![
+                    key,
+                    page_path,
+                    log_output_sha,
+                    anchor_sha,
+                    path_at_commit,
+                    value,
+                    digest
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     fn clear(&self) -> Result<(), CacheError> {
-        // P1 stub.
+        // Take the same no-wait init lock first: never delete under a
+        // concurrent probe/quarantine (plan decision 8). Contention is an
+        // error — the caller reports it rather than silently skipping the
+        // clear (never a wrong-answer path).
+        let dir = schema::cache_dir(&self.common_dir);
+        fs::create_dir_all(&dir)?;
+        let lock_path = schema::init_lock_path(&self.common_dir);
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        match lock_file.try_lock_exclusive() {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "anchor cache init lock held",
+                )
+                .into());
+            }
+            // Some platforms surface `WouldBlock` as Err instead of Ok(false)
+            // (index/lock.rs precedent).
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Err(e.into()),
+            Err(e) => return Err(e.into()),
+        }
+        // Best-effort deletions: NotFound is fine (the cache may not exist);
+        // anything else surfaces as an error. The directory itself may still
+        // hold quarantine artifacts, so its removal is best-effort too.
+        for name in [
+            schema::DB_FILE_NAME,
+            &format!("{}-wal", schema::DB_FILE_NAME),
+            &format!("{}-shm", schema::DB_FILE_NAME),
+        ] {
+            match fs::remove_file(dir.join(name)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        match fs::remove_dir(&dir) {
+            Ok(()) => {}
+            Err(e)
+                if e.kind() == io::ErrorKind::NotFound
+                    || e.kind() == io::ErrorKind::DirectoryNotEmpty =>
+            {
+                // Nothing left, or a quarantine aside remains — either way
+                // the cache contents are gone.
+            }
+            Err(e) => return Err(e.into()),
+        }
         Ok(())
     }
 }

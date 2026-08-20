@@ -1,7 +1,7 @@
 ---
 title: Benchmarking Wiki CLI Performance
 summary: How to run repeatable, source-pinned latency benchmarks of the everyday wiki commands and decompose where the time goes.
-links-reviewed: 1
+links-reviewed: 2
 ---
 
 This guide describes how to measure the per-operation latency of the everyday `wiki` commands — the default search (`wiki "query"`), `list`, `summary`, and `check` — in a way whose numbers are trustworthy. The goal is a repeatable measurement, not a single eyeballed sample: build the binary from the source under test, run each command enough times to report a distribution, and attribute the cost to the right term (process startup, index preparation, or the command body).
@@ -75,9 +75,9 @@ Collect the 25 wall-clock samples per command and report `min / p10 / median / p
 
 ## Decompose the time into three terms
 
-A median is not actionable until you know *which* term it lives in. Every subcommand dispatched from [`main.rs`](/packages/cli/src/main.rs#L271-L288) shares one prefix — resolve the repo root, then [`WikiIndex::prepare`](/packages/cli/src/index/mod.rs#L245-L245), then run the command body — so a win or regression must be attributed to the right term:
+A median is not actionable until you know *which* term it lives in. Every subcommand dispatched from [`main.rs`](/packages/cli/src/main.rs#L280-L297) shares one prefix — resolve the repo root, then [`WikiIndex::prepare`](/packages/cli/src/index/mod.rs#L245-L245), then run the command body — so a win or regression must be attributed to the right term:
 
-1. **Startup.** Process spawn plus the in-process repo-root discovery at [`main.rs`](/packages/cli/src/main.rs#L373), which runs *before* the command span starts. This is captured directly by the `startup` event, emitted in [`run`](/packages/cli/src/main.rs#L281-L287) from an `Instant` taken at process entry — so it no longer has to be recovered as `wall − command-span`. A bare `wiki --version` (which skips `prepare`) gives the floor.
+1. **Startup.** Process spawn plus the in-process repo-root discovery at [`main.rs`](/packages/cli/src/main.rs#L290), which runs *before* the command span starts. This is captured directly by the `startup` event, emitted in [`run`](/packages/cli/src/main.rs#L290-L296) from an `Instant` taken at process entry — so it no longer has to be recovered as `wall − command-span`. A bare `wiki --version` (which skips `prepare`) gives the floor.
 2. **Index preparation.** [`prepare`](/packages/cli/src/index/mod.rs#L245-L245) calls the stat-only [`fast_gate`](/packages/cli/src/index/freshness.rs#L18) at [its call site](/packages/cli/src/index/mod.rs#L322-L328); on a gate miss it falls through to a full `index.refresh`. Both the gate walk and the refresh are wrapped in perf spans — `index.fast_gate` and `index.refresh` — so the gate's worktree leg ([`compute_worktree_dir_hash`](/packages/cli/src/index/freshness.rs#L152-L207)) is visible rather than hiding in an unspanned gap. That walk **must** be cheap and correct because it runs on *every* invocation: it is gitignore-aware (it skips `target/`, `node_modules/`, and the tool's own `.wiki/` store) and parallel, so it stats only content the index ingests and overlaps the per-stat round-trips that dominate a hostile filesystem. Excluding `.wiki/` is not an optimization but a correctness fix — its SQLite WAL/lock churn used to perturb the worktree hash and make the gate miss on *every* run, so the tool refreshed unconditionally.
 3. **Command body.** The work inside the command span itself (the actual search, list, summary, or check), recovered as `command_finish − (fast_gate + gix_open + refresh)`.
 

@@ -14,7 +14,7 @@ The [parser](/packages/cli/src/parser.rs#L6-L12) extracts fragment links from ma
 
 ## Validation Pipeline
 
-The [check command](/packages/cli/src/commands/check.rs#L281-L295) runs a full validation pass: [frontmatter parsing](/packages/cli/src/frontmatter.rs#L123-L135), title/alias collision detection, wikilink resolution, and fragment link verification. Line-range links are classified against the page's git-derived anchor epoch — the cited file's content at the commit where the page's `links-reviewed:` value last changed. With `--fix`, links whose certified content moved are relocated automatically and field-less pages get the field initialized; in-place drift is reported and left for review.
+The [check command](/packages/cli/src/commands/check.rs#L282-L296) runs a full validation pass: [frontmatter parsing](/packages/cli/src/frontmatter.rs#L123-L135), title/alias collision detection, wikilink resolution, and fragment link verification. Line-range links are classified against the page's git-derived anchor epoch — the cited file's content at the commit where the page's `links-reviewed:` value last changed. With `--fix`, links whose certified content moved are relocated automatically and field-less pages get the field initialized; in-place drift is reported and left for review.
 
 ## PostToolUse Hook
 

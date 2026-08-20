@@ -93,9 +93,37 @@ pub fn repo_root() -> Result<PathBuf> {
 /// `Err`; the caller disables the anchor cache for the run (uncached
 /// computation is always correct).
 pub fn common_dir() -> Result<PathBuf> {
-    // P1 stub — Phase 1 implements `gix::discover_with_environment_overrides`
-    // + `repository.common_dir()` + lexical `..`-collapse.
-    Ok(PathBuf::new())
+    let cwd = std::env::current_dir()
+        .into_diagnostic()
+        .wrap_err("failed to read current working directory")?;
+    let repo = gix::discover_with_environment_overrides(cwd)
+        .into_diagnostic()
+        .wrap_err("failed to discover git repository from the current directory")?;
+    Ok(normalize_lexically(repo.common_dir().to_path_buf()))
+}
+
+/// Collapse `.`/`..` segments lexically, preserving the leading root.
+///
+/// A linked worktree's `common_dir()` carries `..` segments — gix returns
+/// `…/.git/worktrees/N/../..` where git's `rev-parse --git-common-dir`
+/// reports `…/.git` (spike S2). The collapsed path is the same directory,
+/// and equality against `rev-parse` output and path joins under it need the
+/// normalized form.
+fn normalize_lexically(path: PathBuf) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(component);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Resolve a git ref name (branch, tag, `HEAD`, or SHA) to a full commit SHA.

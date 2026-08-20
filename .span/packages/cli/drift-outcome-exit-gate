@@ -1,7 +1,7 @@
 .github/workflows/ci.yml rk64:32f4eaddda33814b
-packages/cli/src/commands/check.rs#L464-L465 rk64:ada7a7e0c5c73264
-packages/cli/src/commands/check.rs#L544-L545 rk64:4d1d8ed49f326354
-packages/cli/src/commands/check_fix.rs#L86-L95 rk64:ea0f10ffb264c17e
+packages/cli/src/commands/check.rs#L473-L474 rk64:ada7a7e0c5c73264
+packages/cli/src/commands/check.rs#L554-L555 rk64:4d1d8ed49f326354
+packages/cli/src/commands/check_fix.rs#L87-L96 rk64:ea0f10ffb264c17e
 packages/cli/tests/drift_fix.rs rk64:d6df9c410687dcf1
 
 FixPlan.unverified and FixPlan.certification_skips hold the drift phase's fail-closed counts (Unknown outcomes and Drift/Uncertified skips). check::run must gate its non-zero exit on these counts at both the dry-run and apply sites, or an unresolved Unknown move would silently exit 0 and slip past pre-commit/CI. The usize fields can be ignored without any compiler error, so they must be wired into both exit gates by name — an unwired count field compiles silently. The CI workflow's fail-closed `wiki check` step (with `fetch-depth: 0` so the anchor-commit walk sees full history) is the external consumer of this exit-code contract: it must keep running bare `wiki check` without `--no-exit-code`, or the drift counts stop failing the build.

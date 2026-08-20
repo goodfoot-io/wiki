@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -408,6 +409,12 @@ pub fn run(
     // the post-fix re-check.
     let mut content_cache = ContentCache::new();
 
+    // Per-run anchor-cache fault guard (plan decision 7): every construction
+    // site of this run shares it, so the cache-fault warning fires at most
+    // once per run — first fault only — even though the fix phase and the
+    // post-fix re-check each construct their own cache handle.
+    let cache_fault_reported = Cell::new(false);
+
     let diagnostics = match collect_for_files(
         &files,
         &index_files,
@@ -416,6 +423,7 @@ pub fn run(
         git_reader.as_ref(),
         &mut content_cache,
         !fix,
+        &cache_fault_reported,
     ) {
         Ok(d) => d,
         Err(e) => return Ok(hard_exit(&e)),
@@ -429,6 +437,7 @@ pub fn run(
             source,
             fix_dry_run,
             &mut content_cache,
+            &cache_fault_reported,
         ) {
             Ok(p) => p,
             Err(e) => return Ok(hard_exit(&e)),
@@ -513,6 +522,7 @@ pub fn run(
             // value differs from the newest committed value) keeps the
             // just-applied relocations and field initializations green.
             true,
+            &cache_fault_reported,
         ) {
             Ok(d) => d,
             Err(e) => return Ok(hard_exit(&e)),
@@ -603,6 +613,7 @@ pub fn collect_with_source(
         filter_files_for_source(raw, repo_root, source, git_reader.as_ref())?
     };
     let mut content_cache = ContentCache::new();
+    let cache_fault_reported = Cell::new(false);
     collect_for_files(
         &files,
         &index_files,
@@ -611,6 +622,7 @@ pub fn collect_with_source(
         git_reader.as_ref(),
         &mut content_cache,
         true,
+        &cache_fault_reported,
     )
 }
 
@@ -663,6 +675,117 @@ struct CachedTarget {
     headings: Vec<Heading>,
 }
 
+// ── Anchor cache construction (plan decisions 2, 7, 8) ───────────────────────
+
+/// The per-run anchor cache handle: either the real
+/// [`crate::cache::CacheStore`] or the compile-time
+/// [`crate::cache::NoopCache`] kill switch (`WIKI_ANCHOR_CACHE=0`), plus the
+/// resolved common git directory (when resolution succeeded) so
+/// `--clear-cache` can print `<common-dir>/wiki`.
+pub(crate) struct AnchorCacheHandle {
+    cache: AnchorCacheKind,
+    common_dir: Option<PathBuf>,
+}
+
+enum AnchorCacheKind {
+    Store(crate::cache::CacheStore),
+    Noop(crate::cache::NoopCache),
+}
+
+impl AnchorCacheHandle {
+    /// The cache surface for this run's drift seams.
+    pub(crate) fn cache(&self) -> &dyn crate::cache::AnchorCache {
+        match &self.cache {
+            AnchorCacheKind::Store(store) => store,
+            AnchorCacheKind::Noop(noop) => noop,
+        }
+    }
+
+    /// The resolved common git dir, or `None` when resolution failed (the
+    /// cache is disabled for the run).
+    pub(crate) fn common_dir(&self) -> Option<&Path> {
+        self.common_dir.as_deref()
+    }
+}
+
+/// Construct the per-run anchor cache (plan decisions 2 and 8).
+///
+/// Resolution order: [`crate::git::common_dir`] failure ⇒ cache disabled for
+/// the run (one fault line); `WIKI_ANCHOR_CACHE=0` ⇒
+/// [`crate::cache::NoopCache`] (git-span's `GIT_SPAN_CACHE=0` parity — unset
+/// or any other value means enabled); [`crate::cache::CacheStore::open`] ⇒
+/// `Ok(None)` (the init lock is held by another process, plan decision 4) or
+/// `Err` (one fault line) ⇒ disabled; `Ok(Some(store))` ⇒ the real store.
+/// The Phase-1 store is a no-op stub today, so this plumbing compiles
+/// against stub behavior and switches to the real store automatically when
+/// Phases 1–2 land.
+///
+/// Every disabled path falls back to uncached computation (always correct).
+/// The fault line fires at most once per run: `fault_reported` is shared by
+/// every construction site of one run (the fix phase and the post-fix
+/// re-check each construct), so the "first fault only" rule of plan decision
+/// 7 holds across them.
+pub(crate) fn anchor_cache_for_run(fault_reported: &Cell<bool>) -> AnchorCacheHandle {
+    let noop = |common_dir: Option<PathBuf>| AnchorCacheHandle {
+        cache: AnchorCacheKind::Noop(crate::cache::NoopCache),
+        common_dir,
+    };
+    let common_dir = match crate::git::common_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            report_cache_fault(fault_reported, &e.to_string());
+            return noop(None);
+        }
+    };
+    if std::env::var("WIKI_ANCHOR_CACHE").as_deref() == Ok("0") {
+        return noop(Some(common_dir));
+    }
+    match crate::cache::CacheStore::open(&common_dir) {
+        Ok(Some(store)) => AnchorCacheHandle {
+            cache: AnchorCacheKind::Store(store),
+            common_dir: Some(common_dir),
+        },
+        // The init lock is held by another process — the designed
+        // concurrency path: uncached this run, not a fault (plan decision 4).
+        Ok(None) => noop(Some(common_dir)),
+        Err(e) => {
+            report_cache_fault(fault_reported, &e.to_string());
+            noop(Some(common_dir))
+        }
+    }
+}
+
+/// Emit the single per-run cache-fault warning (plan decision 7): one line
+/// to stderr — first fault of the run only, never a counted diagnostic,
+/// never an exit-code change. Stderr in both output modes keeps the
+/// `--format json` envelope on stdout intact.
+fn report_cache_fault(fault_reported: &Cell<bool>, reason: &str) {
+    if fault_reported.replace(true) {
+        return;
+    }
+    eprintln!("warning: anchor cache unavailable ({reason}); continuing uncached");
+}
+
+/// `wiki check --clear-cache` (plan decision 8): best-effort delete of the
+/// anchor-cache directory (`<common-dir>/wiki` and its WAL sidecars) via
+/// [`crate::cache::AnchorCache::clear`]. The cache is constructed exactly as
+/// a check run constructs it — kill switch, common-dir resolution failure,
+/// held init lock, and open error all apply — so a disabled cache simply
+/// means nothing is deleted. Prints the cache path to stdout (when the
+/// common dir resolved) and always exits 0; a clear failure is one fault
+/// line on stderr, never an exit-code change.
+pub fn clear_cache() -> Result<i32> {
+    let fault_reported = Cell::new(false);
+    let anchor_cache = anchor_cache_for_run(&fault_reported);
+    if let Err(e) = anchor_cache.cache().clear() {
+        report_cache_fault(&fault_reported, &e.to_string());
+    }
+    if let Some(common_dir) = anchor_cache.common_dir() {
+        println!("{}", crate::cache::schema::cache_dir(common_dir).display());
+    }
+    Ok(0)
+}
+
 /// The drift pass (plan Decision 7): classify every line-range link on each
 /// in-scope page against the page's anchor epoch and emit one diagnostic per
 /// non-`Healthy`, non-`Moved` outcome. `Moved` is silent in read-only mode —
@@ -676,8 +799,15 @@ fn collect_drift_diagnostics(
     source: DocSource,
     git_reader: Option<&GitReader>,
     content_cache: &mut ContentCache,
+    fault_reported: &Cell<bool>,
 ) -> Result<Vec<CheckDiagnostic>> {
     let mut out = Vec::new();
+    // Per-run anchor cache (plan decisions 2, 7, 8): constructed once per
+    // run and threaded through the drift seams; any disabled path
+    // (common-dir resolution failure, `WIKI_ANCHOR_CACHE=0`, held init
+    // lock, open error) falls back to uncached computation with at most one
+    // fault line, shared across the run's construction sites.
+    let anchor_cache = anchor_cache_for_run(fault_reported);
     // Shared across pages: the move scan's candidate inventory is loaded once
     // per run, on the first link that needs it.
     let mut ctx = drift::MoveScanCtx::new();
@@ -708,7 +838,7 @@ fn collect_drift_diagnostics(
         };
         let epoch = drift::find_anchor_commit(
             repo_root,
-            &crate::cache::NoopCache,
+            anchor_cache.cache(),
             &page_path,
             &current_value,
             &committed_value,
@@ -728,7 +858,7 @@ fn collect_drift_diagnostics(
         }
         let classes = drift::classify_page(
             repo_root,
-            &crate::cache::NoopCache,
+            anchor_cache.cache(),
             source,
             &page_path,
             content,
@@ -801,6 +931,7 @@ fn collect_drift_diagnostics(
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_for_files(
     files: &[PathBuf],
     index_files: &[PathBuf],
@@ -809,6 +940,7 @@ fn collect_for_files(
     git_reader: Option<&GitReader>,
     content_cache: &mut ContentCache,
     drift_pass: bool,
+    fault_reported: &Cell<bool>,
 ) -> Result<Vec<CheckDiagnostic>> {
     let wiki_ignore =
         crate::wikiignore::WikiIgnore::load(repo_root).map_err(|e| miette::miette!("{e}"))?;
@@ -1035,6 +1167,7 @@ fn collect_for_files(
             source,
             git_reader,
             content_cache,
+            fault_reported,
         )?;
         diagnostics.extend(drift_diags);
     }

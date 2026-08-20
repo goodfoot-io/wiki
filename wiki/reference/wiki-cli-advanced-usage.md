@@ -3,7 +3,7 @@ title: Wiki CLI Advanced Usage
 summary: Advanced wiki CLI usage including glob targeting, JSON output, and stdin/path input.
 tags:
   - reference
-links-reviewed: 1
+links-reviewed: 2
 ---
 
 # Wiki CLI Advanced Usage
@@ -32,6 +32,15 @@ wiki check --fix
 
 `--fix` only rewrites what it can resolve unambiguously: links whose certified content moved are re-pointed, and pages with line-range links but no `links-reviewed:` field get the field initialized. In-place drift, ambiguous moves, and unverifiable links are skipped with a named reason — see the `resolving-skipped-fixes` skill section.
 
+`wiki check` memoizes its history walks in a disposable cache under the repository's git common directory; [the `--clear-cache` flag](/packages/cli/src/main.rs#L326-L327) deletes it and exits 0:
+
+```bash
+# Best-effort delete of the anchor cache directory; prints the path
+wiki check --clear-cache
+```
+
+The cache is safe to delete at any time — it holds nothing that cannot be recomputed, and `WIKI_ANCHOR_CACHE=0` disables it for a single run.
+
 ## Stdin and Path Input
 
 [`wiki`](/packages/cli/src/commands/search.rs#L9-L43) and [`wiki summary`](/packages/cli/src/commands/summary.rs#L72-L100) each accept a file path in addition to a page title or alias:
@@ -58,7 +67,7 @@ When multiple inputs are provided via stdin, the exit code reflects the worst re
 
 ## Targeting Specific Files
 
-All commands accept explicit glob patterns instead of scanning [the current working directory](/packages/cli/src/main.rs#L281-L284):
+All commands accept explicit glob patterns instead of scanning [the current working directory](/packages/cli/src/main.rs#L290-L293):
 
 ```bash
 wiki check wiki/some-section/**/*.md
@@ -79,7 +88,7 @@ With that entry in place, `wiki check CLAUDE.md` (or a glob that happens to matc
 
 ## JSON Output
 
-Every command accepts [`--format json`](/packages/cli/src/main.rs#L46-L48) for scripting:
+Every command accepts [`--format json`](/packages/cli/src/main.rs#L50-L52) for scripting:
 
 ```bash
 wiki check --format json

@@ -35,9 +35,11 @@
 //! rename target, and at most one recreate happens before the run gives up:
 //! any error at any point disables the cache for the run.
 
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::Connection;
+use rusqlite::{params, Connection, ErrorCode, OpenFlags};
 
 use crate::cache::CacheError;
 
@@ -113,9 +115,11 @@ pub const ANCHOR_WALK_DDL: &str = "CREATE TABLE IF NOT EXISTS anchor_walk (
     row_digest     BLOB    NOT NULL
 ) STRICT;";
 
-/// Seed the meta singleton on fresh create. `created_at` is a unix timestamp
-/// (INTEGER, matching the git-span reference shape).
-pub const META_INSERT_SQL: &str = "INSERT INTO meta (id, application_id, schema_version, semantic_epoch, created_at)
+/// Seed the meta singleton on fresh create — idempotent (`OR IGNORE`), so
+/// re-running the seed over an already-seeded database is a no-op.
+/// `created_at` is a unix timestamp (INTEGER, matching the git-span reference
+/// shape).
+pub const META_INSERT_SQL: &str = "INSERT OR IGNORE INTO meta (id, application_id, schema_version, semantic_epoch, created_at)
 VALUES (1, ?, ?, ?, strftime('%s', 'now'));";
 
 /// Read-only liveness probe, run before any write pragma.
@@ -150,29 +154,140 @@ pub enum SuspectKind {
     MetaMismatch,
 }
 
-/// Probe `db_path` read-only and classify it (plan decision 4). `SQLITE_BUSY`
-/// is retried by the caller's wrapper, never reported as a suspect kind.
-///
-/// P1 stub — Phase 1 opens read-only, runs [`PROBE_SQL`] then
-/// [`META_VERIFY_SQL`] (missing file → [`ProbeOutcome::Missing`]).
-pub fn probe(_db_path: &Path) -> Result<ProbeOutcome, CacheError> {
-    Ok(ProbeOutcome::Missing)
+/// Probe `db_path` read-only and classify it (plan decision 4): a missing
+/// file is [`ProbeOutcome::Missing`] — checked before any open, so a probe
+/// never creates the file — then [`PROBE_SQL`] (the liveness leg) and
+/// [`META_VERIFY_SQL`] (the identity leg). `SQLITE_BUSY` on either leg
+/// surfaces as `Err` for the caller's bounded wrapper to retry — a busy
+/// database is healthy, never suspect. A readable database that is not our
+/// shape (meta row absent or differing, or no meta table at all) is
+/// [`SuspectKind::MetaMismatch`]: foreign files are never adopted.
+pub fn probe(db_path: &Path) -> Result<ProbeOutcome, CacheError> {
+    if !db_path.exists() {
+        return Ok(ProbeOutcome::Missing);
+    }
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // Liveness leg: forces SQLite to read the header and page 1, which is
+    // where a non-database or truncated file announces itself.
+    match conn.query_row(PROBE_SQL, [], |_| Ok(())) {
+        Ok(()) => {}
+        Err(rusqlite::Error::SqliteFailure(f, msg)) => match f.code {
+            ErrorCode::NotADatabase => {
+                return Ok(ProbeOutcome::Suspect(SuspectKind::NotADatabase));
+            }
+            ErrorCode::DatabaseCorrupt => {
+                return Ok(ProbeOutcome::Suspect(SuspectKind::Corrupt));
+            }
+            _ => return Err(CacheError::Sqlite(rusqlite::Error::SqliteFailure(f, msg))),
+        },
+        Err(e) => return Err(e.into()),
+    }
+    // Identity leg: the file is a readable database — is it ours?
+    let meta = conn.query_row(META_VERIFY_SQL, [], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    });
+    match meta {
+        Ok((application_id, schema_version, semantic_epoch))
+            if application_id == APPLICATION_ID
+                && schema_version == SCHEMA_VERSION
+                && semantic_epoch == SEMANTIC_EPOCH =>
+        {
+            Ok(ProbeOutcome::Valid)
+        }
+        Ok(_) => Ok(ProbeOutcome::Suspect(SuspectKind::MetaMismatch)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            Ok(ProbeOutcome::Suspect(SuspectKind::MetaMismatch))
+        }
+        Err(rusqlite::Error::SqliteFailure(f, msg)) => match f.code {
+            ErrorCode::NotADatabase => Ok(ProbeOutcome::Suspect(SuspectKind::NotADatabase)),
+            ErrorCode::DatabaseCorrupt => Ok(ProbeOutcome::Suspect(SuspectKind::Corrupt)),
+            ErrorCode::DatabaseBusy => Err(CacheError::Sqlite(rusqlite::Error::SqliteFailure(
+                f, msg,
+            ))),
+            _ => Ok(ProbeOutcome::Suspect(SuspectKind::MetaMismatch)),
+        },
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Quarantine a suspect database: rename it aside with a timestamp, delete
-/// the `-wal`/`-shm` companions, and create a fresh file in its place
-/// (plan decision 4). Runs under the init lock, at most once per run.
+/// the `-wal`/`-shm` companions, and create a fresh, fully seeded file in
+/// its place (plan decision 4). Runs under the init lock, at most once per
+/// run — the caller does not loop.
 ///
-/// P1 stub — Phase 1 implements the rename-aside + sidecar delete + recreate.
-pub fn quarantine(_db_path: &Path) -> Result<(), CacheError> {
+/// The first step is a TOCTOU re-probe: between the open path's probe and
+/// this quarantine's turn under the lock, another process may have recreated
+/// the file — a file that is now valid must never be renamed aside.
+pub fn quarantine(db_path: &Path) -> Result<(), CacheError> {
+    // TOCTOU re-probe of the rename target (plan decision 4).
+    if probe(db_path)? == ProbeOutcome::Valid {
+        return Ok(());
+    }
+
+    // Rename aside with a timestamp, preserving the suspect content.
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before unix epoch")
+        .as_nanos();
+    let aside = db_path.with_file_name(format!("{DB_FILE_NAME}.{stamp}.quarantine"));
+    fs::rename(db_path, &aside)?;
+
+    // Delete the -wal/-shm companions (NotFound is fine — they may never
+    // have existed); a fresh file must start with no stale sidecars.
+    for sidecar in [format!("{DB_FILE_NAME}-wal"), format!("{DB_FILE_NAME}-shm")] {
+        let path = db_path.with_file_name(sidecar);
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    // Fresh create: the binding open order seeds the full schema and the
+    // meta singleton. The connection is dropped — the caller opens its own.
+    drop(open_connection(db_path)?);
     Ok(())
 }
 
-/// Open the database at `db_path` applying the binding open order:
-/// `busy_timeout(1000)` → `PRAGMA journal_mode = WAL` → schema + meta seed.
-///
-/// P1 stub — Phase 1 applies the ordering; the stub returns an in-memory
-/// connection as the fresh-empty sentinel.
-pub fn open_connection(_db_path: &Path) -> Result<Connection, CacheError> {
-    Ok(Connection::open_in_memory()?)
+/// The bounded `SQLITE_BUSY` retry wrapper (plan decision 6): at most five
+/// attempts with a short linear backoff (10 ms × attempt), retrying only
+/// `SQLITE_BUSY` — which includes the WAL-switch pragma's BUSY that bypasses
+/// the busy handler (spike S1). Anything else, or five consecutive BUSY
+/// results, falls through as `Err`: the cache is unavailable for the run.
+/// BUSY is never a quarantine trigger and never treated as corruption.
+pub(crate) fn retry_busy<T>(
+    mut run: impl FnMut() -> Result<T, CacheError>,
+) -> Result<T, CacheError> {
+    for attempt in 0..5 {
+        match run() {
+            Err(CacheError::Sqlite(rusqlite::Error::SqliteFailure(f, _)))
+                if f.code == ErrorCode::DatabaseBusy =>
+            {
+                std::thread::sleep(Duration::from_millis(10 * attempt as u64));
+            }
+            other => return other,
+        }
+    }
+    unreachable!("the loop returns on the fifth attempt")
+}
+
+/// Open the database at `db_path` applying the binding open order (plan
+/// decision 4): `busy_timeout(1000)` → `PRAGMA journal_mode = WAL` → the
+/// three DDL statements → the meta singleton seed. The timeout is set before
+/// the WAL switch (git-span's ordering invariant); the switch itself can
+/// surface `SQLITE_BUSY` without consulting the busy handler (spike S1),
+/// which is why the open path runs under the bounded retry wrapper.
+pub fn open_connection(db_path: &Path) -> Result<Connection, CacheError> {
+    let conn = Connection::open(db_path)?;
+    conn.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS as u64))?;
+    conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+    for ddl in [META_DDL, FINGERPRINT_DDL, ANCHOR_WALK_DDL] {
+        conn.execute_batch(ddl)?;
+    }
+    conn.execute(META_INSERT_SQL, params![APPLICATION_ID, SCHEMA_VERSION, SEMANTIC_EPOCH])?;
+    Ok(conn)
 }

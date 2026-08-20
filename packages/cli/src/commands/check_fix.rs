@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -7,7 +8,7 @@ use std::process::Command;
 use miette::Result;
 use serde::Serialize;
 
-use super::check::ContentCache;
+use super::check::{ContentCache, anchor_cache_for_run};
 use super::drift;
 use crate::frontmatter::parse_frontmatter;
 use crate::headings::{extract_headings, github_slug, resolve_heading, Heading};
@@ -777,6 +778,7 @@ pub fn run_fix_pass(
     source: DocSource,
     dry_run: bool,
     content_cache: &mut ContentCache,
+    fault_reported: &Cell<bool>,
 ) -> Result<FixPlan> {
     let mut rename_map = RenameMap::build(repo_root)?;
 
@@ -1291,6 +1293,7 @@ pub fn run_fix_pass(
         repo_root,
         source,
         content_cache,
+        fault_reported,
         &mut rename_map,
         &mut patches,
         &mut fixes,
@@ -1353,6 +1356,7 @@ fn run_drift_fix_phase(
     repo_root: &Path,
     source: DocSource,
     content_cache: &mut ContentCache,
+    fault_reported: &Cell<bool>,
     rename_map: &mut RenameMap,
     patches: &mut HashMap<PathBuf, String>,
     fixes: &mut Vec<Fix>,
@@ -1367,6 +1371,14 @@ fn run_drift_fix_phase(
             certification_skips: 0,
         });
     }
+
+    // Per-run anchor cache (plan decisions 2, 7, 8): constructed once per
+    // phase and threaded through the drift seams; any disabled path
+    // (common-dir resolution failure, `WIKI_ANCHOR_CACHE=0`, held init
+    // lock, open error) falls back to uncached computation. `fault_reported`
+    // is shared with the post-fix re-check's construction site, so the
+    // cache-fault warning fires at most once per run (plan decision 7).
+    let anchor_cache = anchor_cache_for_run(fault_reported);
 
     let mut unverified = 0;
     let mut certification_skips = 0;
@@ -1407,7 +1419,7 @@ fn run_drift_fix_phase(
         };
         let epoch = drift::find_anchor_commit(
             repo_root,
-            &crate::cache::NoopCache,
+            anchor_cache.cache(),
             &page_path,
             &current_value,
             &committed_value,
@@ -1431,7 +1443,7 @@ fn run_drift_fix_phase(
         };
         let classes = drift::classify_page(
             repo_root,
-            &crate::cache::NoopCache,
+            anchor_cache.cache(),
             source,
             &page_path,
             &content,
@@ -1778,12 +1790,14 @@ mod tests {
 
         let source = repo.path().join("wiki/source.md");
         let target = repo.path().join("wiki/target.md");
+        let fault_reported = Cell::new(false);
         let plan = run_fix_pass(
             &[source.clone(), target.clone()],
             repo.path(),
             crate::index::DocSource::WorkingTree,
             /* dry_run */ true,
             &mut ContentCache::new(),
+            &fault_reported,
         )
         .expect("fix pass");
 
@@ -1843,12 +1857,14 @@ mod tests {
 
         let source = repo.path().join("wiki/source.md");
         let target = repo.path().join("wiki/target.md");
+        let fault_reported = Cell::new(false);
         let plan = run_fix_pass(
             &[source.clone(), target.clone()],
             repo.path(),
             crate::index::DocSource::WorkingTree,
             /* dry_run */ true,
             &mut ContentCache::new(),
+            &fault_reported,
         )
         .expect("fix pass");
 
@@ -1956,11 +1972,13 @@ mod tests {
         let mut patches: HashMap<PathBuf, String> = HashMap::new();
         let mut fixes: Vec<Fix> = Vec::new();
         let mut skipped: Vec<SkippedFix> = Vec::new();
+        let fault_reported = Cell::new(false);
         let outcome = run_drift_fix_phase(
             files,
             repo.path(),
             crate::index::DocSource::WorkingTree,
             &mut ContentCache::new(),
+            &fault_reported,
             &mut rename_map,
             &mut patches,
             &mut fixes,

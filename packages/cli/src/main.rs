@@ -137,6 +137,11 @@ enum Commands {
             conflicts_with = "format"
         )]
         print_applied: bool,
+        /// Best-effort delete of the anchor cache directory under the
+        /// repository's common git dir (plan decision 8): prints the deleted
+        /// path and exits 0 whether or not it existed.
+        #[arg(long = "clear-cache")]
+        clear_cache: bool,
     },
 
     /// List all wiki pages with metadata (title, aliases, tags, file path).
@@ -308,10 +313,18 @@ fn run(
             fix,
             fix_dry_run,
             print_applied,
+            clear_cache,
         }) => {
             if fix && !matches!(source, index::DocSource::WorkingTree) {
                 eprintln!("error: --fix requires --source=worktree");
                 return Ok(2);
+            }
+            // `--clear-cache` (plan decision 8): a best-effort delete that
+            // short-circuits the check entirely — the cache is constructed
+            // exactly as a run constructs it, cleared, the deleted path
+            // printed, and exit 0 returned regardless.
+            if clear_cache {
+                return commands::check::clear_cache();
             }
             commands::check::run(
                 &globs,
