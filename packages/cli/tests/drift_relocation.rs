@@ -35,6 +35,19 @@ fn wiki_check_fix(cwd: &Path, extra: &[&str]) -> Output {
         .expect("run wiki check --fix")
 }
 
+/// Run `wiki check` (plus extra args) from `cwd`.
+fn wiki_check(cwd: &Path, extra: &[&str]) -> Output {
+    let bin = env!("CARGO_BIN_EXE_wiki");
+    let mut args = vec!["check"];
+    args.extend_from_slice(extra);
+    args.push("**/*.md");
+    Command::new(bin)
+        .args(&args)
+        .current_dir(cwd)
+        .output()
+        .expect("run wiki check")
+}
+
 fn init_repo() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     git(tmp.path(), &["init", "-q", "-b", "main"]);
@@ -379,4 +392,272 @@ fn lightly_edited_fuzzy_relocation_reports_honest_bump_diagnostic() {
     assert!(!text2.contains("fixed:"), "re-check must not fix: {text2}");
     let page2 = std::fs::read_to_string(root.join("wiki/page.md")).expect("read page");
     assert_eq!(page, page2, "re-check must not rewrite the page again");
+}
+
+// ── Witness row: deleted duplicate — content identity resolves the pairing ──
+
+/// Variant A (round-2 witness q41): a duplicate with the same display text
+/// is deleted and the survivor is re-pointed to its block's new location
+/// (the target shifted down two lines). Content identity resolves the
+/// pairing — the locator's content equals a same-label candidate's certified
+/// block — so the link is Healthy: the check exits 0 with no diagnostics.
+#[test]
+fn check_deleted_duplicate_repointed_to_block_passes() {
+    let tmp = init_repo();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "fn alpha() {\n    a()\n}\n\nfn beta() {\n    b()\n}\n",
+    )
+    .unwrap();
+    write_certified_page(
+        root,
+        "page.md",
+        "1",
+        "See [canonical](/src/lib.rs#L1-L3) and [canonical](/src/lib.rs#L5-L7).",
+    );
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "certify two same-display-text links"]);
+
+    // The first link is deleted and the target shifts down two lines; the
+    // survivor is re-pointed to follow its block (L5-L7 -> L7-L9).
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "// a\n// b\nfn alpha() {\n    a()\n}\n\nfn beta() {\n    b()\n}\n",
+    )
+    .unwrap();
+    write_certified_page(root, "page.md", "1", "See [canonical](/src/lib.rs#L7-L9).");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "delete duplicate, re-point survivor"]);
+
+    let out = wiki_check(root, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "content identity must resolve the pairing; got:\n{}",
+        combined(&out)
+    );
+    assert!(
+        !combined(&out).contains("could not verify"),
+        "no diagnostics expected:\n{}",
+        combined(&out)
+    );
+}
+
+/// Variant B (round-2 witness q41b): a duplicate is deleted and the target
+/// shifts down, but the survivor's href is left stale. `--fix` relocates it
+/// via the fragment-matched record, and the same run's re-check resolves
+/// Healthy via the content-identity carve-out — the run reports `fixed:`
+/// with no Unknown diagnostic and exits 0, converging (a second run stays
+/// clean).
+#[test]
+fn check_fix_converges_after_deleted_duplicate_block_shift() {
+    let tmp = init_repo();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "fn alpha() {\n    a()\n}\n\nfn beta() {\n    b()\n}\n",
+    )
+    .unwrap();
+    write_certified_page(
+        root,
+        "page.md",
+        "1",
+        "See [canonical](/src/lib.rs#L1-L3) and [canonical](/src/lib.rs#L5-L7).",
+    );
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "certify two same-display-text links"]);
+
+    // The first link is deleted and the target shifts down two lines; the
+    // survivor's href stays stale at the old coordinates.
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "// a\n// b\nfn alpha() {\n    a()\n}\n\nfn beta() {\n    b()\n}\n",
+    )
+    .unwrap();
+    write_certified_page(root, "page.md", "1", "See [canonical](/src/lib.rs#L5-L7).");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "delete duplicate, href stale"]);
+
+    let out = wiki_check_fix(root, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the run must converge; got:\n{}",
+        combined(&out)
+    );
+    let text = combined(&out);
+    assert!(
+        text.contains("fixed:"),
+        "the relocation must be applied: {text}"
+    );
+    assert!(
+        text.contains("#L5-L7") && text.contains("#L7-L9"),
+        "the fixed: line must name both locators: {text}"
+    );
+    assert!(
+        !text.contains("could not verify"),
+        "the re-check must not flag the rewritten link: {text}"
+    );
+    let page = std::fs::read_to_string(root.join("wiki/page.md")).expect("read page");
+    assert!(
+        page.contains("/src/lib.rs#L7-L9"),
+        "the href must follow the block: {page}"
+    );
+    // A second run stays clean — no loop.
+    let out2 = wiki_check(root, &[]);
+    assert_eq!(
+        out2.status.code(),
+        Some(0),
+        "re-check must stay clean; got:\n{}",
+        combined(&out2)
+    );
+}
+
+/// Genuine pairing ambiguity: the duplicate is deleted and the survivor is
+/// re-pointed to content that matches NO same-label candidate's certified
+/// block. The check reports the pairing-ambiguity message — never the
+/// multi-location text — and exits 1; `--fix` skips with the same reason
+/// and leaves the page byte-untouched.
+#[test]
+fn check_deleted_duplicate_genuine_ambiguity_reports_pairing_message() {
+    let tmp = init_repo();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "fn alpha() {\n    a()\n}\n\nfn beta() {\n    b()\n}\n\nfn gamma() {\n    g()\n}\n",
+    )
+    .unwrap();
+    write_certified_page(
+        root,
+        "page.md",
+        "1",
+        "See [canonical](/src/lib.rs#L1-L3) and [canonical](/src/lib.rs#L5-L7).",
+    );
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "certify two same-display-text links"]);
+
+    // The first link is deleted; the survivor is re-pointed to content that
+    // matches no candidate's certified block.
+    write_certified_page(root, "page.md", "1", "See [canonical](/src/lib.rs#L9-L11).");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "delete duplicate, re-point to uncertified content"]);
+
+    let out = wiki_check(root, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "genuine pairing ambiguity must exit 1; got:\n{}",
+        combined(&out)
+    );
+    let text = combined(&out);
+    assert!(
+        text.contains("a duplicate link with this display text was removed"),
+        "message must name the deleted duplicate:\n{text}"
+    );
+    assert!(
+        !text.contains("occurs at multiple locations"),
+        "message must not claim a multi-location ambiguity:\n{text}"
+    );
+
+    let out_fix = wiki_check_fix(root, &[]);
+    assert_eq!(
+        out_fix.status.code(),
+        Some(1),
+        "--fix must also exit 1; got:\n{}",
+        combined(&out_fix)
+    );
+    assert!(
+        combined(&out_fix).contains("skipped:"),
+        "--fix must skip the link:\n{}",
+        combined(&out_fix)
+    );
+    assert!(
+        !combined(&out_fix).contains("fixed:"),
+        "--fix must not apply anything:\n{}",
+        combined(&out_fix)
+    );
+    let page = std::fs::read_to_string(root.join("wiki/page.md")).expect("read page");
+    assert!(
+        page.contains("/src/lib.rs#L9-L11"),
+        "the page must be byte-untouched: {page}"
+    );
+}
+
+/// Control: two same-label links certify byte-identical blocks; one is
+/// deleted and the survivor's locator still contains those bytes. The
+/// any-candidate carve-out is outcome-invariant for identical candidates —
+/// Healthy, exit 0.
+#[test]
+fn check_deleted_duplicate_identical_blocks_stay_healthy() {
+    let tmp = init_repo();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "fn alpha() {\n    a()\n}\n\nfn alpha() {\n    a()\n}\n",
+    )
+    .unwrap();
+    write_certified_page(
+        root,
+        "page.md",
+        "1",
+        "See [canonical](/src/lib.rs#L1-L3) and [canonical](/src/lib.rs#L5-L7).",
+    );
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "certify two identical blocks"]);
+
+    // Delete the first link only; the survivor keeps its locator and its
+    // certified bytes.
+    write_certified_page(root, "page.md", "1", "See [canonical](/src/lib.rs#L5-L7).");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "delete duplicate, survivor untouched"]);
+
+    let out = wiki_check(root, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "identical candidates must stay healthy; got:\n{}",
+        combined(&out)
+    );
+}
+
+/// Control: deletion alone with an unmoved survivor locator passes clean —
+/// the survivor still matches its epoch record by fragment, so nothing
+/// flags. Guards against over-flagging the deleted-duplicate case.
+#[test]
+fn check_deleted_duplicate_with_unmoved_survivor_passes() {
+    let tmp = init_repo();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "fn alpha() {\n    a()\n}\n\nfn beta() {\n    b()\n}\n",
+    )
+    .unwrap();
+    write_certified_page(
+        root,
+        "page.md",
+        "1",
+        "See [canonical](/src/lib.rs#L1-L3) and [canonical](/src/lib.rs#L5-L7).",
+    );
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "certify two same-display-text links"]);
+
+    // Delete the first link only; the survivor keeps its locator and its
+    // certified content.
+    write_certified_page(root, "page.md", "1", "See [canonical](/src/lib.rs#L5-L7).");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "delete duplicate, survivor untouched"]);
+
+    let out = wiki_check(root, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "unmoved survivor must stay clean; got:\n{}",
+        combined(&out)
+    );
 }

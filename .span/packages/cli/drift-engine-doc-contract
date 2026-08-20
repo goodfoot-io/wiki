@@ -1,6 +1,6 @@
-packages/cli/src/commands/drift.rs rk64:ee4bde62796e5641
-packages/cli/tests/drift_relocation.rs rk64:367f43cca6dca800
-plugins/wiki/skills/wiki/sections/fragment-links-and-coverage.md rk64:28038dff5388dd49
+packages/cli/src/commands/drift.rs rk64:dee2a209c679b60e
+packages/cli/tests/drift_relocation.rs rk64:8bc8f8690a9ace19
+plugins/wiki/skills/wiki/sections/fragment-links-and-coverage.md rk64:a4839307dd078892
 plugins/wiki/skills/wiki/sections/resolving-skipped-fixes.md rk64:58b1c192d59ba48c
 plugins/wiki/skills/wiki/sections/running-wiki-check.md rk64:167edd8d30936ec6
 

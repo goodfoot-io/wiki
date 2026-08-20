@@ -64,6 +64,13 @@ pub enum DriftOutcome {
     /// Could not verify (ambiguous move — the certified content occurs at
     /// ≥2 candidate locations). Fail-closed; never auto-fixed.
     Unknown,
+    /// A duplicate link with this display text was removed since the anchor
+    /// epoch, so the surviving link cannot be matched to a reviewed record.
+    /// Distinct from `Unknown`: the ambiguity there is *where* the certified
+    /// content went, here it is *which* epoch record certified the survivor —
+    /// the content itself may occur exactly once. Fail-closed; never
+    /// auto-fixed.
+    UnknownLabelDeleted,
 }
 
 /// The resolved anchor epoch for one page.
@@ -914,18 +921,39 @@ fn classify_link(
         // href's. A label with no record at all (edited display text, or an
         // ordinal beyond the epoch's count) has no certified content to scan
         // for: Uncertified — unless a duplicate was deleted between epoch and
-        // now, which leaves the pairing ambiguous: Unknown.
+        // now, which leaves the pairing ambiguous.
         let label_records: Vec<&CertifiedLink> =
             certified.iter().filter(|c| label_match(c)).collect();
         if label_records.is_empty() {
-            return Ok((
-                if label_deleted {
-                    DriftOutcome::Unknown
-                } else {
-                    DriftOutcome::Uncertified
-                },
-                target_path,
-            ));
+            if label_deleted {
+                // Pairing ambiguity: a duplicate with the same display text
+                // was deleted since the epoch, so no record pairs with the
+                // survivor by ordinal. Content identity resolves the pairing
+                // first — the relocated-but-healthy carve-out (Change 1)
+                // generalized to this case: if the current locator's content
+                // equals ANY same-label candidate's certified block, the
+                // survivor verifiably cites that block (unique content →
+                // unique record; byte-identical candidates → outcome-
+                // invariant), so the link is Healthy. Structural failures
+                // still apply first; the move scan does not run here — the
+                // fragment-match path already handles stale hrefs. With no
+                // candidate match the pairing is genuinely unresolvable:
+                // fail closed, reported distinctly from the multi-location
+                // `Unknown` so the diagnostic can name the real problem.
+                let Some(bytes) = target_bytes.as_deref() else {
+                    return Ok((DriftOutcome::Broken, target_path));
+                };
+                if !extent_fits(bytes, link.start, link.end) {
+                    return Ok((DriftOutcome::Broken, target_path));
+                }
+                for cand in certified.iter().filter(|c| c.label == link.label) {
+                    if certified_content_fp(repo_root, anchor_sha, cand, &mut memo)? == current_fp {
+                        return Ok((DriftOutcome::Healthy, target_path));
+                    }
+                }
+                return Ok((DriftOutcome::UnknownLabelDeleted, target_path));
+            }
+            return Ok((DriftOutcome::Uncertified, target_path));
         }
         let cert = primary_cert(&label_records, &target_path, link.start, link.end);
         // Relocated-but-healthy carve-out: the content at the current locator
@@ -2519,6 +2547,95 @@ pub fn collect_with_source(
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes[0].outcome, DriftOutcome::Unknown);
+    }
+
+    #[test]
+    fn deleted_duplicate_classifies_unknown_label_deleted() {
+        // Round-2 drift-message-honesty: a duplicate with the same display
+        // text deleted since the epoch leaves the survivor unpaired. Content
+        // identity resolves the pairing FIRST — only when the current
+        // locator's content matches NO same-label candidate's certified
+        // block does the pairing fail closed, as here (the locator cites
+        // content that was never certified).
+        let repo = TestRepo::new();
+        repo.create_file(
+            "wiki/target.md",
+            "T0\nblock-line-1\nblock-line-2\nblock-line-3\nT1\n\
+             block-line-1\nblock-line-2\nblock-line-3\nT2\n",
+        );
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page(
+                "Page",
+                "[b](target.md#L2-L4)\n[b](target.md#L6-L8)\n",
+                Some("1"),
+            ),
+        );
+        let c1 = repo.commit("certify two same-display-text links");
+        // The first link is deleted; the survivor is re-pointed to content
+        // matching no candidate's certified block.
+        repo.create_file(
+            "wiki/target.md",
+            "T0\nblock-line-1\nblock-line-2\nblock-line-3\nT1\n\
+             block-line-1\nblock-line-2\nblock-line-3\nT2\nX0\nX1\nX2\n",
+        );
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "[b](target.md#L10-L12)\n", Some("1")),
+        );
+        repo.commit("delete duplicate, re-point to uncertified content");
+        let epoch = LinkEpoch::Commit {
+            sha: c1,
+            path_at_commit: "wiki/page.md".into(),
+            value: Some("1".into()),
+        };
+        let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
+        assert_eq!(classes.len(), 1);
+        assert_eq!(classes[0].outcome, DriftOutcome::UnknownLabelDeleted);
+    }
+
+    #[test]
+    fn repointed_duplicate_resolves_healthy_via_content_identity() {
+        // The relocated-but-healthy carve-out generalized to the ambiguous-
+        // pairing case: the survivor is re-pointed to its block's new
+        // location (coordinates that never existed at the epoch), and the
+        // current content equals a same-label candidate's certified block —
+        // the pairing is resolved by content identity, not a guess.
+        let repo = TestRepo::new();
+        repo.create_file(
+            "wiki/target.md",
+            "T0\nblock-line-1\nblock-line-2\nblock-line-3\nT1\n\
+             block-line-1\nblock-line-2\nblock-line-3\nT2\n",
+        );
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page(
+                "Page",
+                "[b](target.md#L2-L4)\n[b](target.md#L6-L8)\n",
+                Some("1"),
+            ),
+        );
+        let c1 = repo.commit("certify two same-display-text links");
+        // The first link is deleted and the target shifts down two lines;
+        // the survivor is re-pointed to follow its block (L6-L8 -> L8-L10).
+        repo.create_file(
+            "wiki/target.md",
+            "A\nB\nT0\nblock-line-1\nblock-line-2\nblock-line-3\nT1\n\
+             block-line-1\nblock-line-2\nblock-line-3\nT2\n",
+        );
+        repo.create_file(
+            "wiki/page.md",
+            &make_wiki_page("Page", "[b](target.md#L8-L10)\n", Some("1")),
+        );
+        repo.commit("delete duplicate, block shifted down");
+        let epoch = LinkEpoch::Commit {
+            sha: c1,
+            path_at_commit: "wiki/page.md".into(),
+            value: Some("1".into()),
+        };
+        let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
+        assert_eq!(classes.len(), 1);
+        assert_eq!(classes[0].outcome, DriftOutcome::Healthy);
     }
 
     // ── Fuzzy Jaccard tier (Phase 1d, P2 acceptance checks — all pending) ──

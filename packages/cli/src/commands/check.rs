@@ -763,6 +763,16 @@ fn collect_drift_diagnostics(
                         c.original_href
                     ),
                 ),
+                drift::DriftOutcome::UnknownLabelDeleted => (
+                    "link_unverified",
+                    format!(
+                        "could not verify line-range link `{}`: a duplicate link with \
+                         this display text was removed since the last review; the \
+                         surviving link cannot be matched to a reviewed record — re-point \
+                         it to the block's current location and bump `links-reviewed:`",
+                        c.original_href
+                    ),
+                ),
             };
             out.push(CheckDiagnostic {
                 kind: kind.into(),

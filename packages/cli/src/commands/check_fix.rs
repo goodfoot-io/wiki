@@ -1601,6 +1601,26 @@ fn run_drift_fix_phase(
                         ),
                     });
                 }
+                drift::DriftOutcome::UnknownLabelDeleted => {
+                    // Pairing ambiguity — which epoch record certified the
+                    // survivor; content identity could not resolve it. Same
+                    // skip semantics as the multi-location Unknown: never
+                    // first-hit-wins, page untouched.
+                    unverified += 1;
+                    skipped.push(SkippedFix {
+                        file: file_rel.clone(),
+                        line: c.source_line,
+                        kind: FixKind::LinkRelocate,
+                        reason: format!(
+                            "could not verify line-range link `{}`: a duplicate link with \
+                             this display text was removed since the last review; the \
+                             surviving link cannot be matched to a reviewed record — \
+                             re-point it to the block's current location and bump \
+                             `links-reviewed:`",
+                            c.original_href
+                        ),
+                    });
+                }
                 drift::DriftOutcome::Healthy => {}
             }
         }
@@ -2100,6 +2120,63 @@ mod tests {
         assert_eq!(outcome.unverified, 1);
         assert_eq!(outcome.certification_skips, 0);
         assert_eq!(skipped.len(), 1, "one unknown skip: {skipped:?}");
+    }
+
+    /// UnknownLabelDeleted (a duplicate with this display text was removed
+    /// since the epoch and content identity could not resolve the pairing)
+    /// skips with the same unverified count — the reason names the pairing
+    /// ambiguity, never the multi-location text.
+    #[test]
+    fn drift_fix_skips_label_deleted_with_honest_reason() {
+        let repo = TestRepo::new();
+        repo.write(
+            "src/target.rs",
+            "fn alpha() {\n    a()\n}\n\nfn beta() {\n    b()\n}\n",
+        );
+        repo.write(
+            "wiki/page.md",
+            &certified_wiki_page(
+                "Page",
+                "See [target](../src/target.rs#L1-L3) and [target](../src/target.rs#L5-L7).",
+            ),
+        );
+        repo.commit("certify two same-display-text links");
+        // The first link is deleted; the survivor is re-pointed to content
+        // matching no candidate's certified block.
+        repo.write(
+            "src/target.rs",
+            "fn alpha() {\n    a()\n}\n\nfn beta() {\n    b()\n}\n\nfn gamma() {\n    g()\n}\n",
+        );
+        repo.write(
+            "wiki/page.md",
+            &certified_wiki_page("Page", "See [target](../src/target.rs#L9-L11)."),
+        );
+        repo.commit("delete duplicate, re-point to uncertified content");
+
+        let page = repo.path().join("wiki/page.md");
+        let (outcome, fixes, skipped, patches) = drift_phase(&repo, std::slice::from_ref(&page));
+        assert_eq!(fixes.len(), 0, "pairing ambiguity: never auto-fix: {fixes:?}");
+        assert_eq!(outcome.unverified, 1);
+        assert_eq!(outcome.certification_skips, 0);
+        assert_eq!(skipped.len(), 1, "one skip: {skipped:?}");
+        assert!(
+            matches!(skipped[0].kind, FixKind::LinkRelocate),
+            "skip kind must stay LinkRelocate: {skipped:?}"
+        );
+        assert!(
+            skipped[0]
+                .reason
+                .contains("duplicate link with this display text was removed"),
+            "reason must name the deleted duplicate: {skipped:?}"
+        );
+        assert!(
+            !skipped[0].reason.contains("occurs at multiple locations"),
+            "reason must not claim a multi-location ambiguity: {skipped:?}"
+        );
+        assert!(
+            patches.is_empty(),
+            "page must be byte-untouched: {patches:?}"
+        );
     }
 
     /// A page with range links and no field anywhere gets `links-reviewed: 1`
