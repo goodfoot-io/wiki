@@ -50,10 +50,16 @@ pub enum DriftOutcome {
     Drift,
     /// The certified content was found at exactly one new location —
     /// `--fix` rewrites the href (path and range) to follow it.
+    /// `content_identical` is true for an exact-tier match (the destination
+    /// is byte-identical to the certified block, so the link stays certified)
+    /// and false for a fuzzy-tier match (the destination is a lightly-edited
+    /// near-copy — the href follows the move, but the link needs
+    /// re-certification; the fix must not claim "certified content moved").
     Moved {
         new_path: String,
         new_start: u32,
         new_end: u32,
+        content_identical: bool,
     },
     /// Could not verify (ambiguous move — the certified content occurs at
     /// ≥2 candidate locations). Fail-closed; never auto-fixed.
@@ -370,6 +376,13 @@ fn git_output(repo_root: &Path, args: &[&str]) -> Result<String, EpochError> {
 #[derive(Default)]
 pub struct MoveScanCtx {
     candidates: Option<Vec<(String, Vec<u8>)>>,
+    /// Rename rows from the uncommitted diff layers (worktree↔index and
+    /// index↔HEAD) — cross-file relocation evidence (amendment Change 2).
+    uncommitted_renames: Option<Vec<(String, String)>>,
+    /// Per-destination committed name history — the paths this destination
+    /// has been renamed from, most recent first. Lazily walked and cached;
+    /// only cross-file matches pay for a walk.
+    dest_history: HashMap<String, Vec<String>>,
 }
 
 impl MoveScanCtx {
@@ -387,6 +400,119 @@ impl MoveScanCtx {
         }
         Ok(self.candidates.as_deref().expect("just populated"))
     }
+
+    fn uncommitted_renames(
+        &mut self,
+        repo_root: &Path,
+    ) -> Result<&[(String, String)], EpochError> {
+        if self.uncommitted_renames.is_none() {
+            self.uncommitted_renames = Some(uncommitted_rename_rows(repo_root)?);
+        }
+        Ok(self.uncommitted_renames.as_deref().expect("just populated"))
+    }
+
+    fn dest_history(&mut self, repo_root: &Path, dest: &str) -> Result<&[String], EpochError> {
+        if !self.dest_history.contains_key(dest) {
+            let names = renamed_from_history(repo_root, dest)?;
+            self.dest_history.insert(dest.to_string(), names);
+        }
+        Ok(self.dest_history.get(dest).expect("just inserted"))
+    }
+}
+
+/// Rename rows from the uncommitted layers: `git diff --diff-filter=R
+/// --name-status` (worktree↔index) and `git diff --cached --diff-filter=R
+/// --name-status` (index↔HEAD). A staged `git mv` appears in the cached
+/// layer; a plain unstaged `mv` is invisible to git until staged and is
+/// fail-closed (no evidence — a content-only match in an unrelated file is
+/// never relocated).
+fn uncommitted_rename_rows(repo_root: &Path) -> Result<Vec<(String, String)>, EpochError> {
+    let mut rows = Vec::new();
+    for cached in [false, true] {
+        let mut args = vec!["diff"];
+        if cached {
+            args.push("--cached");
+        }
+        args.extend(["--diff-filter=R", "--name-status"]);
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .args(&args)
+            .output()
+            .map_err(|e| EpochError::GitFailed(e.to_string()))?;
+        if !output.status.success() {
+            // A repo with no HEAD makes the cached layer fail; treat it as
+            // empty — the committed history layer still decides.
+            continue;
+        }
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if !line.starts_with('R') {
+                continue;
+            }
+            let mut parts = line.splitn(3, '\t');
+            let _status = parts.next();
+            let old = parts.next().unwrap_or_default().to_string();
+            let new = parts.next().unwrap_or_default().to_string();
+            if !old.is_empty() && !new.is_empty() {
+                rows.push((old, new));
+            }
+        }
+    }
+    Ok(rows)
+}
+
+/// The paths a destination file has been renamed from, most recent first:
+/// `git log --follow --name-status --format=%H -- <dest>` with the name
+/// tracked backwards through `R###` rows — the anchor-epoch walk technique
+/// applied to an existing target.
+fn renamed_from_history(repo_root: &Path, dest_path: &str) -> Result<Vec<String>, EpochError> {
+    let log = git_output(
+        repo_root,
+        &[
+            "log",
+            "--follow",
+            "--name-status",
+            "--format=%H",
+            "--",
+            dest_path,
+        ],
+    )?;
+    let mut name = dest_path.to_string();
+    let mut old_names = Vec::new();
+    for (_, rows) in parse_name_status_log(&log) {
+        if let Some(row) = rows.iter().find(|r| r.is_rename_to(&name)) {
+            name = row.old_path.clone();
+            old_names.push(name.clone());
+        }
+    }
+    Ok(old_names)
+}
+
+/// Amendment Change 2: a cross-file match may relocate only when the
+/// destination file carries identity evidence connecting it to the source.
+/// The destination is evidenced when it is the certified path itself (the
+/// content moved within its own file), when an uncommitted diff-layer rename
+/// row pairs source → destination, or when the source path appears in the
+/// destination's committed rename history — i.e. the destination is the
+/// source's committed successor. A content-only match in an unrelated file
+/// (a quote, a copy) is never a move.
+fn has_identity_evidence(
+    ctx: &mut MoveScanCtx,
+    repo_root: &Path,
+    cert_path: &str,
+    dest_path: &str,
+) -> Result<bool, EpochError> {
+    if dest_path == cert_path {
+        return Ok(true);
+    }
+    if ctx
+        .uncommitted_renames(repo_root)?
+        .iter()
+        .any(|(old, new)| old == cert_path && new == dest_path)
+    {
+        return Ok(true);
+    }
+    Ok(ctx.dest_history(repo_root, dest_path)?.contains(&cert_path.to_string()))
 }
 
 pub fn classify_page(
@@ -427,6 +553,8 @@ pub fn classify_page(
                 end: link.end,
                 label: link.label,
                 fragment: link.fragment,
+                label_ordinal: link.label_ordinal,
+                label_count: link.label_count,
             });
         }
     }
@@ -475,6 +603,15 @@ struct ParsedLink {
     href_byte_start: usize,
     href_byte_end: usize,
     original_href: String,
+    /// 1-based occurrence ordinal of this display text among links with
+    /// byte-identical labels in the page (document order). Half of the
+    /// epoch-record identity: a relocation rewrites path+range only, never
+    /// the display text, so (label, ordinal) is the stable key.
+    label_ordinal: usize,
+    /// How many links in the page share this display text. The ordinal
+    /// pairing against the epoch is only reliable when the two pages agree
+    /// on this count.
+    label_count: usize,
 }
 
 /// A line-range link on the anchor-commit page — one certified locator.
@@ -487,6 +624,10 @@ struct CertifiedLink {
     label: String,
     /// The fragment as written at the anchor commit.
     fragment: String,
+    /// The link's occurrence ordinal and total count for its display text on
+    /// the anchor page — the epoch side of the (label, ordinal) identity.
+    label_ordinal: usize,
+    label_count: usize,
 }
 
 /// True when `content` contains at least one line-range fragment link — the
@@ -543,8 +684,27 @@ fn parse_line_range_links(content: &str) -> Vec<ParsedLink> {
             href_byte_start: href_start,
             href_byte_end: href_end,
             original_href: href.to_string(),
+            label_ordinal: 0,
+            label_count: 0,
         });
         i = href_end + 1;
+    }
+
+    // Epoch-record identity: the display text plus its occurrence ordinal
+    // among identical display texts (document order). Both the anchor page
+    // and the current page run this same parser, so the ordinals compare
+    // one-to-one — and a relocation rewrites only path+range, never the
+    // display text, so (label, ordinal) survives relocation.
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for l in &links {
+        *counts.entry(l.label.clone()).or_default() += 1;
+    }
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for l in &mut links {
+        let ordinal = seen.entry(l.label.clone()).or_default();
+        *ordinal += 1;
+        l.label_ordinal = *ordinal;
+        l.label_count = counts[&l.label];
     }
     links
 }
@@ -657,28 +817,87 @@ fn classify_link(
     };
 
     // Decision 4 presence: identity-based — same resolved target path AND
-    // (same label text OR same href-range string) — plus the relocation
-    // clause: same label AND the current link's target-range content equals
-    // the certified link's. The clause's content equality is the canonical
-    // rk64 comparison, so a CRLF checkout cannot regress it.
+    // (same label OR same href-range string). The label identity is the
+    // display text plus its occurrence ordinal among identical display texts
+    // (the epoch-record key): a relocation rewrites path+range only, never
+    // the display text, so (label, ordinal) is stable across relocations.
+    // The ordinal pairing is only reliable when the epoch page and the
+    // current page agree on how many links share the display text — a
+    // duplicate deleted between epoch and now leaves the survivor unpaired
+    // (Unknown, never a guess at which record certified it), while a
+    // duplicate added now pairs by ordinal and the extras have no record
+    // (Uncertified).
+    let label_match = |c: &CertifiedLink| {
+        c.label == link.label
+            && c.label_ordinal == link.label_ordinal
+            && link.label_count >= c.label_count
+    };
+    let label_deleted = certified
+        .iter()
+        .any(|c| c.label == link.label && c.label_count > link.label_count);
     let mut matched: Vec<&CertifiedLink> = Vec::new();
     let mut memo: HashMap<(String, u32, u32), u64> = HashMap::new();
     let current_fp = current_content_fp(target_bytes.as_deref(), link.start, link.end);
     for c in certified {
-        let identity_arm =
-            c.target_path == target_path && (c.label == link.label || c.fragment == link.fragment);
-        // The clause arm short-circuits behind `!identity_arm`, so identity
-        // matches never pay the anchor-side blob read.
-        let clause_arm = !identity_arm
-            && c.label == link.label
-            && certified_content_fp(repo_root, anchor_sha, c, &mut memo)? == current_fp;
-        if identity_arm || clause_arm {
+        if c.target_path == target_path && (label_match(c) || c.fragment == link.fragment) {
             matched.push(c);
         }
     }
+
     if matched.is_empty() {
-        return Ok((DriftOutcome::Uncertified, target_path));
+        // The locator is not present at the anchor epoch (amendment Change 1):
+        // after a committed relocation the stored coordinates never existed
+        // at the epoch, so the same-label record supplies the certified
+        // content. The record's OWN path+range at the anchor commit is what
+        // every comparison and the move scan key on — never the current
+        // href's. A label with no record at all (edited display text, or an
+        // ordinal beyond the epoch's count) has no certified content to scan
+        // for: Uncertified — unless a duplicate was deleted between epoch and
+        // now, which leaves the pairing ambiguous: Unknown.
+        let label_records: Vec<&CertifiedLink> =
+            certified.iter().filter(|c| label_match(c)).collect();
+        if label_records.is_empty() {
+            return Ok((
+                if label_deleted {
+                    DriftOutcome::Unknown
+                } else {
+                    DriftOutcome::Uncertified
+                },
+                target_path,
+            ));
+        }
+        let cert = primary_cert(&label_records, &target_path, link.start, link.end);
+        // Relocated-but-healthy carve-out: the content at the current locator
+        // equals the certified content.
+        if let Some(bytes) = target_bytes.as_deref()
+            && extent_fits(bytes, link.start, link.end)
+            && certified_content_fp(repo_root, anchor_sha, cert, &mut memo)? == current_fp
+        {
+            return Ok((DriftOutcome::Healthy, target_path));
+        }
+        // Move scan for the certified content. No match → Drift/Broken per
+        // the existing rules: a missing or overhanging target is Broken, a
+        // present-but-different one is Drift.
+        let zero = match &target_bytes {
+            None => DriftOutcome::Broken,
+            Some(b) if !extent_fits(b, link.start, link.end) => DriftOutcome::Broken,
+            Some(_) => DriftOutcome::Drift,
+        };
+        let outcome = move_scan_outcome(
+            repo_root,
+            source,
+            page_path,
+            &target_path,
+            target_bytes.as_deref(),
+            cert,
+            anchor_sha,
+            &mut memo,
+            zero,
+            ctx,
+        )?;
+        return Ok((outcome, target_path));
     }
+
     let cert = primary_cert(&matched, &target_path, link.start, link.end);
 
     // Step 3: target present at the current side, extent still fitting.
@@ -737,8 +956,10 @@ fn classify_link(
 
     // Step 5: the href's range differs from every certified range (the href
     // was edited). Content equal to the certified content → Healthy (already
-    // relocated); different → Uncertified (the as-written locator was never
-    // reviewed).
+    // relocated); otherwise the move scan decides — a genuine relocation
+    // wins, and everything else is Drift (bump), never Uncertified: the link
+    // WAS reviewed at the epoch, and the as-written locator is an edit the
+    // reviewer must ratify.
     let cur_fp = cheap_fingerprint_with_extent(
         bytes,
         &Extent::LineRange {
@@ -751,7 +972,19 @@ fn classify_link(
             return Ok((DriftOutcome::Healthy, target_path));
         }
     }
-    Ok((DriftOutcome::Uncertified, target_path))
+    let outcome = move_scan_outcome(
+        repo_root,
+        source,
+        page_path,
+        &target_path,
+        Some(bytes),
+        cert,
+        anchor_sha,
+        &mut memo,
+        DriftOutcome::Drift,
+        ctx,
+    )?;
+    Ok((outcome, target_path))
 }
 
 /// The matched certified link that anchors the comparison: prefer the one
@@ -838,23 +1071,30 @@ fn move_scan_outcome(
         end: span as u32,
     };
 
-    // Same-file tier: the link's own target. The window at the certified
-    // range's own coordinates is not a move — the content drifted in place,
-    // and "relocating" there rewrites the href to itself on every run.
+    // The certified window — the certified content at its own epoch
+    // coordinates — is never a relocation target in any tier: a match there
+    // means the content drifted in place (or a hand-edited href points
+    // elsewhere while the certified block never moved), and "relocating" to
+    // it rewrites the href to itself on every run. The current link's own
+    // coordinates are NOT excluded: the exact tiers cannot match them (the
+    // scan only runs when the content there differs from the certified
+    // block), and the fuzzy tier must be able to match them — the edited
+    // relocation's match lives at the current coordinates.
+    let not_certified_window = |l: &crate::rk64::Location| {
+        !(l.path == cert.target_path && l.start_line == cert.start && l.end_line == cert.end)
+    };
+
+    // Same-file tier: the link's own target.
     if let Some(bytes) = target_bytes {
         let idx = LineIndex::build(bytes);
         let matches: Vec<crate::rk64::Location> =
             scan_indexed_rk64(&[(target_path.to_string(), idx)], cert_fp, extent, None)
                 .into_iter()
-                .filter(|l| {
-                    !(l.path == target_path
-                        && l.start_line == cert.start
-                        && l.end_line == cert.end)
-                })
+                .filter(not_certified_window)
                 .collect();
         match matches.len() {
             1 => {
-                return moved_to(&matches[0]);
+                return moved_to(&matches[0], true);
             }
             n if n >= 2 => return Ok(DriftOutcome::Unknown),
             _ => {}
@@ -863,19 +1103,27 @@ fn move_scan_outcome(
 
     // Cross-file tier: every other candidate file in the repo. The page
     // itself is excluded — a body quoting the range must not relocate the
-    // link into itself — as is the target (already scanned above). The
-    // candidate inventory comes from the run's shared context: re-reading
-    // every tracked file per link would make each drift link cost the whole
-    // repo again.
+    // link into itself — as is the target (already scanned above). Only
+    // identity-evidenced destinations count (amendment Change 2): a
+    // content-only match in an unrelated file is a quote or a copy, never a
+    // move, and is dropped rather than counted toward Unknown.
     let others: Vec<(&str, &[u8])> = ctx
         .candidates(repo_root, source)?
         .iter()
         .filter(|(path, _)| path != target_path && path != page_path)
         .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
         .collect();
-    let matches = scan_for_content_hash_rk64(&others, cert_fp, extent, None);
+    let mut matches: Vec<crate::rk64::Location> = Vec::new();
+    for l in scan_for_content_hash_rk64(&others, cert_fp, extent, None) {
+        if !not_certified_window(&l) {
+            continue;
+        }
+        if has_identity_evidence(ctx, repo_root, &cert.target_path, &l.path)? {
+            matches.push(l);
+        }
+    }
     match matches.len() {
-        1 => return moved_to(&matches[0]),
+        1 => return moved_to(&matches[0], true),
         n if n >= 2 => return Ok(DriftOutcome::Unknown),
         _ => {}
     }
@@ -883,7 +1131,9 @@ fn move_scan_outcome(
     // Fuzzy tier: the certified content is absent everywhere in exact form.
     // Look for a lightly-edited near-copy (Decision 5 step 4): exactly one
     // at-threshold window → Moved; ≥2 → Unknown; none → `zero_matches`.
-    let fuzzy: Vec<crate::rk64::Location> = fuzzy_locations(
+    // Same-file windows need no identity evidence; cross-file windows do.
+    let mut fuzzy: Vec<crate::rk64::Location> = Vec::new();
+    for l in fuzzy_locations(
         repo_root,
         source,
         page_path,
@@ -892,16 +1142,19 @@ fn move_scan_outcome(
         cert,
         anchor_sha,
         ctx,
-    )?
-    .into_iter()
-    // Same exclusion as the exact same-file tier: the fuzzy tier's in-place
-    // match at the link's own coordinates is drift, not a relocation.
-    .filter(|l| {
-        !(l.path == target_path && l.start_line == cert.start && l.end_line == cert.end)
-    })
-    .collect();
+    )? {
+        if !not_certified_window(&l) {
+            continue;
+        }
+        if l.path != target_path
+            && !has_identity_evidence(ctx, repo_root, &cert.target_path, &l.path)?
+        {
+            continue;
+        }
+        fuzzy.push(l);
+    }
     match fuzzy.len() {
-        1 => moved_to(&fuzzy[0]),
+        1 => moved_to(&fuzzy[0], false),
         n if n >= 2 => Ok(DriftOutcome::Unknown),
         _ => Ok(zero_matches),
     }
@@ -1210,11 +1463,16 @@ fn line_matches_any_cert(
     false
 }
 
-fn moved_to(location: &crate::rk64::Location) -> Result<DriftOutcome, EpochError> {
+/// A move outcome. Exact-tier matches keep the certified content byte-for-
+/// byte (`content_identical: true`); fuzzy-tier matches are lightly-edited
+/// near-copies (`content_identical: false`), which the fix phase must report
+/// honestly instead of claiming "certified content moved".
+fn moved_to(location: &crate::rk64::Location, content_identical: bool) -> Result<DriftOutcome, EpochError> {
     Ok(DriftOutcome::Moved {
         new_path: location.path.clone(),
         new_start: location.start_line,
         new_end: location.end_line,
+        content_identical,
     })
 }
 
@@ -1460,6 +1718,13 @@ pub fn collect_with_source(
 
         fn remove_file(&self, path: &str) {
             fs::remove_file(self.dir.path().join(path)).expect("remove file");
+        }
+
+        /// A committed rename: `git mv` stages the rename so the commit
+        /// records an `R###` row — the identity evidence the cross-file
+        /// relocation rule requires.
+        fn rename_file(&self, from: &str, to: &str) {
+            self.git(&["mv", from, to]);
         }
 
         fn read(&self, path: &str) -> String {
@@ -1948,9 +2213,11 @@ pub fn collect_with_source(
         let (repo, c1) = repo_with_root_target();
         // The href edit is COMMITTED, so HEAD's page points at
         // `wiki/dir/target.md`, absent in HEAD. The blob layers have no
-        // worktree filesystem to consult: salvage is skipped, the edited
-        // locator resolves to nothing, and the link is Uncertified rather
-        // than silently blessed via the worktree copy on disk.
+        // worktree filesystem to consult: salvage is skipped, and the move
+        // scan finds the certified content still sitting at its own epoch
+        // coordinates (excluded from relocation targets), so the edited
+        // locator resolves to nothing → Broken — never blessed via the
+        // worktree copy on disk.
         repo.create_file(
             "wiki/page.md",
             &make_wiki_page("Page", "[b](dir/target.md#L2-L4)\n", Some("1")),
@@ -1972,7 +2239,7 @@ pub fn collect_with_source(
         )
         .expect("classifies");
         assert_eq!(classes.len(), 1);
-        assert_eq!(classes[0].outcome, DriftOutcome::Uncertified);
+        assert_eq!(classes[0].outcome, DriftOutcome::Broken);
         // The effective path stays the resolved href path — no salvage.
         assert_eq!(classes[0].target_path, "wiki/dir/target.md");
     }
@@ -1982,7 +2249,8 @@ pub fn collect_with_source(
         let (repo, c1) = repo_with_root_target();
         // `wiki/dir/target.md` EXISTS with different content, so the direct
         // resolution wins and salvage never runs: the link points at real
-        // content that is not the certified block → Uncertified.
+        // content that is not the certified block, and the certified block
+        // never moved → Drift (review required).
         repo.create_file("wiki/dir/target.md", "X0\nX1\nX2\nX3\nX4\n");
         repo.create_file(
             "wiki/page.md",
@@ -1995,7 +2263,7 @@ pub fn collect_with_source(
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes.len(), 1);
-        assert_eq!(classes[0].outcome, DriftOutcome::Uncertified);
+        assert_eq!(classes[0].outcome, DriftOutcome::Drift);
         assert_eq!(classes[0].target_path, "wiki/dir/target.md");
     }
 
@@ -2018,19 +2286,21 @@ pub fn collect_with_source(
             DriftOutcome::Moved {
                 new_path: "wiki/target.md".into(),
                 new_start: 4,
-                new_end: 6
+                new_end: 6,
+                content_identical: true
             }
         );
     }
 
     #[test]
     fn moved_cross_file_rewrites_path_and_range() {
-        // Cross-file Moved arises when the target is gone (here: the content
-        // moved out and the file was deleted). A merely truncated target is
-        // Broken per the card — see `broken_when_extent_overhangs_target`.
+        // Cross-file Moved arises when the target is gone and the destination
+        // carries identity evidence — here a committed rename (git mv), which
+        // the evidence rule requires: a content-only copy in an unrelated
+        // file never relocates. A merely truncated target is Broken per the
+        // card — see `broken_when_extent_overhangs_target`.
         let (repo, c1) = repo_with_certified_link();
-        repo.remove_file("wiki/target.md");
-        repo.create_file("wiki/other.md", &format!("H\n{BLOCK}\nF\n"));
+        repo.rename_file("wiki/target.md", "wiki/other.md");
         repo.commit("block moved to other.md");
         let epoch = LinkEpoch::Commit {
             sha: c1,
@@ -2043,7 +2313,8 @@ pub fn collect_with_source(
             DriftOutcome::Moved {
                 new_path: "wiki/other.md".into(),
                 new_start: 2,
-                new_end: 4
+                new_end: 4,
+                content_identical: true
             }
         );
     }
@@ -2199,7 +2470,8 @@ pub fn collect_with_source(
             DriftOutcome::Moved {
                 new_path: "wiki/target.md".into(),
                 new_start: 5,
-                new_end: 10
+                new_end: 10,
+                content_identical: false
             }
         );
     }
@@ -2226,9 +2498,10 @@ pub fn collect_with_source(
     #[test]
     fn fuzzy_moved_cross_file_after_small_edit() {
         // Cross-file Moved arises when the target is gone; the edited block
-        // lives in another file, and the fuzzy tier is what finds it.
+        // lives in another file, and the fuzzy tier is what finds it. The
+        // destination carries identity evidence — the committed rename.
         let (repo, c1) = repo_with_certified_fuzzy_block();
-        repo.remove_file("wiki/target.md");
+        repo.rename_file("wiki/target.md", "wiki/other.md");
         repo.create_file("wiki/other.md", &format!("H\n{FUZZY_BLOCK_EDITED}\nF\n"));
         repo.commit("block edited and moved to other.md");
         let epoch = LinkEpoch::Commit {
@@ -2242,20 +2515,24 @@ pub fn collect_with_source(
             DriftOutcome::Moved {
                 new_path: "wiki/other.md".into(),
                 new_start: 2,
-                new_end: 7
+                new_end: 7,
+                content_identical: false
             }
         );
     }
 
     #[test]
     fn fuzzy_two_candidates_is_unknown() {
-        // The edited block appears in two files: two at-threshold windows →
-        // Unknown, per the card's unconditional multi-match rule.
+        // The edited block appears twice within the target: two at-threshold
+        // windows → Unknown, per the card's unconditional multi-match rule.
+        // (Cross-file duplication is never ambiguous: a content-only match in
+        // an unrelated file carries no identity evidence and is dropped.)
         let (repo, c1) = repo_with_certified_fuzzy_block();
-        repo.remove_file("wiki/target.md");
-        repo.create_file("wiki/other.md", &format!("H\n{FUZZY_BLOCK_EDITED}\nF\n"));
-        repo.create_file("wiki/also.md", &format!("X\n{FUZZY_BLOCK_EDITED}\nY\n"));
-        repo.commit("edited block duplicated across two files");
+        repo.create_file(
+            "wiki/target.md",
+            &format!("T0\nA1\nA2\nA3\n{FUZZY_BLOCK_EDITED}\nX\n{FUZZY_BLOCK_EDITED}\nT1\n"),
+        );
+        repo.commit("edited block duplicated within the target");
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
@@ -2448,7 +2725,12 @@ pub fn collect_with_source(
     }
 
     #[test]
-    fn href_edited_to_different_content_is_uncertified() {
+    fn href_edited_to_different_content_is_drift() {
+        // The link's epoch record still matches (same label), and the edited
+        // locator resolves to a range that fits — but the content there is
+        // not the certified block, the certified block never moved, and the
+        // page at the epoch DID review this link → Drift (review required),
+        // never Uncertified for a reviewed link.
         let (repo, c1) = repo_with_certified_link();
         repo.create_file(
             "wiki/page.md",
@@ -2461,7 +2743,7 @@ pub fn collect_with_source(
             value: "1".into(),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
-        assert_eq!(classes[0].outcome, DriftOutcome::Uncertified);
+        assert_eq!(classes[0].outcome, DriftOutcome::Drift);
     }
 
     #[test]
@@ -2521,8 +2803,7 @@ pub fn collect_with_source(
         // target is deleted — cross-file Moved requires a missing target;
         // a truncated one is Broken per the card.
         let (repo, c1) = repo_with_certified_link();
-        repo.remove_file("wiki/target.md");
-        repo.create_file("wiki/other.md", &format!("H\n{BLOCK}\nF\n"));
+        repo.rename_file("wiki/target.md", "wiki/other.md");
         repo.commit("block moved to other.md");
 
         let epoch = LinkEpoch::Commit {
@@ -2536,7 +2817,8 @@ pub fn collect_with_source(
             DriftOutcome::Moved {
                 new_path: "wiki/other.md".into(),
                 new_start: 2,
-                new_end: 4
+                new_end: 4,
+                content_identical: true
             }
         );
 
@@ -2550,7 +2832,7 @@ pub fn collect_with_source(
         assert_eq!(
             classes[0].outcome,
             DriftOutcome::Healthy,
-            "the relocation clause keeps the tool's own rewrite certified"
+            "the relocation carve-out keeps the tool's own rewrite certified"
         );
     }
 

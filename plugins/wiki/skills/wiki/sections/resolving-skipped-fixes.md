@@ -19,7 +19,7 @@ graph TD
     A[skipped link] --> B{what changed?}
     B -->|behavior: new params, logic,<br/>return values, deleted feature| C[update prose, then bump links-reviewed]
     B -->|cosmetic: rename, reformat,<br/>reordered tests| D[prose still accurate →<br/>bump links-reviewed]
-    B -->|content moved: range shifted| E[fix didn't relocate it →<br/>edit the link range, then bump]
+    B -->|content moved: range shifted| E[fix didn't relocate it →<br/>edit the link range, then bump;<br/>relocated but "not byte-identical" →<br/>review the new range, then bump]
     B -->|content deleted| F[drop the link from the page]
     B -->|rewritten in place: same range| G[fix prose, then bump links-reviewed]
 ```
@@ -32,7 +32,7 @@ The field is per-page, not per-link: every line-range link on a page is certifie
 links-reviewed: 2   # was 1
 ```
 
-**Moved (range changed)** — `--fix` relocates these automatically when the moved content is found unambiguously. When it skips instead (ambiguous match, multi-match, content edited during the move), edit the fragment link's range by hand, then bump:
+**Moved (range changed)** — `--fix` relocates these automatically when the moved content is found unambiguously *and* the destination is connected to the target by git history (a rename). A verbatim copy of the cited lines in an unrelated page is a quote, not a move, and is never a relocation target. When the relocated copy was lightly edited during the move, `--fix` rewrites the link but refuses to certify it — the skip says "relocated to … but the content there is not byte-identical to the certified block": review the new range, then bump. When it skips entirely (ambiguous or multi-match, or no identity evidence), edit the fragment link's range by hand, then bump:
 
 ```markdown
 [parse_args()](./packages/cli/src/main.rs#L40-L80)   # re-point the range

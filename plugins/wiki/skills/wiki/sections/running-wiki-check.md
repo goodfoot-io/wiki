@@ -13,8 +13,8 @@ wiki check path/to/page.md   # specific globs, resolved from CWD
 | Bucket | Examples | Fix |
 |---|---|---|
 | Frontmatter / link errors | missing `title`/`summary`, title collision, broken link, dangling `#heading` anchor | plain-text edit in the page |
-| Drifted anchor (line range) | cited bytes changed since the anchor epoch | `--fix` relocates the link when the content moved; in-place drift skips → `./resolving-skipped-fixes.md` |
-| Uncertified / unverifiable | page has no `links-reviewed:` field, or the certified content occurs at multiple locations | fail-closed: re-anchor the link and bump `links-reviewed:` → `./fragment-links-and-coverage.md` |
+| Drifted anchor (line range) | cited bytes changed since the anchor epoch | `--fix` relocates the link when the content moved — in the same file, or into a file git history connects to it (a rename); in-place drift or an un-evidenced match skips → `./resolving-skipped-fixes.md` |
+| Uncertified / unverifiable | page has no `links-reviewed:` field, a link added after the last review, duplicate-label ambiguity, or the certified content at multiple identity-evidenced locations | fail-closed: re-point the link in the page and bump `links-reviewed:` → `./fragment-links-and-coverage.md` |
 
 ## Scoping is by CWD, resolution is by repo root
 
@@ -32,4 +32,4 @@ wiki --source index check   # validate staged content (pre-commit); also: worktr
 
 ## Shallow clones fail closed
 
-The anchor-epoch lookup walks the page's full commit history. In a shallow clone the check reports those links as unverifiable rather than guessing — clone with full history (CI: `fetch-depth: 0`) wherever the check runs.
+The anchor-epoch lookup walks the page's full commit history. In a shallow clone the check fails closed with an error (exit 2) rather than guessing — clone with full history (CI: `fetch-depth: 0`) wherever the check runs.

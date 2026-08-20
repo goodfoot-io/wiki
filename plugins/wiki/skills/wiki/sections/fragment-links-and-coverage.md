@@ -30,11 +30,11 @@ links-reviewed: 1
 The field's value is the page's **anchor epoch**. The engine walks the page's git history to the commit where that value last changed — the **anchor commit** — and takes the cited files *as they were at that commit* as the certified baseline. Each link is then classified against that baseline:
 
 - **Healthy** — the cited range's content is byte-identical to the baseline.
-- **Drift** — same place, different bytes. *This article may now be wrong.* The remedy is reading the diff and bumping the field (whole-page re-certification) — `--fix` will not do it for you.
-- **Moved** — the certified bytes now live elsewhere; `--fix` rewrites the link to follow them.
+- **Drift** — same place, different bytes — or a hand-edited range the reviewer never ratified. *This article may now be wrong.* The remedy is reading the diff and bumping the field (whole-page re-certification) — `--fix` will not do it for you.
+- **Moved** — the certified bytes now live elsewhere: shifted in the same file, or carried into a file git history connects to it (a rename). `--fix` rewrites the link to follow them. A match in an *unrelated* file is a quote, not a move, and is never a relocation target. If the relocated copy was lightly edited during the move, `--fix` still rewrites the link but reports it as needing re-certification instead of claiming the certified content moved.
 - **Broken** — the target is gone or the range no longer fits; `--fix` routes it through the rename machinery, and skips when no unambiguous move exists.
-- **Uncertified** — the href points somewhere the page never reviewed: the as-written path and range aren't among the certified links, and the bytes there aren't the certified block.
-- **Fail-closed** — the page has no `links-reviewed:` field at all (the check errors; `--fix` initializes the field), the anchor commit can't be resolved in a shallow clone, or the certified content matches multiple locations.
+- **Uncertified** — the link is new since the last review: the anchor-commit page has no record of this link (its display text and occurrence), so there is no certified baseline to compare against. Review and bump the field.
+- **Fail-closed** — the page has no `links-reviewed:` field at all (the check errors; `--fix` initializes the field), the anchor commit can't be resolved in a shallow clone, the certified content matches multiple identity-evidenced locations, or a duplicate link label was deleted since the epoch so the record pairing is ambiguous.
 
 One field certifies **every** line-range link on the page together: bumping it is a whole-page claim, so bump only after reviewing every drifted link on the page (see `./resolving-skipped-fixes.md`).
 

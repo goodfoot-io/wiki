@@ -96,10 +96,11 @@ fn fix_relocates_cross_file_and_exits_zero() {
     let root = tmp.path();
     seed_certified(root);
 
-    // The block moves verbatim to src/moved.rs; the original target is
-    // emptied but keeps the range's line count (an out-of-range target is
-    // Broken by contract and never reaches the move scan).
-    std::fs::write(root.join("src/target.rs"), EMPTIED).unwrap();
+    // The block moves to src/moved.rs via a committed rename — the
+    // identity evidence the cross-file tier requires (a content-only copy
+    // in an unrelated file would never win; Change 2 of the relocation
+    // amendment) — with a two-line preamble shift.
+    git(root, &["mv", "src/target.rs", "src/moved.rs"]);
     std::fs::write(
         root.join("src/moved.rs"),
         format!("// preamble\n// x\n{BLOCK}"),
@@ -162,9 +163,14 @@ fn fix_unknown_ambiguous_move_exits_1() {
     let root = tmp.path();
     seed_certified(root);
 
-    std::fs::write(root.join("src/target.rs"), EMPTIED).unwrap();
-    std::fs::write(root.join("src/a.rs"), BLOCK).unwrap();
-    std::fs::write(root.join("src/b.rs"), BLOCK).unwrap();
+    // The certified block appears twice inside the target itself (as
+    // separate files the copies would carry no identity evidence and never
+    // reach Unknown; Change 2 of the relocation amendment).
+    std::fs::write(
+        root.join("src/target.rs"),
+        format!("// preamble\n{EMPTIED}\n// gap\n{BLOCK}\n// gap\n{BLOCK}"),
+    )
+    .unwrap();
     git(root, &["add", "-A"]);
     git(root, &["commit", "-q", "-m", "duplicate block"]);
 
@@ -222,7 +228,9 @@ fn fix_print_applied_lists_rewritten_paths() {
     let root = tmp.path();
     seed_certified(root);
 
-    std::fs::write(root.join("src/target.rs"), EMPTIED).unwrap();
+    // The block moves to src/moved.rs via a committed rename (the
+    // cross-file tier's identity evidence) with a two-line preamble shift.
+    git(root, &["mv", "src/target.rs", "src/moved.rs"]);
     std::fs::write(
         root.join("src/moved.rs"),
         format!("// preamble\n// x\n{BLOCK}"),

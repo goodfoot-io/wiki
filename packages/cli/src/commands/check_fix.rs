@@ -1,6 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -118,7 +118,8 @@ pub enum SuccessorResult {
 pub struct RenameMap {
     /// old path → new path (repo-relative strings)
     map: HashMap<String, Vec<String>>,
-    /// Cache for on-demand `git log --follow` lookups.
+    /// Cache for on-demand git-history lookups (follow walk for present
+    /// paths, deletion-walk + `git show` for deleted paths).
     log_cache: HashMap<String, Vec<String>>,
     repo_root: PathBuf,
 }
@@ -183,43 +184,86 @@ impl RenameMap {
 
     /// Look up the rename successor(s) for `old_path` (repo-relative).
     ///
-    /// On miss, performs an on-demand `git log --diff-filter=R --follow` lookup
-    /// and caches the result.
+    /// On miss, performs an on-demand git-history lookup and caches the
+    /// result. Every destination is followed to its own chain end: a
+    /// destination that no longer exists at HEAD may be an intermediate of a
+    /// further committed rename, and the runtime lookup resolves it the same
+    /// way the build-time chain loop resolves map rows.
     pub fn successor(&mut self, old_path: &Path) -> SuccessorResult {
+        let dests = self.lookup_dests(old_path);
+        let ends = self.chain_ends(dests);
+        self.classify(&ends)
+    }
+
+    /// Resolve `old_path`'s recorded successors: in-memory map, then the
+    /// on-demand cache, then git history (inserted into both, so a result
+    /// found here is visible to every later lookup — the runtime counterpart
+    /// of the build-time chain loop).
+    fn lookup_dests(&mut self, old_path: &Path) -> Vec<String> {
         let key = old_path.to_string_lossy().into_owned();
-
-        // Check in-memory map first.
         if let Some(dests) = self.map.get(&key) {
-            let dests = dests.clone();
-            return match dests.len() {
-                0 => SuccessorResult::None,
-                1 => SuccessorResult::Unique(PathBuf::from(&dests[0])),
-                _ => SuccessorResult::Ambiguous(dests.into_iter().map(PathBuf::from).collect()),
-            };
+            return dests.clone();
         }
-
-        // On-demand git log lookup for HEAD history renames.
         if let Some(cached) = self.log_cache.get(&key) {
-            let cached = cached.clone();
-            return match cached.len() {
-                0 => SuccessorResult::None,
-                1 => SuccessorResult::Unique(PathBuf::from(&cached[0])),
-                _ => SuccessorResult::Ambiguous(cached.into_iter().map(PathBuf::from).collect()),
-            };
+            return cached.clone();
         }
-
         let results = git_log_follow_renames(&self.repo_root, old_path).unwrap_or_default();
-        self.log_cache.insert(key.clone(), results.clone());
-
-        // Also populate main map for chain resolution.
         if !results.is_empty() {
-            self.map.insert(key, results.clone());
+            self.map.insert(key.clone(), results.clone());
         }
+        self.log_cache.insert(key, results.clone());
+        results
+    }
 
-        match results.len() {
+    /// Follow every destination through further renames to its chain end. A
+    /// destination present at HEAD is terminal — any further committed
+    /// rename would have removed it — so only missing destinations expand
+    /// through `lookup_dests` (which consults the map and history, walking
+    /// deletion history for committed renames). A visited set guards cycles:
+    /// a cycle member is kept as-is, and the caller's existence check fails
+    /// closed on it.
+    fn chain_ends(&mut self, dests: Vec<String>) -> Vec<String> {
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut current = dests;
+        loop {
+            let mut changed = false;
+            let mut next = Vec::new();
+            for d in current {
+                if !visited.insert(d.clone()) {
+                    next.push(d);
+                    continue;
+                }
+                if self.repo_root.join(&d).exists() {
+                    next.push(d);
+                    continue;
+                }
+                let further = self.lookup_dests(Path::new(&d));
+                if further.is_empty() {
+                    next.push(d);
+                } else {
+                    next.extend(further);
+                    changed = true;
+                }
+            }
+            current = next;
+            if !changed {
+                break;
+            }
+        }
+        current
+    }
+
+    fn classify(&self, dests: &[String]) -> SuccessorResult {
+        let mut unique: Vec<String> = Vec::new();
+        for d in dests {
+            if !unique.contains(d) {
+                unique.push(d.clone());
+            }
+        }
+        match unique.len() {
             0 => SuccessorResult::None,
-            1 => SuccessorResult::Unique(PathBuf::from(&results[0])),
-            _ => SuccessorResult::Ambiguous(results.into_iter().map(PathBuf::from).collect()),
+            1 => SuccessorResult::Unique(PathBuf::from(&unique[0])),
+            _ => SuccessorResult::Ambiguous(unique.into_iter().map(PathBuf::from).collect()),
         }
     }
 }
@@ -257,18 +301,64 @@ fn run_diff_renames(repo_root: &Path, cached: bool) -> Result<Vec<(String, Strin
     Ok(pairs)
 }
 
-/// Run `git log --diff-filter=R --follow --name-status -- <path>` and return the most
-/// recent rename destination (if any) for `path`.
+/// Resolve the committed rename destination(s) of `old_path` (repo-relative).
+///
+/// For a path present at HEAD, the follow walk reports its rename rows
+/// directly. For a deleted path — the case the Broken routing needs — the
+/// follow walk cannot: a pathspec-limited diff renders the rename's old side
+/// as a plain deletion, so `git log --follow --diff-filter=R` on a deleted
+/// path yields no R rows even with `--full-history`. Walk the deletion
+/// history instead: the newest commit that deleted the path is the commit
+/// whose rename (old side == the path) created its successor, and
+/// `git show --name-status` of that commit exposes the R row.
 fn git_log_follow_renames(repo_root: &Path, old_path: &Path) -> Result<Vec<String>> {
     let path_str = old_path.to_string_lossy();
+
+    if repo_root.join(old_path).exists() {
+        // Present path: the follow walk shows rename rows directly.
+        let output = Command::new("git")
+            .current_dir(repo_root)
+            .args([
+                "log",
+                "--diff-filter=R",
+                "--follow",
+                "--name-status",
+                "--format=",
+                "--",
+                &path_str,
+            ])
+            .output()
+            .map_err(|e| miette::miette!("git log failed: {e}"))?;
+
+        if !output.status.success() {
+            return Ok(vec![]);
+        }
+
+        let text = String::from_utf8_lossy(&output.stdout);
+        // Lines look like: R<score>\t<old>\t<new>
+        // The first occurrence (most recent) is the rename we care about.
+        // We want the *destination* of the most recent rename for this path.
+        for line in text.lines() {
+            if !line.starts_with('R') {
+                continue;
+            }
+            let parts: Vec<&str> = line.splitn(3, '\t').collect();
+            if parts.len() == 3 {
+                return Ok(vec![parts[2].to_string()]);
+            }
+        }
+        return Ok(vec![]);
+    }
+
+    // Deleted path: newest-first deletion history, then the name-status rows
+    // of each deleting commit. The rename that deleted the path appears
+    // there with the old side == the path.
     let output = Command::new("git")
         .current_dir(repo_root)
         .args([
             "log",
-            "--diff-filter=R",
-            "--follow",
-            "--name-status",
-            "--format=",
+            "--diff-filter=D",
+            "--format=%H",
             "--",
             &path_str,
         ])
@@ -280,16 +370,26 @@ fn git_log_follow_renames(repo_root: &Path, old_path: &Path) -> Result<Vec<Strin
     }
 
     let text = String::from_utf8_lossy(&output.stdout);
-    // Lines look like: R<score>\t<old>\t<new>
-    // The first occurrence (most recent) is the rename we care about.
-    // We want the *destination* of the most recent rename for this path.
-    for line in text.lines() {
-        if !line.starts_with('R') {
+    for sha in text
+        .lines()
+        .filter(|l| l.len() == 40 && l.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        let show = Command::new("git")
+            .current_dir(repo_root)
+            .args(["show", "--name-status", "--format=", sha])
+            .output()
+            .map_err(|e| miette::miette!("git show failed: {e}"))?;
+        if !show.status.success() {
             continue;
         }
-        let parts: Vec<&str> = line.splitn(3, '\t').collect();
-        if parts.len() == 3 {
-            return Ok(vec![parts[2].to_string()]);
+        for line in String::from_utf8_lossy(&show.stdout).lines() {
+            if !line.starts_with('R') {
+                continue;
+            }
+            let parts: Vec<&str> = line.splitn(3, '\t').collect();
+            if parts.len() == 3 && parts[1] == path_str {
+                return Ok(vec![parts[2].to_string()]);
+            }
         }
     }
     Ok(vec![])
@@ -1329,6 +1429,7 @@ fn run_drift_fix_phase(
                     new_path,
                     new_start,
                     new_end,
+                    content_identical,
                 } => {
                     // Follow the move: rewrite path and range together as the
                     // full href (round-4 review: never path-only).
@@ -1344,19 +1445,43 @@ fn run_drift_fix_phase(
                         file,
                         repo_root,
                     );
-                    fixes.push(Fix {
-                        file: file_rel.clone(),
-                        line: c.source_line,
-                        kind: FixKind::LinkRelocate,
-                        byte_start: c.href_byte_start,
-                        byte_end: c.href_byte_end,
-                        old_href: c.original_href.clone(),
-                        new_href: new_href.clone(),
-                        reason: format!(
-                            "certified content moved to {new_path} lines {new_start}-{new_end}"
-                        ),
-                        confidence: Confidence::High,
-                    });
+                    if *content_identical {
+                        // Byte-identical relocation: the certified content
+                        // moved, and the rewritten href stays certified.
+                        fixes.push(Fix {
+                            file: file_rel.clone(),
+                            line: c.source_line,
+                            kind: FixKind::LinkRelocate,
+                            byte_start: c.href_byte_start,
+                            byte_end: c.href_byte_end,
+                            old_href: c.original_href.clone(),
+                            new_href: new_href.clone(),
+                            reason: format!(
+                                "certified content moved to {new_path} lines {new_start}-{new_end}"
+                            ),
+                            confidence: Confidence::High,
+                        });
+                    } else {
+                        // Honest fuzzy relocation (amendment Change 3): the
+                        // destination is a lightly-edited near-copy, not the
+                        // certified content. The href still follows the move,
+                        // but no "fixed:" line may claim "certified content
+                        // moved" — the link needs re-certification, and the
+                        // post-fix re-check agrees (it classifies the same
+                        // Moved, which is silent, so the skip below is the one
+                        // coherent diagnostic driving exit 1).
+                        certification_skips += 1;
+                        skipped.push(SkippedFix {
+                            file: file_rel.clone(),
+                            line: c.source_line,
+                            kind: FixKind::LinkRelocate,
+                            reason: format!(
+                                "relocated to {new_path} lines {new_start}-{new_end}, but the \
+                                 content there is not byte-identical to the certified block — \
+                                 bump `links-reviewed:` after reviewing it"
+                            ),
+                        });
+                    }
                     file_patches.push((c.href_byte_start, c.href_byte_end, new_href));
                 }
                 drift::DriftOutcome::Broken => {
@@ -1814,14 +1939,14 @@ mod tests {
     }
 
     /// Moved cross-file: the block disappears from the target and reappears
-    /// verbatim in another file; the phase rewrites path and range together.
+    /// in the file that succeeds it via rename history; the phase rewrites
+    /// path and range together. The rename row is the identity evidence the
+    /// cross-file tier requires — a content-only copy in an unrelated file
+    /// must never win (Change 2 of the relocation amendment).
     #[test]
     fn drift_fix_relocates_moved_cross_file() {
         let (repo, page) = certified_page_repo();
-        // The emptied target keeps the range's line count: an out-of-range
-        // target is Broken by contract (round-1 finding 5) and never reaches
-        // the move scan.
-        repo.write("src/target.rs", EMPTIED);
+        repo.git(&["mv", "src/target.rs", "src/moved.rs"]);
         repo.write("src/moved.rs", &format!("// preamble\n// x\n{BLOCK}"));
         repo.commit("move block cross-file");
 
@@ -1948,14 +2073,17 @@ mod tests {
     }
 
     /// Unknown (the certified content occurs at ≥2 locations) skips and
-    /// counts into `unverified` — never first-hit-wins.
+    /// counts into `unverified` — never first-hit-wins. The two extra
+    /// windows sit in the target itself: as separate files they would carry
+    /// no identity evidence and never reach Unknown (Change 2).
     #[test]
         fn drift_fix_skips_unknown_with_unverified_count() {
         let (repo, page) = certified_page_repo();
-        repo.write("src/target.rs", EMPTIED);
-        repo.write("src/a.rs", BLOCK);
-        repo.write("src/b.rs", BLOCK);
-        repo.commit("duplicate block, original gone");
+        repo.write(
+            "src/target.rs",
+            &format!("// preamble\n{EMPTIED}\n// gap\n{BLOCK}\n// gap\n{BLOCK}"),
+        );
+        repo.commit("duplicate block in place, certified window gone");
 
         let (outcome, fixes, skipped, _) = drift_phase(&repo, std::slice::from_ref(&page));
         assert_eq!(fixes.len(), 0, "ambiguous: never auto-fix: {fixes:?}");
