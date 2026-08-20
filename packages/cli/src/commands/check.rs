@@ -294,6 +294,36 @@ pub fn run(
     fix_dry_run: bool,
     print_applied: bool,
 ) -> Result<i32> {
+    let result = run_inner(
+        globs,
+        json,
+        scan_root,
+        repo_root,
+        no_exit_code,
+        source,
+        fix,
+        fix_dry_run,
+        print_applied,
+    );
+    // The one aggregated per-run anchor-cache event (plan decision 7) —
+    // emitted after the body on every path, early exits included, so a warm
+    // run reports zero legs rather than nothing. Never per link or per page.
+    crate::perf::emit_anchor_cache_event();
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_inner(
+    globs: &[String],
+    json: bool,
+    scan_root: &Path,
+    repo_root: &Path,
+    no_exit_code: bool,
+    source: DocSource,
+    fix: bool,
+    fix_dry_run: bool,
+    print_applied: bool,
+) -> Result<i32> {
     // Every hard-error arm funnels through this: print the error (a JSON
     // envelope on stderr under `--format json`, `error: ...` otherwise),
     // then exit 2 — unless `--no-exit-code` is set, in which case the
@@ -685,6 +715,10 @@ struct CachedTarget {
 pub(crate) struct AnchorCacheHandle {
     cache: AnchorCacheKind,
     common_dir: Option<PathBuf>,
+    /// The init lock was held by another process — the cache (and any
+    /// `--clear-cache` delete) is skipped for the run, benign by plan
+    /// decision 8's racing clause.
+    lock_held: bool,
 }
 
 enum AnchorCacheKind {
@@ -726,9 +760,26 @@ impl AnchorCacheHandle {
 /// re-check each construct), so the "first fault only" rule of plan decision
 /// 7 holds across them.
 pub(crate) fn anchor_cache_for_run(fault_reported: &Cell<bool>) -> AnchorCacheHandle {
+    anchor_cache_for_run_inner(fault_reported, true)
+}
+
+/// The `--clear-cache` construction (plan decision 8): cache management,
+/// not tier use — the kill switch (`WIKI_ANCHOR_CACHE=0`) disables tier use
+/// for check runs, but an explicit clear still deletes, so only the env
+/// gate is bypassed here. Every other disabled path (common-dir resolution
+/// failure, held init lock, open error) keeps its run semantics.
+pub(crate) fn anchor_cache_for_clear(fault_reported: &Cell<bool>) -> AnchorCacheHandle {
+    anchor_cache_for_run_inner(fault_reported, false)
+}
+
+fn anchor_cache_for_run_inner(
+    fault_reported: &Cell<bool>,
+    respect_kill_switch: bool,
+) -> AnchorCacheHandle {
     let noop = |common_dir: Option<PathBuf>| AnchorCacheHandle {
         cache: AnchorCacheKind::Noop(crate::cache::NoopCache),
         common_dir,
+        lock_held: false,
     };
     let common_dir = match crate::git::common_dir() {
         Ok(dir) => dir,
@@ -737,17 +788,22 @@ pub(crate) fn anchor_cache_for_run(fault_reported: &Cell<bool>) -> AnchorCacheHa
             return noop(None);
         }
     };
-    if std::env::var("WIKI_ANCHOR_CACHE").as_deref() == Ok("0") {
+    if respect_kill_switch && std::env::var("WIKI_ANCHOR_CACHE").as_deref() == Ok("0") {
         return noop(Some(common_dir));
     }
     match crate::cache::CacheStore::open(&common_dir) {
         Ok(Some(store)) => AnchorCacheHandle {
             cache: AnchorCacheKind::Store(store),
             common_dir: Some(common_dir),
+            lock_held: false,
         },
         // The init lock is held by another process — the designed
         // concurrency path: uncached this run, not a fault (plan decision 4).
-        Ok(None) => noop(Some(common_dir)),
+        Ok(None) => AnchorCacheHandle {
+            cache: AnchorCacheKind::Noop(crate::cache::NoopCache),
+            common_dir: Some(common_dir),
+            lock_held: true,
+        },
         Err(e) => {
             report_cache_fault(fault_reported, &e.to_string());
             noop(Some(common_dir))
@@ -768,20 +824,26 @@ fn report_cache_fault(fault_reported: &Cell<bool>, reason: &str) {
 
 /// `wiki check --clear-cache` (plan decision 8): best-effort delete of the
 /// anchor-cache directory (`<common-dir>/wiki` and its WAL sidecars) via
-/// [`crate::cache::AnchorCache::clear`]. The cache is constructed exactly as
-/// a check run constructs it — kill switch, common-dir resolution failure,
-/// held init lock, and open error all apply — so a disabled cache simply
-/// means nothing is deleted. Prints the cache path to stdout (when the
-/// common dir resolved) and always exits 0; a clear failure is one fault
-/// line on stderr, never an exit-code change.
+/// [`crate::cache::AnchorCache::clear`]. The construction bypasses only the
+/// kill switch — clearing is cache management, not tier use, so
+/// `WIKI_ANCHOR_CACHE=0 wiki check --clear-cache` still deletes. A held
+/// init lock skips the delete (benign per decision 8's racing clause —
+/// never interleave destructively with a quarantine rename) but says so:
+/// the printed path must not claim a deletion that did not happen. Prints
+/// the cache path to stdout (when the common dir resolved) and always
+/// exits 0; a clear failure is one fault line on stderr, never an
+/// exit-code change.
 pub fn clear_cache() -> Result<i32> {
     let fault_reported = Cell::new(false);
-    let anchor_cache = anchor_cache_for_run(&fault_reported);
+    let anchor_cache = anchor_cache_for_clear(&fault_reported);
     if let Err(e) = anchor_cache.cache().clear() {
         report_cache_fault(&fault_reported, &e.to_string());
     }
     if let Some(common_dir) = anchor_cache.common_dir() {
         println!("{}", crate::cache::schema::cache_dir(common_dir).display());
+        if anchor_cache.lock_held {
+            eprintln!("warning: anchor cache busy; not cleared");
+        }
     }
     Ok(0)
 }

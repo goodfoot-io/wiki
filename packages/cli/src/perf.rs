@@ -1,7 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -14,6 +14,68 @@ struct Logger {
 
 static LOGGER: OnceLock<Option<Logger>> = OnceLock::new();
 static STDERR_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Per-run anchor-cache tallies (plan decision 7): the tiers record hits,
+/// misses, bypasses, and summed git-leg durations here, and the run emits
+/// them as a single aggregated `anchor_cache` event — per-link or per-page
+/// events would flood `wiki.log` (a 10k-link corpus → 10k+ lines per run).
+struct AnchorCacheCounters {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    bypasses: AtomicU64,
+    fingerprint_ns: AtomicU64,
+    walk_ns: AtomicU64,
+}
+
+static ANCHOR_CACHE: AnchorCacheCounters = AnchorCacheCounters {
+    hits: AtomicU64::new(0),
+    misses: AtomicU64::new(0),
+    bypasses: AtomicU64::new(0),
+    fingerprint_ns: AtomicU64::new(0),
+    walk_ns: AtomicU64::new(0),
+};
+
+pub fn anchor_cache_hit() {
+    ANCHOR_CACHE.hits.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn anchor_cache_miss() {
+    ANCHOR_CACHE.misses.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn anchor_cache_bypass() {
+    ANCHOR_CACHE.bypasses.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Sum a tier's git-leg duration (the memoized cost on the miss path). The
+/// `fingerprint`/`walk` split preserves the per-tier economy decomposition
+/// the benchmark and the warm-run economy check rely on.
+pub fn anchor_cache_add_leg(name: &str, ns: u64) {
+    match name {
+        "fingerprint" => ANCHOR_CACHE.fingerprint_ns.fetch_add(ns, Ordering::Relaxed),
+        "walk" => ANCHOR_CACHE.walk_ns.fetch_add(ns, Ordering::Relaxed),
+        _ => 0,
+    };
+}
+
+/// Emit the run's one aggregated `anchor_cache` event (plan decision 7).
+/// Called once per `wiki check` invocation, after the run body, on every
+/// path — early exits included — so a warm run reports zero legs rather
+/// than nothing. A no-op before `perf::init` resolves the log file.
+pub fn emit_anchor_cache_event() {
+    log_event(
+        "anchor_cache",
+        0.0,
+        "ok",
+        json!({
+            "hits": ANCHOR_CACHE.hits.load(Ordering::Relaxed),
+            "misses": ANCHOR_CACHE.misses.load(Ordering::Relaxed),
+            "bypasses": ANCHOR_CACHE.bypasses.load(Ordering::Relaxed),
+            "fingerprint_ms": ANCHOR_CACHE.fingerprint_ns.load(Ordering::Relaxed) as f64 / 1e6,
+            "walk_ms": ANCHOR_CACHE.walk_ns.load(Ordering::Relaxed) as f64 / 1e6,
+        }),
+    );
+}
 
 pub fn enable_stderr(cli_enabled: bool) {
     STDERR_ENABLED.store(cli_enabled || env_stderr_enabled(), Ordering::Relaxed);

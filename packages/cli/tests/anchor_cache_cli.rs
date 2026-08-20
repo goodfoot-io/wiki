@@ -401,3 +401,106 @@ fn fix_mode_forced_fault_warns_at_most_once_across_phases() {
         "the warning must be the only stderr difference"
     );
 }
+
+// ── evaluator witnesses ──────────────────────────────────────────────────────
+
+/// `WIKI_ANCHOR_CACHE=0 wiki check --clear-cache` still deletes (plan
+/// decision 8): clearing is cache management, not tier use — the kill
+/// switch only disables the tiers, so the printed path must not claim a
+/// deletion that did not happen.
+#[test]
+fn clear_cache_under_kill_switch_still_deletes() {
+    let repo = certified_fixture();
+    let warm = run(&repo.root, &["check"]);
+    assert_eq!(
+        warm.status.code(),
+        Some(0),
+        "warm run: {}",
+        String::from_utf8_lossy(&warm.stderr)
+    );
+    let cache_dir = expected_cache_dir(&repo.root);
+    assert!(cache_dir.exists(), "the warm run must have cached");
+
+    let out = wiki(&repo.root, &["check", "--clear-cache"])
+        .env("WIKI_ANCHOR_CACHE", "0")
+        .output()
+        .expect("clear under kill switch");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "clear-cache must exit 0 under the kill switch: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !cache_dir.exists(),
+        "the kill switch must not block the delete"
+    );
+    assert_eq!(
+        trim_stdout(&out),
+        cache_dir.display().to_string(),
+        "the printed path must be the directory that was actually deleted"
+    );
+}
+
+/// A held write lock on the cache DB must fail the cache open — never
+/// panic the process (five consecutive `SQLITE_BUSY` results used to hit an
+/// `unreachable!` and abort with exit 101). The run falls back to uncached
+/// computation: byte-identical to the kill-switch baseline, exactly one
+/// fault line, and a normal exit. The WAL-switch pragma of the open path
+/// bypasses SQLite's busy handler (spike S1), so the open fails fast
+/// through the bounded retry wrapper.
+#[test]
+fn check_under_a_held_write_lock_fails_open_without_panicking() {
+    let repo = certified_fixture();
+    let warm = run(&repo.root, &["check"]);
+    assert_eq!(
+        warm.status.code(),
+        Some(0),
+        "warm run: {}",
+        String::from_utf8_lossy(&warm.stderr)
+    );
+
+    let db = wiki::cache::schema::db_path(expected_cache_dir(&repo.root).parent().unwrap());
+    let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let locker = std::thread::spawn(move || {
+        let conn = wiki::cache::schema::open_connection(&db).expect("locker connection");
+        conn.execute_batch("BEGIN EXCLUSIVE;")
+            .expect("take the write lock");
+        acquired_tx.send(()).expect("signal the lock");
+        let _ = release_rx.recv_timeout(std::time::Duration::from_secs(30));
+    });
+    acquired_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the locker must take the write lock before the check runs");
+
+    let locked = run(&repo.root, &["check"]);
+    let off = wiki(&repo.root, &["check"])
+        .env("WIKI_ANCHOR_CACHE", "0")
+        .output()
+        .expect("kill-switch baseline");
+    release_tx.send(()).expect("release the locker");
+    locker.join().expect("locker thread");
+
+    assert_eq!(
+        locked.status.code(),
+        off.status.code(),
+        "a busy cache must never panic (exit 101) — it fails open: {}",
+        String::from_utf8_lossy(&locked.stderr)
+    );
+    assert_eq!(
+        locked.stdout, off.stdout,
+        "a busy cache must not touch stdout"
+    );
+    assert_eq!(
+        fault_warnings(&locked.stderr).len(),
+        1,
+        "a busy cache emits exactly one fault line: {:?}",
+        fault_warnings(&locked.stderr)
+    );
+    assert_eq!(
+        non_fault_stderr(&locked),
+        non_fault_stderr(&off),
+        "the fault line must be the only stderr difference"
+    );
+}

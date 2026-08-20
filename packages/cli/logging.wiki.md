@@ -1,7 +1,7 @@
 ---
 title: Wiki Logging and Perf Instrumentation
 summary: Documents all logging and performance tracing points in the wiki CLI. 
-links-reviewed: 2
+links-reviewed: 3
 ---
 
 ## Overview
@@ -47,20 +47,13 @@ These scopes cover the cold-cache path: when the stat-only freshness gate misses
 
 ### Anchor Cache
 
-These cover the disposable anchor-cache tiers inside [`wiki check`](./src/commands/check.rs): the fingerprint tier (per-link rk64 of the certified target range) and the anchor tier (per-page anchor-epoch walk). Every scope below fires only on a cache miss — the served-hit path runs no git leg — so the scope's warm-run absence is exactly the economy the cache buys. All events carry `meta.page` (the page path), and the zero-duration ones have `duration_ms: 0.0`.
-
-| Location | Scope Name | Measures | Metadata |
-|----------|-----------|----------|----------|
-| [drift.rs](./src/commands/drift.rs#L1354-L1358) | `cache.fingerprint` | Tier-F git leg: reads the certified target range's blob at the anchor commit (miss path only) | `page` (page path) |
-| [drift.rs](./src/commands/drift.rs#L338-L404) | `cache.walk` | Tier-A memoized leg: the per-commit blob-read + YAML-parse loop of the anchor-epoch walk (miss path only) | `page` (page path) |
+The disposable anchor-cache tiers inside [`wiki check`](./src/commands/check.rs) — the fingerprint tier (per-link rk64 of the certified target range) and the anchor tier (per-page anchor-epoch walk) — report through **one aggregated event per run** (plan decision 7): per-link or per-page events would flood `wiki.log` (a 10k-link corpus → 10k+ lines per run).
 
 | Location | Event Name | Meaning |
 |----------|-----------|----------|
-| [drift.rs](./src/commands/drift.rs#L1333-L1338) | `cache.fingerprint.hit` | Served a verified fingerprint row |
-| [drift.rs](./src/commands/drift.rs#L1341-L1346) | `cache.fingerprint.miss` | Fingerprint lookup missed; computing the git leg |
-| [drift.rs](./src/commands/drift.rs#L314-L319) | `cache.walk.hit` | Served a verified anchor-walk row |
-| [drift.rs](./src/commands/drift.rs#L326-L331) | `cache.walk.miss` | Anchor-walk lookup missed; computing the memoized leg |
-| [drift.rs](./src/commands/drift.rs#L286-L292) | `cache.walk.bypass` | Shallow clone: the walk tier is bypassed and the run fails closed unchanged |
+| [check.rs](./src/commands/check.rs#L286-L313) | `anchor_cache` | Emitted once per check invocation after the run body, on every path — early exits included. `meta.hits`, `meta.misses`, `meta.bypasses` tally the row-level outcomes across both tiers; `meta.fingerprint_ms` and `meta.walk_ms` sum each tier's git-leg durations ([drift.rs](./src/commands/drift.rs#L392) and [drift.rs](./src/commands/drift.rs#L1370)), recorded on the miss path only — a served hit runs no git leg — so a fully warm run reports zeros. |
+
+The tally sites live at the tier seams: the shallow gate ([drift.rs](./src/commands/drift.rs#L288)), the verified-hit serves ([drift.rs](./src/commands/drift.rs#L311), [drift.rs](./src/commands/drift.rs#L1322)), and the misses that precede computing ([drift.rs](./src/commands/drift.rs#L318), [drift.rs](./src/commands/drift.rs#L1325)).
 
 ## Direct Output Points (println! and eprintln!)
 

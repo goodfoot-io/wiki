@@ -1,7 +1,9 @@
-packages/cli/scripts/bench.mjs#L160-L160 rk64:171f496903a953df
-packages/cli/scripts/bench.mjs#L198-L199 rk64:17b822e943d0c225
+packages/cli/scripts/bench.mjs#L169-L169 rk64:171f496903a953df
+packages/cli/scripts/bench.mjs#L207-L208 rk64:17b822e943d0c225
+packages/cli/scripts/bench.mjs#L486-L486 rk64:15fc9d8275b659df
 packages/cli/src/index/mod.rs#L322-L351 rk64:e4e8155207ddb2f7
 packages/cli/src/main.rs#L276-L367 rk64:46b452864b8994c5
-packages/cli/src/perf.rs#L99-L99 rk64:ea06ccad2bedd9c4
+packages/cli/src/perf.rs#L65-L68 rk64:bb32218b01c179f1
+packages/cli/src/perf.rs#L161-L161 rk64:ea06ccad2bedd9c4
 
-Term-decomposition contract for the latency benchmark: the perf event names the Rust CLI emits to wiki.log (startup, command_finish, index.fast_gate/gix_open/refresh) are parsed by name in bench.mjs to attribute time to the startup/prepare/body terms.
+Term-decomposition contract for the benchmark: the perf event names the Rust CLI emits to wiki.log (startup, command_finish, index.fast_gate/gix_open/refresh, and the one-per-run anchor_cache counter) are parsed by name in bench.mjs to attribute time to the startup/prepare/body terms and to report the anchor-cache economy.

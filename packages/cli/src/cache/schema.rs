@@ -265,17 +265,22 @@ pub fn quarantine(db_path: &Path) -> Result<(), CacheError> {
 pub(crate) fn retry_busy<T>(
     mut run: impl FnMut() -> Result<T, CacheError>,
 ) -> Result<T, CacheError> {
+    let mut last_busy = None;
     for attempt in 0..5 {
         match run() {
-            Err(CacheError::Sqlite(rusqlite::Error::SqliteFailure(f, _)))
+            Err(e @ CacheError::Sqlite(rusqlite::Error::SqliteFailure(f, _)))
                 if f.code == ErrorCode::DatabaseBusy =>
             {
+                last_busy = Some(e);
                 std::thread::sleep(Duration::from_millis(10 * attempt as u64));
             }
             other => return other,
         }
     }
-    unreachable!("the loop returns on the fifth attempt")
+    // Five consecutive BUSY results: fall through to the fail-open contract
+    // (plan decision 6) — the fifth BUSY is returned as the failure, the
+    // cache is unavailable for the run. Never a panic, never a quarantine.
+    Err(last_busy.expect("the loop only exits after five BUSY results"))
 }
 
 /// Open the database at `db_path` applying the binding open order (plan
@@ -293,4 +298,43 @@ pub fn open_connection(db_path: &Path) -> Result<Connection, CacheError> {
     }
     conn.execute(META_INSERT_SQL, params![APPLICATION_ID, SCHEMA_VERSION, SEMANTIC_EPOCH])?;
     Ok(conn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    /// The fail-open witness (plan decision 6): five consecutive
+    /// `SQLITE_BUSY` results return the fifth as `Err` — never a panic. A
+    /// writer holding an exclusive lock makes every attempt fail fast
+    /// (zero busy timeout on the victim), so the test runs inside the
+    /// retry wrapper's own backoff window.
+    #[test]
+    fn retry_busy_falls_through_to_err_after_five_busy_results() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("witness.sqlite");
+
+        let locker = Connection::open(&db).expect("open locker");
+        locker.execute_batch("BEGIN EXCLUSIVE;").expect("take write lock");
+
+        let victim = Connection::open(&db).expect("open victim");
+        victim
+            .busy_timeout(Duration::from_millis(0))
+            .expect("set zero timeout");
+
+        let result = retry_busy(|| {
+            victim
+                .execute_batch("CREATE TABLE witness (id INTEGER);")
+                .map_err(CacheError::from)
+        });
+        let err = result.expect_err("five BUSY results must return Err, not panic");
+        assert!(
+            matches!(
+                err,
+                CacheError::Sqlite(rusqlite::Error::SqliteFailure(f, _)) if f.code == ErrorCode::DatabaseBusy
+            ),
+            "the fifth BUSY must be the returned error: {err:?}"
+        );
+    }
 }

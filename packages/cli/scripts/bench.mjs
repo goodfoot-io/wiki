@@ -470,8 +470,9 @@ function commitCount(corpus) {
 }
 
 // One measured `wiki check`: wall clock plus the cache tiers' contribution —
-// the summed cache.fingerprint/cache.walk span durations and the per-tier
-// hit/miss counts — parsed from the run's wiki.log.
+// the aggregated `anchor_cache` event (plan decision 7: one per run, never
+// per link) carrying hit/miss/bypass counts and the summed
+// fingerprint/walk git-leg durations.
 function anchorCheckRun(bin, corpus) {
   writeFileSync(logPath(corpus), "");
   const start = process.hrtime.bigint();
@@ -482,19 +483,16 @@ function anchorCheckRun(bin, corpus) {
   });
   const wall = Number(process.hrtime.bigint() - start) / 1e6;
   const events = readRunEvents(corpus);
-  const count = (name) => events.filter((e) => e.event === name).length;
+  const agg = events.find((e) => e.event === "anchor_cache");
+  const meta = agg?.meta ?? {};
   return {
     ok: r.status === 0 || r.status === 1,
     status: r.status,
     wall,
-    legMs: events
-      .filter((e) => e.event === "cache.fingerprint" || e.event === "cache.walk")
-      .reduce((acc, e) => acc + (e.duration_ms ?? 0), 0),
-    fingerprintHit: count("cache.fingerprint.hit"),
-    fingerprintMiss: count("cache.fingerprint.miss"),
-    walkHit: count("cache.walk.hit"),
-    walkMiss: count("cache.walk.miss"),
-    walkBypass: count("cache.walk.bypass"),
+    legMs: (meta.fingerprint_ms ?? 0) + (meta.walk_ms ?? 0),
+    hits: meta.hits ?? 0,
+    misses: meta.misses ?? 0,
+    bypasses: meta.bypasses ?? 0,
   };
 }
 
@@ -516,9 +514,9 @@ function anchorMeasure(bin, corpus, runs) {
     warm: {
       wall: summarize(warm.map((r) => r.wall)),
       legMs: summarize(warm.map((r) => r.legMs)),
-      fingerprintHit: medianOf(warm.map((r) => r.fingerprintHit)),
-      walkHit: medianOf(warm.map((r) => r.walkHit)),
-      walkBypass: medianOf(warm.map((r) => r.walkBypass)),
+      hits: medianOf(warm.map((r) => r.hits)),
+      misses: medianOf(warm.map((r) => r.misses)),
+      bypasses: medianOf(warm.map((r) => r.bypasses)),
       failedStatus: warm.map((r) => r.failedStatus ?? (r.ok ? null : r.status)).find((s) => s != null) ?? null,
     },
   };
@@ -531,12 +529,12 @@ function printAnchorReport(env, real, synthetic) {
     console.log(`${label.padEnd(11)} commits ${String(m.commits ?? "?").padStart(6)}`);
     console.log(
       `  cold  wall ${ms(cold.wall)}ms   cache legs ${ms(cold.legMs)}ms   ` +
-        `(fp hit ${cold.fingerprintHit}, miss ${cold.fingerprintMiss} · walk hit ${cold.walkHit}, miss ${cold.walkMiss})` +
+        `(hits ${cold.hits}, misses ${cold.misses}, bypasses ${cold.bypasses})` +
         (cold.ok ? "" : `  [run status ${cold.status}]`),
     );
     console.log(
       `  warm  wall ${ms(w.wall.median)}ms   cache legs ${ms(w.legMs.median)}ms   ` +
-        `(fp hit ${w.fingerprintHit ?? "—"}, walk hit ${w.walkHit ?? "—"}, bypass ${w.walkBypass ?? 0})` +
+        `(hits ${w.hits ?? "—"}, misses ${w.misses ?? "—"}, bypasses ${w.bypasses ?? 0})` +
         (w.failedStatus != null ? `  [run status ${w.failedStatus}]` : ""),
     );
   };

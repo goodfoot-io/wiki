@@ -325,21 +325,27 @@ fn log_events(repo_root: &Path) -> Vec<Value> {
         .collect()
 }
 
-/// Count events with the given `event` name.
-fn count_events(events: &[Value], name: &str) -> usize {
-    events
-        .iter()
-        .filter(|e| e["event"].as_str() == Some(name))
-        .count()
+/// The run's aggregated `anchor_cache` event (plan decision 7), or `None`
+/// when the log has none.
+fn anchor_cache_event(repo_root: &Path) -> Option<Value> {
+    log_events(repo_root)
+        .into_iter()
+        .find(|e| e["event"].as_str() == Some("anchor_cache"))
 }
 
-/// Count events with the given `event` name for one page (the `meta.page`
-/// field, repo-relative like `wiki/guide.md`).
-fn count_events_for_page(events: &[Value], name: &str, page: &str) -> usize {
-    events
-        .iter()
-        .filter(|e| e["event"].as_str() == Some(name) && e["meta"]["page"].as_str() == Some(page))
-        .count()
+/// The aggregate's `meta` counter as a u64 (0 when missing).
+fn aggregate_counter(repo_root: &Path, name: &str) -> u64 {
+    anchor_cache_event(repo_root)
+        .and_then(|e| e["meta"][name].as_u64())
+        .unwrap_or(0)
+}
+
+/// The aggregate's summed cache-git leg milliseconds (fingerprint + walk) —
+/// the memoized cost, zero on a fully served run.
+fn aggregate_legs_ms(repo_root: &Path) -> f64 {
+    let event = anchor_cache_event(repo_root).expect("anchor_cache event");
+    event["meta"]["fingerprint_ms"].as_f64().unwrap_or(0.0)
+        + event["meta"]["walk_ms"].as_f64().unwrap_or(0.0)
 }
 
 /// Count rows in one cache table filtered by a column equality.
@@ -432,10 +438,10 @@ fn oracle_all_modes_are_byte_identical_across_cache_states() {
 
 // ── (c) warm-run economy ──────────────────────────────────────────────────────
 
-/// Plan check (c) — warm-run economy: a warm cache performs strictly fewer
-/// cache-git legs (the `cache.fingerprint` / `cache.walk` spans, per the
-/// perf contract) than the cold run, and the warm run serves rows
-/// (`cache.fingerprint.hit`).
+/// Plan check (c) — warm-run economy: a warm cache pays zero cache-git legs
+/// (the aggregate's summed `fingerprint_ms` + `walk_ms` — the memoized
+/// per-commit and per-link costs, per plan decision 7's one-per-run event)
+/// and recomputes nothing, while the cold run pays the legs and misses.
 #[test]
 fn warm_run_performs_strictly_fewer_cache_git_legs_than_cold() {
     let repo = certified_fixture();
@@ -443,22 +449,31 @@ fn warm_run_performs_strictly_fewer_cache_git_legs_than_cold() {
     let cold = run_perf(&repo.root, &["check"]);
     assert_eq!(cold.status.code(), Some(0), "{}", combined(&cold));
     let cold_events = log_events(&repo.root);
-    let cold_legs = count_events(&cold_events, "cache.fingerprint")
-        + count_events(&cold_events, "cache.walk");
+    assert!(
+        aggregate_counter(&repo.root, "misses") >= 1,
+        "the cold run must miss at least one row: {cold_events:?}"
+    );
+    assert!(
+        aggregate_legs_ms(&repo.root) > 0.0,
+        "the cold run must pay the cache-git legs: {cold_events:?}"
+    );
 
     let warm = run_perf(&repo.root, &["check"]);
     assert_eq!(warm.status.code(), Some(0), "{}", combined(&warm));
     let warm_events = log_events(&repo.root);
-    let warm_legs = count_events(&warm_events, "cache.fingerprint")
-        + count_events(&warm_events, "cache.walk");
-
-    assert!(
-        warm_legs < cold_legs,
-        "a warm cache must run strictly fewer cache-git legs (cold {cold_legs}, warm {warm_legs}):\ncold: {cold_events:?}\nwarm: {warm_events:?}"
+    assert_eq!(
+        aggregate_counter(&repo.root, "misses"),
+        0,
+        "the warm run must recompute nothing: {warm_events:?}"
+    );
+    assert_eq!(
+        aggregate_legs_ms(&repo.root),
+        0.0,
+        "the warm run must pay zero cache-git legs: {warm_events:?}"
     );
     assert!(
-        count_events(&warm_events, "cache.fingerprint.hit") >= 1,
-        "the warm run must serve at least one fingerprint row: {warm_events:?}"
+        aggregate_counter(&repo.root, "hits") >= 1,
+        "the warm run must serve at least one row: {warm_events:?}"
     );
 }
 
@@ -597,27 +612,23 @@ fn two_concurrent_checks_on_a_fresh_cache_both_succeed() {
 
 /// Plan check (h) — anchor invalidation: a commit touching one page moves
 /// its walk key (its `git log --follow` output changes), so that page's
-/// walk misses and recomputes, while an untouched page's walk still hits.
+/// walk misses and recomputes, while untouched walks and fingerprint rows
+/// still hit. The three-page, one-link fixture makes the aggregated
+/// per-run counters (plan decision 7) discriminate per page: after the
+/// touch exactly one miss and five hits is the only consistent reading.
 #[test]
 fn commit_touching_a_page_moves_its_walk_key_but_not_others() {
     let repo = certified_fixture();
-    let touched = "wiki/guide.md";
-    let untouched = "wiki/other.md";
 
-    // Cold run lands the rows; the warm run serves both pages' walks.
+    // Cold run lands the rows; the warm run serves every walk and fingerprint.
     run(&repo.root, &["check"]);
     let warm = run_perf(&repo.root, &["check"]);
     assert_eq!(warm.status.code(), Some(0), "{}", combined(&warm));
     let warm_events = log_events(&repo.root);
     assert_eq!(
-        count_events_for_page(&warm_events, "cache.walk.hit", touched),
-        1,
-        "the warm run must serve the touched page's walk: {warm_events:?}"
-    );
-    assert_eq!(
-        count_events_for_page(&warm_events, "cache.walk.hit", untouched),
-        1,
-        "the warm run must serve the untouched page's walk: {warm_events:?}"
+        aggregate_counter(&repo.root, "misses"),
+        0,
+        "the warm run must serve every row: {warm_events:?}"
     );
 
     // A commit touching only `guide.md` changes its log output → new key.
@@ -632,19 +643,14 @@ fn commit_touching_a_page_moves_its_walk_key_but_not_others() {
     assert_eq!(after.status.code(), Some(0), "{}", combined(&after));
     let events = log_events(&repo.root);
     assert_eq!(
-        count_events_for_page(&events, "cache.walk.miss", touched),
+        aggregate_counter(&repo.root, "misses"),
         1,
-        "the touched page's walk must miss and recompute: {events:?}"
+        "exactly the touched page's walk must miss and recompute: {events:?}"
     );
     assert_eq!(
-        count_events_for_page(&events, "cache.walk.hit", touched),
-        0,
-        "a moved walk key must never hit: {events:?}"
-    );
-    assert_eq!(
-        count_events_for_page(&events, "cache.walk.hit", untouched),
-        1,
-        "an untouched page's walk must still hit: {events:?}"
+        aggregate_counter(&repo.root, "hits"),
+        5,
+        "the untouched walks and every fingerprint row must still hit: {events:?}"
     );
 }
 
@@ -699,27 +705,17 @@ fn shallow_transition_bypasses_and_fails_closed() {
     );
     let events = log_events(&repo.root);
     assert_eq!(
-        count_events(&events, "cache.walk.hit"),
+        aggregate_counter(&repo.root, "hits"),
         0,
         "a shallow run must never serve: {events:?}"
     );
     assert_eq!(
-        count_events(&events, "cache.walk.miss"),
-        0,
-        "a shallow run must never compute-write: {events:?}"
-    );
-    assert_eq!(
-        count_events(&events, "cache.fingerprint.hit"),
-        0,
-        "a shallow run must never serve: {events:?}"
-    );
-    assert_eq!(
-        count_events(&events, "cache.fingerprint.miss"),
+        aggregate_counter(&repo.root, "misses"),
         0,
         "a shallow run must never compute-write: {events:?}"
     );
     assert!(
-        count_events(&events, "cache.walk.bypass") >= 1,
+        aggregate_counter(&repo.root, "bypasses") >= 1,
         "the shallow gate must bypass the walk tier: {events:?}"
     );
 }
@@ -801,13 +797,22 @@ fn unreadable_page_blob_is_probed_present_and_skips_the_walk_row() {
         restored.stdout, on.stdout,
         "restored state must check identically"
     );
+    assert_eq!(
+        count_rows(&db, "anchor_walk", "page_path", damaged),
+        1,
+        "the restored run must cache the damaged page's walk"
+    );
 
     let serve = run_perf(&repo.root, &["check"]);
     assert_eq!(serve.status.code(), Some(0), "{}", combined(&serve));
     let events = log_events(&repo.root);
     assert_eq!(
-        count_events_for_page(&events, "cache.walk.hit", damaged),
-        1,
+        aggregate_counter(&repo.root, "misses"),
+        0,
+        "the restored row must serve — nothing recomputed: {events:?}"
+    );
+    assert!(
+        aggregate_counter(&repo.root, "hits") >= 1,
         "the restored row must serve: {events:?}"
     );
 }

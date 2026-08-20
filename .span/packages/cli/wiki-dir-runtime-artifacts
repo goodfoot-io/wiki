@@ -1,6 +1,6 @@
 .gitignore#L70-L76 rk64:4c4e65457aaeb241
 packages/cli/src/index/lock.rs#L17-L29 rk64:d8eb3fcc6ee78810
 packages/cli/src/index/mod.rs#L72-L81 rk64:b2f5078af9fe4ef8
-packages/cli/src/perf.rs#L130-L133 rk64:c7d205c6efd35b72
+packages/cli/src/perf.rs#L192-L195 rk64:c7d205c6efd35b72
 
 .wiki/ holds the index cache's runtime artifacts: the sqlite DB and its sidecars live under wiki_dir/index_db_path, the refresh lock at .wiki/wiki-refresh.lock, and perf logs land at the repo root as wiki.log. .gitignore ignores that exact set, and the lock and path helpers pin the same names in code. Adding or renaming any artifact requires updating all sites in lockstep.

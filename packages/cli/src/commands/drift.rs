@@ -21,6 +21,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
+use std::time::Instant;
 
 use thiserror::Error;
 
@@ -280,15 +281,11 @@ fn walk_anchor_epoch(
 ) -> Result<LinkEpoch, EpochError> {
     // The repository state is the authority: a local-path `--depth 1` clone
     // can silently copy full history, so clone flags must not be trusted.
-    // The gate runs FIRST, before any cache consult — the bypassed tier
-    // emits `cache.walk.bypass` and the run fails closed unchanged.
+    // The gate runs FIRST, before any cache consult — the bypassed tier is
+    // tallied for the run's aggregated `anchor_cache` event and the run
+    // fails closed unchanged.
     if git_output(repo_root, &["rev-parse", "--is-shallow-repository"])?.trim() == "true" {
-        crate::perf::log_event(
-            "cache.walk.bypass",
-            0.0,
-            "ok",
-            serde_json::json!({ "page": page_path }),
-        );
+        crate::perf::anchor_cache_bypass();
         return Err(EpochError::ShallowClone);
     }
 
@@ -311,34 +308,25 @@ fn walk_anchor_epoch(
     // only a verified row; any lookup error is a miss, never a failure.
     let cache_key = crate::cache::key::walk_key(page_path, &log);
     if let Some(row) = cache.lookup_walk(&cache_key, page_path, &log).unwrap_or(None) {
-        crate::perf::log_event(
-            "cache.walk.hit",
-            0.0,
-            "ok",
-            serde_json::json!({ "page": page_path }),
-        );
+        crate::perf::anchor_cache_hit();
         return Ok(LinkEpoch::Commit {
             sha: row.anchor_sha,
             path_at_commit: row.path_at_commit,
             value: row.value,
         });
     }
-    crate::perf::log_event(
-        "cache.walk.miss",
-        0.0,
-        "ok",
-        serde_json::json!({ "page": page_path }),
-    );
+    crate::perf::anchor_cache_miss();
 
     // The memoized leg: the existing per-commit blob-read + YAML-parse loop.
     // Failed reads are recorded — the walk still treats them as the
     // field-less state, exactly as uncached — and the availability probe
-    // below decides whether the resulting epoch may be cached.
+    // below decides whether the resulting epoch may be cached. Its duration
+    // is tallied into the run's aggregated `anchor_cache` event (the walk
+    // leg of the economy) — a served hit never reaches this timing, so a
+    // warm run reports zero walk milliseconds.
     let mut failed_reads: Vec<(String, String)> = Vec::new();
-    let epoch = crate::perf::scope_result(
-        "cache.walk",
-        serde_json::json!({ "page": page_path }),
-        || {
+    let walk_start = Instant::now();
+    let epoch = (|| {
             // Walk newest→oldest: (sha, name in effect at that commit,
             // parsed value). Every pushed value is readable by construction;
             // absence at a commit is compared as the field-less state.
@@ -400,8 +388,9 @@ fn walk_anchor_epoch(
                     }
                 },
             })
-        },
-    )?;
+    })();
+    crate::perf::anchor_cache_add_leg("walk", walk_start.elapsed().as_nanos() as u64);
+    let epoch = epoch?;
 
     // The write: the walk's epoch is cached only when no failed read probed
     // present or unknown — an unreadable blob is not a defined walk input,
@@ -1330,32 +1319,19 @@ fn certified_content_fp(
         .unwrap_or(None)
         && let Some(fp) = crate::rk64::rk64_from_hex(&fp_hex)
     {
-        crate::perf::log_event(
-            "cache.fingerprint.hit",
-            0.0,
-            "ok",
-            serde_json::json!({ "page": page_path }),
-        );
+        crate::perf::anchor_cache_hit();
         return Ok(fp);
     }
-    crate::perf::log_event(
-        "cache.fingerprint.miss",
-        0.0,
-        "ok",
-        serde_json::json!({ "page": page_path }),
-    );
+    crate::perf::anchor_cache_miss();
     if let Some(&fp) = memo.get(&key) {
         return Ok(fp);
     }
 
-    // The tier's git leg — it runs only here, never on a served hit, so the
-    // span (and its warm-run absence) is exactly the economy the cache
-    // buys.
-    let fp = match crate::perf::scope_result(
-        "cache.fingerprint",
-        serde_json::json!({ "page": page_path }),
-        || read_blob_at(repo_root, anchor_sha, &cert.target_path),
-    )? {
+    // The tier's git leg — it runs only here, never on a served hit, and its
+    // duration is tallied into the run's aggregated `anchor_cache` event, so
+    // a warm run reports zero fingerprint milliseconds.
+    let fp_start = Instant::now();
+    let fp = match read_blob_at(repo_root, anchor_sha, &cert.target_path)? {
         None => {
             // The read failed; the probe decides the write.
             if availability_probe(repo_root, anchor_sha, &cert.target_path) == Availability::Absent {
@@ -1391,6 +1367,7 @@ fn certified_content_fp(
             fp
         }
     };
+    crate::perf::anchor_cache_add_leg("fingerprint", fp_start.elapsed().as_nanos() as u64);
     memo.insert(key, fp);
     Ok(fp)
 }

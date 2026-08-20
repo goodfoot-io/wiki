@@ -1,6 +1,6 @@
 .github/workflows/ci.yml rk64:32f4eaddda33814b
-packages/cli/src/commands/check.rs#L473-L474 rk64:ada7a7e0c5c73264
-packages/cli/src/commands/check.rs#L554-L555 rk64:4d1d8ed49f326354
+packages/cli/src/commands/check.rs#L503-L504 rk64:ada7a7e0c5c73264
+packages/cli/src/commands/check.rs#L584-L585 rk64:4d1d8ed49f326354
 packages/cli/src/commands/check_fix.rs#L87-L96 rk64:ea0f10ffb264c17e
 packages/cli/tests/drift_fix.rs rk64:d6df9c410687dcf1
 
