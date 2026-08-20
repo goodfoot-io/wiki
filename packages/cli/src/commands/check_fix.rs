@@ -1369,11 +1369,21 @@ fn run_drift_fix_phase(
     let mut ctx = drift::MoveScanCtx::new();
 
     for file in files {
-        let content = match content_cache
-            .get_or_try_read(file, || std::fs::read_to_string(file))
-        {
-            Ok(c) => c.to_string(),
-            Err(_) => continue,
+        // The drift phase runs last (see run_fix_pass), so earlier phases
+        // (Fix #1, Fix #3) may already hold a rewritten whole file for this
+        // page. Read the patched content when one exists — the earlier
+        // phases' href offsets are against that content, and this phase's
+        // own offsets must be too, or the drift relocation would clobber
+        // their rewrite with a file built from the original bytes.
+        let content = if let Some(patched) = patches.get(file) {
+            patched.clone()
+        } else {
+            match content_cache
+                .get_or_try_read(file, || std::fs::read_to_string(file))
+            {
+                Ok(c) => c.to_string(),
+                Err(_) => continue,
+            }
         };
         if !drift::has_line_range_links(&content) {
             continue;
@@ -1384,16 +1394,16 @@ fn run_drift_fix_phase(
             .unwrap_or_else(|_| file.to_string_lossy().into_owned());
         let page_path = file_rel.replace('\\', "/");
 
-        let current_value = drift::extract_links_reviewed(&content);
+        let current_value = drift::read_links_reviewed(&content);
         let committed_value = match DocSource::Head.read(repo_root, &page_path) {
-            Ok(Some(head_content)) => drift::extract_links_reviewed(&head_content),
-            _ => None,
+            Ok(Some(head_content)) => drift::read_links_reviewed(&head_content),
+            _ => drift::LinksReviewedRead::Readable(None),
         };
         let epoch = drift::find_anchor_commit(
             repo_root,
             &page_path,
-            current_value.as_deref(),
-            committed_value.as_deref(),
+            &current_value,
+            &committed_value,
         )
         .map_err(|e| miette::miette!("{e}"))?;
 

@@ -354,6 +354,253 @@ fn drift_shallow_clone_fails_closed() {
     );
 }
 
+/// Control for the `--no-exit-code` escape hatch (witness W5): the same
+/// shallow clone reports the error on stderr but exits 0 under the flag.
+/// The flag's contract is "report but never fail", so it must gate the
+/// hard-error arms (the shallow-clone EpochError lands in the collect
+/// arms) exactly as it gates validation errors.
+#[test]
+fn drift_shallow_clone_no_exit_code_reports_and_exits_zero() {
+    let tmp = init_repo();
+    let root = tmp.path();
+    seed_certified(root);
+
+    let dst = tempfile::tempdir().unwrap();
+    let src = format!("file://{}", root.display());
+    let status = Command::new("git")
+        .args(["clone", "-q", "--depth", "1"])
+        .arg(&src)
+        .arg(dst.path())
+        .status()
+        .expect("spawn git clone");
+    assert!(status.success(), "git clone failed");
+
+    let out = wiki_check(dst.path(), &["--no-exit-code"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "--no-exit-code must suppress the hard-error exit; stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined(&out).contains("shallow"),
+        "the shallow-clone error must still be surfaced; got:\n{}",
+        combined(&out)
+    );
+
+    // Under `--format json` the same suppressed hard error prints a JSON
+    // envelope on stderr instead of the plain text line.
+    let outj = wiki_check(dst.path(), &["--no-exit-code", "--format", "json"]);
+    assert_eq!(
+        outj.status.code(),
+        Some(0),
+        "json mode must also respect --no-exit-code; stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&outj.stdout),
+        String::from_utf8_lossy(&outj.stderr)
+    );
+    let errj = String::from_utf8_lossy(&outj.stderr);
+    assert!(
+        errj.contains("\"error\"") && errj.contains("shallow"),
+        "json mode must print the error envelope; got:\n{errj}"
+    );
+}
+
+/// Control for the empty-corpus decision: with no pages matched, the
+/// "no wiki pages found" fatal diagnostic still prints, and `--no-exit-code`
+/// gates its exit the same way it gates every other hard error.
+#[test]
+fn drift_empty_corpus_no_exit_code_reports_and_exits_zero() {
+    let tmp = init_repo();
+    let root = tmp.path();
+
+    let out = wiki_check(root, &["--no-exit-code"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "--no-exit-code must suppress the empty-corpus exit; stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined(&out).contains("no wiki pages found"),
+        "the empty-corpus diagnostic must still be surfaced; got:\n{}",
+        combined(&out)
+    );
+
+    // Without the flag the empty corpus keeps failing closed.
+    let out2 = wiki_check(root, &[]);
+    assert_eq!(
+        out2.status.code(),
+        Some(2),
+        "empty corpus must keep exit 2 without the flag"
+    );
+}
+
+// ── Unparseable YAML: not a value, not an epoch event ─────────────────────────
+
+/// Witness W6 (finding yaml-breakage-rebaselines): a commit that breaks the
+/// page's YAML is not a value and not an epoch event. After a repair commit
+/// that adds a new line-range link WITHOUT bumping the field, the anchor
+/// stays at the newest readable value change — the repair commit cannot
+/// silently re-certify links no human reviewed, and the new link classifies
+/// Uncertified (exit 1).
+#[test]
+fn drift_broken_yaml_repair_cannot_reanchor() {
+    let tmp = init_repo();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "fn foo() {\n    42\n}\n").unwrap();
+    write_certified_page(root, "page.md", "1", "See [a](/src/lib.rs#L1-L3).");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "certify"]);
+
+    // Commit B breaks the YAML block entirely.
+    std::fs::write(
+        root.join("wiki/page.md"),
+        "---\ntitle: [unclosed\nlinks-reviewed: 1\n---\n\nSee [a](/src/lib.rs#L1-L3).\n",
+    )
+    .unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "break yaml"]);
+
+    // Commit C repairs the YAML with the SAME field value and adds a new
+    // line-range link. Under the old conflating read, the broken commit
+    // parsed as `None`, so the (C, B) pair "differed" and C re-anchored at
+    // itself — silently certifying a link no human reviewed.
+    write_certified_page(
+        root,
+        "page.md",
+        "1",
+        "See [a](/src/lib.rs#L1-L3) and [b](/src/lib.rs#L2-L2).",
+    );
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "repair, no bump"]);
+
+    let out = wiki_check(root, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the un-reviewed link must classify Uncertified; stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let both = combined(&out);
+    assert!(
+        both.contains("/src/lib.rs#L2-L2")
+            && both.contains("not present at the page's anchor epoch"),
+        "the new link must be flagged as un-reviewed at the true anchor; got:\n{both}"
+    );
+}
+
+/// Control for the repair-cannot-reanchor witness: a genuine bump DOES
+/// anchor at the bump commit, so a link added in the same commit as the
+/// bump is certified by it.
+#[test]
+fn drift_bump_anchors_at_the_bump_commit() {
+    let tmp = init_repo();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "fn foo() {\n    42\n}\n").unwrap();
+    write_certified_page(root, "page.md", "1", "See [a](/src/lib.rs#L1-L3).");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "field 1"]);
+    write_certified_page(
+        root,
+        "page.md",
+        "2",
+        "See [a](/src/lib.rs#L1-L3) and [b](/src/lib.rs#L2-L2).",
+    );
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "bump to 2, add link"]);
+
+    let out = wiki_check(root, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a bumped page certifies the link added with the bump; got:\n{}",
+        combined(&out)
+    );
+}
+
+/// Control: when no pair of readable values differs, the anchor is the
+/// oldest readable commit — the field's introduction.
+#[test]
+fn drift_field_introduction_anchors_the_epoch() {
+    let tmp = init_repo();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "fn foo() {\n    42\n}\n").unwrap();
+    write_page(root, "page.md", "See [a](/src/lib.rs#L1-L3).");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "no field yet"]);
+    write_certified_page(root, "page.md", "1", "See [a](/src/lib.rs#L1-L3).");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "field introduced"]);
+    write_certified_page(root, "page.md", "1", "See [a](/src/lib.rs#L1-L3) — body edit only.");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "body edit"]);
+
+    let out = wiki_check(root, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the introduction commit anchors the epoch and certifies; got:\n{}",
+        combined(&out)
+    );
+}
+
+/// Decision control for the unparseable current side (lead tiebreak: fail
+/// closed — an explicit error, never a silent pass): a page whose CURRENT
+/// YAML cannot be parsed errors with exit 2 in both read-only and `--fix`
+/// modes, and `--fix` leaves the page untouched (broken YAML is a human
+/// edit, not an auto-repair).
+#[test]
+fn drift_unparseable_current_yaml_fails_closed() {
+    let tmp = init_repo();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "fn foo() {\n    42\n}\n").unwrap();
+    write_certified_page(root, "page.md", "1", "See [a](/src/lib.rs#L1-L3).");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "certify"]);
+    std::fs::write(
+        root.join("wiki/page.md"),
+        "---\ntitle: [unclosed\nlinks-reviewed: 1\n---\n\nSee [a](/src/lib.rs#L1-L3).\n",
+    )
+    .unwrap();
+
+    let out = wiki_check(root, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "an unparseable current page must fail closed; stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined(&out).contains("unparseable YAML frontmatter"),
+        "the error must name the broken YAML; got:\n{}",
+        combined(&out)
+    );
+
+    let before = std::fs::read_to_string(root.join("wiki/page.md")).unwrap();
+    let out_fix = wiki_check(root, &["--fix"]);
+    assert_eq!(
+        out_fix.status.code(),
+        Some(2),
+        "--fix must fail closed too, never initializing the field on broken YAML; \
+         stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&out_fix.stdout),
+        String::from_utf8_lossy(&out_fix.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("wiki/page.md")).unwrap(),
+        before,
+        "--fix must not touch a page with unparseable YAML"
+    );
+}
+
 // ── Rename tracking ──────────────────────────────────────────────────────────
 
 #[test]

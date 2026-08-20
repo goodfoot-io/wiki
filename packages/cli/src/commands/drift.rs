@@ -80,11 +80,14 @@ pub enum LinkEpoch {
     /// The anchor is the newest commit at which the field value changed (or
     /// the oldest walked commit when no pair differs — field introduction).
     /// `path_at_commit` is the page's path at that commit, so the
-    /// anchor-side blob is read under the name in effect there.
+    /// anchor-side blob is read under the name in effect there. `value` is
+    /// `None` when the field is absent at the anchor commit (the anchor can
+    /// be a field-less readable commit when unparseable commits above it
+    /// were skipped).
     Commit {
         sha: String,
         path_at_commit: String,
-        value: String,
+        value: Option<String>,
     },
     /// The field is absent at the current side and was never walked —
     /// the page has no anchor epoch. Read-only modes hard-error
@@ -101,6 +104,8 @@ pub enum EpochError {
     UnreadableBlob { page: String, commit: String },
     #[error("classify_page requires a resolved anchor epoch (Current or Commit)")]
     MissingEpoch,
+    #[error("page `{page}` has unparseable YAML frontmatter — repair it before certification")]
+    UnparseableYaml { page: String },
     #[error("git failed: {0}")]
     GitFailed(String),
 }
@@ -132,51 +137,89 @@ pub struct LinkClass {
 
 // ── Engine ────────────────────────────────────────────────────────────────────
 
-/// Extract the `links-reviewed:` frontmatter value from page content,
-/// coerced to its string form. Returns `None` when the page has no leading
-/// `---` YAML block, the field is absent, or its value is not a scalar.
-/// Change detection compares these strings, so any later value change
-/// re-certifies the page.
-pub fn extract_links_reviewed(content: &str) -> Option<String> {
-    let (yaml_start, yaml_end, _) = frontmatter::yaml_block_bounds(content)?;
+/// The outcome of reading a page's `links-reviewed:` frontmatter field,
+/// coerced to its string form. `Unparseable` is a distinct state, not a
+/// value and not an absence (finding yaml-breakage-rebaselines): a page
+/// whose YAML block cannot be parsed must never participate in epoch
+/// comparison — a repair commit would otherwise compare equal to the broken
+/// commit, re-anchor the page, and silently certify links no human
+/// reviewed. Change detection compares the readable strings, so any later
+/// value change re-certifies the page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinksReviewedRead {
+    /// The field is absent (no YAML block, field missing, or non-scalar
+    /// value) or carries the coerced scalar string.
+    Readable(Option<String>),
+    /// The page has a YAML block that cannot be parsed.
+    Unparseable,
+}
+
+pub fn read_links_reviewed(content: &str) -> LinksReviewedRead {
+    let Some((yaml_start, yaml_end, _)) = frontmatter::yaml_block_bounds(content) else {
+        return LinksReviewedRead::Readable(None);
+    };
     let yaml = &content[yaml_start..yaml_end];
-    let parsed: serde_yaml::Value = serde_yaml::from_str(yaml).ok()?;
-    let value = parsed.get("links-reviewed")?;
-    scalar_to_string(value)
+    let parsed: serde_yaml::Value = match serde_yaml::from_str(yaml) {
+        Ok(p) => p,
+        Err(_) => return LinksReviewedRead::Unparseable,
+    };
+    LinksReviewedRead::Readable(parsed.get("links-reviewed").and_then(scalar_to_string))
 }
 
 /// Resolve the page's anchor epoch per plan Decision 2.
 ///
-/// `current_value` is the field value at the current side (worktree fs,
+/// `current_value` is the field read at the current side (worktree fs,
 /// `HEAD` blob, or index blob, per `--source`); `committed_value` is the
-/// value at `HEAD` (the newest committed value). When the two differ the
-/// anchor epoch IS the current state (pending-certification rule). When both
-/// are `None` the page has no epoch (`Missing`). Only when both are `Some`
-/// and equal does the engine walk full ancestry
-/// (`git log --follow --name-status --format=%H -- <page>`, no commit cap, no
-/// `--first-parent`) and anchor at the newer commit of the first adjacent
-/// pair whose parsed values differ, or the oldest walked commit if no pair
-/// differs. A shallow clone is detected via `git rev-parse
-/// --is-shallow-repository` and fails closed with [`EpochError::ShallowClone`].
+/// read at `HEAD` (the newest committed value). An unparseable current side
+/// fails closed with [`EpochError::UnparseableYaml`] — the page's YAML is
+/// broken right now, so no classification can be trusted, and neither a
+/// silent pass nor an auto-repair is acceptable. When both sides are
+/// readable and differ, the anchor epoch IS the current state
+/// (pending-certification rule). When both read `None` the page has no
+/// epoch (`Missing`). Only when both are `Some` and equal does the engine
+/// walk full ancestry (`git log --follow --name-status --format=%H --
+/// <page>`, no commit cap, no `--first-parent`) and anchor at the newer
+/// commit of the first adjacent pair whose parsed values differ, or the
+/// oldest walked commit if no pair differs. An unparseable committed side
+/// is not a value and not `Missing` — the walk resolves the epoch from the
+/// readable history, skipping unparseable commits entirely. A shallow clone
+/// is detected via `git rev-parse --is-shallow-repository` and fails closed
+/// with [`EpochError::ShallowClone`].
 pub fn find_anchor_commit(
     repo_root: &Path,
     page_path: &str,
-    current_value: Option<&str>,
-    committed_value: Option<&str>,
+    current_value: &LinksReviewedRead,
+    committed_value: &LinksReviewedRead,
 ) -> Result<LinkEpoch, EpochError> {
-    if current_value != committed_value {
-        // Pending-certification rule (Decision 2): a field bump, addition, or
-        // removal that is not yet committed makes the anchor epoch the current
-        // state itself.
-        return Ok(LinkEpoch::Current {
-            value: current_value.map(str::to_owned),
+    // Fail closed on an unparseable current side (lead tiebreak: an
+    // explicit error, never a silent pass). `--fix` cannot repair broken
+    // YAML; the page needs a human edit.
+    let LinksReviewedRead::Readable(current_value) = current_value else {
+        return Err(EpochError::UnparseableYaml {
+            page: page_path.to_string(),
         });
-    }
-    let Some(_committed) = committed_value else {
-        // Both sides absent — the page has no anchor epoch.
-        return Ok(LinkEpoch::Missing);
     };
-    walk_anchor_epoch(repo_root, page_path)
+    match committed_value {
+        LinksReviewedRead::Readable(committed_value) => {
+            if current_value != committed_value {
+                // Pending-certification rule (Decision 2): a field bump,
+                // addition, or removal that is not yet committed makes the
+                // anchor epoch the current state itself.
+                return Ok(LinkEpoch::Current {
+                    value: current_value.clone(),
+                });
+            }
+            let Some(_committed) = committed_value else {
+                // Both sides absent — the page has no anchor epoch.
+                return Ok(LinkEpoch::Missing);
+            };
+            walk_anchor_epoch(repo_root, page_path)
+        }
+        // An unparseable HEAD blob is not a value: the pending rule cannot
+        // compare it, and the field is not "missing" — the walk resolves
+        // the epoch from the readable history, skipping the broken commit.
+        LinksReviewedRead::Unparseable => walk_anchor_epoch(repo_root, page_path),
+    }
 }
 
 /// Full-ancestry walk per plan Decision 3: `git log --follow --name-status
@@ -186,7 +229,10 @@ pub fn find_anchor_commit(
 /// similarity suffix is a rename). The anchor is the newer commit of the
 /// first adjacent pair (newest→oldest) whose parsed field values differ;
 /// when no pair differs the field was introduced at the oldest walked
-/// commit, which is the anchor.
+/// commit, which is the anchor. Commits whose YAML cannot be parsed are
+/// skipped entirely — they are not values and not epoch events, so a
+/// repair commit compares against the next-older readable value and can
+/// never re-anchor the page at itself.
 fn walk_anchor_epoch(repo_root: &Path, page_path: &str) -> Result<LinkEpoch, EpochError> {
     // The repository state is the authority: a local-path `--depth 1` clone
     // can silently copy full history, so clone flags must not be trusted.
@@ -207,11 +253,18 @@ fn walk_anchor_epoch(repo_root: &Path, page_path: &str) -> Result<LinkEpoch, Epo
     )?;
 
     // Walk newest→oldest: (sha, name in effect at that commit, parsed value).
+    // Every pushed value is readable by construction; absence at a commit is
+    // compared as the field-less state.
     let mut name = page_path.to_string();
-    let mut walked: Vec<(String, String, Option<String>)> = Vec::new();
+    let mut walked: Vec<(String, String, LinksReviewedRead)> = Vec::new();
     for (sha, rows) in parse_name_status_log(&log) {
-        let value = blob_field_value(repo_root, &sha, &name)?;
-        walked.push((sha, name.clone(), value));
+        match blob_links_reviewed(repo_root, &sha, &name)? {
+            Some(LinksReviewedRead::Unparseable) => {} // skipped entirely
+            Some(LinksReviewedRead::Readable(v)) => {
+                walked.push((sha.clone(), name.clone(), LinksReviewedRead::Readable(v)));
+            }
+            None => walked.push((sha.clone(), name.clone(), LinksReviewedRead::Readable(None))),
+        }
         // The pre-commit name for the next (older) commit comes from the
         // rename row whose new path is the name in effect at this commit.
         if let Some(row) = rows.iter().find(|r| r.is_rename_to(&name)) {
@@ -222,29 +275,36 @@ fn walk_anchor_epoch(repo_root: &Path, page_path: &str) -> Result<LinkEpoch, Epo
     for pair in walked.windows(2) {
         let (newer, older) = (&pair[0], &pair[1]);
         if newer.2 != older.2 {
-            // Invariant: the walk starts at HEAD, whose value is the
-            // committed value (Some) — the newer side of the first differing
-            // pair always carries the field, never an absence.
+            // Invariant: unparseable commits were skipped, so both sides of
+            // every pair are readable — the newer side anchors, whether it
+            // carries the field or the field is absent there.
             return Ok(LinkEpoch::Commit {
                 sha: newer.0.clone(),
                 path_at_commit: newer.1.clone(),
-                value: newer
-                    .2
-                    .clone()
-                    .expect("newer side of a differing pair always carries the field"),
+                value: match &newer.2 {
+                    LinksReviewedRead::Readable(v) => v.clone(),
+                    LinksReviewedRead::Unparseable => {
+                        unreachable!("unparseable commits are skipped")
+                    }
+                },
             });
         }
     }
-    let anchor = walked
-        .last()
-        .expect("--follow on an existing page yields at least one commit");
+    let Some(anchor) = walked.last() else {
+        // Every walked commit carried unparseable YAML: no readable value
+        // exists to anchor on. Fail closed rather than anchoring at a
+        // broken commit.
+        return Err(EpochError::UnparseableYaml {
+            page: page_path.to_string(),
+        });
+    };
     Ok(LinkEpoch::Commit {
         sha: anchor.0.clone(),
         path_at_commit: anchor.1.clone(),
-        value: anchor
-            .2
-            .clone()
-            .expect("all walked values are equal to the committed value"),
+        value: match &anchor.2 {
+            LinksReviewedRead::Readable(v) => v.clone(),
+            LinksReviewedRead::Unparseable => unreachable!("unparseable commits are skipped"),
+        },
     })
 }
 
@@ -300,17 +360,18 @@ fn parse_name_status_log(log: &str) -> Vec<(String, Vec<NameStatusRow>)> {
     out
 }
 
-/// The page's parsed field value at `commit`, read under the name in effect
-/// there. `Ok(None)` when the path is absent at that commit — a walk
-/// boundary, not an error.
-fn blob_field_value(
+/// The page's parsed field read at `commit`, under the name in effect there.
+/// `Ok(None)` when the path is absent at that commit — a walk boundary, not
+/// an error. A present-but-unparseable page reports `Unparseable` so the
+/// walk can skip the commit instead of treating it as a value.
+fn blob_links_reviewed(
     repo_root: &Path,
     commit: &str,
     path: &str,
-) -> Result<Option<String>, EpochError> {
+) -> Result<Option<LinksReviewedRead>, EpochError> {
     match read_blob_at(repo_root, commit, path)? {
         None => Ok(None),
-        Some(bytes) => Ok(extract_links_reviewed(&String::from_utf8_lossy(&bytes))),
+        Some(bytes) => Ok(Some(read_links_reviewed(&String::from_utf8_lossy(&bytes)))),
     }
 }
 
@@ -1807,41 +1868,63 @@ pub fn collect_with_source(
         )
     }
 
-    fn field_value(content: &str) -> Option<String> {
-        extract_links_reviewed(content)
+    fn field_value(content: &str) -> LinksReviewedRead {
+        read_links_reviewed(content)
     }
 
-    // ── extract_links_reviewed ──
+    /// A readable field value for `find_anchor_commit` call sites.
+    fn read(v: Option<&str>) -> LinksReviewedRead {
+        LinksReviewedRead::Readable(v.map(str::to_owned))
+    }
+
+    // ── read_links_reviewed ──
 
     #[test]
     fn extracts_scalar_values_to_their_string_form() {
         assert_eq!(
             field_value(&make_wiki_page("P", "body\n", Some("1"))),
-            Some("1".into())
+            LinksReviewedRead::Readable(Some("1".into()))
         );
         assert_eq!(
             field_value(&make_wiki_page("P", "body\n", Some("v2"))),
-            Some("v2".into())
+            LinksReviewedRead::Readable(Some("v2".into()))
         );
         assert_eq!(
             field_value(&make_wiki_page("P", "body\n", Some("\"quoted value\""))),
-            Some("quoted value".into()),
+            LinksReviewedRead::Readable(Some("quoted value".into())),
             "YAML string scalars unquote"
         );
         assert_eq!(
             field_value(&make_wiki_page("P", "body\n", Some("2"))),
-            Some("2".into()),
+            LinksReviewedRead::Readable(Some("2".into())),
             "numeric scalars coerce to their string form"
         );
     }
 
     #[test]
-    fn extracts_none_when_field_absent_or_unparseable() {
-        assert_eq!(field_value(&make_wiki_page("P", "body\n", None)), None);
-        assert_eq!(field_value("no frontmatter at all\n"), None);
+    fn reads_absent_field_and_unparseable_yaml_distinctly() {
+        assert_eq!(
+            field_value(&make_wiki_page("P", "body\n", None)),
+            LinksReviewedRead::Readable(None)
+        );
+        assert_eq!(
+            field_value("no frontmatter at all\n"),
+            LinksReviewedRead::Readable(None)
+        );
         // A field-looking line in the BODY is not frontmatter.
         let body = "links-reviewed: 5\n";
-        assert_eq!(field_value(&make_wiki_page("P", body, None)), None);
+        assert_eq!(
+            field_value(&make_wiki_page("P", body, None)),
+            LinksReviewedRead::Readable(None)
+        );
+        // A broken YAML block is its own state — not a value, not an absence
+        // (finding yaml-breakage-rebaselines).
+        let broken = "---\ntitle: [unclosed\nlinks-reviewed: 1\n---\nbody\n";
+        assert_eq!(
+            field_value(broken),
+            LinksReviewedRead::Unparseable,
+            "unparseable YAML must read as Unparseable, never as an absent field"
+        );
     }
 
     // ── parse_line_range_links: non-content scrubbing ──
@@ -1921,7 +2004,7 @@ pub fn collect_with_source(
         repo.create_file("wiki/page.md", &make_wiki_page("P", "body\n", Some("1")));
         repo.commit("field=1");
         repo.create_file("wiki/page.md", &make_wiki_page("P", "body\n", Some("2")));
-        let epoch = find_anchor_commit(repo.path(), "wiki/page.md", Some("2"), Some("1"))
+        let epoch = find_anchor_commit(repo.path(), "wiki/page.md", &read(Some("2")), &read(Some("1")))
             .expect("resolves");
         assert_eq!(
             epoch,
@@ -1938,7 +2021,7 @@ pub fn collect_with_source(
         repo.commit("no field");
         repo.create_file("wiki/page.md", &make_wiki_page("P", "body\n", Some("1")));
         let epoch =
-            find_anchor_commit(repo.path(), "wiki/page.md", Some("1"), None).expect("resolves");
+            find_anchor_commit(repo.path(), "wiki/page.md", &read(Some("1")), &read(None)).expect("resolves");
         assert_eq!(
             epoch,
             LinkEpoch::Current {
@@ -1954,7 +2037,7 @@ pub fn collect_with_source(
         repo.commit("field=1");
         repo.create_file("wiki/page.md", &make_wiki_page("P", "body\n", None));
         let epoch =
-            find_anchor_commit(repo.path(), "wiki/page.md", None, Some("1")).expect("resolves");
+            find_anchor_commit(repo.path(), "wiki/page.md", &read(None), &read(Some("1"))).expect("resolves");
         assert_eq!(epoch, LinkEpoch::Current { value: None });
     }
 
@@ -1963,7 +2046,7 @@ pub fn collect_with_source(
         let repo = TestRepo::new();
         repo.create_file("wiki/page.md", &make_wiki_page("P", "body\n", None));
         repo.commit("no field");
-        let epoch = find_anchor_commit(repo.path(), "wiki/page.md", None, None).expect("resolves");
+        let epoch = find_anchor_commit(repo.path(), "wiki/page.md", &read(None), &read(None)).expect("resolves");
         assert_eq!(epoch, LinkEpoch::Missing);
     }
 
@@ -1984,14 +2067,14 @@ pub fn collect_with_source(
         );
         repo.commit("body edit after bump");
 
-        let epoch = find_anchor_commit(repo.path(), "wiki/page.md", Some("2"), Some("2"))
+        let epoch = find_anchor_commit(repo.path(), "wiki/page.md", &read(Some("2")), &read(Some("2")))
             .expect("resolves");
         assert_eq!(
             epoch,
             LinkEpoch::Commit {
                 sha: bump_sha,
                 path_at_commit: "wiki/page.md".into(),
-                value: "2".into(),
+                value: Some("2".into()),
             }
         );
     }
@@ -2004,14 +2087,14 @@ pub fn collect_with_source(
         repo.create_file("wiki/page.md", &make_wiki_page("P", "edited\n", Some("1")));
         repo.commit("body edit");
 
-        let epoch = find_anchor_commit(repo.path(), "wiki/page.md", Some("1"), Some("1"))
+        let epoch = find_anchor_commit(repo.path(), "wiki/page.md", &read(Some("1")), &read(Some("1")))
             .expect("resolves");
         assert_eq!(
             epoch,
             LinkEpoch::Commit {
                 sha: intro_sha,
                 path_at_commit: "wiki/page.md".into(),
-                value: "1".into(),
+                value: Some("1".into()),
             }
         );
     }
@@ -2031,14 +2114,14 @@ pub fn collect_with_source(
 
         // HEAD is the merge commit; the certification exists only on the
         // feature branch — a --first-parent walk would never see it.
-        let epoch = find_anchor_commit(repo.path(), "wiki/page.md", Some("2"), Some("2"))
+        let epoch = find_anchor_commit(repo.path(), "wiki/page.md", &read(Some("2")), &read(Some("2")))
             .expect("resolves");
         assert_eq!(
             epoch,
             LinkEpoch::Commit {
                 sha: bump_sha,
                 path_at_commit: "wiki/page.md".into(),
-                value: "2".into(),
+                value: Some("2".into()),
             }
         );
     }
@@ -2053,14 +2136,14 @@ pub fn collect_with_source(
         repo.git(&["mv", "wiki/renamed.md", "wiki/final-name.md"]);
         repo.commit("rename to final-name.md");
 
-        let epoch = find_anchor_commit(repo.path(), "wiki/final-name.md", Some("1"), Some("1"))
+        let epoch = find_anchor_commit(repo.path(), "wiki/final-name.md", &read(Some("1")), &read(Some("1")))
             .expect("resolves");
         assert_eq!(
             epoch,
             LinkEpoch::Commit {
                 sha: intro_sha,
                 path_at_commit: "wiki/page.md".into(),
-                value: "1".into(),
+                value: Some("1".into()),
             },
             "the blob is read under the name in effect at the anchor commit"
         );
@@ -2075,9 +2158,111 @@ pub fn collect_with_source(
         repo.commit("body edit");
 
         let clone = repo.shallow_clone();
-        let err = find_anchor_commit(clone.path(), "wiki/page.md", Some("1"), Some("1"))
+        let err = find_anchor_commit(clone.path(), "wiki/page.md", &read(Some("1")), &read(Some("1")))
             .expect_err("shallow history cannot resolve an anchor epoch");
         assert!(matches!(err, EpochError::ShallowClone), "got {err:?}");
+    }
+
+    // ── walk: unparseable commits are not values, not epoch events ──
+
+    #[test]
+    fn unparseable_commit_is_skipped_so_repair_cannot_reanchor() {
+        let repo = TestRepo::new();
+        repo.create_file("wiki/page.md", &make_wiki_page("P", "body\n", Some("1")));
+        let intro_sha = repo.commit("field=1");
+        // Commit B breaks the YAML block entirely; commit C repairs it with
+        // the SAME value (no bump). Under the old conflating read, B parsed
+        // as `None` and the (C, B) pair differed — re-anchoring at C and
+        // silently certifying whatever C's page carries.
+        repo.create_file(
+            "wiki/page.md",
+            "---\ntitle: [unclosed\nlinks-reviewed: 1\n---\nbody\n",
+        );
+        repo.commit("break yaml");
+        repo.create_file("wiki/page.md", &make_wiki_page("P", "edited\n", Some("1")));
+        repo.commit("repair, no bump");
+
+        let epoch = find_anchor_commit(repo.path(), "wiki/page.md", &read(Some("1")), &read(Some("1")))
+            .expect("resolves");
+        assert_eq!(
+            epoch,
+            LinkEpoch::Commit {
+                sha: intro_sha,
+                path_at_commit: "wiki/page.md".into(),
+                value: Some("1".into()),
+            },
+            "the repair commit must not re-anchor: B is skipped entirely, C \
+             compares equal to A, and the anchor stays at the introduction"
+        );
+    }
+
+    #[test]
+    fn unparseable_current_side_fails_closed() {
+        let repo = TestRepo::new();
+        repo.create_file("wiki/page.md", &make_wiki_page("P", "body\n", Some("1")));
+        repo.commit("field=1");
+        // The worktree YAML is broken right now: no classification may run
+        // against it — neither a silent Healthy pass nor a relocation.
+        repo.create_file(
+            "wiki/page.md",
+            "---\ntitle: [unclosed\nlinks-reviewed: 1\n---\nbody\n",
+        );
+        let err = find_anchor_commit(
+            repo.path(),
+            "wiki/page.md",
+            &field_value(&repo.read("wiki/page.md")),
+            &read(Some("1")),
+        )
+        .expect_err("an unparseable current side must fail closed");
+        assert!(matches!(err, EpochError::UnparseableYaml { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn unparseable_committed_side_walks_the_readable_history() {
+        let repo = TestRepo::new();
+        repo.create_file("wiki/page.md", &make_wiki_page("P", "body\n", Some("1")));
+        let intro_sha = repo.commit("field=1");
+        repo.create_file(
+            "wiki/page.md",
+            "---\ntitle: [unclosed\nlinks-reviewed: 1\n---\nbody\n",
+        );
+        repo.commit("break yaml");
+        // A broken HEAD is not a value and not `Missing`: the pending rule
+        // cannot compare it, so the walk resolves the epoch from the
+        // readable history.
+        let epoch = find_anchor_commit(
+            repo.path(),
+            "wiki/page.md",
+            &read(Some("1")),
+            &LinksReviewedRead::Unparseable,
+        )
+        .expect("resolves");
+        assert_eq!(
+            epoch,
+            LinkEpoch::Commit {
+                sha: intro_sha,
+                path_at_commit: "wiki/page.md".into(),
+                value: Some("1".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn all_unparseable_history_fails_closed() {
+        let repo = TestRepo::new();
+        repo.create_file(
+            "wiki/page.md",
+            "---\ntitle: [unclosed\n---\nbody\n",
+        );
+        repo.commit("broken from the start");
+        let err = find_anchor_commit(
+            repo.path(),
+            "wiki/page.md",
+            &read(Some("1")),
+            &LinksReviewedRead::Unparseable,
+        )
+        .expect_err("no readable value anywhere must fail closed");
+        assert!(matches!(err, EpochError::UnparseableYaml { .. }), "got {err:?}");
     }
 
     // ── classify_page: one test per outcome ──
@@ -2088,7 +2273,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes.len(), 1);
@@ -2106,7 +2291,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes[0].outcome, DriftOutcome::Drift);
@@ -2127,7 +2312,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes.len(), 2);
@@ -2143,7 +2328,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes[0].outcome, DriftOutcome::Broken);
@@ -2162,7 +2347,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes[0].outcome, DriftOutcome::Broken);
@@ -2200,7 +2385,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes.len(), 1);
@@ -2226,7 +2411,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let page_content = repo.read("wiki/page.md");
         let classes = classify_page(
@@ -2259,7 +2444,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes.len(), 1);
@@ -2278,7 +2463,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(
@@ -2305,7 +2490,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(
@@ -2330,7 +2515,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes[0].outcome, DriftOutcome::Unknown);
@@ -2462,7 +2647,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(
@@ -2489,7 +2674,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes[0].outcome, DriftOutcome::Drift);
@@ -2507,7 +2692,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(
@@ -2536,7 +2721,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes[0].outcome, DriftOutcome::Unknown);
@@ -2556,7 +2741,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes[0].outcome, DriftOutcome::Drift);
@@ -2573,7 +2758,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes[0].outcome, DriftOutcome::Broken);
@@ -2718,7 +2903,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes[0].outcome, DriftOutcome::Healthy);
@@ -2740,7 +2925,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes[0].outcome, DriftOutcome::Drift);
@@ -2761,7 +2946,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes.len(), 1, "only line-range links are classified");
@@ -2789,7 +2974,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes[0].outcome, DriftOutcome::Healthy);
@@ -2809,7 +2994,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(
@@ -2852,7 +3037,7 @@ pub fn collect_with_source(
         let epoch = LinkEpoch::Commit {
             sha: c1,
             path_at_commit: "wiki/page.md".into(),
-            value: "1".into(),
+            value: Some("1".into()),
         };
         let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
         assert_eq!(classes[0].outcome, DriftOutcome::Healthy);

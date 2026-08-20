@@ -32,4 +32,4 @@ wiki --source index check   # validate staged content (pre-commit); also: worktr
 
 ## Shallow clones fail closed
 
-The anchor-epoch lookup walks the page's full commit history. In a shallow clone the check fails closed with an error (exit 2) rather than guessing — clone with full history (CI: `fetch-depth: 0`) wherever the check runs.
+The anchor-epoch lookup walks the page's full commit history. In a shallow clone the check fails closed with an error (exit 2) rather than guessing — clone with full history (CI: `fetch-depth: 0`) wherever the check runs. With `--no-exit-code` (the hook's configuration) the error still prints but the run exits 0, so a shallow clone never blocks a commit; the protection is simply absent until the clone is deepened.

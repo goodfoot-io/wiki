@@ -1,7 +1,7 @@
-packages/cli/src/commands/drift.rs rk64:24edc42b55bee55c
+packages/cli/src/commands/drift.rs rk64:ee4bde62796e5641
 packages/cli/tests/drift_relocation.rs rk64:367f43cca6dca800
-plugins/wiki/skills/wiki/sections/fragment-links-and-coverage.md rk64:7570dc1ac947fa70
+plugins/wiki/skills/wiki/sections/fragment-links-and-coverage.md rk64:28038dff5388dd49
 plugins/wiki/skills/wiki/sections/resolving-skipped-fixes.md rk64:58b1c192d59ba48c
-plugins/wiki/skills/wiki/sections/running-wiki-check.md rk64:69f0da97177dc5d8
+plugins/wiki/skills/wiki/sections/running-wiki-check.md rk64:167edd8d30936ec6
 
 drift.rs is the ground truth for the drift engine's behavior — how the `links-reviewed:` epoch selects its certification commit, what classifies a link healthy/uncertified/broken/drifted/moved/unverifiable, and which outcomes `--fix` relocates versus skips. drift_relocation.rs pins that contract's relocation tiers and remedy texts as in-suite witness controls, so a change to the classification or skip semantics must keep them green; the fragment-links-and-coverage, resolving-skipped-fixes, and running-wiki-check sections describe that behavior for operators, so a change must also be re-verified against all three descriptions, and a doc that re-describes the contract must stay true of the implementation and of what the pins exercise.

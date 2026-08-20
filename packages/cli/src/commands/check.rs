@@ -293,6 +293,21 @@ pub fn run(
     fix_dry_run: bool,
     print_applied: bool,
 ) -> Result<i32> {
+    // Every hard-error arm funnels through this: print the error (a JSON
+    // envelope on stderr under `--format json`, `error: ...` otherwise),
+    // then exit 2 — unless `--no-exit-code` is set, in which case the
+    // diagnostic still prints but the run reports success. The flag's
+    // contract is "report but never fail"; a hard error is reportable the
+    // same way a validation error is.
+    let hard_exit = |err: &dyn std::fmt::Display| -> i32 {
+        if json {
+            eprintln!("{}", serde_json::json!({"error": err.to_string()}));
+        } else {
+            eprintln!("error: {err}");
+        }
+        if no_exit_code { 0 } else { 2 }
+    };
+
     // Files to check are selected from `scan_root` (the current working
     // directory); globs resolve relative to it.
     //
@@ -323,14 +338,7 @@ pub fn run(
         DocSource::Index | DocSource::Head => {
             match GitReader::open(repo_root) {
                 Ok(gr) => Some(gr),
-                Err(e) => {
-                    if json {
-                        eprintln!("{}", serde_json::json!({"error": e.to_string()}));
-                    } else {
-                        eprintln!("error: {e}");
-                    }
-                    return Ok(2);
-                }
+                Err(e) => return Ok(hard_exit(&e)),
             }
         }
         DocSource::WorkingTree => None,
@@ -339,23 +347,14 @@ pub fn run(
     let index_files = match discover_files(&[], repo_root, repo_root, source, git_reader.as_ref()) {
         Ok(f) => match filter_files_for_source(f, repo_root, source, git_reader.as_ref()) {
             Ok(f) => f,
-            Err(e) => {
-                if json {
-                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
-                } else {
-                    eprintln!("error: {e}");
-                }
-                return Ok(2);
-            }
+            Err(e) => return Ok(hard_exit(&e)),
         },
         Err(e) => {
-            // Real infrastructure failure — fail closed in both modes.
-            if json {
-                eprintln!("{}", serde_json::json!({"error": e.to_string()}));
-            } else {
-                eprintln!("error: {e}");
-            }
-            return Ok(2);
+            // Whole-repo discovery failure: report through the same gate as
+            // every other hard error. Without `--no-exit-code` (CI, plain
+            // check) it stays fail-closed at exit 2; with the flag (the
+            // hook's best-effort contract) it reports and exits 0.
+            return Ok(hard_exit(&e));
         }
     };
 
@@ -381,39 +380,26 @@ pub fn run(
     } else {
         let raw = match discover_files(globs, scan_root, repo_root, source, git_reader.as_ref()) {
             Ok(f) => f,
-            Err(e) => {
-                if json {
-                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
-                } else {
-                    eprintln!("error: {e}");
-                }
-                return Ok(2);
-            }
+            Err(e) => return Ok(hard_exit(&e)),
         };
         match filter_files_for_source(raw, repo_root, source, git_reader.as_ref()) {
             Ok(f) => f,
-            Err(e) => {
-                if json {
-                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
-                } else {
-                    eprintln!("error: {e}");
-                }
-                return Ok(2);
-            }
+            Err(e) => return Ok(hard_exit(&e)),
         }
     };
 
     // Empty-corpus semantics: in non-fix mode an empty scoped selection is the
     // "no wiki pages found" fatal diagnostic (exit 2). In `--fix` mode it
     // degrades gracefully: the fix pass is a no-op over an empty set.
+    //
+    // Decision: the empty corpus is the same class as the other hard errors,
+    // so `--no-exit-code` gates it the same way — the message still prints,
+    // but the run reports success. The flag's contract is "report but never
+    // fail", and a script that wants a nonzero "nothing matched" signal can
+    // simply not pass the flag.
     if files.is_empty() && !fix {
         let msg = "no wiki pages found (no .md files matched)";
-        if json {
-            eprintln!("{}", serde_json::json!({"error": msg}));
-        } else {
-            eprintln!("error: {msg}");
-        }
-        return Ok(2);
+        return Ok(hard_exit(&msg));
     }
 
     // Per-run content cache: avoids re-reading wiki pages (frontmatter loop,
@@ -432,14 +418,7 @@ pub fn run(
         !fix,
     ) {
         Ok(d) => d,
-        Err(e) => {
-            if json {
-                eprintln!("{}", serde_json::json!({"error": e.to_string()}));
-            } else {
-                eprintln!("error: {e}");
-            }
-            return Ok(2);
-        }
+        Err(e) => return Ok(hard_exit(&e)),
     };
 
     // ── Fix pass (only in --fix mode) ────────────────────────────────────────
@@ -452,14 +431,7 @@ pub fn run(
             &mut content_cache,
         ) {
             Ok(p) => p,
-            Err(e) => {
-                if json {
-                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
-                } else {
-                    eprintln!("error: {e}");
-                }
-                return Ok(2);
-            }
+            Err(e) => return Ok(hard_exit(&e)),
         };
 
         if fix_dry_run {
@@ -543,14 +515,7 @@ pub fn run(
             true,
         ) {
             Ok(d) => d,
-            Err(e) => {
-                if json {
-                    eprintln!("{}", serde_json::json!({"error": e.to_string()}));
-                } else {
-                    eprintln!("error: {e}");
-                }
-                return Ok(2);
-            }
+            Err(e) => return Ok(hard_exit(&e)),
         };
 
         if json {
@@ -733,18 +698,19 @@ fn collect_drift_diagnostics(
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
-        let current_value = drift::extract_links_reviewed(content);
+        let current_value = drift::read_links_reviewed(content);
         // The newest committed value is the page blob at HEAD; a page absent
-        // at HEAD (new file) has none.
+        // at HEAD (new file) has none. A HEAD read failure is treated as an
+        // absent field, matching the pre-tri-state behavior.
         let committed_value = match read_via_source(path, repo_root, DocSource::Head, git_reader) {
-            Ok(head_content) => drift::extract_links_reviewed(&head_content),
-            Err(_) => None,
+            Ok(head_content) => drift::read_links_reviewed(&head_content),
+            Err(_) => drift::LinksReviewedRead::Readable(None),
         };
         let epoch = drift::find_anchor_commit(
             repo_root,
             &page_path,
-            current_value.as_deref(),
-            committed_value.as_deref(),
+            &current_value,
+            &committed_value,
         )
         .map_err(|e| miette::miette!("{e}"))?;
         if matches!(&epoch, drift::LinkEpoch::Missing) {

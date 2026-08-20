@@ -249,3 +249,69 @@ fn fix_print_applied_lists_rewritten_paths() {
         "--print-applied stdout must be exactly the rewritten paths; got:\n{stdout}"
     );
 }
+
+/// Same-page patch composition (witness W4, finding same-page-patch-clobber):
+/// a page carrying both a broken non-range link — whose successor is an
+/// uncommitted worktree `git mv` — and a drifted line-range link must
+/// materialize BOTH fixes in one `--fix` run. The drift phase runs last and
+/// must read the earlier phases' patch as its base; rebuilding the page from
+/// the original bytes would wipe the rename rewrite, leaving the broken link
+/// in place and the post-fix re-check red.
+#[test]
+fn fix_composes_rename_fix_and_relocation_on_same_page() {
+    let tmp = init_repo();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::write(root.join("src/target.rs"), format!("// preamble\n{BLOCK}")).unwrap();
+    // The renamed sibling is a proper wiki page (a frontmatter-less file
+    // would be excluded by the whole-repo walk but flagged by glob
+    // selection, making the fixture selection-path-dependent).
+    write_page(root, "old.md", "Old page.");
+    write_certified_page(
+        root,
+        "page.md",
+        "1",
+        "See [old](./old.md) and [code](../src/target.rs#L2-L4).",
+    );
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "certify"]);
+
+    // Worktree edits: the rename successor (staged `git mv`) and a same-file
+    // block shift (preamble grows to three lines).
+    git(root, &["mv", "wiki/old.md", "wiki/new.md"]);
+    std::fs::write(
+        root.join("src/target.rs"),
+        format!("// preamble\n// x\n// y\n{BLOCK}"),
+    )
+    .unwrap();
+
+    let out = wiki_check_fix(root, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "both fixes must land and the post-fix re-check must be clean; got:\n{}",
+        combined(&out)
+    );
+    let both = combined(&out);
+    assert!(
+        both.contains("./old.md → ./new.md"),
+        "the rename fix must be reported; got:\n{both}"
+    );
+    assert!(
+        both.contains("../src/target.rs#L2-L4 → ../src/target.rs#L4-L6"),
+        "the relocation fix must be reported; got:\n{both}"
+    );
+    let page = std::fs::read_to_string(root.join("wiki/page.md")).expect("read page");
+    assert!(
+        page.contains("[old](./new.md)"),
+        "the rename rewrite must survive the drift phase:\n{page}"
+    );
+    assert!(
+        page.contains("[code](../src/target.rs#L4-L6)"),
+        "the relocation must land on the same page:\n{page}"
+    );
+    // Re-running the check over the composed page stays green.
+    let out2 = wiki_check_fix(root, &[]);
+    assert_eq!(out2.status.code(), Some(0), "second run stays green");
+}
