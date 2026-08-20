@@ -14,7 +14,8 @@
 // `within` / `over` markers, not enforced, until the perf fixes land.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 
@@ -31,16 +32,22 @@ function parseArgs(argv) {
     coldRuns: 11,
     trials: 1,
     json: false,
+    anchorCache: false,
+    anchorRuns: 5,
+    anchorCommits: 10000,
     bin: process.env.WIKI_BENCH_BIN ?? join(CLI_DIR, "target", "build", "release", "wiki"),
     corpus: WORKSPACE_ROOT,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--json") opts.json = true;
+    else if (arg === "--anchor-cache") opts.anchorCache = true;
     else if (arg === "--runs") opts.runs = Number(argv[++i]);
     else if (arg === "--warmup") opts.warmup = Number(argv[++i]);
     else if (arg === "--cold-runs") opts.coldRuns = Number(argv[++i]);
     else if (arg === "--trials") opts.trials = Number(argv[++i]);
+    else if (arg === "--anchor-runs") opts.anchorRuns = Number(argv[++i]);
+    else if (arg === "--anchor-commits") opts.anchorCommits = Number(argv[++i]);
     else if (arg === "--bin") opts.bin = resolve(argv[++i]);
     else if (arg === "--corpus") opts.corpus = resolve(argv[++i]);
     else {
@@ -52,6 +59,8 @@ function parseArgs(argv) {
   if (!Number.isFinite(opts.warmup) || opts.warmup < 0) opts.warmup = 0;
   if (!Number.isFinite(opts.coldRuns) || opts.coldRuns < 1) opts.coldRuns = 11;
   if (!Number.isFinite(opts.trials) || opts.trials < 1) opts.trials = 1;
+  if (!Number.isFinite(opts.anchorRuns) || opts.anchorRuns < 1) opts.anchorRuns = 5;
+  if (!Number.isFinite(opts.anchorCommits) || opts.anchorCommits < 1) opts.anchorCommits = 10000;
   return opts;
 }
 
@@ -410,6 +419,153 @@ function printTable(warm, cold, perceived, env) {
   console.log("Report-only: this command always exits 0.");
 }
 
+// ---- anchor-cache mode ---------------------------------------------------
+
+// Synthetic deep-history corpus: `commits` commits touching a wiki page and
+// a cited target. The target's cited range (L1-L3) is byte-identical across
+// both target blobs — only a comment below the range alternates — so the
+// page's `links-reviewed: 1` anchors at the oldest commit and the check
+// stays Healthy while the anchor walk still blob-reads the page at every
+// walked commit. That makes the per-commit read loop the measured cost,
+// which is exactly the tier-A leg the cache memoizes.
+const TARGET_V1 = "fn stable() {\n    work()\n}\n// A\n";
+const TARGET_V2 = "fn stable() {\n    work()\n}\n// B\n";
+const SYNTH_PAGE =
+  "---\ntitle: Guide\nsummary: Synthetic anchor-cache benchmark page.\nlinks-reviewed: 1\n---\n\nSee [the target](docs/target.md#L1-L3).\n";
+
+function buildSyntheticCorpus(commits) {
+  const root = mkdtempSync(join(tmpdir(), "wiki-anchor-bench-"));
+  const git = (args, opts = {}) => spawnSync("git", args, { cwd: root, encoding: "utf8", ...opts });
+  git(["init", "-q", "-b", "main"]);
+  mkdirSync(join(root, "wiki"));
+  mkdirSync(join(root, "docs"));
+
+  // fast-import stream: two target blobs and one page blob, then `commits`
+  // commits alternating the target blob. fast-import turns 10k commits into
+  // seconds where 10k git(1) invocations would take minutes.
+  const stream = [];
+  const blobs = [TARGET_V1, TARGET_V2, SYNTH_PAGE];
+  for (const [i, body] of blobs.entries()) {
+    stream.push(`blob\nmark :${i + 1}\ndata ${Buffer.byteLength(body)}\n${body}`);
+  }
+  for (let i = 0; i < commits; i++) {
+    const target = i % 2 === 0 ? ":1" : ":2";
+    const lines = i === 0 ? [`M 100644 :3 wiki/guide.md`, `M 100644 ${target} docs/target.md`] : [`M 100644 ${target} docs/target.md`];
+    const msg = `c${i}`;
+    stream.push(
+      `commit refs/heads/main\ncommitter Bench <bench@example.invalid> 1700000000 +0000\ndata ${Buffer.byteLength(msg)}\n${msg}\n` +
+        lines.join("\n") + "\n",
+    );
+  }
+  const imp = git(["fast-import", "--quiet"], { input: stream.join("\n") + "\n" });
+  if (imp.status !== 0) throw new Error(`fast-import failed: ${imp.stderr}`);
+  const co = git(["checkout", "-q", "main"]);
+  if (co.status !== 0) throw new Error(`checkout failed: ${co.stderr}`);
+  return root;
+}
+
+function commitCount(corpus) {
+  const r = spawnSync("git", ["rev-list", "--count", "HEAD"], { cwd: corpus, encoding: "utf8" });
+  return r.status === 0 ? Number(r.stdout.trim()) : null;
+}
+
+// One measured `wiki check`: wall clock plus the cache tiers' contribution —
+// the summed cache.fingerprint/cache.walk span durations and the per-tier
+// hit/miss counts — parsed from the run's wiki.log.
+function anchorCheckRun(bin, corpus) {
+  writeFileSync(logPath(corpus), "");
+  const start = process.hrtime.bigint();
+  const r = spawnSync(bin, ["check"], {
+    cwd: corpus,
+    encoding: "utf8",
+    env: { ...process.env, WIKI_PERF: "1" },
+  });
+  const wall = Number(process.hrtime.bigint() - start) / 1e6;
+  const events = readRunEvents(corpus);
+  const count = (name) => events.filter((e) => e.event === name).length;
+  return {
+    ok: r.status === 0 || r.status === 1,
+    status: r.status,
+    wall,
+    legMs: events
+      .filter((e) => e.event === "cache.fingerprint" || e.event === "cache.walk")
+      .reduce((acc, e) => acc + (e.duration_ms ?? 0), 0),
+    fingerprintHit: count("cache.fingerprint.hit"),
+    fingerprintMiss: count("cache.fingerprint.miss"),
+    walkHit: count("cache.walk.hit"),
+    walkMiss: count("cache.walk.miss"),
+    walkBypass: count("cache.walk.bypass"),
+  };
+}
+
+// Cold-vs-warm anchor-cache measurement for one corpus: `--clear-cache`
+// wipes the cache, one cold check pays both tiers, then `runs` warm checks
+// should pay neither — the served-hit path runs no cache.* span at all.
+function anchorMeasure(bin, corpus, runs) {
+  const clear = spawnSync(bin, ["check", "--clear-cache"], { cwd: corpus, encoding: "utf8" });
+  if (clear.status !== 0) {
+    console.error(`warning: --clear-cache exited ${clear.status} in ${corpus}`);
+  }
+  const cold = anchorCheckRun(bin, corpus);
+  const warm = [];
+  for (let i = 0; i < runs; i++) warm.push(anchorCheckRun(bin, corpus));
+  return {
+    corpus,
+    commits: commitCount(corpus),
+    cold,
+    warm: {
+      wall: summarize(warm.map((r) => r.wall)),
+      legMs: summarize(warm.map((r) => r.legMs)),
+      fingerprintHit: medianOf(warm.map((r) => r.fingerprintHit)),
+      walkHit: medianOf(warm.map((r) => r.walkHit)),
+      walkBypass: medianOf(warm.map((r) => r.walkBypass)),
+      failedStatus: warm.map((r) => r.failedStatus ?? (r.ok ? null : r.status)).find((s) => s != null) ?? null,
+    },
+  };
+}
+
+function printAnchorReport(env, real, synthetic) {
+  const row = (label, m) => {
+    const cold = m.cold;
+    const w = m.warm;
+    console.log(`${label.padEnd(11)} commits ${String(m.commits ?? "?").padStart(6)}`);
+    console.log(
+      `  cold  wall ${ms(cold.wall)}ms   cache legs ${ms(cold.legMs)}ms   ` +
+        `(fp hit ${cold.fingerprintHit}, miss ${cold.fingerprintMiss} · walk hit ${cold.walkHit}, miss ${cold.walkMiss})` +
+        (cold.ok ? "" : `  [run status ${cold.status}]`),
+    );
+    console.log(
+      `  warm  wall ${ms(w.wall.median)}ms   cache legs ${ms(w.legMs.median)}ms   ` +
+        `(fp hit ${w.fingerprintHit ?? "—"}, walk hit ${w.walkHit ?? "—"}, bypass ${w.walkBypass ?? 0})` +
+        (w.failedStatus != null ? `  [run status ${w.failedStatus}]` : ""),
+    );
+  };
+  console.log("");
+  console.log(`anchor cache — ${env.binVersion}`);
+  console.log(`fs:      ${env.fsClass}`);
+  console.log(`runs:    1 cold after --clear-cache; ${env.anchorRuns} warm (median)`);
+  console.log("");
+  row("real", real);
+  row("synthetic", synthetic);
+  console.log("");
+  console.log("The cold cache-leg sum is the O(commits × pages) blob-read cost the cache");
+  console.log("memoizes; a fully warm run serves every row and pays no cache.* span at all.");
+  console.log("Report-only: this mode always exits 0.");
+}
+
+function runAnchorCacheMode(opts, env) {
+  const real = anchorMeasure(opts.bin, opts.corpus, opts.anchorRuns);
+  const synthRoot = buildSyntheticCorpus(opts.anchorCommits);
+  const synthetic = anchorMeasure(opts.bin, synthRoot, opts.anchorRuns);
+  if (opts.json) {
+    console.log(JSON.stringify({ env, anchor: { real, synthetic } }, null, 2));
+  } else {
+    printAnchorReport(env, real, synthetic);
+  }
+  console.error(`synthetic corpus kept at ${synthRoot} (delete when done)`);
+  process.exit(0);
+}
+
 // ---- main ----------------------------------------------------------------
 
 // One full per-op measurement pass: build the op set, then run warm + cold for
@@ -446,7 +602,10 @@ function main() {
     warmup: opts.warmup,
     coldRuns: opts.coldRuns,
     trials: opts.trials,
+    anchorRuns: opts.anchorRuns,
   };
+
+  if (opts.anchorCache) runAnchorCacheMode(opts, env);
 
   // Run the entire measurement opts.trials times. With trials === 1 we use the
   // single result set directly so behaviour and output are identical to before.
