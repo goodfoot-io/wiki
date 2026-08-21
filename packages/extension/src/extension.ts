@@ -1,15 +1,13 @@
 /**
- * VS Code extension entry point for the standalone wiki viewer.
+ * VS Code extension entry point for wiki language and search features.
  *
- * Registers the wiki custom text editor provider (wiki.viewer) and commands
- * (wiki.search, wiki.openInEditor) on activation.
+ * Registers wiki language features, search, and CLI lifecycle commands.
  *
- * @summary VS Code extension entry point for the standalone wiki viewer.
+ * @summary VS Code extension entry point for wiki language and search features.
  */
 
 import * as vscode from 'vscode';
 import { wikiQuickPick } from './commands/wikiQuickPick.js';
-import { WikiEditorProvider } from './providers/WikiEditorProvider.js';
 import { WikiLanguageFeatures } from './providers/WikiLanguageFeatures.js';
 import { formatLogError, getWikiLogger, registerWikiLogger } from './utils/logger.js';
 import { WikiBinaryManager, wasManagedInstall } from './utils/wikiInstaller.js';
@@ -32,8 +30,6 @@ export function activate(context: vscode.ExtensionContext): void {
   // ---------------------------------------------------------------------------
   const languageFeatures = new WikiLanguageFeatures(binaryManager);
   context.subscriptions.push(...languageFeatures.register());
-
-  const provider = new WikiEditorProvider(context.extensionUri, binaryManager, context);
 
   // ---------------------------------------------------------------------------
   // File-move rename: rewrite incoming markdown links when a `.md` file or
@@ -104,11 +100,6 @@ export function activate(context: vscode.ExtensionContext): void {
     });
 
   context.subscriptions.push(
-    vscode.window.registerCustomEditorProvider('wiki.viewer', provider, {
-      supportsMultipleEditorsPerDocument: true,
-      webviewOptions: { retainContextWhenHidden: true, enableFindWidget: true }
-    }),
-
     vscode.commands.registerCommand('wiki.search', () => wikiQuickPick(binaryManager, context)),
 
     vscode.commands.registerCommand('wiki.retryInstall', async () => {
@@ -125,21 +116,7 @@ export function activate(context: vscode.ExtensionContext): void {
       } catch (error) {
         void vscode.window.showErrorMessage(`Wiki: ${binaryManager.formatFailure(error)}`);
       }
-    }),
-
-    vscode.commands.registerCommand(
-      'wiki.openInEditor',
-      (uri?: vscode.Uri, options?: vscode.TextDocumentShowOptions | vscode.ViewColumn) => {
-        const resolvedUri = uri ?? vscode.window.activeTextEditor?.document.uri;
-        if (!resolvedUri) {
-          void vscode.window.showInformationMessage('Open a wiki file first to use this command.');
-          return;
-        }
-        const showOptions: vscode.TextDocumentShowOptions =
-          typeof options === 'number' ? { viewColumn: options, preview: false } : (options ?? { preview: false });
-        return vscode.window.showTextDocument(resolvedUri, showOptions);
-      }
-    )
+    })
   );
 }
 
@@ -147,5 +124,5 @@ export function activate(context: vscode.ExtensionContext): void {
  * Called by VS Code when the extension is deactivated.
  */
 export function deactivate(): void {
-  // No-op: provider cleans up per-panel in resolveCustomEditor.
+  // No-op: subscriptions are disposed by VS Code.
 }

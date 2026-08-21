@@ -1,4 +1,0 @@
-packages/extension/package.json#L70-L76 rk64:7fbfbd3df04ae70b
-packages/extension/src/webviews/wiki/toolbar.ts#L28-L36 rk64:635aebef795b8c24
-
-Wiki search shortcut that pairs a platform-adaptive keybinding declaration with a matching toolbar modifier-key display hint.

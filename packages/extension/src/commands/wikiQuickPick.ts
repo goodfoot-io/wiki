@@ -11,7 +11,7 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { formatLogError, getWikiLogger } from '../utils/logger.js';
-import { loadValidatedRecentlyViewed } from '../utils/recentlyViewed.js';
+import { loadValidatedRecentlyViewed, recordWikiView } from '../utils/recentlyViewed.js';
 import { runWikiCommand } from '../utils/wikiBinary.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
 
@@ -132,7 +132,7 @@ async function searchPages(binaryPath: string, query: string, signal: AbortSigna
 }
 
 /**
- * Open a wiki file in the custom wiki viewer.
+ * Open a wiki file in VS Code's text editor.
  *
  * Resolves repo-relative paths against [workspaceRoot()](./wikiQuickPick.ts)
  * before constructing the URI, so paths emitted by the CLI
@@ -142,7 +142,7 @@ async function searchPages(binaryPath: string, query: string, signal: AbortSigna
  */
 export async function openWikiFile(file: string): Promise<void> {
   const uri = vscode.Uri.file(resolveWorkspacePath(file));
-  await vscode.commands.executeCommand('vscode.openWith', uri, 'wiki.viewer');
+  await vscode.window.showTextDocument(uri, { preview: false });
 }
 
 /**
@@ -279,6 +279,7 @@ export async function wikiQuickPick(binaryManager: WikiBinaryManager, context: v
     const selected = qp.selectedItems[0];
     if (selected == null) return;
     qp.hide();
+    await recordWikiView(context, resolveWorkspacePath(selected.file));
     await openWikiFile(selected.file);
   });
 

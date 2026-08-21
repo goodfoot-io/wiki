@@ -7,8 +7,6 @@
  *
  * Outputs:
  *   dist/bundle.cjs        — extension host (CJS, vscode external)
- *   dist/wiki.js           — webview bundle (IIFE)
- *   dist/codicons/         — codicon.css + codicon.ttf
  */
 
 import * as esbuild from 'esbuild';
@@ -19,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 const EXTENSION_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DIST = path.join(EXTENSION_ROOT, 'dist');
 
+fs.rmSync(DIST, { recursive: true, force: true });
 fs.mkdirSync(DIST, { recursive: true });
 
 // Extension host — runs in Node.js inside VS Code.
@@ -33,27 +32,5 @@ await esbuild.build({
   sourcemap: true,
   minify: true
 });
-
-// Webview — runs in the browser sandbox inside the panel.
-// ESM + splitting so mermaid is emitted as a separate chunk and loaded lazily.
-await esbuild.build({
-  entryPoints: { wiki: path.join(EXTENSION_ROOT, 'src/webviews/wiki/index.ts') },
-  bundle: true,
-  outdir: DIST,
-  format: 'esm',
-  splitting: true,
-  platform: 'browser',
-  target: 'es2022',
-  sourcemap: true,
-  minify: true
-});
-
-// Codicon assets referenced by the webview CSP.
-const codiconsOut = path.join(DIST, 'codicons');
-fs.mkdirSync(codiconsOut, { recursive: true });
-const codiconsSrc = path.dirname(fileURLToPath(import.meta.resolve('@vscode/codicons/dist/codicon.css')));
-for (const file of ['codicon.css', 'codicon.ttf']) {
-  fs.copyFileSync(path.join(codiconsSrc, file), path.join(codiconsOut, file));
-}
 
 console.log('[build-production] Done.');

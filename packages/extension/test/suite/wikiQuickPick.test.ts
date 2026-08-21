@@ -17,9 +17,9 @@ describe('wikiQuickPick', () => {
     assert.ok(commands.includes('wiki.search'), 'wiki.search not registered');
   });
 
-  it('wiki.openInEditor command is registered', async () => {
+  it('wiki.openInEditor command is not registered', async () => {
     const commands = await vscode.commands.getCommands();
-    assert.ok(commands.includes('wiki.openInEditor'), 'wiki.openInEditor not registered');
+    assert.ok(!commands.includes('wiki.openInEditor'), 'wiki.openInEditor should have been removed with the webview');
   });
 
   it('wiki.retryInstall command is registered', async () => {

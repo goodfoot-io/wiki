@@ -1,5 +1,0 @@
-packages/extension/src/providers/WikiEditorProvider.ts#L161-L171 rk64:4fe68cea80dbb141
-packages/extension/src/webviews/wiki/index.ts#L187-L207 rk64:84454f00848dacb9
-packages/extension/src/webviews/wiki/types.ts#L14-L14 rk64:5fad983d16ddb0ec
-
-When WikiBinaryManager.ready() rejects after the article has already rendered, WikiEditorProvider posts showWarning and the webview displays it as a non-replacing banner above the article content — never as showError that replaces the rendered page. The type system ensures showWarning is a valid HostMessage variant and is handled in the switch, but nothing enforces the semantic choice of warning vs error in the provider's failure handler or the non-replacing vs content-replacing rendering in the webview handler.

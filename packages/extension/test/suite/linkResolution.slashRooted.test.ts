@@ -9,14 +9,12 @@
  * treated a leading `/` as a filesystem-absolute path
  * (`path.isAbsolute(rawPath)` is true on POSIX), so a link like
  * `/packages/cli/src/commands/mod.rs#L123` resolved to the literal
- * filesystem path `/packages/...` — which does not exist — and the wiki
- * webview reported `Could not find file`.
+ * filesystem path `/packages/...` — which does not exist.
  *
  * ## What this test covers
- * Both pure resolvers must mirror the Rust convention: strip the leading
- * `/` and resolve against the workspace root, while leaving relative,
- * `..`, bare, genuinely-absolute (outside-workspace), and external links
- * unchanged.
+ * The language-feature resolver must mirror the Rust convention: strip the
+ * leading `/` and resolve against the workspace root while leaving relative
+ * and external links unchanged.
  *
  * @summary Regression test for `/`-rooted link resolution in both TS resolvers.
  * @module test/suite/linkResolution.slashRooted.test
@@ -24,29 +22,10 @@
 
 import * as assert from 'node:assert';
 import * as path from 'node:path';
-import { resolveWebviewLinkPath } from '../../src/providers/WikiEditorProvider.js';
 import { resolveLinkTarget } from '../../src/providers/WikiLanguageFeatures.js';
 
 const WS = path.sep === '\\' ? 'C:\\ws' : '/ws';
-const SRC_DIR = path.join(WS, 'wiki');
-const SRC_FILE = path.join(SRC_DIR, 'page.md');
-
-describe('WikiEditorProvider.resolveWebviewLinkPath — /-rooted links', () => {
-  it('resolves a /-rooted link against the workspace root', () => {
-    const resolved = resolveWebviewLinkPath('/packages/cli/src/commands/mod.rs', SRC_DIR, WS);
-    assert.strictEqual(resolved, path.join(WS, 'packages', 'cli', 'src', 'commands', 'mod.rs'));
-  });
-
-  it('still resolves a relative link against the linking document directory', () => {
-    const resolved = resolveWebviewLinkPath('../other/x.md', SRC_DIR, WS);
-    assert.strictEqual(resolved, path.join(WS, 'other', 'x.md'));
-  });
-
-  it('still resolves a bare link against the linking document directory', () => {
-    const resolved = resolveWebviewLinkPath('sibling.md', SRC_DIR, WS);
-    assert.strictEqual(resolved, path.join(SRC_DIR, 'sibling.md'));
-  });
-});
+const SRC_FILE = path.join(WS, 'wiki', 'page.md');
 
 describe('WikiLanguageFeatures.resolveLinkTarget — /-rooted links', () => {
   it('resolves a /-rooted link against the workspace root', () => {

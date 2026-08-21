@@ -1,6 +1,6 @@
 /**
  * Per-workspace MRU history of wiki articles viewed through
- * [WikiEditorProvider.resolveCustomTextEditor](../providers/WikiEditorProvider.ts).
+ * [wikiQuickPick](../commands/wikiQuickPick.ts) when a search result is opened.
  *
  * Stored as a string array of absolute paths in
  * [context.workspaceState](../extension.ts) under

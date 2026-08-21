@@ -1,5 +1,5 @@
-packages/cli/Cargo.toml#L1-L5 rk64:a85ffed16a010e5d
-packages/cli/package.json#L2-L4 rk64:2514da6fe491a7c4
+packages/cli/Cargo.toml#L1-L5 rk64:0df8b818ecfe7de9
+packages/cli/package.json#L2-L4 rk64:fabed2ba5bdcdaf0
 packages/cli/scripts/postinstall.js#L88-L100 rk64:622af276d80d153f
 
 The cargo [package] name and version in Cargo.toml determine the built binary's filename and --version output, while packages/cli/package.json's bin and optionalDependencies plus the postinstall installer's hardcoded binary names and platform-package lookups must mirror them; scripts/sync-versions.sh is the authority that fans the package.json version out to Cargo.toml, the npm platform packages, and Cargo.lock, so a manual version or name edit on one side alone ships a mismatched release.

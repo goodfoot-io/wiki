@@ -16,3 +16,6 @@ plugins/*/.claude-plugin/plugin.json merge=json-version
 
 # Resolve .mesh/ merge conflicts structurally via git-mesh merge driver
 .mesh/** merge=mesh
+
+# Resolve .span/ merge conflicts structurally via git-span merge driver
+.span/** merge=span

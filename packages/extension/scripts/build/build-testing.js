@@ -3,15 +3,11 @@
  *
  * Invoked by test/runTest.ts with TEST_DIST_DIR set to a unique temp path.
  * VS Code loads the extension from TEST_DIST_DIR as its root, using the
- * package.json written here (main: "./bundle.cjs"). The webview script is
- * at TEST_DIST_DIR/dist/wiki.js, matching _buildShellHtml's extensionUri paths.
+ * package.json written here (main: "./bundle.cjs").
  *
  * Outputs into TEST_DIST_DIR:
  *   package.json                    — extension manifest (main: ./bundle.cjs)
  *   bundle.cjs                      — extension host (CJS, vscode external)
- *   dist/wiki.js                    — webview bundle (IIFE)
- *   dist/codicons/                  — codicon.css + codicon.ttf
- *   media/                          — markdown.css, highlight.css
  *   test/suite/index.cjs            — Mocha runner entry point
  *   test/suite/*.test.cjs           — individual test suites
  */
@@ -48,38 +44,6 @@ await esbuild.build({
   external: ['vscode'],
   sourcemap: true
 });
-
-// Webview — runs in the browser sandbox inside the panel.
-// extensionUri points at OUT_DIR, so the webview entry must be at OUT_DIR/dist/wiki.js.
-// ESM + splitting so mermaid is emitted as a separate chunk and loaded lazily.
-const distDir = path.join(OUT_DIR, 'dist');
-fs.mkdirSync(distDir, { recursive: true });
-await esbuild.build({
-  entryPoints: { wiki: path.join(EXTENSION_ROOT, 'src/webviews/wiki/index.ts') },
-  bundle: true,
-  outdir: distDir,
-  format: 'esm',
-  splitting: true,
-  platform: 'browser',
-  target: 'es2022',
-  sourcemap: true
-});
-
-// Codicon assets referenced by the webview CSP.
-const codiconsOut = path.join(distDir, 'codicons');
-fs.mkdirSync(codiconsOut, { recursive: true });
-const codiconsSrc = path.dirname(fileURLToPath(import.meta.resolve('@vscode/codicons/dist/codicon.css')));
-for (const file of ['codicon.css', 'codicon.ttf']) {
-  fs.copyFileSync(path.join(codiconsSrc, file), path.join(codiconsOut, file));
-}
-
-// Media assets (CSS files) — referenced relative to extensionUri/media/.
-const mediaOut = path.join(OUT_DIR, 'media');
-fs.mkdirSync(mediaOut, { recursive: true });
-const mediaSrc = path.join(EXTENSION_ROOT, 'media');
-for (const file of fs.readdirSync(mediaSrc)) {
-  fs.copyFileSync(path.join(mediaSrc, file), path.join(mediaOut, file));
-}
 
 // Test suite — Mocha runner entry point.
 const testSuiteOut = path.join(OUT_DIR, 'test', 'suite');

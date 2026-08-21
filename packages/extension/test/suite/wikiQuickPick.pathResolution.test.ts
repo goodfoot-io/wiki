@@ -55,21 +55,19 @@ describe('wikiQuickPick — path resolution (bug reproduction)', () => {
 
     // openWikiFile receives repo-relative paths from the CLI (wiki list /
     // wiki <query> output). Calling it with a relative path should resolve
-    // against workspaceRoot() and open the file in the wiki viewer.
+    // against workspaceRoot() and open the file in the text editor.
     await openWikiFile('wiki/relative-path-bug.md');
 
     const activeTab = await waitForTab(
       (tab) =>
-        tab?.input instanceof vscode.TabInputCustom &&
-        (tab.input as vscode.TabInputCustom).uri.fsPath === wikiFile.fsPath,
-      'Expected openWikiFile to open the correct wiki file in the custom ' +
-        'viewer, but the correct file was never opened. With the bug, ' +
+        tab?.input instanceof vscode.TabInputText && (tab.input as vscode.TabInputText).uri.fsPath === wikiFile.fsPath,
+      'Expected openWikiFile to open the correct wiki file in the text ' +
+        'editor, but the correct file was never opened. With the bug, ' +
         `openWikiFile receives 'wiki/relative-path-bug.md' and calls ` +
         `vscode.Uri.file() on it, producing file:///wiki/relative-path-bug.md ` +
         `instead of resolving against workspaceRoot() to produce ${wikiFile.fsPath}.`
     );
-    const tabInput = activeTab.input as vscode.TabInputCustom;
-    assert.strictEqual(tabInput.viewType, 'wiki.viewer');
+    const tabInput = activeTab.input as vscode.TabInputText;
     assert.strictEqual(tabInput.uri.fsPath, wikiFile.fsPath);
   });
 

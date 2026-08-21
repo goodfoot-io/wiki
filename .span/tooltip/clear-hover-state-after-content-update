@@ -1,5 +1,0 @@
-packages/extension/src/webviews/wiki/index.ts#L77-L84 rk64:ce368f702119b036
-packages/extension/src/webviews/wiki/index.ts#L130-L149 rk64:7ddbe3cd7b0b0f10
-packages/extension/src/webviews/wiki/tooltip.ts#L209-L216 rk64:336863728c5499af
-
-The updateContent and mouseout handlers in the wiki webview entry point must call clearHoverState() from the tooltip module to cancel the hover timer, clear the pending-hover anchor reference, and hide the tooltip — preventing stale hover state from referencing a morphdom-detached anchor element after content patching. Nothing checks that either handler calls it, so removing a call silently re-introduces the stale-hover-tooltip bug.

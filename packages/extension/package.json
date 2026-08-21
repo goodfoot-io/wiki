@@ -1,8 +1,8 @@
 {
   "name": "wiki-extension",
-  "displayName": "Wiki Viewer",
-  "description": "Renders wiki markdown files in webview panels with wikilink navigation.",
-  "version": "0.5.111",
+  "displayName": "Wiki",
+  "description": "Wiki language features, search, and CLI integration for Markdown files.",
+  "version": "0.5.115",
   "publisher": "goodfoot",
   "type": "module",
   "engines": {
@@ -32,32 +32,10 @@
         }
       }
     },
-    "configurationDefaults": {
-      "workbench.editorAssociations": {
-        "{git}:/**/*.md": "default"
-      }
-    },
-    "customEditors": [
-      {
-        "viewType": "wiki.viewer",
-        "displayName": "Wiki Viewer",
-        "selector": [
-          {
-            "filenamePattern": "**/*.md"
-          }
-        ],
-        "priority": "default"
-      }
-    ],
     "commands": [
       {
         "command": "wiki.search",
         "title": "Search",
-        "category": "Wiki"
-      },
-      {
-        "command": "wiki.openInEditor",
-        "title": "Open in Editor",
         "category": "Wiki"
       },
       {
@@ -85,22 +63,10 @@
     "typecheck": "tsgo --noEmit",
     "clean": "rm -rf dist out dist-test-* *.vsix tsconfig.tsbuildinfo"
   },
-  "dependencies": {
-    "@vscode-elements/elements": "^2.5.1",
-    "@vscode/codicons": "^0.0.45",
-    "highlight.js": "^11.11.1",
-    "markdown-it": "^14.1.1",
-    "markdown-it-front-matter": "^0.2.4",
-    "mermaid": "^11.14.0",
-    "morphdom": "^2.7.8"
-  },
   "devDependencies": {
     "@goodfoot/vscode-logging": "workspace:*",
     "@goodfoot/wiki": "workspace:*",
-    "@types/highlight.js": "^10.1.0",
-    "@types/markdown-it": "^14.1.2",
     "@types/mocha": "^10.0.10",
-    "@types/morphdom": "^2.4.2",
     "@types/node": "24.x",
     "@types/vscode": "^1.100.0",
     "@typescript/native-preview": "^7.0.0-dev",
