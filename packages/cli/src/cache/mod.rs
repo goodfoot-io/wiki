@@ -23,9 +23,11 @@ pub mod key;
 pub mod schema;
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use fs4::fs_std::FileExt;
 use rusqlite::params;
@@ -62,6 +64,59 @@ pub enum CacheError {
     /// single quarantine-and-recreate attempt also failed.
     #[error("anchor cache is corrupt and could not be recreated: {0}")]
     Corrupt(String),
+}
+
+/// Invocation-scoped cache diagnostic budget. Clones share the same guard,
+/// so separate stores and fix phases still emit at most one warning total.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InjectedFault {
+    Operational,
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    Schema,
+}
+
+#[derive(Default)]
+struct ReporterState {
+    reported: Cell<bool>,
+    injected: RefCell<VecDeque<InjectedFault>>,
+}
+
+#[derive(Clone, Default)]
+pub struct CacheReporter(Rc<ReporterState>);
+
+impl CacheReporter {
+    pub fn unavailable(&self, reason: &str) {
+        if !self.0.reported.replace(true) {
+            eprintln!("warning: anchor cache unavailable ({reason}); continuing uncached");
+        }
+    }
+
+    pub fn rebuilt(&self) {
+        if !self.0.reported.replace(true) {
+            eprintln!("warning: anchor cache was corrupt; rebuilt");
+        }
+    }
+
+    pub fn for_invocation() -> Self {
+        let reporter = Self::default();
+        #[cfg(debug_assertions)]
+        if let Ok(script) = std::env::var("WIKI_ANCHOR_CACHE_TEST_FAULT_SEQUENCE") {
+            reporter
+                .0
+                .injected
+                .borrow_mut()
+                .extend(script.split(',').filter_map(|item| match item {
+                    "operational" => Some(InjectedFault::Operational),
+                    "schema" => Some(InjectedFault::Schema),
+                    _ => None,
+                }));
+        }
+        reporter
+    }
+
+    fn next_injected(&self) -> Option<InjectedFault> {
+        self.0.injected.borrow_mut().pop_front()
+    }
 }
 
 /// The cache surface the drift seams consume (plan decision 5). Reads verify
@@ -155,7 +210,8 @@ pub struct CacheStore {
     pending: RefCell<Vec<PendingWrite>>,
     collecting_page: Cell<bool>,
     disabled: Cell<bool>,
-    fault_reported: Cell<bool>,
+    reporter: CacheReporter,
+    inject_operational: Cell<bool>,
 }
 
 enum PendingWrite {
@@ -196,6 +252,14 @@ impl CacheStore {
     /// working connection opens; a held lock means another process is mid-
     /// init, so this run serves uncached rather than waiting.
     pub fn open(common_dir: &Path) -> Result<Option<Self>, CacheError> {
+        Self::open_with_reporter(common_dir, CacheReporter::default())
+    }
+
+    pub fn open_with_reporter(
+        common_dir: &Path,
+        reporter: CacheReporter,
+    ) -> Result<Option<Self>, CacheError> {
+        let injected = reporter.next_injected();
         let dir = schema::cache_dir(common_dir);
         fs::create_dir_all(&dir)?;
         let lock_path = schema::init_lock_path(common_dir);
@@ -218,6 +282,11 @@ impl CacheStore {
             if !held {
                 return Ok(None);
             }
+            #[cfg(debug_assertions)]
+            if injected == Some(InjectedFault::Schema) && db.exists() {
+                let conn = rusqlite::Connection::open(&db)?;
+                conn.execute_batch("DROP TABLE IF EXISTS fingerprint; CREATE TABLE fingerprint (key_digest TEXT PRIMARY KEY) STRICT;")?;
+            }
             match schema::probe(&db)? {
                 schema::ProbeOutcome::Valid => {}
                 // Missing is a fresh create, never a quarantine (plan
@@ -233,7 +302,7 @@ impl CacheStore {
                     // no JSON); a quarantine that failed never reaches this
                     // line — the Err propagation and the caller's fault
                     // line cover it.
-                    eprintln!("warning: anchor cache was corrupt; rebuilt");
+                    reporter.rebuilt();
                 }
             }
             // Release the init lock before the working connection opens.
@@ -249,7 +318,8 @@ impl CacheStore {
                 pending: RefCell::new(Vec::new()),
                 collecting_page: Cell::new(false),
                 disabled: Cell::new(false),
-                fault_reported: Cell::new(false),
+                reporter: reporter.clone(),
+                inject_operational: Cell::new(injected == Some(InjectedFault::Operational)),
             }))
         })
     }
@@ -257,13 +327,18 @@ impl CacheStore {
     /// Construct a cache-management handle without opening SQLite. This is
     /// required on Windows, where an open database cannot be unlinked.
     pub fn for_clear(common_dir: &Path) -> Self {
+        Self::for_clear_with_reporter(common_dir, CacheReporter::default())
+    }
+
+    pub fn for_clear_with_reporter(common_dir: &Path, reporter: CacheReporter) -> Self {
         Self {
             conn: RefCell::new(None),
             common_dir: common_dir.to_path_buf(),
             pending: RefCell::new(Vec::new()),
             collecting_page: Cell::new(false),
             disabled: Cell::new(false),
-            fault_reported: Cell::new(false),
+            reporter,
+            inject_operational: Cell::new(false),
         }
     }
 
@@ -277,8 +352,15 @@ impl CacheStore {
     fn operational_fault(&self, error: &CacheError) {
         self.disabled.set(true);
         self.pending.borrow_mut().clear();
-        if !self.fault_reported.replace(true) {
-            eprintln!("warning: anchor cache unavailable ({error}); continuing uncached");
+        self.reporter.unavailable(&error.to_string());
+    }
+
+    fn inject_operational_fault(&self) -> bool {
+        if self.inject_operational.replace(false) {
+            self.operational_fault(&CacheError::Sqlite(rusqlite::Error::InvalidQuery));
+            true
+        } else {
+            false
         }
     }
 }
@@ -351,6 +433,9 @@ impl AnchorCache for CacheStore {
         range_start: u32,
         range_end: u32,
     ) -> Result<Option<String>, CacheError> {
+        if self.inject_operational_fault() {
+            return Ok(None);
+        }
         if self.disabled.get() {
             return Ok(None);
         }
@@ -462,6 +547,9 @@ impl AnchorCache for CacheStore {
         page_path: &str,
         log_output: &str,
     ) -> Result<Option<WalkRow>, CacheError> {
+        if self.inject_operational_fault() {
+            return Ok(None);
+        }
         if self.disabled.get() {
             return Ok(None);
         }

@@ -1,10 +1,10 @@
 packages/claude-code-hooks/src/post-tool-use.ts rk64:be7c65baa74a2ce1
-packages/cli/src/commands/check.rs#L282-L296 rk64:ca50894963c47164
+packages/cli/src/commands/check.rs#L281-L295 rk64:ca50894963c47164
 packages/cli/src/commands/search.rs rk64:4bcc02eb16e7fdef
 packages/cli/src/commands/summary.rs#L72-L82 rk64:0ce82663ffe5539f
 packages/cli/src/parser.rs#L6-L12 rk64:b76fbea44656a0a3
 packages/cli/src/parser.rs#L61-L63 rk64:182480d2b7f35690
 packages/cli/src/parser.rs#L251-L257 rk64:9685a32cb24070fa
-wiki/architecture/wiki-cli.md rk64:fbb0195c05028c08
+wiki/architecture/wiki-cli.md rk64:eacb40d054873802
 
 The architecture page's behavior claims stay true of the code it cites: parser extraction, scrubbing, and split-on-# semantics, the check pipeline's drift classification and --fix behavior, the summary and search entrypoints, and the PostToolUse hook's ownership. Wiki check certifies the line-range citations against their anchor epochs, but whole-file citations and the prose claims themselves have no other enforcement.

@@ -30,6 +30,7 @@ fn wiki(cwd: &Path, args: &[&str]) -> Command {
     cmd.current_dir(cwd)
         .env_remove("GIT_DIR")
         .env_remove("WIKI_ANCHOR_CACHE")
+        .env_remove("WIKI_ANCHOR_CACHE_TEST_FAULT_SEQUENCE")
         .args(args);
     cmd
 }
@@ -400,6 +401,44 @@ fn fix_mode_forced_fault_warns_at_most_once_across_phases() {
         non_fault_stderr(&switched),
         "the warning must be the only stderr difference"
     );
+}
+
+fn all_cache_warnings(stderr: &[u8]) -> Vec<&str> {
+    std::str::from_utf8(stderr)
+        .expect("utf8 stderr")
+        .lines()
+        .filter(|line| line.starts_with("warning: anchor cache "))
+        .collect()
+}
+
+#[test]
+fn fix_operational_faults_in_multiple_phases_share_one_warning_budget() {
+    let repo = certified_fixture();
+    let mut cmd = wiki(&repo.root, &["check", "--fix"]);
+    cmd.env("WIKI_ANCHOR_CACHE_TEST_FAULT_SEQUENCE", "operational,operational,operational");
+    let faulted = cmd.output().expect("faulted fix command");
+
+    let mut oracle = wiki(&repo.root, &["check", "--fix"]);
+    oracle.env("WIKI_ANCHOR_CACHE", "0");
+    let oracle = oracle.output().expect("uncached fix oracle");
+    assert_eq!(faulted.status.code(), oracle.status.code());
+    assert_eq!(faulted.stdout, oracle.stdout);
+    assert_eq!(all_cache_warnings(&faulted.stderr).len(), 1, "{:?}", all_cache_warnings(&faulted.stderr));
+}
+
+#[test]
+fn fix_operational_fault_then_schema_rebuild_share_one_warning_budget() {
+    let repo = certified_fixture();
+    let mut cmd = wiki(&repo.root, &["check", "--fix"]);
+    cmd.env("WIKI_ANCHOR_CACHE_TEST_FAULT_SEQUENCE", "operational,schema");
+    let faulted = cmd.output().expect("mixed-fault fix command");
+
+    let mut oracle = wiki(&repo.root, &["check", "--fix"]);
+    oracle.env("WIKI_ANCHOR_CACHE", "0");
+    let oracle = oracle.output().expect("uncached fix oracle");
+    assert_eq!(faulted.status.code(), oracle.status.code());
+    assert_eq!(faulted.stdout, oracle.stdout);
+    assert_eq!(all_cache_warnings(&faulted.stderr).len(), 1, "{:?}", all_cache_warnings(&faulted.stderr));
 }
 
 // ── evaluator witnesses ──────────────────────────────────────────────────────
