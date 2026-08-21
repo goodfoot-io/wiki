@@ -243,7 +243,7 @@ fn verbatim_quote_in_unrelated_page_never_wins_the_fuzzy_tier() {
     // The certified range L2-L4 still fits the emptied target (Drift, not
     // Broken), and the quoting page holds the block verbatim at L1-L3.
     std::fs::write(root.join("src/target.rs"), EMPTIED).unwrap();
-    std::fs::write(root.join("wiki/quote.md"), format!("{BLOCK}")).unwrap();
+    std::fs::write(root.join("wiki/quote.md"), BLOCK).unwrap();
     git(root, &["add", "-A"]);
     git(root, &["commit", "-q", "-m", "quote the block"]);
 

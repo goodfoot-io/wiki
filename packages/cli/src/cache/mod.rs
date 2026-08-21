@@ -22,6 +22,7 @@
 pub mod key;
 pub mod schema;
 
+use std::cell::{Cell, RefCell};
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -68,6 +69,14 @@ pub enum CacheError {
 /// queried tuple and its `row_digest` checked; writes are computed strictly
 /// outside any transaction by the caller and flushed per page.
 pub trait AnchorCache {
+    /// Start collecting writes for one classified page.
+    fn begin_page(&self) {}
+
+    /// Commit the current page's collected writes in one transaction.
+    fn flush_page(&self) -> Result<(), CacheError> {
+        Ok(())
+    }
+
     /// Return the cached 16-hex rk64 fingerprint for the queried tuple, or
     /// `None` on a miss. The row is served only after the stored tuple is
     /// compared field-by-field against the queried tuple (all five fields)
@@ -140,9 +149,35 @@ pub trait AnchorCache {
 /// probe/quarantine/open ordering.
 pub struct CacheStore {
     /// Open SQLite connection (always `Some` after [`CacheStore::open`]).
-    conn: Option<rusqlite::Connection>,
+    conn: RefCell<Option<rusqlite::Connection>>,
     /// Common git dir — derives the db and init-lock paths via [`schema`].
     common_dir: PathBuf,
+    pending: RefCell<Vec<PendingWrite>>,
+    collecting_page: Cell<bool>,
+    disabled: Cell<bool>,
+    fault_reported: Cell<bool>,
+}
+
+enum PendingWrite {
+    Fingerprint {
+        key: String,
+        page_path: String,
+        anchor_sha: String,
+        target_path: String,
+        range_start: u32,
+        range_end: u32,
+        fp: String,
+        digest: Vec<u8>,
+    },
+    Walk {
+        key: String,
+        page_path: String,
+        log_output_sha: String,
+        anchor_sha: String,
+        path_at_commit: String,
+        value: Option<String>,
+        digest: Vec<u8>,
+    },
 }
 
 impl CacheStore {
@@ -202,17 +237,111 @@ impl CacheStore {
                 }
             }
             // Release the init lock before the working connection opens.
+            // Explicit unlock matters on filesystems where closing a cloned
+            // or internally duplicated descriptor does not promptly release
+            // the advisory lock for a same-process clear.
+            FileExt::unlock(&lock_file)?;
             drop(lock_file);
             let conn = schema::open_connection(&db)?;
             Ok(Some(CacheStore {
-                conn: Some(conn),
+                conn: RefCell::new(Some(conn)),
                 common_dir: common_dir.to_path_buf(),
+                pending: RefCell::new(Vec::new()),
+                collecting_page: Cell::new(false),
+                disabled: Cell::new(false),
+                fault_reported: Cell::new(false),
             }))
         })
+    }
+
+    /// Construct a cache-management handle without opening SQLite. This is
+    /// required on Windows, where an open database cannot be unlinked.
+    pub fn for_clear(common_dir: &Path) -> Self {
+        Self {
+            conn: RefCell::new(None),
+            common_dir: common_dir.to_path_buf(),
+            pending: RefCell::new(Vec::new()),
+            collecting_page: Cell::new(false),
+            disabled: Cell::new(false),
+            fault_reported: Cell::new(false),
+        }
+    }
+
+    /// Whether this handle currently retains SQLite. Exposed as a narrow
+    /// ordering seam for platform-sensitive clear tests.
+    #[doc(hidden)]
+    pub fn connection_is_open(&self) -> bool {
+        self.conn.borrow().is_some()
+    }
+
+    fn operational_fault(&self, error: &CacheError) {
+        self.disabled.set(true);
+        self.pending.borrow_mut().clear();
+        if !self.fault_reported.replace(true) {
+            eprintln!("warning: anchor cache unavailable ({error}); continuing uncached");
+        }
     }
 }
 
 impl AnchorCache for CacheStore {
+    fn begin_page(&self) {
+        if !self.disabled.get() {
+            self.pending.borrow_mut().clear();
+            self.collecting_page.set(true);
+        }
+    }
+
+    fn flush_page(&self) -> Result<(), CacheError> {
+        if self.disabled.get() {
+            return Ok(());
+        }
+        let writes = std::mem::take(&mut *self.pending.borrow_mut());
+        self.collecting_page.set(false);
+        if writes.is_empty() {
+            return Ok(());
+        }
+        let result = schema::retry_busy(|| {
+            let mut conn_ref = self.conn.borrow_mut();
+            let Some(conn) = conn_ref.as_mut() else {
+                return Ok(());
+            };
+            let tx = conn.transaction()?;
+            for write in &writes {
+                match write {
+                    PendingWrite::Fingerprint {
+                        key,
+                        page_path,
+                        anchor_sha,
+                        target_path,
+                        range_start,
+                        range_end,
+                        fp,
+                        digest,
+                    } => {
+                        tx.execute("INSERT INTO fingerprint (key_digest,page_path,anchor_sha,target_path,range_start,range_end,fp,row_digest) VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(key_digest) DO UPDATE SET page_path=excluded.page_path,anchor_sha=excluded.anchor_sha,target_path=excluded.target_path,range_start=excluded.range_start,range_end=excluded.range_end,fp=excluded.fp,row_digest=excluded.row_digest", params![key,page_path,anchor_sha,target_path,*range_start as i64,*range_end as i64,fp,digest])?;
+                    }
+                    PendingWrite::Walk {
+                        key,
+                        page_path,
+                        log_output_sha,
+                        anchor_sha,
+                        path_at_commit,
+                        value,
+                        digest,
+                    } => {
+                        tx.execute("INSERT INTO anchor_walk (key_digest,page_path,log_output_sha,anchor_sha,path_at_commit,value,row_digest) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(key_digest) DO UPDATE SET page_path=excluded.page_path,log_output_sha=excluded.log_output_sha,anchor_sha=excluded.anchor_sha,path_at_commit=excluded.path_at_commit,value=excluded.value,row_digest=excluded.row_digest", params![key,page_path,log_output_sha,anchor_sha,path_at_commit,value,digest])?;
+                    }
+                }
+            }
+            tx.commit()?;
+            Ok(())
+        });
+        if let Err(ref error) = result {
+            self.operational_fault(error);
+        }
+        result
+    }
+
     fn lookup_fingerprint(
         &self,
         key: &str,
@@ -222,7 +351,11 @@ impl AnchorCache for CacheStore {
         range_start: u32,
         range_end: u32,
     ) -> Result<Option<String>, CacheError> {
-        let Some(conn) = self.conn.as_ref() else {
+        if self.disabled.get() {
+            return Ok(None);
+        }
+        let conn_ref = self.conn.borrow();
+        let Some(conn) = conn_ref.as_ref() else {
             return Ok(None);
         };
         let row = conn.query_row(
@@ -246,7 +379,13 @@ impl AnchorCache for CacheStore {
         let (stored_page, stored_anchor, stored_target, stored_start, stored_end, fp, row_digest) =
             match row {
                 Ok(row) => row,
-                Err(_) => return Ok(None),
+                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+                Err(e) => {
+                    drop(conn_ref);
+                    let error = CacheError::Sqlite(e);
+                    self.operational_fault(&error);
+                    return Ok(None);
+                }
             };
         // The stored tuple must match the queried tuple field by field...
         if stored_page != page_path
@@ -285,9 +424,9 @@ impl AnchorCache for CacheStore {
         range_end: u32,
         fp: &str,
     ) -> Result<(), CacheError> {
-        let Some(conn) = self.conn.as_ref() else {
+        if self.disabled.get() {
             return Ok(());
-        };
+        }
         let digest = key::row_digest(
             &[
                 page_path,
@@ -300,33 +439,21 @@ impl AnchorCache for CacheStore {
         );
         // Last-write-wins on the key; the row_digest covers the whole row so
         // a served row always re-derives (plan decision 5).
-        schema::retry_busy(|| {
-            conn.execute(
-                "INSERT INTO fingerprint
-                     (key_digest, page_path, anchor_sha, target_path, range_start, range_end,
-                      fp, row_digest)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT(key_digest) DO UPDATE SET
-                     page_path = excluded.page_path,
-                     anchor_sha = excluded.anchor_sha,
-                     target_path = excluded.target_path,
-                     range_start = excluded.range_start,
-                     range_end = excluded.range_end,
-                     fp = excluded.fp,
-                     row_digest = excluded.row_digest",
-                params![
-                    key,
-                    page_path,
-                    anchor_sha,
-                    target_path,
-                    range_start as i64,
-                    range_end as i64,
-                    fp,
-                    digest
-                ],
-            )?;
+        self.pending.borrow_mut().push(PendingWrite::Fingerprint {
+            key: key.into(),
+            page_path: page_path.into(),
+            anchor_sha: anchor_sha.into(),
+            target_path: target_path.into(),
+            range_start,
+            range_end,
+            fp: fp.into(),
+            digest,
+        });
+        if self.collecting_page.get() {
             Ok(())
-        })
+        } else {
+            self.flush_page()
+        }
     }
 
     fn lookup_walk(
@@ -335,7 +462,11 @@ impl AnchorCache for CacheStore {
         page_path: &str,
         log_output: &str,
     ) -> Result<Option<WalkRow>, CacheError> {
-        let Some(conn) = self.conn.as_ref() else {
+        if self.disabled.get() {
+            return Ok(None);
+        }
+        let conn_ref = self.conn.borrow();
+        let Some(conn) = conn_ref.as_ref() else {
             return Ok(None);
         };
         let row = conn.query_row(
@@ -357,7 +488,13 @@ impl AnchorCache for CacheStore {
         // (plan decision 5).
         let (stored_page, log_sha, anchor, path_at_commit, value, row_digest) = match row {
             Ok(row) => row,
-            Err(_) => return Ok(None),
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+            Err(e) => {
+                drop(conn_ref);
+                let error = CacheError::Sqlite(e);
+                self.operational_fault(&error);
+                return Ok(None);
+            }
         };
         // The stored tuple must match the queried tuple: page_path verbatim,
         // log_output re-derived to its sha (the full log output is never
@@ -367,12 +504,7 @@ impl AnchorCache for CacheStore {
         }
         // ... and the row_digest must re-derive over (tuple + value).
         let digest = key::row_digest(
-            &[
-                page_path,
-                &log_sha,
-                &anchor,
-                &path_at_commit,
-            ],
+            &[page_path, &log_sha, &anchor, &path_at_commit],
             value.as_deref(),
         );
         if digest != row_digest {
@@ -394,43 +526,36 @@ impl AnchorCache for CacheStore {
         path_at_commit: &str,
         value: Option<&str>,
     ) -> Result<(), CacheError> {
-        let Some(conn) = self.conn.as_ref() else {
+        if self.disabled.get() {
             return Ok(());
-        };
+        }
         let digest = key::row_digest(
             &[page_path, log_output_sha, anchor_sha, path_at_commit],
             value,
         );
         // Last-write-wins on the key; the row_digest covers the whole row so
         // a served row always re-derives (plan decision 5).
-        schema::retry_busy(|| {
-            conn.execute(
-                "INSERT INTO anchor_walk
-                     (key_digest, page_path, log_output_sha, anchor_sha, path_at_commit, value,
-                      row_digest)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(key_digest) DO UPDATE SET
-                     page_path = excluded.page_path,
-                     log_output_sha = excluded.log_output_sha,
-                     anchor_sha = excluded.anchor_sha,
-                     path_at_commit = excluded.path_at_commit,
-                     value = excluded.value,
-                     row_digest = excluded.row_digest",
-                params![
-                    key,
-                    page_path,
-                    log_output_sha,
-                    anchor_sha,
-                    path_at_commit,
-                    value,
-                    digest
-                ],
-            )?;
+        self.pending.borrow_mut().push(PendingWrite::Walk {
+            key: key.into(),
+            page_path: page_path.into(),
+            log_output_sha: log_output_sha.into(),
+            anchor_sha: anchor_sha.into(),
+            path_at_commit: path_at_commit.into(),
+            value: value.map(str::to_owned),
+            digest,
+        });
+        if self.collecting_page.get() {
             Ok(())
-        })
+        } else {
+            self.flush_page()
+        }
     }
 
     fn clear(&self) -> Result<(), CacheError> {
+        // Close before acquiring the deletion lock: Windows refuses to
+        // remove the database or sidecars while this process retains it.
+        self.pending.borrow_mut().clear();
+        drop(self.conn.borrow_mut().take());
         // Take the same no-wait init lock first: never delete under a
         // concurrent probe/quarantine (plan decision 8). Contention is an
         // error — the caller reports it rather than silently skipping the
@@ -479,7 +604,10 @@ impl AnchorCache for CacheStore {
             Ok(entries) => {
                 for entry in entries {
                     let path = entry.map_err(CacheError::from)?.path();
-                    let name = path.file_name().expect("dir entry has a name").to_string_lossy();
+                    let name = path
+                        .file_name()
+                        .expect("dir entry has a name")
+                        .to_string_lossy();
                     if name.starts_with(&aside_prefix) && name.ends_with(".quarantine") {
                         match fs::remove_file(&path) {
                             Ok(()) => {}
@@ -512,8 +640,7 @@ impl AnchorCache for CacheStore {
             Ok(()) => {}
             Err(e)
                 if e.kind() == io::ErrorKind::NotFound
-                    || e.kind() == io::ErrorKind::DirectoryNotEmpty =>
-            {}
+                    || e.kind() == io::ErrorKind::DirectoryNotEmpty => {}
             Err(e) => return Err(e.into()),
         }
         Ok(())

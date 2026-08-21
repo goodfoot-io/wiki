@@ -769,7 +769,22 @@ pub(crate) fn anchor_cache_for_run(fault_reported: &Cell<bool>) -> AnchorCacheHa
 /// gate is bypassed here. Every other disabled path (common-dir resolution
 /// failure, held init lock, open error) keeps its run semantics.
 pub(crate) fn anchor_cache_for_clear(fault_reported: &Cell<bool>) -> AnchorCacheHandle {
-    anchor_cache_for_run_inner(fault_reported, false)
+    let common_dir = match crate::git::common_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            report_cache_fault(fault_reported, &e.to_string());
+            return AnchorCacheHandle {
+                cache: AnchorCacheKind::Noop(crate::cache::NoopCache),
+                common_dir: None,
+                lock_held: false,
+            };
+        }
+    };
+    AnchorCacheHandle {
+        cache: AnchorCacheKind::Store(crate::cache::CacheStore::for_clear(&common_dir)),
+        common_dir: Some(common_dir),
+        lock_held: false,
+    }
 }
 
 fn anchor_cache_for_run_inner(
@@ -898,6 +913,7 @@ fn collect_drift_diagnostics(
             Ok(head_content) => drift::read_links_reviewed(&head_content),
             Err(_) => drift::LinksReviewedRead::Readable(None),
         };
+        anchor_cache.cache().begin_page();
         let epoch = drift::find_anchor_commit(
             repo_root,
             anchor_cache.cache(),
@@ -907,6 +923,7 @@ fn collect_drift_diagnostics(
         )
         .map_err(|e| miette::miette!("{e}"))?;
         if matches!(&epoch, drift::LinkEpoch::Missing) {
+            let _ = anchor_cache.cache().flush_page();
             out.push(CheckDiagnostic {
                 kind: "anchor_epoch_missing".into(),
                 file: page_path.clone(),
@@ -928,6 +945,7 @@ fn collect_drift_diagnostics(
             &mut ctx,
         )
         .map_err(|e| miette::miette!("{e}"))?;
+        let _ = anchor_cache.cache().flush_page();
         for c in classes {
             let (kind, message) = match &c.outcome {
                 drift::DriftOutcome::Healthy | drift::DriftOutcome::Moved { .. } => continue,

@@ -1,5 +1,5 @@
 packages/cli/src/commands/check.rs#L615-L624 rk64:e4979825ce9ee01e
-packages/cli/src/commands/check.rs#L1131-L1136 rk64:f72ce367c68106bc
+packages/cli/src/commands/check.rs#L1149-L1154 rk64:f72ce367c68106bc
 packages/cli/src/commands/mod.rs#L249-L259 rk64:915fc4410ff7c163
 packages/cli/src/index/freshness.rs#L218-L234 rk64:26604bd6a5914c56
 packages/cli/src/index/passes/index_file.rs#L4-L98 rk64:c213c1a03b006252

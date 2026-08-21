@@ -21,9 +21,9 @@ use tempfile::TempDir;
 
 use wiki::cache::key::{fingerprint_key, sha256_hex, walk_key};
 use wiki::cache::schema::{
-    db_path, init_lock_path, open_connection, probe, quarantine, ProbeOutcome, SuspectKind,
     ANCHOR_WALK_DDL, APPLICATION_ID, BUSY_TIMEOUT_MS, DB_FILE_NAME, FINGERPRINT_DDL, META_DDL,
-    SCHEMA_VERSION, SEMANTIC_EPOCH,
+    ProbeOutcome, SCHEMA_VERSION, SEMANTIC_EPOCH, SuspectKind, db_path, init_lock_path,
+    open_connection, probe, quarantine,
 };
 use wiki::cache::{AnchorCache, CacheStore, WalkRow};
 
@@ -111,6 +111,90 @@ fn open_store(common_dir: &Path) -> CacheStore {
         .expect("init lock is not held in a test fixture")
 }
 
+#[test]
+fn probe_rejects_malformed_fingerprint_binding_schema_and_open_rebuilds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = wiki::cache::schema::db_path(dir.path());
+    drop(open_store(dir.path()));
+    let conn = rusqlite::Connection::open(&db).expect("open db");
+    conn.execute_batch(
+        "DROP TABLE fingerprint; CREATE TABLE fingerprint (key_digest TEXT PRIMARY KEY) STRICT;",
+    )
+    .expect("malform fingerprint");
+    drop(conn);
+    assert!(matches!(
+        wiki::cache::schema::probe(&db).unwrap(),
+        wiki::cache::schema::ProbeOutcome::Suspect(
+            wiki::cache::schema::SuspectKind::SchemaMismatch
+        )
+    ));
+    drop(open_store(dir.path()));
+    assert_eq!(
+        wiki::cache::schema::probe(&db).unwrap(),
+        wiki::cache::schema::ProbeOutcome::Valid
+    );
+}
+
+#[test]
+fn probe_rejects_malformed_walk_binding_schema_and_open_rebuilds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = wiki::cache::schema::db_path(dir.path());
+    drop(open_store(dir.path()));
+    let conn = rusqlite::Connection::open(&db).expect("open db");
+    conn.execute_batch(
+        "DROP TABLE anchor_walk; CREATE TABLE anchor_walk (key_digest TEXT PRIMARY KEY) STRICT;",
+    )
+    .expect("malform walk");
+    drop(conn);
+    assert!(matches!(
+        wiki::cache::schema::probe(&db).unwrap(),
+        wiki::cache::schema::ProbeOutcome::Suspect(
+            wiki::cache::schema::SuspectKind::SchemaMismatch
+        )
+    ));
+    drop(open_store(dir.path()));
+    assert_eq!(
+        wiki::cache::schema::probe(&db).unwrap(),
+        wiki::cache::schema::ProbeOutcome::Valid
+    );
+}
+
+#[test]
+fn page_writes_remain_queued_until_one_explicit_flush() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = open_store(dir.path());
+    store.begin_page();
+    for line in 1..=8 {
+        let key = fingerprint_key("page.md", SHA, "target.md", line, line);
+        store
+            .upsert_fingerprint(&key, "page.md", SHA, "target.md", line, line, FP)
+            .unwrap();
+    }
+    let db = wiki::cache::schema::db_path(dir.path());
+    let observer = rusqlite::Connection::open(&db).expect("observer");
+    let before: i64 = observer
+        .query_row("SELECT count(*) FROM fingerprint", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(before, 0, "page writes must not autocommit per row");
+    store.flush_page().unwrap();
+    let after: i64 = observer
+        .query_row("SELECT count(*) FROM fingerprint", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(after, 8, "one page flush publishes the whole batch");
+}
+
+#[test]
+fn clear_drops_its_connection_before_removing_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = open_store(dir.path());
+    assert!(store.connection_is_open());
+    store.clear().expect("clear");
+    assert!(
+        !store.connection_is_open(),
+        "clear must release SQLite before unlinking"
+    );
+}
+
 /// Restores the process cwd on drop. `git::common_dir()` discovers from the
 /// current directory, and the suite runs single-threaded (--test-threads=1).
 struct CwdGuard(PathBuf);
@@ -138,7 +222,11 @@ fn linked_worktree_repo() -> LinkedWorktreeRepo {
     git(main.path(), &["init", "-b", "main"]);
     git(main.path(), &["config", "user.email", "test@example.com"]);
     git(main.path(), &["config", "user.name", "Test"]);
-    fs::write(main.path().join("README.md"), "anchor cache worktree fixture\n").expect("write README");
+    fs::write(
+        main.path().join("README.md"),
+        "anchor cache worktree fixture\n",
+    )
+    .expect("write README");
     git(main.path(), &["add", "."]);
     git(main.path(), &["commit", "-m", "init"]);
     let linked = TempDir::new().expect("tempdir");
@@ -334,7 +422,10 @@ fn probe_classifies_a_truncated_db_as_corrupt() {
     // Fold the WAL into the main file so the truncation lands in real pages.
     exec_on_db(&db, "PRAGMA wal_checkpoint(TRUNCATE);");
     let len = fs::metadata(&db).expect("metadata").len();
-    assert!(len > 512, "crafted db must be larger than the 100-byte header");
+    assert!(
+        len > 512,
+        "crafted db must be larger than the 100-byte header"
+    );
     let file = fs::File::options()
         .write(true)
         .open(&db)
@@ -393,13 +484,13 @@ fn quarantine_renames_aside_deletes_sidecars_and_creates_fresh() {
     quarantine(&db).expect("quarantine");
 
     // The suspect file is renamed aside exactly once, content preserved.
-    let aside = db_artifacts(&cache);
+    let aside = db_artifacts(cache);
     assert_eq!(aside.len(), 1, "exactly one quarantine rename-aside");
     assert_eq!(fs::read(&aside[0]).expect("read aside"), garbage);
 
     // The original -wal/-shm companions are gone — nothing in the cache dir
     // still carries their content.
-    for entry in fs::read_dir(&cache).expect("read cache dir") {
+    for entry in fs::read_dir(cache).expect("read cache dir") {
         let path = entry.expect("entry").path();
         if path.is_file() {
             assert_ne!(
@@ -512,7 +603,15 @@ fn store_fingerprint_overwrite_is_last_write_wins() {
     let store = open_store(dir.path());
     let key = fingerprint_key("pages/guide.md", SHA, "pages/other.md", 10, 20);
     store
-        .upsert_fingerprint(&key, "pages/guide.md", SHA, "pages/other.md", 10, 20, "0000000000000000")
+        .upsert_fingerprint(
+            &key,
+            "pages/guide.md",
+            SHA,
+            "pages/other.md",
+            10,
+            20,
+            "0000000000000000",
+        )
         .expect("upsert first");
     store
         .upsert_fingerprint(&key, "pages/guide.md", SHA, "pages/other.md", 10, 20, FP)
@@ -610,7 +709,14 @@ fn store_walk_upsert_then_lookup_serves() {
     let key = walk_key("pages/foo.md", LOG_ONE);
     let log_sha = sha256_hex(LOG_ONE.as_bytes());
     store
-        .upsert_walk(&key, "pages/foo.md", &log_sha, SHA, "pages/foo.md", Some("3"))
+        .upsert_walk(
+            &key,
+            "pages/foo.md",
+            &log_sha,
+            SHA,
+            "pages/foo.md",
+            Some("3"),
+        )
         .expect("upsert");
     let served = store
         .lookup_walk(&key, "pages/foo.md", LOG_ONE)
@@ -739,7 +845,9 @@ fn store_walk_tampered_log_output_sha_is_a_miss() {
         .expect("upsert");
     exec_on_db(
         &db_path(dir.path()),
-        &format!("UPDATE anchor_walk SET log_output_sha = 'deadbeefdeadbeef' WHERE key_digest = '{key}';"),
+        &format!(
+            "UPDATE anchor_walk SET log_output_sha = 'deadbeefdeadbeef' WHERE key_digest = '{key}';"
+        ),
     );
     assert_eq!(
         store

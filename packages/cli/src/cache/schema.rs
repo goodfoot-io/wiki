@@ -42,7 +42,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, ErrorCode, OpenFlags};
+use rusqlite::{Connection, ErrorCode, OpenFlags, params};
 
 use crate::cache::CacheError;
 
@@ -122,7 +122,8 @@ pub const ANCHOR_WALK_DDL: &str = "CREATE TABLE IF NOT EXISTS anchor_walk (
 /// re-running the seed over an already-seeded database is a no-op.
 /// `created_at` is a unix timestamp (INTEGER, matching the git-span reference
 /// shape).
-pub const META_INSERT_SQL: &str = "INSERT OR IGNORE INTO meta (id, application_id, schema_version, semantic_epoch, created_at)
+pub const META_INSERT_SQL: &str =
+    "INSERT OR IGNORE INTO meta (id, application_id, schema_version, semantic_epoch, created_at)
 VALUES (1, ?, ?, ?, strftime('%s', 'now'));";
 
 /// Read-only liveness probe, run before any write pragma.
@@ -155,6 +156,57 @@ pub enum SuspectKind {
     /// `semantic_epoch` mismatch — a database written by a different tool or
     /// schema.
     MetaMismatch,
+    /// One of the binding tier tables is absent or has the wrong columns,
+    /// declared types, nullability, or primary-key shape.
+    SchemaMismatch,
+}
+
+const FINGERPRINT_COLUMNS: &[(&str, &str, bool, bool)] = &[
+    ("key_digest", "TEXT", false, true),
+    ("page_path", "TEXT", false, false),
+    ("anchor_sha", "TEXT", false, false),
+    ("target_path", "TEXT", false, false),
+    ("range_start", "INTEGER", false, false),
+    ("range_end", "INTEGER", false, false),
+    ("fp", "TEXT", false, false),
+    ("row_digest", "BLOB", false, false),
+];
+const WALK_COLUMNS: &[(&str, &str, bool, bool)] = &[
+    ("key_digest", "TEXT", false, true),
+    ("page_path", "TEXT", false, false),
+    ("log_output_sha", "TEXT", false, false),
+    ("anchor_sha", "TEXT", false, false),
+    ("path_at_commit", "TEXT", false, false),
+    ("value", "TEXT", true, false),
+    ("row_digest", "BLOB", false, false),
+];
+
+fn table_matches(
+    conn: &Connection,
+    table: &str,
+    expected: &[(&str, &str, bool, bool)],
+) -> Result<bool, rusqlite::Error> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? == 0,
+                row.get::<_, i64>(5)? != 0,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows.len() == expected.len()
+        && rows
+            .iter()
+            .zip(expected)
+            .all(|((name, ty, nullable, pk), expected)| {
+                name == expected.0
+                    && ty.eq_ignore_ascii_case(expected.1)
+                    && *nullable == expected.2
+                    && *pk == expected.3
+            }))
 }
 
 /// Probe `db_path` read-only and classify it (plan decision 4): a missing
@@ -199,7 +251,13 @@ pub fn probe(db_path: &Path) -> Result<ProbeOutcome, CacheError> {
                 && schema_version == SCHEMA_VERSION
                 && semantic_epoch == SEMANTIC_EPOCH =>
         {
-            Ok(ProbeOutcome::Valid)
+            if table_matches(&conn, "fingerprint", FINGERPRINT_COLUMNS)?
+                && table_matches(&conn, "anchor_walk", WALK_COLUMNS)?
+            {
+                Ok(ProbeOutcome::Valid)
+            } else {
+                Ok(ProbeOutcome::Suspect(SuspectKind::SchemaMismatch))
+            }
         }
         Ok(_) => Ok(ProbeOutcome::Suspect(SuspectKind::MetaMismatch)),
         Err(rusqlite::Error::QueryReturnedNoRows) => {
@@ -208,9 +266,9 @@ pub fn probe(db_path: &Path) -> Result<ProbeOutcome, CacheError> {
         Err(rusqlite::Error::SqliteFailure(f, msg)) => match f.code {
             ErrorCode::NotADatabase => Ok(ProbeOutcome::Suspect(SuspectKind::NotADatabase)),
             ErrorCode::DatabaseCorrupt => Ok(ProbeOutcome::Suspect(SuspectKind::Corrupt)),
-            ErrorCode::DatabaseBusy => Err(CacheError::Sqlite(rusqlite::Error::SqliteFailure(
-                f, msg,
-            ))),
+            ErrorCode::DatabaseBusy => {
+                Err(CacheError::Sqlite(rusqlite::Error::SqliteFailure(f, msg)))
+            }
             _ => Ok(ProbeOutcome::Suspect(SuspectKind::MetaMismatch)),
         },
         Err(e) => Err(e.into()),
@@ -296,7 +354,10 @@ pub fn open_connection(db_path: &Path) -> Result<Connection, CacheError> {
     for ddl in [META_DDL, FINGERPRINT_DDL, ANCHOR_WALK_DDL] {
         conn.execute_batch(ddl)?;
     }
-    conn.execute(META_INSERT_SQL, params![APPLICATION_ID, SCHEMA_VERSION, SEMANTIC_EPOCH])?;
+    conn.execute(
+        META_INSERT_SQL,
+        params![APPLICATION_ID, SCHEMA_VERSION, SEMANTIC_EPOCH],
+    )?;
     Ok(conn)
 }
 
@@ -316,7 +377,9 @@ mod tests {
         let db = dir.path().join("witness.sqlite");
 
         let locker = Connection::open(&db).expect("open locker");
-        locker.execute_batch("BEGIN EXCLUSIVE;").expect("take write lock");
+        locker
+            .execute_batch("BEGIN EXCLUSIVE;")
+            .expect("take write lock");
 
         let victim = Connection::open(&db).expect("open victim");
         victim

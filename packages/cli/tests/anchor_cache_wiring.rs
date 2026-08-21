@@ -529,7 +529,7 @@ fn corrupted_cache_faults_once_and_rebuilds() {
     );
 
     // Leg 1: plain garbage over the database file.
-    fs::write(&repo.db(), b"this is not a sqlite database - plain garbage").expect("garbage over db");
+    fs::write(repo.db(), b"this is not a sqlite database - plain garbage").expect("garbage over db");
     let garbage = run(&repo.root, &["check"]);
     assert_byte_identical_with_fault(&baseline, &garbage, "garbage over the database");
     assert_eq!(
@@ -543,10 +543,10 @@ fn corrupted_cache_faults_once_and_rebuilds() {
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
         .expect("checkpoint");
     drop(conn);
-    let len = fs::metadata(&repo.db()).expect("db metadata").len();
+    let len = fs::metadata(repo.db()).expect("db metadata").len();
     fs::File::options()
         .write(true)
-        .open(&repo.db())
+        .open(repo.db())
         .expect("open db")
         .set_len(len / 2)
         .expect("truncate db");
@@ -557,6 +557,34 @@ fn corrupted_cache_faults_once_and_rebuilds() {
         ProbeOutcome::Valid,
         "the truncated-db run must rebuild a valid cache"
     );
+}
+
+/// A meta-valid database with either tier's binding table malformed is
+/// quarantined before use, then warms normally on the following run.
+#[test]
+fn malformed_tier_schemas_rebuild_transparently_and_then_hit() {
+    for (table, ddl) in [
+        ("fingerprint", "CREATE TABLE fingerprint (key_digest TEXT PRIMARY KEY) STRICT;"),
+        ("anchor_walk", "CREATE TABLE anchor_walk (key_digest TEXT PRIMARY KEY) STRICT;"),
+    ] {
+        let repo = certified_fixture();
+        let baseline = run(&repo.root, &["check"]);
+        assert_eq!(baseline.status.code(), Some(0), "{}", combined(&baseline));
+
+        let conn = rusqlite::Connection::open(repo.db()).expect("open cache for schema damage");
+        conn.execute_batch(&format!("DROP TABLE {table}; {ddl}"))
+            .expect("malform tier table");
+        drop(conn);
+
+        let rebuilt = run(&repo.root, &["check"]);
+        assert_byte_identical_with_fault(&baseline, &rebuilt, table);
+        assert_eq!(quarantine_warnings(&rebuilt.stderr).len(), 1, "{table}");
+        assert_eq!(probe(&repo.db()).unwrap(), ProbeOutcome::Valid, "{table}");
+
+        let warm = run_perf(&repo.root, &["check"]);
+        assert_eq!(warm.status.code(), Some(0), "{}", combined(&warm));
+        assert_eq!(aggregate_counter(&repo.root, "misses"), 0, "rebuilt {table} must warm");
+    }
 }
 
 // ── (g) concurrent invocations ────────────────────────────────────────────────
