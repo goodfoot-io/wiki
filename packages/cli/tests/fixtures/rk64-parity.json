@@ -1,6 +1,6 @@
 {
-  "generated_from": "implement/main-3/baseline (a1ef5b2cd8c60c73227d52de553c658b3d2a0943)",
-  "generator": "spike/rk64-parity/make_fixture.py",
+  "generated_from": "rk64-parity-baseline (a1ef5b2cd8c60c73227d52de553c658b3d2a0943)",
+  "generator": "packages/cli/tests/fixtures/rk64-parity/make_fixture.py",
   "note": "Every stored rk64 anchor pair from the .wiki/ corpus at the baseline, with canonical content embedded. `current` entries match the target's content at baseline; `historical` entries (the by-design-stale anchors) match at their oldest matching historical commit.",
   "entries": [
     {
