@@ -635,6 +635,123 @@ fn read_head_blob_inner(
     Ok(None)
 }
 
+/// Read the raw bytes of the blob at `commit_sha_hex`:`path_rel` (a full
+/// 40-hex commit SHA) — the in-process equivalent of `git show
+/// <sha>:<path>`, opening the repository first. Multi-commit history walks
+/// should hold a [`GitReader`] and call
+/// [`GitReader::read_blob_at_commit`] instead, so the open cost is paid
+/// once.
+///
+/// `Ok(None)` when the path is absent at that commit, resolves through a
+/// non-directory entry or a submodule gitlink, or names an unloadable blob
+/// object — the full `git show` exit-128 family, whose members callers
+/// disambiguate via the availability probe when it matters. A bad object id,
+/// a missing commit or tree object, and other structural failures are
+/// `Err`. Like `git show`, symlinks are NOT dereferenced — the link's own
+/// bytes are returned.
+pub fn read_blob_at_commit(
+    repo_root: &Path,
+    commit_sha_hex: &str,
+    path_rel: &str,
+) -> Result<Option<Vec<u8>>> {
+    let repo = open_repo(repo_root)?;
+    read_blob_at_commit_inner(&repo, commit_sha_hex, path_rel)
+}
+
+fn read_blob_at_commit_inner(
+    repo: &gix::Repository,
+    commit_sha_hex: &str,
+    path_rel: &str,
+) -> Result<Option<Vec<u8>>> {
+    let id = gix::ObjectId::from_hex(commit_sha_hex.as_bytes())
+        .map_err(|_| miette!("'{commit_sha_hex}' is not a full hex object id"))?;
+    let commit = repo
+        .find_object(id)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to read object '{commit_sha_hex}'"))?
+        .try_into_commit()
+        .map_err(|_| miette!("object '{commit_sha_hex}' is not a commit"))?;
+    let tree = commit
+        .tree()
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to read tree of commit '{commit_sha_hex}'"))?;
+    blob_bytes_at_tree_path(repo, tree.id, path_rel)
+}
+
+/// Walk `path_rel` component-wise from `root_tree_id` to its blob and return
+/// the raw bytes. A missing intermediate or terminal component, a non-tree at
+/// a non-terminal position, a tree or gitlink at the terminal position are
+/// all `Ok(None)` — the path holds no readable blob there.
+fn blob_bytes_at_tree_path(
+    repo: &gix::Repository,
+    root_tree_id: gix::ObjectId,
+    path_rel: &str,
+) -> Result<Option<Vec<u8>>> {
+    let parts: Vec<&str> = path_rel.split('/').collect();
+    let mut current_tree_id = root_tree_id;
+
+    for (i, part) in parts.iter().enumerate() {
+        let is_last = i == parts.len() - 1;
+        let tree_obj = repo
+            .find_object(current_tree_id)
+            .into_diagnostic()
+            .wrap_err("failed to find tree object during path walk")?;
+        let tree = tree_obj
+            .try_into_tree()
+            .map_err(|_| miette!("object is not a tree during path walk"))?;
+
+        let mut found = false;
+        for entry_ref in tree.iter() {
+            let entry = entry_ref
+                .into_diagnostic()
+                .wrap_err("failed to decode tree entry")?;
+            let name = std::str::from_utf8(entry.filename())
+                .into_diagnostic()
+                .wrap_err("tree entry name is not valid UTF-8")?;
+            if name != *part {
+                continue;
+            }
+            found = true;
+            match entry.mode().kind() {
+                gix::object::tree::EntryKind::Tree => {
+                    if is_last {
+                        // A directory occupies the path — no blob to read.
+                        return Ok(None);
+                    }
+                    current_tree_id = entry.object_id();
+                }
+                gix::object::tree::EntryKind::Commit => {
+                    // Submodule gitlink — wiki content does not live in
+                    // submodules; treat as absent.
+                    return Ok(None);
+                }
+                _ => {
+                    if is_last {
+                        // Blob, executable blob, or symlink: return the raw
+                        // bytes (`git show` does not dereference symlinks).
+                        // A present-but-unloadable object (pruned, corrupt)
+                        // maps to `Ok(None)` — the exact `git show` exit-128
+                        // contract this helper replaces, which the drift
+                        // engine's availability probe (plan decision 1)
+                        // disambiguates on the cache-write path.
+                        return Ok(repo
+                            .find_object(entry.object_id())
+                            .ok()
+                            .map(|object| object.data.to_vec()));
+                    }
+                    // The path resolves through a non-directory.
+                    return Ok(None);
+                }
+            }
+            break;
+        }
+        if !found {
+            return Ok(None);
+        }
+    }
+    Ok(None)
+}
+
 /// Return `true` if `path_rel` has an entry in the git index.
 ///
 /// Fails closed when `.git/index` is absent — see `open_persisted_index`.
@@ -718,6 +835,19 @@ impl GitReader {
                 unreachable!("GitReader is not used with WorkingTree")
             }
         }
+    }
+
+    /// Read the raw bytes of the blob at `commit_sha_hex`:`path_rel` (a full
+    /// 40-hex commit SHA) — the in-process equivalent of `git show
+    /// <sha>:<path>` — reusing this reader's open repository so a multi-
+    /// commit history walk pays the open cost once. See
+    /// [`read_blob_at_commit`] for the absent/error contract.
+    pub fn read_blob_at_commit(
+        &self,
+        commit_sha_hex: &str,
+        path_rel: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        read_blob_at_commit_inner(&self.repo, commit_sha_hex, path_rel)
     }
 
     /// Return all repo-relative paths tracked in the given `source`.
@@ -1235,5 +1365,120 @@ mod tests {
         repo.git(&["add", "staged_only.md"]);
 
         assert!(!has_head_entry(repo.path(), "staged_only.md").expect("has_head_entry"));
+    }
+
+    // ── read_blob_at_commit (P3 in-process blob reads) ────────────────────────
+
+    /// Multi-commit fixture: create → edit → rename, plus an unrelated file
+    /// so each commit's tree is non-trivial. Returns the repo and the SHAs of
+    /// the three commits, oldest first.
+    fn repo_with_rename_history() -> (TestRepo, [String; 3]) {
+        let repo = TestRepo::new();
+        repo.create_file("docs/page.md", "v1\n");
+        repo.create_file("other.txt", "unrelated\n");
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-m", "create"]);
+        let c1 = resolve_ref(repo.path(), "HEAD").expect("HEAD sha");
+
+        repo.create_file("docs/page.md", "v2\n");
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-m", "edit"]);
+        let c2 = resolve_ref(repo.path(), "HEAD").expect("HEAD sha");
+
+        repo.git(&["mv", "docs/page.md", "docs/renamed.md"]);
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-m", "rename page"]);
+        let c3 = resolve_ref(repo.path(), "HEAD").expect("HEAD sha");
+
+        (repo, [c1, c2, c3])
+    }
+
+    /// `git show <sha>:<path>` as the subprocess oracle: `Ok(Some(bytes))`
+    /// on success, `Ok(None)` on git's exit-128 absence family.
+    fn git_show_blob(repo: &TestRepo, sha: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        let output = Command::new("git")
+            .current_dir(repo.path())
+            .args(["show", &format!("{sha}:{path}")])
+            .output()
+            .into_diagnostic()
+            .wrap_err("failed to spawn git show")?;
+        if output.status.success() {
+            return Ok(Some(output.stdout));
+        }
+        if output.status.code() == Some(128) {
+            return Ok(None);
+        }
+        Err(miette!(
+            "git show {sha}:{path} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+
+    /// The helper must agree with the `git show` subprocess byte-for-byte for
+    /// every present path across a create → edit → rename history — including
+    /// a directory component — and report absent (`None`) exactly where the
+    /// subprocess does: before creation and after the rename.
+    #[test]
+    fn read_blob_at_commit_matches_git_show_across_history_and_rename() {
+        let (repo, [c1, c2, c3]) = repo_with_rename_history();
+
+        // (commit, path, expectation) triples covering present, edited,
+        // renamed-away (absent), renamed-to, and never-existed paths.
+        let cases = [
+            (&c1, "docs/page.md", Some(&b"v1\n"[..])),
+            (&c1, "other.txt", Some(&b"unrelated\n"[..])),
+            (&c2, "docs/page.md", Some(&b"v2\n"[..])),
+            (&c2, "docs/renamed.md", None),
+            (&c3, "docs/renamed.md", Some(&b"v2\n"[..])),
+            (&c3, "docs/page.md", None),
+            (&c1, "docs/nope.md", None),
+        ];
+        for (sha, path, expected) in cases {
+            let got = read_blob_at_commit(repo.path(), sha, path)
+                .unwrap_or_else(|e| panic!("read_blob_at_commit {sha}:{path} failed: {e:?}"));
+            let want = git_show_blob(&repo, sha, path).expect("git show oracle");
+            assert_eq!(got.as_deref(), expected, "fixture sanity at {sha}:{path}");
+            assert_eq!(
+                got, want,
+                "helper must equal `git show {sha}:{path}` (None included)"
+            );
+        }
+    }
+
+    /// The GitReader form must behave identically to the standalone form —
+    /// the drift walk holds one open repository across many commit reads.
+    #[test]
+    fn git_reader_read_blob_at_commit_matches_standalone() {
+        let (repo, shas) = repo_with_rename_history();
+        let reader = GitReader::open(repo.path()).expect("open reader");
+        for sha in shas {
+            for path in ["docs/page.md", "docs/renamed.md", "other.txt"] {
+                assert_eq!(
+                    reader.read_blob_at_commit(&sha, path).expect("reader read"),
+                    read_blob_at_commit(repo.path(), &sha, path).expect("standalone read"),
+                    "reader and standalone forms disagree at {sha}:{path}"
+                );
+            }
+        }
+    }
+
+    /// A non-hex or abbreviated object id is an error, never a silent
+    /// `None` — fail closed like every other object failure.
+    #[test]
+    fn read_blob_at_commit_fails_closed_on_bad_sha() {
+        let (repo, _) = repo_with_rename_history();
+        for bad in ["not-a-sha", "abcdef"] {
+            assert!(
+                read_blob_at_commit(repo.path(), bad, "other.txt").is_err(),
+                "'{bad}' must error"
+            );
+        }
+        // A well-formed hex id that names no object errors too.
+        assert!(read_blob_at_commit(
+            repo.path(),
+            "0000000000000000000000000000000000000000",
+            "other.txt"
+        )
+        .is_err());
     }
 }

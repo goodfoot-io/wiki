@@ -307,10 +307,11 @@ fn run_diff_renames(repo_root: &Path, cached: bool) -> Result<Vec<(String, Strin
 /// directly. For a deleted path — the case the Broken routing needs — the
 /// follow walk cannot: a pathspec-limited diff renders the rename's old side
 /// as a plain deletion, so `git log --follow --diff-filter=R` on a deleted
-/// path yields no R rows even with `--full-history`. Walk the deletion
-/// history instead: the newest commit that deleted the path is the commit
-/// whose rename (old side == the path) created its successor, and
-/// `git show --name-status` of that commit exposes the R row.
+/// path yields no R rows even with `--full-history`. Instead, ONE repo-wide
+/// `git log --diff-filter=RD --name-status --format=%H` (no pathspec — the
+/// rename row's old side is the only reliable filter) is parsed client-side,
+/// newest commit first, returning the new side of the first rename row whose
+/// old side equals the searched path.
 fn git_log_follow_renames(repo_root: &Path, old_path: &Path) -> Result<Vec<String>> {
     let path_str = old_path.to_string_lossy();
 
@@ -350,18 +351,15 @@ fn git_log_follow_renames(repo_root: &Path, old_path: &Path) -> Result<Vec<Strin
         return Ok(vec![]);
     }
 
-    // Deleted path: newest-first deletion history, then the name-status rows
-    // of each deleting commit. The rename that deleted the path appears
-    // there with the old side == the path.
+    // Deleted path: one repo-wide log of renames and deletions, newest
+    // first. A commit that renamed the searched path away necessarily also
+    // deleted it, so the old code's enumeration of deleting commits was a
+    // subset of exactly these commits; scanning every commit's rows for an R
+    // row whose OLD side equals the path cannot false-match a commit that
+    // deletes some other file while renaming Y≠X (old-side equality guards).
     let output = Command::new("git")
         .current_dir(repo_root)
-        .args([
-            "log",
-            "--diff-filter=D",
-            "--format=%H",
-            "--",
-            &path_str,
-        ])
+        .args(["log", "--diff-filter=RD", "--name-status", "--format=%H"])
         .output()
         .map_err(|e| miette::miette!("git log failed: {e}"))?;
 
@@ -370,26 +368,9 @@ fn git_log_follow_renames(repo_root: &Path, old_path: &Path) -> Result<Vec<Strin
     }
 
     let text = String::from_utf8_lossy(&output.stdout);
-    for sha in text
-        .lines()
-        .filter(|l| l.len() == 40 && l.bytes().all(|b| b.is_ascii_hexdigit()))
-    {
-        let show = Command::new("git")
-            .current_dir(repo_root)
-            .args(["show", "--name-status", "--format=", sha])
-            .output()
-            .map_err(|e| miette::miette!("git show failed: {e}"))?;
-        if !show.status.success() {
-            continue;
-        }
-        for line in String::from_utf8_lossy(&show.stdout).lines() {
-            if !line.starts_with('R') {
-                continue;
-            }
-            let parts: Vec<&str> = line.splitn(3, '\t').collect();
-            if parts.len() == 3 && parts[1] == path_str {
-                return Ok(vec![parts[2].to_string()]);
-            }
+    for (_, rows) in drift::parse_name_status_log(&text) {
+        if let Some(row) = rows.iter().find(|r| r.is_rename() && r.old_path == path_str) {
+            return Ok(vec![row.new_path.clone()]);
         }
     }
     Ok(vec![])
@@ -1923,6 +1904,104 @@ mod tests {
         }
     }
 
+    // ── git_log_follow_renames: deleted-path lookup (P4) ─────────────────────
+
+    /// A committed rename renders the old path as deleted in the worktree;
+    /// the deleted-path lookup must resolve its successor through the R row
+    /// of the renaming commit.
+    #[test]
+    fn deleted_path_resolves_successor_through_rename() {
+        let repo = TestRepo::new();
+        repo.write("src/a.md", "content\n");
+        repo.commit("create a.md");
+        repo.git(&["mv", "src/a.md", "src/b.md"]);
+        repo.commit("rename a.md to b.md");
+
+        // Later unrelated history must not disturb the resolution.
+        repo.write("other.txt", "noise\n");
+        repo.commit("unrelated");
+
+        let got = git_log_follow_renames(repo.path(), Path::new("src/a.md")).expect("lookup");
+        assert_eq!(got, vec!["src/b.md".to_string()]);
+    }
+
+    /// A commit that deletes X outright while renaming Y→Z in the SAME
+    /// commit must not produce a false match for X — old-side equality is
+    /// the guard. An older commit's genuine rename of X is still found
+    /// through newer non-matching commits (newest-first scan).
+    #[test]
+    fn deleted_path_scan_is_not_confused_by_unrelated_renames() {
+        let repo = TestRepo::new();
+        repo.write("src/x.md", "x\n");
+        repo.write("src/y.md", "y\n");
+        repo.commit("create x.md and y.md");
+        // Genuine rename of X one step back in history.
+        repo.git(&["mv", "src/x.md", "src/x2.md"]);
+        repo.commit("rename x.md to x2.md");
+        repo.git(&["mv", "src/x2.md", "src/final.md"]);
+        repo.commit("rename x2.md to final.md");
+        // Newest commit: deletes Y outright while renaming an unrelated file.
+        repo.write("src/w.md", "w\n");
+        repo.commit("add w");
+        repo.git(&["rm", "src/y.md"]);
+        repo.git(&["mv", "src/w.md", "src/v.md"]);
+        repo.commit("delete y.md and rename w.md to v.md");
+
+        let y = git_log_follow_renames(repo.path(), Path::new("src/y.md")).expect("lookup y");
+        assert!(
+            y.is_empty(),
+            "an outright deletion has no successor; got {y:?} — \
+             the R(w→v) row of the deleting commit must not match"
+        );
+        let x = git_log_follow_renames(repo.path(), Path::new("src/x.md")).expect("lookup x");
+        assert_eq!(
+            x,
+            vec!["src/x2.md".to_string()],
+            "the FIRST (newest) matching rename wins, skipping newer commits \
+             that do not touch x.md"
+        );
+    }
+
+    /// Multi-hop renames resolve to the FIRST hop here — chaining to the
+    /// terminal destination is `RenameMap`'s job (`chain_ends`).
+    #[test]
+    fn deleted_path_returns_first_hop_only() {
+        let repo = TestRepo::new();
+        repo.write("docs/a.md", "a\n");
+        repo.commit("create a.md");
+        repo.git(&["mv", "docs/a.md", "docs/b.md"]);
+        repo.commit("a -> b");
+        repo.git(&["mv", "docs/b.md", "docs/c.md"]);
+        repo.commit("b -> c");
+
+        let got =
+            git_log_follow_renames(repo.path(), Path::new("docs/a.md")).expect("lookup");
+        assert_eq!(got, vec!["docs/b.md".to_string()]);
+    }
+
+    /// The present-path branch is unchanged: it returns the NEW side of the
+    /// most recent rename row of the pathspec-limited follow walk — for a
+    /// file renamed INTO its current name that is the path itself; a never-
+    /// renamed file has no rows and resolves to no successor here (chaining
+    /// and map layers live in `RenameMap`).
+    #[test]
+    fn present_path_follows_newest_rename_row() {
+        let repo = TestRepo::new();
+        repo.write("docs/old.md", "old\n");
+        repo.commit("create old.md");
+        repo.git(&["mv", "docs/old.md", "docs/newer.md"]);
+        repo.commit("old -> newer");
+        repo.write("unrelated.txt", "u\n");
+        repo.commit("unrelated");
+
+        let got =
+            git_log_follow_renames(repo.path(), Path::new("docs/newer.md")).expect("lookup");
+        assert_eq!(got, vec!["docs/newer.md".to_string()]);
+
+        let none =
+            git_log_follow_renames(repo.path(), Path::new("unrelated.txt")).expect("lookup");
+        assert!(none.is_empty());
+    }
 
     // ── Drift fix phase (plan Decision 6) ──────────────────────────────────────
     //

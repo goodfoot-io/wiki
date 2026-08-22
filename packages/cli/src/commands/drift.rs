@@ -330,10 +330,16 @@ fn walk_anchor_epoch(
             // Walk newest→oldest: (sha, name in effect at that commit,
             // parsed value). Every pushed value is readable by construction;
             // absence at a commit is compared as the field-less state.
+            //
+            // The repository is opened once for the whole loop (P3): every
+            // history commit's blob read goes through one gix handle instead
+            // of spawning a `git show` subprocess per commit.
+            let reader = crate::git::GitReader::open(repo_root)
+                .map_err(|e| EpochError::GitFailed(format!("{e:?}")))?;
             let mut name = page_path.to_string();
             let mut walked: Vec<(String, String, LinksReviewedRead)> = Vec::new();
             for (sha, rows) in parse_name_status_log(&log) {
-                match blob_links_reviewed(repo_root, &sha, &name)? {
+                match blob_links_reviewed(&reader, &sha, &name)? {
                     Some(LinksReviewedRead::Unparseable) => {} // skipped entirely
                     Some(LinksReviewedRead::Readable(v)) => {
                         walked.push((sha.clone(), name.clone(), LinksReviewedRead::Readable(v)));
@@ -429,15 +435,17 @@ fn walk_anchor_epoch(
 /// One `--name-status` row: the status token (letter plus informational
 /// similarity suffix) and the path(s). Renames and copies carry two paths.
 #[derive(Debug)]
-struct NameStatusRow {
+pub(crate) struct NameStatusRow {
     status: String,
-    old_path: String,
-    new_path: String,
+    /// The pre-image path (for non-rename rows, the single affected path).
+    pub(crate) old_path: String,
+    /// The post-image path (equal to `old_path` unless the row is a rename).
+    pub(crate) new_path: String,
 }
 
 impl NameStatusRow {
     /// Any `R###` row is a rename — the similarity suffix is informational.
-    fn is_rename(&self) -> bool {
+    pub(crate) fn is_rename(&self) -> bool {
         self.status.starts_with('R')
     }
 
@@ -447,8 +455,10 @@ impl NameStatusRow {
 }
 
 /// Parse `git log --name-status --format=%H` output into `(sha, rows)` pairs,
-/// newest commit first. A blank line separates commit records.
-fn parse_name_status_log(log: &str) -> Vec<(String, Vec<NameStatusRow>)> {
+/// newest commit first. A blank line separates commit records. Shared with
+/// the fix phase's deleted-path rename lookup (`check_fix.rs`), which parses
+/// the same output shape.
+pub(crate) fn parse_name_status_log(log: &str) -> Vec<(String, Vec<NameStatusRow>)> {
     let mut out: Vec<(String, Vec<NameStatusRow>)> = Vec::new();
     for line in log.lines() {
         if line.is_empty() {
@@ -482,21 +492,39 @@ fn parse_name_status_log(log: &str) -> Vec<(String, Vec<NameStatusRow>)> {
 /// `Ok(None)` when the path is absent at that commit — a walk boundary, not
 /// an error. A present-but-unparseable page reports `Unparseable` so the
 /// walk can skip the commit instead of treating it as a value.
+///
+/// Reads through the caller-held [`crate::git::GitReader`] so a walk over
+/// many commits opens the repository once.
 fn blob_links_reviewed(
-    repo_root: &Path,
+    reader: &crate::git::GitReader,
     commit: &str,
     path: &str,
 ) -> Result<Option<LinksReviewedRead>, EpochError> {
-    match read_blob_at(repo_root, commit, path)? {
+    match reader.read_blob_at_commit(commit, path).map_err(git_failed)? {
         None => Ok(None),
         Some(bytes) => Ok(Some(read_links_reviewed(&String::from_utf8_lossy(&bytes)))),
     }
 }
 
-/// `git show <commit>:<path>` (or `git show :<path>` for the index when
-/// `commit` is empty). `Ok(None)` when the path is absent there (exit 128);
-/// any other git failure fails closed.
+/// Map an in-process git failure (gix open/object/tree error) onto the
+/// fail-closed [`EpochError::GitFailed`], preserving the full cause chain.
+fn git_failed(e: miette::Report) -> EpochError {
+    EpochError::GitFailed(format!("{e:?}"))
+}
+
+/// Read a blob at `<commit>:<path>` — `git show <commit>:<path>` semantics.
+///
+/// A full 40-hex commit SHA is served in-process by
+/// [`crate::git::read_blob_at_commit`] (one repository open per call; the
+/// history walk instead threads a shared [`crate::git::GitReader`] through
+/// [`blob_links_reviewed`]). Any other rev spec keeps the subprocess:
+/// `HEAD:path`, and the index form `:path` when `commit` is empty.
+/// `Ok(None)` when the path is absent there; any other git failure fails
+/// closed.
 fn read_blob_at(repo_root: &Path, commit: &str, path: &str) -> Result<Option<Vec<u8>>, EpochError> {
+    if commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return crate::git::read_blob_at_commit(repo_root, commit, path).map_err(git_failed);
+    }
     let spec = if commit.is_empty() {
         format!(":{path}")
     } else {
