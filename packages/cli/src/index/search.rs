@@ -49,6 +49,31 @@ pub(crate) fn make_fts_query(q: &str) -> String {
     parts.join(" ")
 }
 
+/// Build the column-scoped FTS5 phrase query `aliases_text:"<token>"` used
+/// as a PREFILTER for the exact alias comparisons (`search_weighted` stage
+/// 1b and `resolve_page`). The `fts` table indexes `blobs.aliases_text`
+/// verbatim through the same `unicode61 remove_diacritics 2` tokenizer that will
+/// tokenize the quoted phrase, so whenever an aliases_text token equals the
+/// needle under ASCII-case-insensitive equality its indexed token sequence
+/// occurs contiguously in the column — the phrase always retrieves it. The
+/// prefilter may therefore over-approximate (extra rows are dropped by the
+/// client-side exact compare) but can never miss. `None` when no safe phrase
+/// can be built (an empty token matches nothing and cannot be quoted) —
+/// callers fall back to their unfiltered scan.
+///
+/// Unlike [`make_fts_query`] (which strips quotes for bareword queries),
+/// this keeps content intact by escaping per FTS5 string syntax: a double
+/// quote inside the string is escaped by doubling it.
+fn fts_alias_match(token: &str) -> Option<String> {
+    if token.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "aliases_text:\"{}\"",
+        token.replace('"', "\"\"")
+    ))
+}
+
 /// Run a weighted search. Returns up to `limit` rows starting at `offset`,
 /// alongside the (uncapped) total match count.
 pub fn search_weighted(
@@ -96,40 +121,39 @@ pub fn search_weighted(
 
     // (1b) Token-wise alias match (case-insensitive): split aliases_text on
     // whitespace/comma and compare each token individually, replicating the
-    // approach in resolve_page at L246-L252.
+    // approach in resolve_page at L246-L252. Candidate rows are narrowed
+    // through the FTS aliases column first (P5): `aliases_text:"<query>"` is an
+    // over-approximation of the exact token equality below (same tokenizer
+    // folds indexed text and phrase identically — see `fts_alias_match`), so
+    // streaming only FTS hits keeps the per-row `eq_ignore_ascii_case`
+    // verdict byte-identical while skipping every corpus row that could not
+    // match anyway. When no safe MATCH phrase exists (empty query) the
+    // previous full scan runs unchanged.
     {
-        let mut stmt = conn.prepare(
-            "SELECT b.oid, b.title, b.summary, p.path_rel, b.aliases_text
-             FROM blobs b
-             JOIN paths p ON p.oid = b.oid AND p.source = ?1
-             WHERE b.aliases_text != ''",
-        )?;
-        let rows = stmt.query_map(params![src], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-            ))
-        })?;
-        for row in rows {
-            let (oid, title, summary, path, aliases) = row?;
-            let needle = q_lower.as_str();
-            for a in aliases.split(|c: char| c.is_whitespace() || c == ',') {
-                let a = a.trim();
-                if !a.is_empty() && a.eq_ignore_ascii_case(needle) {
-                    if seen.insert(oid) {
-                        out.push(SearchResult {
-                            title,
-                            file: path,
-                            summary,
-                            alias: None,
-                            snippets: Vec::new(),
-                        });
-                    }
-                    break;
-                }
+        let needle = q_lower.as_str();
+        match fts_alias_match(needle) {
+            Some(alias_expr) => {
+                let mut stmt = conn.prepare(
+                    "SELECT b.oid, b.title, b.summary, p.path_rel, b.aliases_text
+                     FROM blobs b
+                     JOIN paths p ON p.oid = b.oid AND p.source = ?1
+                     JOIN fts ON fts.rowid = b.rowid
+                     WHERE fts MATCH ?2
+                     ORDER BY b.rowid",
+                )?;
+                let rows = stmt.query_map(params![src, alias_expr], map_alias_candidate_row)?;
+                collect_exact_alias_hits(rows, needle, &mut seen, &mut out)?;
+            }
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT b.oid, b.title, b.summary, p.path_rel, b.aliases_text
+                     FROM blobs b
+                     JOIN paths p ON p.oid = b.oid AND p.source = ?1
+                     WHERE b.aliases_text != ''
+                     ORDER BY b.rowid",
+                )?;
+                let rows = stmt.query_map(params![src], map_alias_candidate_row)?;
+                collect_exact_alias_hits(rows, needle, &mut seen, &mut out)?;
             }
         }
     }
@@ -280,6 +304,50 @@ pub fn search_weighted(
     Ok((paged, total))
 }
 
+/// Row mapper shared by both stage-1b branches (FTS-prefiltered and fallback
+/// scan): `(oid, title, summary, path_rel, aliases_text)`.
+fn map_alias_candidate_row(
+    r: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(String, String, String, String, String)> {
+    Ok((
+        r.get::<_, String>(0)?,
+        r.get::<_, String>(1)?,
+        r.get::<_, String>(2)?,
+        r.get::<_, String>(3)?,
+        r.get::<_, String>(4)?,
+    ))
+}
+
+/// The exact half of search stage 1b, unchanged by the P5 prefilter: keep a
+/// row when any whitespace/comma-delimited token of its `aliases_text`
+/// equals `needle` under `eq_ignore_ascii_case`, deduped by blob OID.
+fn collect_exact_alias_hits(
+    rows: impl Iterator<Item = rusqlite::Result<(String, String, String, String, String)>>,
+    needle: &str,
+    seen: &mut HashSet<String>,
+    out: &mut Vec<SearchResult>,
+) -> rusqlite::Result<()> {
+    for row in rows {
+        let (oid, title, summary, path, aliases) = row?;
+        for a in aliases.split(|c: char| c.is_whitespace() || c == ',') {
+            let a = a.trim();
+            if !a.is_empty() && a.eq_ignore_ascii_case(needle) {
+                if seen.insert(oid.clone()) {
+                    out.push(SearchResult {
+                        title,
+                        file: path,
+                        summary,
+                        alias: None,
+                        snippets: Vec::new(),
+                    });
+                }
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Resolve a single page by title, alias, repo-relative path, or `.md` link.
 ///
 /// Returns the first match, prioritizing exact title/alias hits, then path
@@ -325,49 +393,53 @@ pub fn resolve_page(
         }));
     }
 
-    // Alias match: aliases_text is whitespace-joined. The broad SELECT
-    // intentionally omits b.body — body text is fetched only for the
-    // matching row below, avoiding bulk IO when iterating the corpus.
-    let mut stmt = conn.prepare(
-        "SELECT b.rowid, b.title, b.summary, b.aliases_text, p.path_rel
-         FROM blobs b
-         JOIN paths p ON p.oid = b.oid AND p.source = ?1",
-    )?;
-    let rows = stmt.query_map(params![src], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, String>(4)?,
-        ))
-    })?;
-    for row in rows {
-        let (rowid, title, summary, aliases, path_rel) = row?;
-        let needle = q_lower.as_str();
-        let mut matched: Option<String> = None;
-        for a in aliases.split(|c: char| c.is_whitespace() || c == ',') {
-            let a = a.trim();
-            if !a.is_empty() && a.eq_ignore_ascii_case(needle) {
-                matched = Some(a.to_string());
-                break;
-            }
-        }
-        if matched.is_some() {
-            let body: String = conn.query_row(
-                "SELECT b.body FROM blobs b WHERE b.rowid = ?1",
-                params![rowid],
-                |r| r.get(0),
+    // Alias match: aliases_text is whitespace-joined. Candidate rows are
+    // narrowed through the FTS aliases column (P5) exactly as in
+    // `search_weighted` stage 1b — `aliases_text:"<input>"` over-approximates the
+    // exact token equality (`fts_alias_match`), and the surviving rows run
+    // the same per-token compare, so the first hit under the old full scan's
+    // rowid order is still the first hit here. When no safe MATCH phrase can
+    // be built, the unfiltered scan runs unchanged. The SELECTs intentionally
+    // omit b.body — body text is fetched only for the matching row below,
+    // avoiding bulk IO when iterating candidates.
+    let alias_hit: Option<AliasHit> = match fts_alias_match(&q_lower) {
+        Some(alias_expr) => {
+            let mut stmt = conn.prepare(
+                "SELECT b.rowid, b.title, b.summary, b.aliases_text, p.path_rel
+                 FROM blobs b
+                 JOIN paths p ON p.oid = b.oid AND p.source = ?1
+                 JOIN fts ON fts.rowid = b.rowid
+                 WHERE fts MATCH ?2
+                 ORDER BY b.rowid",
             )?;
-            return Ok(Some(ResolvedPage {
-                title,
-                file: repo_root.join(&path_rel).to_string_lossy().into_owned(),
-                summary,
-                content: body,
-                alias: matched,
-                document_id: rowid,
-            }));
+            let rows = stmt.query_map(params![src, alias_expr], map_resolve_alias_row)?;
+            first_exact_alias_hit(rows, &q_lower)?
         }
+        None => {
+            let mut stmt = conn.prepare(
+                "SELECT b.rowid, b.title, b.summary, b.aliases_text, p.path_rel
+                 FROM blobs b
+                 JOIN paths p ON p.oid = b.oid AND p.source = ?1
+                 ORDER BY b.rowid",
+            )?;
+            let rows = stmt.query_map(params![src], map_resolve_alias_row)?;
+            first_exact_alias_hit(rows, &q_lower)?
+        }
+    };
+    if let Some((rowid, title, summary, matched, path_rel)) = alias_hit {
+        let body: String = conn.query_row(
+            "SELECT b.body FROM blobs b WHERE b.rowid = ?1",
+            params![rowid],
+            |r| r.get(0),
+        )?;
+        return Ok(Some(ResolvedPage {
+            title,
+            file: repo_root.join(&path_rel).to_string_lossy().into_owned(),
+            summary,
+            content: body,
+            alias: Some(matched),
+            document_id: rowid,
+        }));
     }
 
     // Path lookup.
@@ -403,4 +475,325 @@ pub fn resolve_page(
     }
 
     Ok(None)
+}
+
+/// Row mapper shared by both `resolve_page` alias-stage branches:
+/// `(rowid, title, summary, aliases_text, path_rel)`.
+fn map_resolve_alias_row(
+    r: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(i64, String, String, String, String)> {
+    Ok((
+        r.get::<_, i64>(0)?,
+        r.get::<_, String>(1)?,
+        r.get::<_, String>(2)?,
+        r.get::<_, String>(3)?,
+        r.get::<_, String>(4)?,
+    ))
+}
+
+/// One resolved alias-stage candidate: `(rowid, title, summary, matched
+/// alias text, path_rel)`.
+type AliasHit = (i64, String, String, String, String);
+
+/// The exact half of the alias stage, unchanged by the P5 prefilter: return
+/// the first row (in rowid order) with an aliases_text token equal to
+/// `needle` under `eq_ignore_ascii_case`, paired with the matched alias
+/// text.
+fn first_exact_alias_hit(
+    rows: impl Iterator<Item = rusqlite::Result<(i64, String, String, String, String)>>,
+    needle: &str,
+) -> rusqlite::Result<Option<AliasHit>> {
+    for row in rows {
+        let (rowid, title, summary, aliases, path_rel) = row?;
+        let mut matched: Option<String> = None;
+        for a in aliases.split(|c: char| c.is_whitespace() || c == ',') {
+            let a = a.trim();
+            if !a.is_empty() && a.eq_ignore_ascii_case(needle) {
+                matched = Some(a.to_string());
+                break;
+            }
+        }
+        if let Some(alias) = matched {
+            return Ok(Some((rowid, title, summary, alias, path_rel)));
+        }
+    }
+    Ok(None)
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::schema;
+
+    /// In-memory index DB with the real schema (the FTS triggers populate
+    /// the virtual table as rows are inserted).
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        schema::bootstrap(&conn).expect("bootstrap schema");
+        conn
+    }
+
+    fn insert_page(
+        conn: &Connection,
+        oid: &str,
+        title: &str,
+        aliases: &str,
+        body: &str,
+        path_rel: &str,
+        source: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO blobs (oid, refcount, title, summary, body, aliases_text, tags_text, keywords_text)
+             VALUES (?1, 1, ?2, 'A summary.', ?3, ?4, '', '')",
+            params![oid, title, body, aliases],
+        )
+        .expect("insert blob");
+        conn.execute(
+            "INSERT INTO paths (path_rel, source, oid, stat_mtime_ns, stat_size, stat_ctime_ns, parent_dir)
+             VALUES (?1, ?2, ?3, NULL, NULL, NULL, '')",
+            params![path_rel, source, oid],
+        )
+        .expect("insert path");
+    }
+
+    fn files(results: &[SearchResult]) -> Vec<&str> {
+        results.iter().map(|r| r.file.as_str()).collect()
+    }
+
+    // ── fts_alias_match: safe phrase construction ──
+
+    #[test]
+    fn fts_alias_match_escapes_double_quotes() {
+        assert_eq!(
+            fts_alias_match("ven\"ture").as_deref(),
+            Some("aliases_text:\"ven\"\"ture\"")
+        );
+        assert_eq!(
+            fts_alias_match("venture").as_deref(),
+            Some("aliases_text:\"venture\"")
+        );
+        assert_eq!(fts_alias_match(""), None, "an empty token builds no phrase");
+    }
+
+    // ── P5: alias stages stream only FTS-prefiltered rows ──
+
+    #[test]
+    fn search_stage_1b_finds_alias_token_through_fts_prefilter() {
+        let conn = test_conn();
+        insert_page(
+            &conn,
+            "o1",
+            "Venture Page",
+            "Quixotic Venture",
+            "body without the query word",
+            "docs/v.md",
+            source_filter_id(DocSource::WorkingTree),
+        );
+        insert_page(
+            &conn,
+            "o2",
+            "Other Page",
+            "",
+            "filler",
+            "docs/other.md",
+            source_filter_id(DocSource::WorkingTree),
+        );
+
+        // Lowercase query against the mixed-case alias — the exact
+        // `eq_ignore_ascii_case` verdict must survive the prefilter.
+        let (results, total) =
+            search_weighted(&conn, DocSource::WorkingTree, "venture", 10, 0).expect("search");
+        assert_eq!(files(&results), vec!["docs/v.md"]);
+        assert_eq!(total, 1);
+    }
+
+    /// The stage-1b exact compare gates the prefilter's over-approximation:
+    /// a row whose aliases_text satisfies the FTS phrase (`e-mail` → token
+    /// pair [e, mail], which the space-separated form also forms) but fails
+    /// the token-wise `eq_ignore_ascii_case` verdict is dropped here. The
+    /// dropped row may still surface later through the independent stage-3
+    /// FTS scan (pre-existing behavior, unchanged) — this asserts the stage-
+    /// 1b contribution only: the real alias hit leads the result list.
+    #[test]
+    fn search_stage_1b_exact_compare_gates_over_approximated_prefilter_hits() {
+        let conn = test_conn();
+        insert_page(
+            &conn,
+            "o1",
+            "Mail Page",
+            "e-mail",
+            "no query words here",
+            "docs/mail.md",
+            source_filter_id(DocSource::WorkingTree),
+        );
+        insert_page(
+            &conn,
+            "o2",
+            "Decoy",
+            "e mail",
+            "also no query words",
+            "docs/decoy.md",
+            source_filter_id(DocSource::WorkingTree),
+        );
+
+        let (results, _) =
+            search_weighted(&conn, DocSource::WorkingTree, "e-mail", 10, 0).expect("search");
+        assert_eq!(
+            results.first().expect("alias hit").file,
+            "docs/mail.md",
+            "the exact alias hit must lead; got {:?}",
+            files(&results)
+        );
+    }
+
+    /// The same gate, isolated from every other stage: fed candidate rows in
+    /// which the over-approximated row comes first, the exact compare must
+    /// skip it and keep only the true alias token equality.
+    #[test]
+    fn collect_exact_alias_hits_drops_phrase_only_rows() {
+        let rows = [
+            Ok(("o-decoy".into(), "Decoy".into(), "s".into(), "d.md".into(), "e mail".into())),
+            Ok(("o-real".into(), "Mail".into(), "s".into(), "m.md".into(), "e-mail".into())),
+        ];
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        collect_exact_alias_hits(rows.into_iter(), "e-mail", &mut seen, &mut out)
+            .expect("collect");
+        assert_eq!(files(&out), vec!["m.md"], "phrase-only row must be dropped");
+    }
+
+    #[test]
+    fn search_stage_1b_handles_quoted_alias_tokens() {
+        let conn = test_conn();
+        insert_page(
+            &conn,
+            "o1",
+            "Quote Page",
+            "say\"hi",
+            "nothing relevant",
+            "docs/quoted.md",
+            source_filter_id(DocSource::WorkingTree),
+        );
+
+        let (results, _) =
+            search_weighted(&conn, DocSource::WorkingTree, "say\"hi", 10, 0).expect("search");
+        assert_eq!(files(&results), vec!["docs/quoted.md"]);
+    }
+
+    #[test]
+    fn resolve_page_alias_match_streams_prefiltered_rows_only() {
+        let conn = test_conn();
+        let src = source_filter_id(DocSource::WorkingTree);
+        insert_page(&conn, "o1", "Guide", "", "plain body", "docs/g.md", src);
+        insert_page(
+            &conn,
+            "o2",
+            "Alias Target",
+            "Handbook HB",
+            "the resolved content",
+            "docs/h.md",
+            src,
+        );
+
+        let repo = Path::new("/repo");
+        let page = resolve_page(&conn, repo, DocSource::WorkingTree, "hb").expect("resolve");
+        let page = page.expect("alias hit");
+        assert_eq!(page.title, "Alias Target");
+        assert_eq!(page.alias.as_deref(), Some("HB"));
+        assert_eq!(page.content, "the resolved content");
+        assert_eq!(page.file, "/repo/docs/h.md");
+
+        // No alias anywhere → falls through to Ok(None) after title/path miss.
+        let miss =
+            resolve_page(&conn, repo, DocSource::WorkingTree, "nonexistent").expect("resolve");
+        assert!(miss.is_none());
+    }
+
+    // ── P5: aggregate total count equals the per-OID loop ──
+
+    /// Hand-computed expectation for the uncapped total. Query `docs/zeta`
+    /// compiles to the single phrase-prefix `"docs/zeta"*` (adjacent token
+    /// pair) and drives stage 2 (path LIKE `%docs/zeta%`) so pre-FTS OIDs
+    /// exist, while the FTS expression matches an overlapping but different
+    /// set:
+    ///
+    /// - zeta.md      : pre-FTS hit (path), NOT in FTS (no docs–zeta pair)
+    ///   → extra += 1
+    /// - advanced.md  : pre-FTS hit (path, `docs/zeta-advanced.md`) AND FTS
+    ///   hit (`docs zeta` adjacent in body) → extra += 0
+    /// - combined.md  : FTS hit only (`docs zeta` adjacent; its path lacks
+    ///   the literal `docs/zeta` substring)
+    /// - intro.md     : in neither set
+    ///
+    /// Expected total = true FTS total (2) + non-matching pre-FTS OIDs (1).
+    #[test]
+    fn search_total_matches_hand_computed_expectation() {
+        let conn = test_conn();
+        let src = source_filter_id(DocSource::WorkingTree);
+        insert_page(&conn, "o1", "Intro", "", "alpha beta gamma", "docs/intro.md", src);
+        insert_page(
+            &conn,
+            "o2",
+            "Zeta Page",
+            "",
+            "unrelated words entirely",
+            "docs/zeta.md",
+            src,
+        );
+        insert_page(
+            &conn,
+            "o3",
+            "Combined",
+            "",
+            "read our docs zeta coverage now",
+            "notes/combined.md",
+            src,
+        );
+        insert_page(
+            &conn,
+            "o4",
+            "Advanced Zeta",
+            "",
+            "covers docs zeta topics deeply",
+            "docs/zeta-advanced.md",
+            src,
+        );
+
+        let (_, total) =
+            search_weighted(&conn, DocSource::WorkingTree, "docs/zeta", 10, 0).expect("search");
+        assert_eq!(total, 3, "2 FTS hits + 1 non-FTS pre-stage OID");
+    }
+
+    /// Chunking: 600 pre-FTS OIDs force three chunked COUNT queries. 200 of
+    /// the docs match the FTS expression (`bulk item payload` bodies carry
+    /// both query words), 400 do not; every doc is a stage-2 pre-FTS hit via
+    /// its `bulk/item…` path. Expected total = 200 + 400 = 600.
+    #[test]
+    fn search_total_chunking_six_hundred_pre_fts_oids() {
+        let conn = test_conn();
+        let src = source_filter_id(DocSource::WorkingTree);
+        for i in 0..600 {
+            let matching = i % 3 == 0;
+            let body = if matching { "bulk item payload" } else { "filler text" };
+            insert_page(
+                &conn,
+                &format!("bulk-o{i}"),
+                &format!("Entry {i}"),
+                "",
+                body,
+                &format!("bulk/item{i:03}.md"),
+                src,
+            );
+        }
+
+        let (_, total) =
+            search_weighted(&conn, DocSource::WorkingTree, "bulk/item", 10, 0).expect("search");
+        assert_eq!(total, 600, "200 FTS-matching + 400 non-matching pre-stage OIDs");
+
+        let (paged, _) =
+            search_weighted(&conn, DocSource::WorkingTree, "bulk/item", 7, 5).expect("paged");
+        assert_eq!(paged.len(), 7, "paging still applies to the result window");
+    }
 }
