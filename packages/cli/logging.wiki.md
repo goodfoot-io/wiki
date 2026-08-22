@@ -1,7 +1,7 @@
 ---
 title: Wiki Logging and Perf Instrumentation
 summary: Documents all logging and performance tracing points in the wiki CLI. 
-links-reviewed: 3
+links-reviewed: 4
 ---
 
 ## Overview
@@ -51,9 +51,9 @@ The disposable anchor-cache tiers inside [`wiki check`](./src/commands/check.rs)
 
 | Location | Event Name | Meaning |
 |----------|-----------|----------|
-| [check.rs](./src/commands/check.rs#L286-L313) | `anchor_cache` | Emitted once per check invocation after the run body, on every path — early exits included. `meta.hits`, `meta.misses`, `meta.bypasses` tally the row-level outcomes across both tiers; `meta.fingerprint_ms` and `meta.walk_ms` sum each tier's git-leg durations ([drift.rs](./src/commands/drift.rs#L392) and [drift.rs](./src/commands/drift.rs#L1370)), recorded on the miss path only — a served hit runs no git leg — so a fully warm run reports zeros. |
+| [check.rs](./src/commands/check.rs#L286-L313) | `anchor_cache` | Emitted once per check invocation after the run body, on every path — early exits included. `meta.hits`, `meta.misses`, `meta.bypasses` tally the row-level outcomes across both tiers; `meta.fingerprint_ms` and `meta.walk_ms` sum each tier's git-leg durations ([drift.rs](./src/commands/drift.rs#L398) and [drift.rs](./src/commands/drift.rs#L1398)), recorded on the miss path only — a served hit runs no git leg — so a fully warm run reports zeros. |
 
-The tally sites live at the tier seams: the shallow gate ([drift.rs](./src/commands/drift.rs#L288)), the verified-hit serves ([drift.rs](./src/commands/drift.rs#L311), [drift.rs](./src/commands/drift.rs#L1322)), and the misses that precede computing ([drift.rs](./src/commands/drift.rs#L318), [drift.rs](./src/commands/drift.rs#L1325)).
+The tally sites live at the tier seams: the shallow gate ([drift.rs](./src/commands/drift.rs#L288)), the verified-hit serves ([drift.rs](./src/commands/drift.rs#L311), [drift.rs](./src/commands/drift.rs#L1350)), and the misses that precede computing ([drift.rs](./src/commands/drift.rs#L318), [drift.rs](./src/commands/drift.rs#L1353)).
 
 ## Direct Output Points (println! and eprintln!)
 
