@@ -4,7 +4,6 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { isWikiFile } from '../src/post-tool-use.js';
 
-const FIX_PREFIX_BYTES = 4096;
 const IO_BUDGET_BYTES = 64 * 1024;
 const BIG_FILE_BYTES = 8 * 1024 * 1024;
 

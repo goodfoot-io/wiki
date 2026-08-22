@@ -1,8 +1,35 @@
 import { type SpawnSyncReturns, spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { getFilePath, type Logger, postToolUseHook, postToolUseOutput } from '@goodfoot/claude-code-hooks';
+
+const FRONTMATTER_SCAN_BYTES = 4096;
+const FRONTMATTER_SCAN_LINES = 30;
+
+/**
+ * Read a bounded byte prefix from disk for the frontmatter head scan. A
+ * frontmatter block must open at byte 0, so nothing past the window can change
+ * the verdict; a block truncated mid-window fails closed exactly like a missing
+ * close fence. The prefix is trimmed back to its last complete line so a torn
+ * tail — including a split multibyte character at the window boundary — is
+ * never scanned.
+ */
+function readFrontmatterPrefix(absPath: string): string {
+  const buf = Buffer.alloc(FRONTMATTER_SCAN_BYTES);
+  const fd = openSync(absPath, 'r');
+  try {
+    const bytesRead = readSync(fd, buf, 0, FRONTMATTER_SCAN_BYTES, 0);
+    let head = buf.toString('utf-8', 0, bytesRead);
+    if (bytesRead === FRONTMATTER_SCAN_BYTES) {
+      const lastNewline = head.lastIndexOf('\n');
+      if (lastNewline !== -1) head = head.slice(0, lastNewline);
+    }
+    return head;
+  } finally {
+    closeSync(fd);
+  }
+}
 
 /**
  * Returns true if the file is a wiki member, determined exclusively by YAML
@@ -15,10 +42,9 @@ export function isWikiFile(filePath: string, cwd: string): boolean {
   const absPath = isAbsolute(filePath) ? filePath : resolve(cwd, filePath);
   if (!existsSync(absPath)) return false;
 
-  // Read only the first 30 lines to locate frontmatter efficiently.
-  const content = readFileSync(absPath, 'utf-8');
-  const lines = content.split('\n');
-  const head = lines.slice(0, 30);
+  // Read only the first 30 lines to locate frontmatter efficiently: scan a
+  // bounded disk prefix instead of materializing the whole file.
+  const head = readFrontmatterPrefix(absPath).split('\n').slice(0, FRONTMATTER_SCAN_LINES);
 
   if (head[0]?.trim() !== '---') return false;
 
