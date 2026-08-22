@@ -194,10 +194,12 @@ export class WikiLanguageFeatures {
   /**
    * Find every `.md` file inside the open workspace.
    *
+   * @param token - Cancellation token forwarded to `findFiles`; when
+   *                cancelled, enumeration aborts and no files are returned.
    * @returns URIs of every workspace markdown file (excluding `node_modules`).
    */
-  private async _allMarkdownFiles(): Promise<vscode.Uri[]> {
-    return vscode.workspace.findFiles('**/*.md', '**/node_modules/**');
+  private async _allMarkdownFiles(token?: vscode.CancellationToken): Promise<vscode.Uri[]> {
+    return vscode.workspace.findFiles('**/*.md', '**/node_modules/**', undefined, token);
   }
 
   // --------------------------------------------------------------------------
@@ -504,7 +506,7 @@ export class WikiLanguageFeatures {
         document: vscode.TextDocument,
         position: vscode.Position,
         _context: vscode.ReferenceContext,
-        _token: vscode.CancellationToken
+        token: vscode.CancellationToken
       ): Promise<vscode.Location[] | undefined> => {
         if (!this._isMarkdownFile(document.uri)) return undefined;
 
@@ -513,7 +515,7 @@ export class WikiLanguageFeatures {
           link != null ? resolveLinkTarget(link.href, document.uri.fsPath, this._workspaceRoot()) : document.uri.fsPath;
         if (targetPath == null) return undefined;
 
-        return this._findIncomingLinks(targetPath);
+        return this._findIncomingLinks(targetPath, token);
       }
     });
   }
@@ -527,15 +529,26 @@ export class WikiLanguageFeatures {
    * behavior). Output order matches the {@link _allMarkdownFiles} enumeration
    * order regardless of read completion order.
    *
-   * @returns Scans for every readable workspace markdown file.
+   * @param token - Cancellation token. When cancelled — during enumeration,
+   *                which aborts before any file is read, or between
+   *                individual reads — no further files are read.
+   * @returns Scans for every readable workspace markdown file, or null when
+   *          cancellation was observed; callers must treat null as "no
+   *          results" rather than consuming a partial corpus.
    */
-  private async _scanWorkspaceMarkdown(): Promise<MarkdownFileScan[]> {
-    const files = await this._allMarkdownFiles();
+  private async _scanWorkspaceMarkdown(token?: vscode.CancellationToken): Promise<MarkdownFileScan[] | null> {
+    const files = await this._allMarkdownFiles(token);
+
+    // Bail before any read: cancellation landing during enumeration must not
+    // lead to a partially-read corpus.
+    if (token?.isCancellationRequested) return null;
+
     const slots: (MarkdownFileScan | null)[] = new Array(files.length).fill(null);
     let nextIndex = 0;
 
     const readNext = async (): Promise<void> => {
       while (nextIndex < files.length) {
+        if (token?.isCancellationRequested) return;
         const index = nextIndex;
         nextIndex++;
         const fileUri = files[index]!;
@@ -555,6 +568,8 @@ export class WikiLanguageFeatures {
     }
     await Promise.all(workers);
 
+    if (token?.isCancellationRequested) return null;
+
     return slots.filter((scan): scan is MarkdownFileScan => scan !== null);
   }
 
@@ -565,10 +580,22 @@ export class WikiLanguageFeatures {
    * Performs ONE enumeration+read pass over the workspace corpus.
    *
    * @param targetAbsPath - Absolute path to the file being referenced.
-   * @returns Locations of every matching link.
+   * @param token - Cancellation token; when cancellation is observed, no
+   *                locations are returned.
+   * @returns Locations of every matching link, or an empty array when the
+   *          scan was cancelled — never a partial set.
    */
-  private async _findIncomingLinks(targetAbsPath: string): Promise<vscode.Location[]> {
-    const scans = await this._scanWorkspaceMarkdown();
+  private async _findIncomingLinks(
+    targetAbsPath: string,
+    token?: vscode.CancellationToken
+  ): Promise<vscode.Location[]> {
+    const scans = await this._scanWorkspaceMarkdown(token);
+
+    // Fail closed: a cancelled reference request must never present a subset
+    // of the references as the complete answer, mirroring
+    // {@link WikiLanguageFeatures.buildFileMoveEdit}.
+    if (scans === null) return [];
+
     const locations: vscode.Location[] = [];
     const wsRoot = this._workspaceRoot();
     // One scanner instance for the whole pass; reset between lines.
@@ -607,11 +634,23 @@ export class WikiLanguageFeatures {
    *
    * @param oldAbsPath - Absolute path the link previously resolved to.
    * @param newAbsPath - Absolute path the link should now resolve to.
+   * @param token - Cancellation token; when cancellation is observed mid-scan
+   *                the returned promise rejects with `vscode.CancellationError`
+   *                rather than yielding a partially-built edit.
    * @returns A WorkspaceEdit replacing every matching href.
    */
-  async buildFileMoveEdit(oldAbsPath: string, newAbsPath: string): Promise<vscode.WorkspaceEdit> {
+  async buildFileMoveEdit(
+    oldAbsPath: string,
+    newAbsPath: string,
+    token?: vscode.CancellationToken
+  ): Promise<vscode.WorkspaceEdit> {
     const edit = new vscode.WorkspaceEdit();
-    const scans = await this._scanWorkspaceMarkdown();
+    const scans = await this._scanWorkspaceMarkdown(token);
+
+    // Fail closed: a cancelled rename must never apply a subset of the
+    // rewrites, so cancellation surfaces as a rejected promise.
+    if (scans === null) throw new vscode.CancellationError();
+
     this._appendMoveRewriteEdits(scans, new Map([[oldAbsPath, newAbsPath]]), edit);
     return edit;
   }
@@ -709,7 +748,11 @@ export class WikiLanguageFeatures {
     }
 
     const edit = new vscode.WorkspaceEdit();
+    // No token today (onDidRenameFiles has none to give), so null cannot
+    // occur — but fail closed anyway: a cancelled corpus must never yield
+    // partial directory-move rewrites.
     const scans = await this._scanWorkspaceMarkdown();
+    if (scans === null) return edit;
     const rewriteCount = this._appendMoveRewriteEdits(scans, moves, edit);
     getWikiLogger().debug(
       'directory move %s -> %s: %d pages moved, scanned %d markdown files, rewrote %d links',
@@ -735,7 +778,7 @@ export class WikiLanguageFeatures {
         document: vscode.TextDocument,
         position: vscode.Position,
         newName: string,
-        _token: vscode.CancellationToken
+        token: vscode.CancellationToken
       ): Promise<vscode.WorkspaceEdit | undefined> => {
         if (!this._isMarkdownFile(document.uri)) return undefined;
         const link = this._findMarkdownLinkAtPosition(document, position);
@@ -750,7 +793,7 @@ export class WikiLanguageFeatures {
           ? path.normalize(newName)
           : path.normalize(path.resolve(path.dirname(document.uri.fsPath), newName));
 
-        return this.buildFileMoveEdit(oldAbs, newAbs);
+        return this.buildFileMoveEdit(oldAbs, newAbs, token);
       }
     });
   }
