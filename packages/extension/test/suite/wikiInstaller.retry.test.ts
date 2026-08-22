@@ -94,7 +94,7 @@ describe('wikiInstaller — retry recovers from a failed start (bug reproduction
       const manager = new WikiBinaryManager(context);
 
       // Activation-equivalent: the first start fails (server refuses).
-      await assert.rejects(manager.start(), undefined, 'Expected the initial start to fail');
+      await assert.rejects(manager.start(), /HTTP 503/, 'Expected the initial start to fail');
 
       // Conditions heal: the release server now works.
       mode = 'serve';

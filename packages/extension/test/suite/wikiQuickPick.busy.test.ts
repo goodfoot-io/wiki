@@ -71,6 +71,8 @@ describe('wikiQuickPick — busy clears on abort (bug reproduction)', () => {
 /**
  * Start a handler whose mock search resolves only when its abort signal
  * fires — mirroring a wiki CLI process killed mid-run.
+ *
+ * @returns The handler plus the arrays recording busy flips and resets.
  */
 function startStuckSearch(): {
   handler: ReturnType<typeof createSearchHandler>;
