@@ -9,9 +9,10 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { constants as fsConstants } from 'node:fs';
+import { createReadStream, constants as fsConstants } from 'node:fs';
 import { access, chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import { getWikiLogger } from './logger.js';
 import {
   getManagedBinaryPaths,
@@ -446,10 +447,17 @@ async function assertExecutable(filePath: string, platform: NodeJS.Platform): Pr
   await access(filePath, fsConstants.X_OK);
 }
 
+/**
+ * Compute the SHA-256 hex digest of a file by streaming it through the hash
+ * in fixed-size chunks, so the binary is never fully buffered in memory.
+ *
+ * @param filePath - Absolute path to the file to hash.
+ * @returns Lowercase hex SHA-256 digest.
+ */
 async function sha256File(filePath: string): Promise<string> {
-  return createHash('sha256')
-    .update(await readFile(filePath))
-    .digest('hex');
+  const hash = createHash('sha256');
+  await pipeline(createReadStream(filePath), hash);
+  return hash.digest('hex');
 }
 
 async function findExecutableOnPath(
