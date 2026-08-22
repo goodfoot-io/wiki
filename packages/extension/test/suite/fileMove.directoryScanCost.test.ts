@@ -42,6 +42,10 @@ function wsRoot(): string {
  * Poll findFiles until `predicate` holds over the workspace markdown paths.
  * VS Code's search index lags behind filesystem writes, so callers wait for
  * visibility rather than sleeping a fixed interval.
+ *
+ * @param predicate - Completion test evaluated over each enumeration's paths.
+ * @param label - Human-readable phase name for the timeout error message.
+ * @returns The paths from the first enumeration satisfying `predicate`.
  */
 async function waitForMarkdown(predicate: (paths: string[]) => boolean, label: string): Promise<string[]> {
   const deadline = Date.now() + 5000;
@@ -130,7 +134,7 @@ describe('directory move scan cost', () => {
       const languageFeatures = new WikiLanguageFeatures(null as unknown as WikiBinaryManager);
       edit = await languageFeatures.buildDirectoryMoveEdit(path.join(root, srcDirName), path.join(root, dstDirName));
     } finally {
-      fsMod.promises.readFile = originalReadFile;
+      (fsMod.promises as unknown as { readFile: ReadFileLike }).readFile = originalReadFile;
     }
 
     // --- Assert ---

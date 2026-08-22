@@ -14,6 +14,7 @@ import { readFile, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { type FrontmatterInfo, readFrontmatter } from '../utils/frontmatter.js';
+import { getWikiLogger } from '../utils/logger.js';
 import { runWikiCommand } from '../utils/wikiBinary.js';
 import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
 
@@ -569,13 +570,18 @@ export class WikiLanguageFeatures {
 
   /**
    * Build a WorkspaceEdit that rewrites incoming links to every `.md` file
-   * inside a renamed directory.
+   * inside a renamed directory, in a single pass over the workspace.
    *
-   * Enumerates `.md` files under `newDirPath` and calls
-   * {@link buildFileMoveEdit} for each, substituting the old directory prefix
-   * for the new one. When a directory is renamed in the VS Code explorer the
+   * Enumerates `.md` files under `newDirPath` to derive one old→new absolute
+   * path pair per moved page, then scans the workspace's markdown files once,
+   * rewriting links whose resolved target matches any pair. Cost is
+   * proportional to the workspace regardless of how many pages moved — a
+   * directory move of K pages performs one enumeration and one read pass
+   * (~N reads), not K full-workspace rescans (K×N reads).
+   *
+   * When a directory is renamed in the VS Code explorer the
    * `onDidRenameFiles` event delivers a single event for the directory URI;
-   * this method bridges that event to the per-file rewriter.
+   * this method bridges that event to link rewriting.
    *
    * @param oldDirPath - Absolute path of the directory before the rename.
    * @param newDirPath - Absolute path of the directory after the rename.
@@ -587,16 +593,62 @@ export class WikiLanguageFeatures {
       new vscode.RelativePattern(vscode.Uri.file(newDirPath), '**/*.md'),
       '**/node_modules/**'
     );
+    if (mdFiles.length === 0) return edit;
+
+    // Map each moved page's pre-rename absolute path to its post-rename path.
+    // Keys are built with the same join used by the previous per-page
+    // implementation, so lookups below compare against exactly the strings
+    // resolveLinkTarget() output was compared against before.
+    const oldToNew = new Map<string, string>();
     for (const fileUri of mdFiles) {
       const relPath = path.relative(newDirPath, fileUri.fsPath);
-      const oldPath = path.join(oldDirPath, relPath);
-      const partial = await this.buildFileMoveEdit(oldPath, fileUri.fsPath);
-      for (const [uri, edits] of partial.entries()) {
-        for (const e of edits) {
-          edit.replace(uri, e.range, e.newText);
+      oldToNew.set(path.join(oldDirPath, relPath), fileUri.fsPath);
+    }
+
+    const files = await this._allMarkdownFiles();
+    let rewriteCount = 0;
+    for (const fileUri of files) {
+      let text: string;
+      try {
+        text = await readFile(fileUri.fsPath, 'utf8');
+      } catch {
+        continue;
+      }
+
+      const lines = text.split('\n');
+      for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+        const lineText = lines[lineIdx]!;
+        const re = new RegExp(MARKDOWN_LINK_RE.source, 'g');
+        let match: RegExpExecArray | null;
+        for (match = re.exec(lineText); match !== null; match = re.exec(lineText)) {
+          const href = match[2]!;
+          const hashIdx = href.indexOf('#');
+          const rawPath = hashIdx >= 0 ? href.slice(0, hashIdx) : href;
+          const fragment = hashIdx >= 0 ? href.slice(hashIdx) : '';
+          const resolved = resolveLinkTarget(rawPath, fileUri.fsPath, this._workspaceRoot());
+          if (resolved == null) continue;
+          const newAbsPath = oldToNew.get(resolved);
+          if (newAbsPath == null) continue;
+
+          const newRel = path.relative(path.dirname(fileUri.fsPath), newAbsPath);
+          const newHref = (newRel.split(path.sep).join('/') || rawPath) + fragment;
+
+          const hrefStart = lineText.indexOf(href, match.index);
+          if (hrefStart < 0) continue;
+          edit.replace(fileUri, new vscode.Range(lineIdx, hrefStart, lineIdx, hrefStart + href.length), newHref);
+          rewriteCount++;
         }
       }
     }
+
+    getWikiLogger().debug(
+      'directory move %s -> %s: %d pages moved, scanned %d markdown files, rewrote %d links',
+      oldDirPath,
+      newDirPath,
+      oldToNew.size,
+      files.length,
+      rewriteCount
+    );
     return edit;
   }
 
