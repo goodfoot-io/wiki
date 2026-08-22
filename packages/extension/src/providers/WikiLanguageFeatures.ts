@@ -37,6 +37,15 @@ interface CheckOutput {
  */
 const MARKDOWN_LINK_RE = /(?<!!)\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
 
+/** One scanned workspace markdown file: its URI and content split into lines. */
+interface MarkdownFileScan {
+  fileUri: vscode.Uri;
+  lines: string[];
+}
+
+/** Max concurrent `readFile` calls during a single workspace scan pass. */
+const SCAN_READ_CONCURRENCY = 6;
+
 /**
  * Resolve a markdown link href to an absolute filesystem path, relative to
  * `fromFile`'s directory. Returns null for non-internal targets (http(s)/mailto/
@@ -195,6 +204,50 @@ export class WikiLanguageFeatures {
   // Completion
   // --------------------------------------------------------------------------
 
+  /**
+   * Read frontmatter for `absPath` through the mtime-keyed
+   * {@link _frontmatterCache}. On cache miss the file is read from disk and
+   * the result populated into the cache; on stat failure null is returned
+   * without caching.
+   *
+   * @param absPath - Absolute filesystem path to a markdown file.
+   * @returns Parsed frontmatter, or null when the file cannot be stat'd/read.
+   */
+  private async _cachedFrontmatter(absPath: string): Promise<FrontmatterInfo | null> {
+    let mtime: number;
+    try {
+      const s = await stat(absPath);
+      mtime = s.mtimeMs;
+    } catch {
+      return null;
+    }
+
+    const cached = this._frontmatterCache.get(absPath);
+    if (cached !== undefined && cached.mtime === mtime) {
+      return cached.fm;
+    }
+
+    const fm = await readFrontmatter(absPath);
+    this._frontmatterCache.set(absPath, { mtime, fm });
+    return fm;
+  }
+
+  /**
+   * Drop every frontmatter-cache entry whose path was not seen in the given
+   * enumeration of current workspace files (deleted files can never appear in
+   * findFiles output). O(cache size) set difference.
+   *
+   * @param currentPaths - fsPaths of every markdown file currently enumerated.
+   */
+  private _evictStaleFrontmatter(currentPaths: readonly string[]): void {
+    const seen = new Set(currentPaths);
+    for (const key of this._frontmatterCache.keys()) {
+      if (!seen.has(key)) {
+        this._frontmatterCache.delete(key);
+      }
+    }
+  }
+
   private _registerCompletionProvider(): vscode.Disposable {
     return vscode.languages.registerCompletionItemProvider(
       [{ language: 'markdown' }],
@@ -218,6 +271,9 @@ export class WikiLanguageFeatures {
           const files = await this._allMarkdownFiles();
           if (token.isCancellationRequested) return undefined;
 
+          // Evict cache entries for files deleted since the last pass.
+          this._evictStaleFrontmatter(files.map((fileUri) => fileUri.fsPath));
+
           type ResolvedEntry = {
             fileUri: vscode.Uri;
             href: string;
@@ -230,24 +286,8 @@ export class WikiLanguageFeatures {
               if (relPath === '') return null;
               // Normalise separators to POSIX for markdown links.
               const href = relPath.split(path.sep).join('/');
-              const absPath = fileUri.fsPath;
 
-              // Check mtime-based cache
-              let mtime: number;
-              try {
-                const s = await stat(absPath);
-                mtime = s.mtimeMs;
-              } catch {
-                return { fileUri, href, fm: null };
-              }
-
-              const cached = this._frontmatterCache.get(absPath);
-              if (cached !== undefined && cached.mtime === mtime) {
-                return { fileUri, href, fm: cached.fm };
-              }
-
-              const fm = await readFrontmatter(absPath);
-              this._frontmatterCache.set(absPath, { mtime, fm });
+              const fm = await this._cachedFrontmatter(fileUri.fsPath);
               return { fileUri, href, fm };
             })
           );
@@ -296,7 +336,9 @@ export class WikiLanguageFeatures {
         const absTarget = resolveLinkTarget(link.href, document.uri.fsPath, this._workspaceRoot());
         if (absTarget == null) return undefined;
 
-        const fm = await readFrontmatter(absTarget);
+        // Serve frontmatter from the mtime-keyed cache exactly like the
+        // completion path instead of re-reading the target on every hover.
+        const fm = await this._cachedFrontmatter(absTarget);
         const md = new vscode.MarkdownString();
         const wsRoot = this._workspaceRoot();
         const relForDisplay =
@@ -477,32 +519,69 @@ export class WikiLanguageFeatures {
   }
 
   /**
+   * Enumerate every workspace markdown file once and read each file's content
+   * once with bounded concurrency, producing the shared scan corpus used by
+   * the incoming-link and file-move features.
+   *
+   * Files that cannot be read are skipped silently (prior sequential
+   * behavior). Output order matches the {@link _allMarkdownFiles} enumeration
+   * order regardless of read completion order.
+   *
+   * @returns Scans for every readable workspace markdown file.
+   */
+  private async _scanWorkspaceMarkdown(): Promise<MarkdownFileScan[]> {
+    const files = await this._allMarkdownFiles();
+    const slots: (MarkdownFileScan | null)[] = new Array(files.length).fill(null);
+    let nextIndex = 0;
+
+    const readNext = async (): Promise<void> => {
+      while (nextIndex < files.length) {
+        const index = nextIndex;
+        nextIndex++;
+        const fileUri = files[index]!;
+        try {
+          const text = await readFile(fileUri.fsPath, 'utf8');
+          slots[index] = { fileUri, lines: text.split('\n') };
+        } catch {
+          // Unreadable file — skip, matching prior behavior.
+        }
+      }
+    };
+
+    const workerCount = Math.min(SCAN_READ_CONCURRENCY, files.length);
+    const workers: Promise<void>[] = [];
+    for (let i = 0; i < workerCount; i++) {
+      workers.push(readNext());
+    }
+    await Promise.all(workers);
+
+    return slots.filter((scan): scan is MarkdownFileScan => scan !== null);
+  }
+
+  /**
    * Scan every markdown file in the workspace for a link whose resolved
    * absolute path equals `targetAbsPath`.
+   *
+   * Performs ONE enumeration+read pass over the workspace corpus.
    *
    * @param targetAbsPath - Absolute path to the file being referenced.
    * @returns Locations of every matching link.
    */
   private async _findIncomingLinks(targetAbsPath: string): Promise<vscode.Location[]> {
-    const files = await this._allMarkdownFiles();
+    const scans = await this._scanWorkspaceMarkdown();
     const locations: vscode.Location[] = [];
+    const wsRoot = this._workspaceRoot();
+    // One scanner instance for the whole pass; reset between lines.
+    const re = new RegExp(MARKDOWN_LINK_RE.source, 'g');
 
-    for (const fileUri of files) {
-      let text: string;
-      try {
-        text = await readFile(fileUri.fsPath, 'utf8');
-      } catch {
-        continue;
-      }
-
-      const lines = text.split('\n');
+    for (const { fileUri, lines } of scans) {
       for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
         const lineText = lines[lineIdx]!;
-        const re = new RegExp(MARKDOWN_LINK_RE.source, 'g');
+        re.lastIndex = 0;
         let match: RegExpExecArray | null;
         for (match = re.exec(lineText); match !== null; match = re.exec(lineText)) {
           const href = match[2]!;
-          const resolved = resolveLinkTarget(href, fileUri.fsPath, this._workspaceRoot());
+          const resolved = resolveLinkTarget(href, fileUri.fsPath, wsRoot);
           if (resolved !== targetAbsPath) continue;
           const hrefStart = lineText.indexOf(href, match.index);
           if (hrefStart < 0) continue;
@@ -532,40 +611,64 @@ export class WikiLanguageFeatures {
    */
   async buildFileMoveEdit(oldAbsPath: string, newAbsPath: string): Promise<vscode.WorkspaceEdit> {
     const edit = new vscode.WorkspaceEdit();
-    const files = await this._allMarkdownFiles();
+    const scans = await this._scanWorkspaceMarkdown();
+    this._appendMoveRewriteEdits(scans, new Map([[oldAbsPath, newAbsPath]]), edit);
+    return edit;
+  }
 
-    for (const fileUri of files) {
-      let text: string;
-      try {
-        text = await readFile(fileUri.fsPath, 'utf8');
-      } catch {
-        continue;
-      }
+  /**
+   * Pure computation over an already-scanned corpus: rewrite every markdown
+   * link whose resolved absolute target matches one of `moves`' keys so that
+   * its href becomes a relative path from the linking file's directory to
+   * the mapped new absolute path. Fragments (`#anchors`) are preserved and
+   * re-appended to the rewritten href.
+   *
+   * A single traversal handles every move pair at once, so a directory
+   * rename with F files costs one workspace pass instead of F passes.
+   *
+   * @param scans - Shared scan corpus (one entry per readable workspace .md).
+   * @param moves - Map of old absolute link-target path → new absolute path.
+   * @param edit - WorkspaceEdit accumulating the replacement edits.
+   * @returns The number of replacement edits appended.
+   */
+  private _appendMoveRewriteEdits(
+    scans: readonly MarkdownFileScan[],
+    moves: ReadonlyMap<string, string>,
+    edit: vscode.WorkspaceEdit
+  ): number {
+    let rewriteCount = 0;
+    if (moves.size === 0) return rewriteCount;
+    const wsRoot = this._workspaceRoot();
+    // One scanner instance for the whole pass; reset between lines.
+    const re = new RegExp(MARKDOWN_LINK_RE.source, 'g');
 
-      const lines = text.split('\n');
+    for (const { fileUri, lines } of scans) {
+      const sourceDir = path.dirname(fileUri.fsPath);
       for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
         const lineText = lines[lineIdx]!;
-        const re = new RegExp(MARKDOWN_LINK_RE.source, 'g');
+        re.lastIndex = 0;
         let match: RegExpExecArray | null;
         for (match = re.exec(lineText); match !== null; match = re.exec(lineText)) {
           const href = match[2]!;
           const hashIdx = href.indexOf('#');
           const rawPath = hashIdx >= 0 ? href.slice(0, hashIdx) : href;
           const fragment = hashIdx >= 0 ? href.slice(hashIdx) : '';
-          const resolved = resolveLinkTarget(rawPath, fileUri.fsPath, this._workspaceRoot());
-          if (resolved !== oldAbsPath) continue;
+          const resolved = resolveLinkTarget(rawPath, fileUri.fsPath, wsRoot);
+          if (resolved === null) continue;
+          const newAbsPath = moves.get(resolved);
+          if (newAbsPath === undefined) continue;
 
-          const newRel = path.relative(path.dirname(fileUri.fsPath), newAbsPath);
+          const newRel = path.relative(sourceDir, newAbsPath);
           const newHref = (newRel.split(path.sep).join('/') || rawPath) + fragment;
 
           const hrefStart = lineText.indexOf(href, match.index);
           if (hrefStart < 0) continue;
           edit.replace(fileUri, new vscode.Range(lineIdx, hrefStart, lineIdx, hrefStart + href.length), newHref);
+          rewriteCount++;
         }
       }
     }
-
-    return edit;
+    return rewriteCount;
   }
 
   /**
@@ -573,8 +676,9 @@ export class WikiLanguageFeatures {
    * inside a renamed directory, in a single pass over the workspace.
    *
    * Enumerates `.md` files under `newDirPath` to derive one old→new absolute
-   * path pair per moved page, then scans the workspace's markdown files once,
-   * rewriting links whose resolved target matches any pair. Cost is
+   * path pair per moved page, then performs ONE enumeration+read+scan pass
+   * over the workspace corpus ({@link _scanWorkspaceMarkdown}) computing every
+   * edit in a single traversal via {@link _appendMoveRewriteEdits}. Cost is
    * proportional to the workspace regardless of how many pages moved — a
    * directory move of K pages performs one enumeration and one read pass
    * (~N reads), not K full-workspace rescans (K×N reads).
@@ -588,65 +692,31 @@ export class WikiLanguageFeatures {
    * @returns A WorkspaceEdit that rewrites every link targeting a file inside the renamed directory.
    */
   async buildDirectoryMoveEdit(oldDirPath: string, newDirPath: string): Promise<vscode.WorkspaceEdit> {
-    const edit = new vscode.WorkspaceEdit();
     const mdFiles = await vscode.workspace.findFiles(
       new vscode.RelativePattern(vscode.Uri.file(newDirPath), '**/*.md'),
       '**/node_modules/**'
     );
-    if (mdFiles.length === 0) return edit;
+    if (mdFiles.length === 0) return new vscode.WorkspaceEdit();
 
     // Map each moved page's pre-rename absolute path to its post-rename path.
-    // Keys are built with the same join used by the previous per-page
-    // implementation, so lookups below compare against exactly the strings
+    // Keys are built with the same join the per-page implementation passed as
+    // oldAbsPath, so lookups below compare against exactly the strings
     // resolveLinkTarget() output was compared against before.
-    const oldToNew = new Map<string, string>();
+    const moves = new Map<string, string>();
     for (const fileUri of mdFiles) {
       const relPath = path.relative(newDirPath, fileUri.fsPath);
-      oldToNew.set(path.join(oldDirPath, relPath), fileUri.fsPath);
+      moves.set(path.join(oldDirPath, relPath), fileUri.fsPath);
     }
 
-    const files = await this._allMarkdownFiles();
-    let rewriteCount = 0;
-    for (const fileUri of files) {
-      let text: string;
-      try {
-        text = await readFile(fileUri.fsPath, 'utf8');
-      } catch {
-        continue;
-      }
-
-      const lines = text.split('\n');
-      for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-        const lineText = lines[lineIdx]!;
-        const re = new RegExp(MARKDOWN_LINK_RE.source, 'g');
-        let match: RegExpExecArray | null;
-        for (match = re.exec(lineText); match !== null; match = re.exec(lineText)) {
-          const href = match[2]!;
-          const hashIdx = href.indexOf('#');
-          const rawPath = hashIdx >= 0 ? href.slice(0, hashIdx) : href;
-          const fragment = hashIdx >= 0 ? href.slice(hashIdx) : '';
-          const resolved = resolveLinkTarget(rawPath, fileUri.fsPath, this._workspaceRoot());
-          if (resolved == null) continue;
-          const newAbsPath = oldToNew.get(resolved);
-          if (newAbsPath == null) continue;
-
-          const newRel = path.relative(path.dirname(fileUri.fsPath), newAbsPath);
-          const newHref = (newRel.split(path.sep).join('/') || rawPath) + fragment;
-
-          const hrefStart = lineText.indexOf(href, match.index);
-          if (hrefStart < 0) continue;
-          edit.replace(fileUri, new vscode.Range(lineIdx, hrefStart, lineIdx, hrefStart + href.length), newHref);
-          rewriteCount++;
-        }
-      }
-    }
-
+    const edit = new vscode.WorkspaceEdit();
+    const scans = await this._scanWorkspaceMarkdown();
+    const rewriteCount = this._appendMoveRewriteEdits(scans, moves, edit);
     getWikiLogger().debug(
       'directory move %s -> %s: %d pages moved, scanned %d markdown files, rewrote %d links',
       oldDirPath,
       newDirPath,
-      oldToNew.size,
-      files.length,
+      moves.size,
+      scans.length,
       rewriteCount
     );
     return edit;
