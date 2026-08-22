@@ -159,10 +159,13 @@ export interface SearchHandler {
  * Create a handler for QuickPick value-change events that manages abort
  * controllers for in-flight searches.
  *
- * Search invocations are debounced by 150 ms so rapid keystrokes batch
- * into a single call. Emptying the query aborts any in-flight search,
- * restores the initial page list via {@link onResetToInitial}, and clears
- * the busy indicator via {@link onBusy}.
+ * Queries are debounced by 150 ms so rapid keystrokes coalesce into one
+ * search invocation. An aborted search skips its completion callbacks by
+ * design — a newer query owns the UI state now — so whoever aborts without
+ * a successor must clear the busy indicator itself: emptying the query
+ * restores the initial page list via {@link onResetToInitial} and clears
+ * busy via {@link onBusy}, and disposing the handler does the same for any
+ * in-flight search.
  *
  * @param search           - Async search function (e.g., spawns wiki CLI).
  * @param onResults        - Called with search results when they arrive.
@@ -185,10 +188,12 @@ export function createSearchHandler(
       clearTimeout(debounceTimer);
 
       if (query.trim() === '') {
-        // The aborted search's continuation skips onBusy(false) by design, so
-        // this branch is the only remaining writer for the cycle — clearing
-        // here guarantees the picker returns to a fully idle state.
-        onBusy(false);
+        // The aborted search's continuation skips onBusy(false) by design,
+        // and no new search runs for an empty query to clear it later.
+        if (activeAbort !== undefined) {
+          onBusy(false);
+          activeAbort = undefined;
+        }
         onResetToInitial();
         return;
       }
@@ -201,6 +206,7 @@ export function createSearchHandler(
         void (async () => {
           const results = await search(query.trim(), abort.signal);
           if (!abort.signal.aborted) {
+            activeAbort = undefined;
             onResults(results);
             onBusy(false);
           }
@@ -209,7 +215,13 @@ export function createSearchHandler(
     },
 
     dispose(): void {
-      activeAbort?.abort();
+      // Same as the empty-query path: an aborted search cannot clear busy
+      // itself.
+      if (activeAbort !== undefined) {
+        activeAbort.abort();
+        onBusy(false);
+        activeAbort = undefined;
+      }
       clearTimeout(debounceTimer);
     }
   };

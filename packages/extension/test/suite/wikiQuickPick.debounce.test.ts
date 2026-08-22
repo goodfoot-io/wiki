@@ -1,17 +1,13 @@
 /**
- * Reproduction test: QuickPick's onDidChangeValue handler has no debounce,
- * spawning a wiki CLI process on every keystroke.
+ * Regression guard: the QuickPick search handler debounces rapid keystrokes.
  *
- * When the handler fires via onDidChangeValue, rapid keystrokes within any
- * short window each immediately invoke searchPages, which spawns a separate
- * wiki CLI process. There is no debounce timer to batch them.
+ * `createSearchHandler` wraps the search call in a 150ms debounce timer so
+ * that a burst of keystrokes triggers exactly one wiki CLI invocation after
+ * the user stops typing. This test asserts the debounced behavior
+ * (1 call per burst) and passes against the current fixed code; it guards
+ * against reintroducing the original per-keystroke spawn behavior.
  *
- * A fix would add a 150ms debounce to `createSearchHandler` so that only a
- * single search is triggered after the user stops typing. This test asserts
- * the desired behavior (1 call) and MUST FAIL against the current unfixed
- * code, confirming the bug.
- *
- * @summary Reproduction test for missing debounce in wikiQuickPick search.
+ * @summary Regression guard for debounce in wikiQuickPick search handler.
  * @module test/suite/wikiQuickPick.debounce.test
  */
 

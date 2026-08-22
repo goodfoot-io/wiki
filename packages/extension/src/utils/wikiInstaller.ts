@@ -44,8 +44,11 @@ export class WikiBinaryManager {
 
   async retry(): Promise<WikiBinaryReadyResult> {
     // Await any in-flight ensureReady before discarding the promise, so two
-    // concurrent retry/start combinations do not race to the same install paths.
-    await this.readyPromise;
+    // concurrent retry/start combinations do not race to the same install
+    // paths. Swallow the awaited rejection: a previously failed start is
+    // exactly what retry exists to discard, and letting it propagate would
+    // keep serving the stale error until the window reloads.
+    await this.readyPromise?.catch(() => undefined);
     this.readyPromise = null;
     return this.start();
   }
