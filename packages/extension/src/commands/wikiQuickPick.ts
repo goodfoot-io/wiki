@@ -159,9 +159,10 @@ export interface SearchHandler {
  * Create a handler for QuickPick value-change events that manages abort
  * controllers for in-flight searches.
  *
- * CURRENT BEHAVIOR (bug): Each call immediately invokes `search` with no
- * debounce. A debounce timer should wrap the `search` call to batch rapid
- * keystrokes into a single invocation.
+ * Search invocations are debounced by 150 ms so rapid keystrokes batch
+ * into a single call. Emptying the query aborts any in-flight search,
+ * restores the initial page list via {@link onResetToInitial}, and clears
+ * the busy indicator via {@link onBusy}.
  *
  * @param search           - Async search function (e.g., spawns wiki CLI).
  * @param onResults        - Called with search results when they arrive.
@@ -184,6 +185,10 @@ export function createSearchHandler(
       clearTimeout(debounceTimer);
 
       if (query.trim() === '') {
+        // The aborted search's continuation skips onBusy(false) by design, so
+        // this branch is the only remaining writer for the cycle — clearing
+        // here guarantees the picker returns to a fully idle state.
+        onBusy(false);
         onResetToInitial();
         return;
       }
