@@ -9,7 +9,7 @@ import { getFilePath, type Logger, postToolUseHook, postToolUseOutput } from '@g
  * frontmatter: both `title` and `summary` must be present and non-empty.
  * Non-.md files are never wiki members.
  */
-function isWikiFile(filePath: string, cwd: string): boolean {
+export function isWikiFile(filePath: string, cwd: string): boolean {
   if (!filePath.endsWith('.md')) return false;
 
   const absPath = isAbsolute(filePath) ? filePath : resolve(cwd, filePath);
