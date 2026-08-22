@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use std::path::Path;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, params, params_from_iter};
 
 use crate::index::{DocSource, ResolvedPage, SearchResult, Snippet};
 
@@ -18,6 +18,12 @@ pub(crate) fn source_filter_id(source: DocSource) -> i64 {
         DocSource::WorkingTree => 2,
     }
 }
+
+/// OIDs per anti-join chunk when correcting the FTS total for pre-FTS
+/// matches. SQLite's default `SQLITE_MAX_VARIABLE_NUMBER` is 32766 binds
+/// per statement; 900 keeps every chunk far below any limit while a
+/// realistic corpus needs only one statement.
+const TOTAL_COUNT_CHUNK: usize = 900;
 
 /// Build an FTS5 MATCH expression from a free-form user query.
 ///
@@ -234,26 +240,37 @@ pub fn search_weighted(
         if pre_fts_seen.is_empty() {
             true_fts_total as usize
         } else {
-            // Pre-FTS matches (exact title / path) may also match the FTS
-            // query.  Count OIDs seen before FTS that do NOT match the FTS
-            // expression and add them to the FTS total.
-            let mut extra: usize = 0;
-            for oid in &pre_fts_seen {
-                let in_fts: bool = conn
-                    .query_row(
-                        "SELECT 1
-                         FROM fts
-                         JOIN blobs b ON b.rowid = fts.rowid AND b.oid = ?1
-                         WHERE fts MATCH ?2
-                         LIMIT 1",
-                        params![oid, fts_query],
-                        |_| Ok(()),
-                    )
-                    .is_ok();
-                if !in_fts {
-                    extra += 1;
-                }
-            }
+            // Pre-FTS matches (exact title / alias / path) may also match
+            // the FTS query. Count, in one anti-join per chunk of OIDs,
+            // those that do NOT satisfy the MATCH expression and add them
+            // to the FTS total. `blobs.oid` is a PRIMARY KEY, so the old
+            // per-OID probe and this set-based form answer the identical
+            // question — but each chunk evaluates MATCH once instead of
+            // once per document.
+            let extra = crate::perf::scope_result(
+                "search.total_count",
+                serde_json::json!({ "pre_matches": pre_fts_seen.len() }),
+                || -> rusqlite::Result<usize> {
+                    let mut extra: usize = 0;
+                    for chunk in pre_fts_seen.chunks(TOTAL_COUNT_CHUNK) {
+                        let placeholders = vec!["?"; chunk.len()].join(", ");
+                        let sql = format!(
+                            "SELECT COUNT(*) FROM blobs b \
+                             WHERE b.oid IN ({placeholders}) \
+                             AND NOT EXISTS (SELECT 1 FROM fts \
+                             WHERE fts.rowid = b.rowid AND fts MATCH ?{})",
+                            chunk.len() + 1
+                        );
+                        let bound = params_from_iter(
+                            chunk.iter().chain(std::iter::once(&fts_query)),
+                        );
+                        let not_matching: i64 =
+                            conn.query_row(sql.as_str(), bound, |r| r.get(0))?;
+                        extra += not_matching as usize;
+                    }
+                    Ok(extra)
+                },
+            )?;
             (true_fts_total as usize) + extra
         }
     } else {
