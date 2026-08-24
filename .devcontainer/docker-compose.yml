@@ -24,6 +24,10 @@ services:
       # nested mounts. The base entrypoint symlinks the home paths here.
       - opencode-data:/var/lib/coaxial/opencode
       - cards-worktrees:/var/lib/coaxial/cards-worktrees
+      # Rust toolchains (rustup renames dirs into place, which the virtiofs
+      # stale-cache defect breaks) and the cargo registry/bin cache.
+      - rustup-data:/var/lib/coaxial/rustup
+      - cargo-data:/var/lib/coaxial/cargo
     environment:
       - NODE_OPTIONS=--max-old-space-size=8192
       - CLAUDE_CONFIG_DIR=/home/node/.claude
@@ -34,3 +38,5 @@ services:
 volumes:
   opencode-data:
   cards-worktrees:
+  rustup-data:
+  cargo-data:
