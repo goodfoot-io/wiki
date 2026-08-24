@@ -42,8 +42,17 @@ fn measure_match_statements(db_path: &Path, query: &str) -> (usize, usize) {
 
     MATCH_STATEMENTS.store(0, Ordering::SeqCst);
     conn.trace(Some(tracer));
+    // The served generation is whichever one the prepare left newest; a
+    // freshly prepared single-generation store serves gen_id 1's corpus.
+    let gen_id: i64 = conn
+        .query_row(
+            "SELECT gen_id FROM generations ORDER BY created_at DESC, gen_id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .expect("served generation");
     let (rows, total) =
-        search_weighted(&conn, DocSource::WorkingTree, query, 10, 0)
+        search_weighted(&conn, gen_id, DocSource::WorkingTree, query, 10, 0)
             .expect("search_weighted");
     conn.trace(None);
     let _ = rows;
@@ -51,6 +60,7 @@ fn measure_match_statements(db_path: &Path, query: &str) -> (usize, usize) {
     (MATCH_STATEMENTS.load(Ordering::SeqCst), total)
 }
 
+#[allow(dead_code)]
 fn build_index(repo: &common::FixtureRepo) -> PathBuf {
     let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare");
     drop(index);
@@ -63,7 +73,6 @@ fn build_index(repo: &common::FixtureRepo) -> PathBuf {
 /// Target-layout port of [`build_index`]: the merged store at
 /// `<git-common-dir>/wiki/store.sqlite`.
 #[test]
-#[ignore = "target layout lands in Phase 3; production still writes .wiki/wiki-index.sqlite"]
 fn build_index_at_merged_store() {
     let repo = common::FixtureRepo::new();
     let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare");
@@ -74,6 +83,7 @@ fn build_index_at_merged_store() {
 }
 
 #[test]
+#[ignore = "old .wiki layout retired in Phase 3; tracer bound re-pinned at the merged store below"]
 fn total_count_probes_do_not_scale_with_pre_matches() {
     // Twelve distinct blobs sharing the exact title "Gadget". The exact-title
     // stage collects 12 pre-FTS OIDs, and because the title text itself is
@@ -109,6 +119,7 @@ fn total_count_probes_do_not_scale_with_pre_matches() {
 }
 
 #[test]
+#[ignore = "old .wiki layout retired in Phase 3; totals re-pinned at the merged store below"]
 fn total_count_mixed_pre_matches_some_satisfying_fts() {
     // The card's required equivalence case: more than one pre-FTS match
     // where SOME satisfy the FTS query and some do not. Exact-title twins
@@ -161,7 +172,6 @@ fn total_count_mixed_pre_matches_some_satisfying_fts() {
 // both the single-query correction and the totals.
 
 #[test]
-#[ignore = "target layout lands in Phase 3; production still writes .wiki/wiki-index.sqlite"]
 fn total_count_probes_do_not_scale_at_merged_store() {
     let repo = common::FixtureRepo::new();
     const PRE_MATCHES: usize = 12;

@@ -1,77 +1,98 @@
-//! Fast triple gate: 3× stat on `.git/HEAD`, `.git/index`, repo root +
-//! state-row read. No `gix::Repository` open on the fast path.
+//! Canonical freshness inputs: HEAD oid, `.git/index` trailer, and the
+//! worktree `(path, mtime_ns)` walk feeding [`crate::index::generations::
+//! worktree_signature`]. The gate hashes these into a
+//! `StateFingerprint` and looks the digest up in the merged store — no
+//! state row, no stored triple comparison.
 
 use std::fs;
 use std::io::Read;
 use std::path::Path;
 
-/// Marker returned when the fast gate matches: the on-disk HEAD/index/worktree
-/// triple equals the stored state, so no refresh is required. Carries no data —
-/// callers only distinguish `Some` (fresh) from `None` (refresh required).
-pub struct FastTriple;
+use crate::index::generations::{
+    StateFingerprint, UNBORN_HEAD_OID, ZERO_INDEX_CHECKSUM, worktree_signature,
+};
 
-/// Stat-only fast gate: three stats + one state-row read; no gix open.
+/// Compute the canonical fingerprint of the repository's current state, or
+/// `None` when a leg is unreadable — which the gate treats as a miss
+/// (fail-open toward rehash). `repo` may be supplied by callers that
+/// already hold an open `gix::Repository` (the refresh path); otherwise one
+/// is opened for the head-tree leg.
 ///
-/// Returns `Ok(Some(triple))` when the on-disk triple matches the state row.
-/// Returns `Ok(None)` when any input is missing or the state is stale and a
-/// refresh is therefore required.
-pub fn fast_gate(
+/// The result must be byte-stable across call sites: whatever this returns
+/// on unchanged state is exactly what the refresh path publishes.
+pub(crate) fn current_fingerprint(
+    repo_root: &Path,
     dot_git: &Path,
-    conn: &rusqlite::Connection,
-) -> anyhow::Result<Option<FastTriple>> {
-    let index_path = dot_git.join("index");
-    let repo_root = dot_git.parent().unwrap_or(dot_git);
-
-    // No explicit existence stats here: every read below fails closed on a
-    // missing input. `read_head_oid` returns None if HEAD is absent,
-    // `read_index_trailer` stats the index itself and returns None if absent,
-    // and a missing `repo_root` yields an empty worktree hash that cannot match
-    // the stored generation. In all cases `fast_gate` returns `Ok(None)` (a
-    // refresh), so the redundant up-front stats only cost the warm hot path.
-
-    let head_oid = match read_head_oid(dot_git) {
-        Some(h) => h,
-        None => return Ok(None),
+    repo: Option<&gix::Repository>,
+    wikiignore_hash: &[u8; 20],
+) -> anyhow::Result<Option<StateFingerprint>> {
+    // HEAD oid: file-based resolution matches the refresh path's gix
+    // emission byte-for-byte, including the unborn-HEAD sentinel.
+    let Some(head_oid) = read_head_oid(dot_git) else {
+        return Ok(None);
     };
 
-    let index_checksum = match read_index_trailer(&index_path) {
-        Some(t) => t,
-        None => return Ok(None),
+    let Some(index_checksum) = read_index_trailer(&dot_git.join("index")) else {
+        return Ok(None);
     };
 
-    let (state_head, state_checksum, state_generation): (String, Vec<u8>, i64) = match conn
-        .query_row(
-            "SELECT head_oid, index_checksum, worktree_generation FROM state WHERE id = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-
-    if state_head != head_oid {
-        return Ok(None);
+    // Head tree: peel HEAD through gix (an unborn HEAD diffs against the
+    // empty tree). A failed open degrades to a gate miss rather than an
+    // error — consistent with every other unreadable-input leg.
+    let head_tree_oid = match repo {
+        Some(repo) => repo.head_tree_id().ok().map(|id| id.to_hex().to_string()),
+        None => match gix::open(repo_root) {
+            Ok(opened) => opened.head_tree_id().ok().map(|id| id.to_hex().to_string()),
+            Err(_) => return Ok(None),
+        },
     }
-    if state_checksum.len() != 20 || state_checksum.as_slice() != index_checksum.as_slice() {
-        return Ok(None);
-    }
+    .unwrap_or_default(); // unborn HEAD diffs against the empty tree
 
-    // Worktree leg of the triple: hash directory + markdown-file mtimes on
-    // disk and compare against the stored generation. Directory mtimes catch
-    // file creation and deletion; file mtimes catch in-place edits (which do
-    // not update the parent directory's mtime on Linux).
-    let current_worktree_hash = compute_worktree_dir_hash(repo_root);
-    if state_generation != current_worktree_hash {
-        return Ok(None);
-    }
+    let mut wikiignore = [0u8; 20];
+    wikiignore.copy_from_slice(wikiignore_hash);
 
-    // Also require state to be non-empty (a fresh DB has empty head_oid + zero
-    // checksum). If everything is zero, force a refresh.
-    if state_head.is_empty() {
-        return Ok(None);
-    }
+    let pairs = collect_worktree_pairs(repo_root);
+    Ok(Some(StateFingerprint {
+        head_oid,
+        head_tree_oid,
+        index_checksum,
+        wikiignore_hash: wikiignore,
+        worktree_sig: worktree_signature(&pairs),
+    }))
+}
 
-    Ok(Some(FastTriple))
+/// The publish-side twin of [`current_fingerprint`]: same canonical inputs,
+/// but every leg falls back to its sentinel instead of degrading — a fresh
+/// clone may have no `.git/index` yet and an unborn HEAD has no tree, and
+/// the refresh must still publish a generation for that state.
+pub(crate) fn published_fingerprint(
+    repo: &gix::Repository,
+    repo_root: &Path,
+    dot_git: &Path,
+    wikiignore_hash: &[u8; 20],
+) -> StateFingerprint {
+    let head_oid = repo
+        .head_id()
+        .ok()
+        .map(|id| id.to_hex().to_string())
+        .unwrap_or_else(|| UNBORN_HEAD_OID.to_string());
+    let head_tree_oid = repo
+        .head_tree_id()
+        .ok()
+        .map(|id| id.to_hex().to_string())
+        .unwrap_or_default();
+    let index_checksum =
+        read_index_trailer(&dot_git.join("index")).unwrap_or(ZERO_INDEX_CHECKSUM);
+    let mut wikiignore = [0u8; 20];
+    wikiignore.copy_from_slice(wikiignore_hash);
+    let pairs = collect_worktree_pairs(repo_root);
+    StateFingerprint {
+        head_oid,
+        head_tree_oid,
+        index_checksum,
+        wikiignore_hash: wikiignore,
+        worktree_sig: worktree_signature(&pairs),
+    }
 }
 
 /// Resolve `.git/HEAD` to a 40-char hex OID, following a single symref hop.
@@ -134,31 +155,23 @@ fn read_index_trailer(index_path: &Path) -> Option<[u8; 20]> {
     Some(buf)
 }
 
-/// Compute a 64-bit hash over every directory's and markdown file's
-/// (repo-relative path, mtime_ns) pair. Directory mtimes catch file creation
-/// and deletion; file mtimes catch in-place edits (which do not update the
+/// Collect the sorted `(repo-relative path, mtime_ns)` pairs of every
+/// directory and markdown file under `repo_root`, feeding
+/// [`worktree_signature`]. Directory mtimes catch file creation and
+/// deletion; file mtimes catch in-place edits (which do not update the
 /// parent directory's mtime on Linux).
 ///
-/// The walk is gitignore-aware (it skips `target/`, `node_modules/`, and
-/// anything else gitignored — none of which the index ingests), and also skips
-/// `.git` and `.wiki` (the tool's own derived-data store, whose churn must not
-/// affect the hash) at any depth. Dot-directories like `.github` are still
-/// walked because hidden filtering is disabled. The result is a superset of the
-/// content the index ingests, so the gate never falsely HITs after a real edit.
-///
-/// Returns a deterministic hash suitable for comparing against a stored
-/// `worktree_generation` value.
-pub(crate) fn compute_worktree_dir_hash(repo_root: &Path) -> i64 {
-    use std::hash::{Hash, Hasher};
-
-    // Collect (rel_path, mtime_ns) for every directory and markdown file
-    // under repo_root. The walk mirrors git's ignore semantics as a superset of
-    // what the index ingests, and additionally prunes `.git` and `.wiki`.
+/// The walk is gitignore-aware (a superset of what the index ingests) and
+/// prunes `.git` and `.wiki` at any depth. The synthetic
+/// `.wiki/.wikiignore` mtime pair folds in so any edit to the ignore list
+/// changes the signature even though the walk prunes `.wiki/`.
+pub(crate) fn collect_worktree_pairs(repo_root: &Path) -> Vec<(String, i64)> {
     // The parallel walker overlaps the per-entry stat round-trips across
     // threads, which dominates latency on a hostile (fuseblk) filesystem.
-    // Threads push kept pairs into a shared Mutex<Vec>; the work is stat-bound,
-    // not lock-bound, so a per-entry lock-and-push is fine. The pairs are sorted
-    // by path after the walk, so collection order does not affect the hash.
+    // Threads push kept pairs into a shared Mutex<Vec>; the work is
+    // stat-bound, not lock-bound, so a per-entry lock-and-push is fine.
+    // Pairs are sorted after the walk, so collection order never leaks
+    // into the signature (worktree_signature re-sorts defensively anyway).
     let pairs = std::sync::Mutex::new(Vec::<(std::path::PathBuf, i64)>::new());
     let walker = ignore::WalkBuilder::new(repo_root)
         .standard_filters(true)
@@ -186,9 +199,9 @@ pub(crate) fn compute_worktree_dir_hash(repo_root: &Path) -> i64 {
                     Err(_) => return ignore::WalkState::Continue,
                 };
 
-                // Cheap readdir-backed filter first (no stat): only directories
-                // and markdown files are kept. `file_type()` comes from
-                // readdir's d_type on Linux, so this discards
+                // Cheap readdir-backed filter first (no stat): only
+                // directories and markdown files are kept. `file_type()`
+                // comes from readdir's d_type on Linux, so this discards
                 // `.rs`/`.ts`/`.json`/etc. without a stat.
                 let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
                 let is_file = entry.file_type().is_some_and(|ft| ft.is_file());
@@ -196,8 +209,8 @@ pub(crate) fn compute_worktree_dir_hash(repo_root: &Path) -> i64 {
                     return ignore::WalkState::Continue;
                 }
 
-                // Stat only the entries we keep. `entry.metadata()` may reuse a
-                // stat already performed by the walker.
+                // Stat only the entries we keep. `entry.metadata()` may
+                // reuse a stat already performed by the walker.
                 let mtime_ns = match entry
                     .metadata()
                     .ok()
@@ -215,11 +228,9 @@ pub(crate) fn compute_worktree_dir_hash(repo_root: &Path) -> i64 {
         )
     });
 
-    // Fold .wiki/.wikiignore mtime into the generation hash so any edit to the
-    // ignore list busts the fast gate and triggers reindex. The walk above
-    // prunes `.wiki/` entirely, so without this an edit to `.wikiignore` would
-    // change neither the dir hash nor head/index checksums. No WikiIgnore load
-    // here (the function returns i64 and cannot fail closed) — only a stat.
+    // Fold .wiki/.wikiignore mtime into the signature so any edit to the
+    // ignore list busts the gate even though the walk prunes `.wiki/`.
+    // Only a stat — no WikiIgnore load here (this cannot fail closed).
     {
         let wikiignore_path = repo_root.join(".wiki").join(".wikiignore");
         if let Ok(meta) = std::fs::metadata(&wikiignore_path)
@@ -233,17 +244,12 @@ pub(crate) fn compute_worktree_dir_hash(repo_root: &Path) -> i64 {
         }
     }
 
-    // Sort for deterministic ordering independent of filesystem readdir order
-    // and of the thread interleaving above.
     let mut pairs = pairs.into_inner().unwrap();
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for (path, mtime) in &pairs {
-        path.hash(&mut hasher);
-        mtime.hash(&mut hasher);
-    }
-    hasher.finish() as i64
+    pairs
+        .into_iter()
+        .map(|(p, m)| (p.to_string_lossy().to_string(), m))
+        .collect()
 }
 
 /// True when `path` has a `.md` extension (case-insensitive).
@@ -331,25 +337,25 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_worktree_dir_hash_changes_on_wikiignore_content_change() {
-        // Editing `.wiki/.wikiignore` must bust the freshness fast-gate even
-        // though the walk prunes `.wiki/` — the file's mtime is folded into
-        // the hash.
+    fn worktree_signature_changes_on_wikiignore_content_change() {
+        // Editing `.wiki/.wikiignore` must bust freshness even though the
+        // walk prunes `.wiki/` — the file's mtime pair folds into the
+        // collected pairs behind the signature.
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         fs::create_dir_all(root.join(".wiki")).unwrap();
         let ignore = root.join(".wiki").join(".wikiignore");
 
-        // Absent → present must change the hash (the mtime pair is folded in).
-        let absent = compute_worktree_dir_hash(root);
+        // Absent → present must change the signature.
+        let absent = worktree_signature(&collect_worktree_pairs(root));
         fs::write(&ignore, "drafts/\n").unwrap();
-        let present = compute_worktree_dir_hash(root);
+        let present = worktree_signature(&collect_worktree_pairs(root));
         assert_ne!(
             absent, present,
-            "creating .wiki/.wikiignore must change the generation hash"
+            "creating .wiki/.wikiignore must change the worktree signature"
         );
 
-        // A content edit that advances the mtime must also change the hash.
+        // A content edit that advances the mtime must also change it.
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
         let later_ns = later
             .duration_since(std::time::UNIX_EPOCH)
@@ -357,10 +363,10 @@ mod tests {
             .as_nanos();
         fs::write(&ignore, "secrets/\n").unwrap();
         set_mtime_ns(&ignore, later_ns as i64);
-        let edited = compute_worktree_dir_hash(root);
+        let edited = worktree_signature(&collect_worktree_pairs(root));
         assert_ne!(
             present, edited,
-            "editing .wiki/.wikiignore must change the generation hash"
+            "editing .wiki/.wikiignore must change the worktree signature"
         );
     }
 }

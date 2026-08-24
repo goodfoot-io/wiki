@@ -143,32 +143,41 @@ fn scalar(conn: &Connection, sql: &str) -> i64 {
 }
 
 fn fts_tables(conn: &Connection) -> Vec<String> {
+    // Only the virtual children themselves (`fts_<gen_id>`); FTS5's shadow
+    // tables (`fts_1_data`, `fts_1_idx`, …) carry a second underscore and
+    // are excluded — gen ids are integers and never contain one.
     let mut stmt = conn
         .prepare(
             "SELECT name FROM sqlite_master WHERE type = 'table'
-             AND name LIKE 'fts\\_%' ESCAPE '\\' ORDER BY name",
+             AND name LIKE 'fts\\_%' ESCAPE '\\'
+             AND name NOT LIKE 'fts\\_%\\_%' ESCAPE '\\'
+             ORDER BY name",
         )
         .expect("prepare sqlite_master");
     let rows = stmt.query_map([], |r| r.get::<_, String>(0)).expect("fts listing");
     rows.map(|r| r.expect("row")).collect()
 }
 
-/// BM25 ranking over one generation's FTS table — the order search must
-/// serve. Column weights match production: bm25(fts_g, 5,4,3,3,2,1).
-fn ranked_rowids(conn: &Connection, fts_table: &str, query: &str) -> Vec<i64> {
+/// BM25 ranking over one generation's FTS table, as document oids ordered
+/// by score then oid — the order search must serve, in a store-independent
+/// identity space (blob rowids are per-store insert order; scores and their
+/// tie-break must match a cold rebuild exactly). Column weights match
+/// production: bm25(fts_g, 5,4,3,3,2,1).
+fn ranked_oids(conn: &Connection, fts_table: &str, query: &str) -> Vec<String> {
     let sql = format!(
-        "SELECT rowid FROM {fts_table} WHERE {fts_table} MATCH ?1 \
-         ORDER BY bm25({fts_table}, 5, 4, 3, 3, 2, 1), rowid"
+        "SELECT b.oid FROM {fts_table} \
+         JOIN blobs b ON b.rowid = {fts_table}.rowid \
+         WHERE {fts_table} MATCH ?1 \
+         ORDER BY bm25({fts_table}, 5, 4, 3, 3, 2, 1) ASC, b.oid ASC"
     );
     let mut stmt = conn.prepare(&sql).expect("prepare ranked match");
-    let rows = stmt.query_map([query], |r| r.get::<_, i64>(0)).expect("ranked match");
+    let rows = stmt.query_map([query], |r| r.get::<_, String>(0)).expect("ranked match");
     rows.map(|r| r.expect("row")).collect()
 }
 
 // ── 1–2: digest canonicalization ────────────────────────────────────────
 
 #[test]
-#[ignore = "stubbed until Phase 3"]
 fn state_digest_is_injective_over_field_order_and_boundaries() {
     let base = StateFingerprint {
         head_oid: format!("{:040x}", 1),
@@ -222,7 +231,6 @@ fn state_digest_is_injective_over_field_order_and_boundaries() {
 }
 
 #[test]
-#[ignore = "stubbed until Phase 3"]
 fn worktree_signature_canonicalizes_order_and_boundaries() {
     let sorted = vec![("a.md".to_string(), 1), ("b.md".to_string(), 2)];
     let shuffled = vec![("b.md".to_string(), 2), ("a.md".to_string(), 1)];
@@ -249,7 +257,6 @@ fn worktree_signature_canonicalizes_order_and_boundaries() {
 // ── 3–6: publish, isolation, immutability ───────────────────────────────
 
 #[test]
-#[ignore = "stubbed until Phase 3"]
 fn publish_conflict_discards_loser_fts_table_and_serves_existing() {
     let (_tmp, store) = open_store();
     let fp = fingerprint(1);
@@ -296,7 +303,6 @@ fn publish_conflict_discards_loser_fts_table_and_serves_existing() {
 }
 
 #[test]
-#[ignore = "stubbed until Phase 3"]
 fn divergent_generations_coexist_serving_their_own_corpus() {
     let (_tmp, store) = open_store();
 
@@ -346,16 +352,15 @@ fn divergent_generations_coexist_serving_their_own_corpus() {
     let conn = raw_conn(store.path());
     let old_fts = format!("fts_{}", old_gen.gen_id);
     let new_fts = format!("fts_{}", new_gen.gen_id);
-    assert_eq!(ranked_rowids(&conn, &old_fts, "gamma").len(), 1);
-    assert_eq!(ranked_rowids(&conn, &new_fts, "gamma").len(), 0);
-    assert_eq!(ranked_rowids(&conn, &new_fts, "delta").len(), 1);
-    assert_eq!(ranked_rowids(&conn, &old_fts, "delta").len(), 0);
-    assert_eq!(ranked_rowids(&conn, &old_fts, "edited").len(), 0);
-    assert_eq!(ranked_rowids(&conn, &new_fts, "edited").len(), 1);
+    assert_eq!(ranked_oids(&conn, &old_fts, "gamma").len(), 1);
+    assert_eq!(ranked_oids(&conn, &new_fts, "gamma").len(), 0);
+    assert_eq!(ranked_oids(&conn, &new_fts, "delta").len(), 1);
+    assert_eq!(ranked_oids(&conn, &old_fts, "delta").len(), 0);
+    assert_eq!(ranked_oids(&conn, &old_fts, "edited").len(), 0);
+    assert_eq!(ranked_oids(&conn, &new_fts, "edited").len(), 1);
 }
 
 #[test]
-#[ignore = "stubbed until Phase 3"]
 fn warm_rankings_equal_cold_rebuild_of_same_digest() {
     let (_warm_tmp, warm) = open_store();
     let (_cold_tmp, cold) = open_store();
@@ -387,30 +392,33 @@ fn warm_rankings_equal_cold_rebuild_of_same_digest() {
     let cold_conn = raw_conn(cold.path());
     for query in ["gadget", "alpha", "prose"] {
         assert_eq!(
-            ranked_rowids(&warm_conn, &format!("fts_{}", warm_gen.gen_id), query),
-            ranked_rowids(&cold_conn, &format!("fts_{}", cold_gen.gen_id), query),
+            ranked_oids(&warm_conn, &format!("fts_{}", warm_gen.gen_id), query),
+            ranked_oids(&cold_conn, &format!("fts_{}", cold_gen.gen_id), query),
             "BM25 ranking must be identical warm vs cold for query {query:?}"
         );
     }
 }
 
 #[test]
-#[ignore = "stubbed until Phase 3"]
 fn retained_generation_is_never_physically_deleted_by_later_publish() {
     let (_tmp, store) = open_store();
 
-    let (keep_old_oid, keep_old_fields) = page_blob("Old Only", "Only the old generation holds me.");
-    let (shared_oid, _) = page_blob("Shared", "Present in both generations.");
+    let old_page = Page::new("old_only.md", "Old Only", 100);
+    let shared_page = Page::new("shared.md", "Shared", 200);
+    // The oids the fixture pages actually publish under (Page::blob() is
+    // deterministic per title).
+    let (keep_old_oid, _) = old_page.blob();
+    let (shared_oid, _) = shared_page.blob();
 
     // Newer publish drops old_only.md from its corpus — and deletes
     // nothing physical: publish is insert-only under immutability.
     let old_gen = published(
         &store,
-        candidate(fingerprint(1), &[Page::new("old_only.md", "Old Only", 100), Page::new("shared.md", "Shared", 200)]),
+        candidate(fingerprint(1), &[old_page, shared_page.clone()]),
     );
     let new_gen = published(
         &store,
-        candidate(fingerprint(2), &[Page::new("shared.md", "Shared", 200), Page::new("new_only.md", "New Only", 300)]),
+        candidate(fingerprint(2), &[shared_page, Page::new("new_only.md", "New Only", 300)]),
     );
 
     let conn = raw_conn(store.path());
@@ -423,7 +431,6 @@ fn retained_generation_is_never_physically_deleted_by_later_publish() {
         })
         .expect("displaced blob row must survive");
     assert!(refcount >= 1, "the retained generation still references it");
-    let _ = keep_old_fields;
 
     // ...its gen_paths rows stay intact through the older generation...
     assert_eq!(
@@ -435,25 +442,55 @@ fn retained_generation_is_never_physically_deleted_by_later_publish() {
     );
     // ...and its fts_ child still answers its own corpus.
     assert!(fts_tables(&conn).contains(&format!("fts_{}", old_gen.gen_id)));
+    let old_fts = format!("fts_{}", old_gen.gen_id);
+    let new_fts = format!("fts_{}", new_gen.gen_id);
     assert_eq!(
-        ranked_rowids(&conn, &format!("fts_{}", old_gen.gen_id), "hold").len(),
+        ranked_oids(&conn, &old_fts, "old").len(),
         1,
         "older generation still serves its displaced page"
     );
     assert_eq!(
-        ranked_rowids(&conn, &format!("fts_{}", new_gen.gen_id), "hold").len(),
+        ranked_oids(&conn, &new_fts, "old").len(),
         0,
         "newer generation does not see the displaced page"
     );
     let shared_hex = shared_oid.0;
     assert!(scalar(&conn, &format!("SELECT COUNT(*) FROM blobs WHERE oid = '{shared_hex}'")) > 0);
     assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM blobs WHERE title = 'New Only'"), 1);
+
+    // Membership-refcount ruling: after every gen_paths-mutating operation,
+    // blobs.refcount must equal COUNT(DISTINCT gen_id) referencing the oid.
+    // keep_old is referenced only by the retained older generation; shared
+    // by both.
+    let refcount_invariant = |oid: &str| -> i64 {
+        conn.query_row(
+            "SELECT b.refcount = COALESCE(
+                 (SELECT COUNT(DISTINCT gp.gen_id) FROM gen_paths gp WHERE gp.oid = b.oid), 0)
+             FROM blobs b WHERE b.oid = ?1",
+            [oid],
+            |r| r.get::<_, i64>(0),
+        )
+        .expect("refcount invariant query")
+    };
+    assert_eq!(refcount_invariant(&keep_old_oid.0), 1);
+    let old_refcount: i64 = conn
+        .query_row(
+            "SELECT refcount FROM blobs WHERE oid = ?1",
+            [&keep_old_oid.0],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(old_refcount, 1, "exactly one retained generation holds the displaced blob");
+    assert_eq!(refcount_invariant(&shared_hex), 1);
+    let shared_refcount: i64 = conn
+        .query_row("SELECT refcount FROM blobs WHERE oid = ?1", [&shared_hex], |r| r.get(0))
+        .unwrap();
+    assert_eq!(shared_refcount, 2, "both retained generations hold the shared blob");
 }
 
 // ── 7–10: carry-forward contracts (dir-mtimes suite rewrites) ───────────
 
 #[test]
-#[ignore = "stubbed until Phase 3"]
 fn carry_forward_matches_path_and_mtime_pairs() {
     let (_tmp, store) = open_store();
 
@@ -501,7 +538,6 @@ fn carry_forward_matches_path_and_mtime_pairs() {
 }
 
 #[test]
-#[ignore = "stubbed until Phase 3"]
 fn deleted_directory_leaves_no_trace_in_the_serving_generation() {
     let (_tmp, store) = open_store();
 
@@ -543,12 +579,11 @@ fn deleted_directory_leaves_no_trace_in_the_serving_generation() {
     );
     let conn = raw_conn(store.path());
     assert!(fts_tables(&conn).contains(&format!("fts_{}", gen1.gen_id)));
-    assert_eq!(ranked_rowids(&conn, &format!("fts_{}", gen1.gen_id), "one").len(), 1);
-    assert_eq!(ranked_rowids(&conn, &format!("fts_{}", gen2.gen_id), "one").len(), 0);
+    assert_eq!(ranked_oids(&conn, &format!("fts_{}", gen1.gen_id), "one").len(), 1);
+    assert_eq!(ranked_oids(&conn, &format!("fts_{}", gen2.gen_id), "one").len(), 0);
 }
 
 #[test]
-#[ignore = "stubbed until Phase 3"]
 fn hostile_fs_disables_carry_forward_full_rescan_only() {
     let (_tmp, store) = open_store();
 
@@ -588,7 +623,6 @@ fn hostile_fs_disables_carry_forward_full_rescan_only() {
 }
 
 #[test]
-#[ignore = "stubbed until Phase 3"]
 fn carry_forward_reingests_only_changed_files() {
     let (_tmp, store) = open_store();
 
@@ -630,7 +664,6 @@ fn carry_forward_reingests_only_changed_files() {
 // ── 11–14: retention, verification, invariants ──────────────────────────
 
 #[test]
-#[ignore = "stubbed until Phase 3"]
 fn retention_keeps_newest_plus_recency_bound_per_d10() {
     let (_tmp, store) = open_store();
 
@@ -715,7 +748,6 @@ fn retention_keeps_newest_plus_recency_bound_per_d10() {
 }
 
 #[test]
-#[ignore = "stubbed until Phase 3"]
 fn unverified_generation_row_never_serves() {
     let (_tmp, store) = open_store();
     let fp = fingerprint(3);
@@ -775,7 +807,6 @@ fn unverified_generation_row_never_serves() {
 }
 
 #[test]
-#[ignore = "stubbed until Phase 3"]
 fn compute_happens_outside_write_txn() {
     let (_tmp, store) = open_store();
     assert!(!store.is_in_write_txn(), "freshly opened handle is autocommit");
@@ -797,7 +828,6 @@ fn compute_happens_outside_write_txn() {
 }
 
 #[test]
-#[ignore = "stubbed until Phase 3"]
 fn best_effort_access_touch_never_fails_lookup() {
     let (_tmp, store) = open_store();
     let fp = fingerprint(5);

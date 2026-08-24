@@ -1,32 +1,32 @@
 //! Pass orchestrator: `Tree -> Index -> Worktree` merged into a single
 //! `seen_paths` map.
 //!
-//! All three passes emit [`PassDelta`] values; the orchestrator merges
-//! them with strict later-source-wins ordering, applies refcount-driven
-//! blob bookkeeping, and re-tokenizes only on actual content changes.
+//! All three passes emit [`PassDelta`] values against the newest retained
+//! generation's recorded inputs (delta base, plan D5); the orchestrator
+//! merges them with strict later-source-wins ordering and builds a
+//! [`PublishCandidate`] entirely outside any write transaction — parsing,
+//! object-database reads, and hashing all precede [`GenerationsStore::
+//! publish`], whose single atomic transaction materializes the generation,
+//! its `gen_paths` rows, the global blob upserts, and the per-generation
+//! FTS child. Nothing is ever mutated in place: immutability replaces the
+//! old CAS-on-state-row machinery.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use rusqlite::{Connection, params};
 
 use crate::index::freshness;
+use crate::index::generations::{
+    self, GenPathRow, Generation, GenerationsStore, PublishCandidate, StateFingerprint,
+    EMPTY_TREE_BASE, ZERO_INDEX_CHECKSUM,
+};
 use crate::index::ingest::{WikiBlobFields, parse_blob};
 use crate::index::{BlobOid, HostileFs, Source};
 
 pub mod index_file;
 pub mod tree;
 pub mod worktree;
-
-/// Numeric encoding of [`Source`] used in the `paths.source` column.
-pub(crate) fn source_id(s: Source) -> i64 {
-    match s {
-        Source::Tree => 0,
-        Source::Index => 1,
-        Source::Worktree => 2,
-    }
-}
 
 /// One change observed by a single pass.
 #[derive(Debug, Clone)]
@@ -44,12 +44,13 @@ pub enum DeltaAction {
         oid: BlobOid,
         /// Bytes read during the pass, for sources where the pass
         /// reads file content itself (e.g. Worktree). When `Some`,
-        /// `apply_add` uses these instead of re-reading from disk,
-        /// eliminating the TOCTOU window between hash and apply.
+        /// the candidate builder uses these instead of re-reading
+        /// from disk, eliminating the TOCTOU window between hash
+        /// and ingest.
         blob_bytes: Option<Vec<u8>>,
         /// File mtime at the moment of hashing, stored in
-        /// `paths.stat_mtime_ns` so the next refresh can detect
-        /// in-place content edits inside clean directories.
+        /// `gen_paths.stat_mtime_ns` so the next refresh can detect
+        /// in-place content edits.
         stat_mtime_ns: Option<i64>,
     },
     /// Path is no longer present in this source.
@@ -66,14 +67,17 @@ pub enum DeltaAction {
 pub struct RefreshOutcome {
     pub fts_retokenizations: u64,
     pub pass3_full_rescans: u64,
-    /// Number of directories Pass 3 had to descend into and stat/hash files
-    /// for (i.e. directories whose mtime differed from the recorded
-    /// `dir_mtimes` entry, or all directories on a hostile filesystem).
+    /// Number of directories Pass 3 descended into and stat/hashed
+    /// markdown files for. The dir-mtime Merkle short-circuit is gone
+    /// (plan D6): every directory is walked, and carry-forward happens at
+    /// `(path_rel, stat_mtime_ns)` file granularity.
     pub pass3_dir_walks: u64,
-    /// `true` when the orchestrator lost the state-row CAS on commit and
-    /// the transaction was rolled back. The caller must serve the prior
-    /// snapshot and must not bump any freshness gates.
-    pub cas_lost: bool,
+    /// True when publish reported [`PublishOutcome::ConflictDiscarded`] —
+    /// an identical generation already existed, so the winner (byte-for-
+    /// byte the same canonical state) is served instead.
+    pub conflict_discarded: bool,
+    /// The generation to serve after the refresh, whatever the outcome.
+    pub served_gen_id: i64,
 }
 
 /// Resolve a blob's bytes for the requested OID.
@@ -109,45 +113,44 @@ fn read_blob_bytes(
 }
 
 /// SHA-1 of the `.wiki/.wikiignore` contents, or the 20-zero sentinel when
-/// the file is absent. Stored in `state.wikiignore_hash` so the next refresh
-/// can detect a wikiignore-only commit (which the diff-based Tree pass cannot
-/// otherwise observe) and run a full bidirectional Tree reconciliation.
-fn compute_wikiignore_hash(repo_root: &Path) -> Vec<u8> {
+/// the file is absent. Part of the canonical fingerprint: the Tree pass is
+/// diff-based and cannot observe a wikiignore-only commit, so a change in
+/// this hash relative to the base generation forces a full bidirectional
+/// Tree reconciliation.
+pub(crate) fn compute_wikiignore_hash(repo_root: &Path) -> [u8; 20] {
     let path = repo_root.join(".wiki").join(".wikiignore");
-    match std::fs::read(&path) {
-        Ok(bytes) => {
-            gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, &bytes)
-                .expect("SHA-1 hashing is infallible")
-                .as_bytes()
-                .to_vec()
-        }
-        Err(_) => vec![0u8; 20],
+    let mut out = [0u8; 20];
+    if let Ok(bytes) = std::fs::read(&path) {
+        let digest = gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, &bytes)
+            .expect("SHA-1 hashing is infallible")
+            .as_bytes()
+            .to_vec();
+        out.copy_from_slice(&digest);
     }
+    out
 }
 
-/// Drive Pass 1, Pass 2, Pass 3 and apply their deltas inside a single
-/// `BEGIN IMMEDIATE` transaction.
+/// Drive Pass 1, Pass 2, Pass 3 against the newest generation's delta base,
+/// build the publish candidate outside any transaction, and publish it
+/// atomically. On conflict-discard the existing (identical) generation is
+/// the serve target.
 pub fn refresh(
     repo: &gix::Repository,
     repo_root: &Path,
     dot_git: &Path,
-    conn: &mut Connection,
+    store: &GenerationsStore,
     hostile_fs: HostileFs,
 ) -> Result<RefreshOutcome> {
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    // Delta base: the newest retained generation, or a cold start.
+    let base: Option<Generation> = store.newest()?;
+    let base_rows = match &base {
+        Some(generation) => store.all_generation_paths(generation.gen_id)?,
+        None => Vec::new(),
+    };
 
-    // Read prior state (head_tree_oid + index_checksum + generation + wikiignore_hash).
-    let (prior_head_tree, prior_index_checksum, prior_generation, prior_wikiignore_hash): (
-        String,
-        Vec<u8>,
-        i64,
-        Vec<u8>,
-    ) = tx.query_row(
-        "SELECT head_tree_oid, index_checksum, generation, wikiignore_hash
-         FROM state WHERE id = 1",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    )?;
+    let prior_head_tree = base
+        .as_ref()
+        .map_or(EMPTY_TREE_BASE.to_string(), |g| g.fingerprint.head_tree_oid.clone());
     let prior_head_tree_oid = if prior_head_tree.is_empty() {
         None
     } else {
@@ -156,39 +159,70 @@ pub fn refresh(
                 .map_err(|e| anyhow::anyhow!("decode prior head_tree_oid: {e}"))?,
         )
     };
+    let prior_index_checksum_arr: [u8; 20] =
+        base.as_ref().map_or(ZERO_INDEX_CHECKSUM, |g| g.fingerprint.index_checksum);
 
     // Load WikiIgnore once; all three passes apply the same filter so
-    // wikiignored paths are never inserted into the DB regardless of source.
+    // wikiignored paths are never ingested regardless of source.
     let wiki_ignore = crate::wikiignore::WikiIgnore::load(repo_root)?;
 
     // Hash the current `.wiki/.wikiignore` contents (20-zero sentinel when
-    // absent). The Tree pass is diff-based and cannot observe a commit that
-    // only edits `.wiki/.wikiignore` while leaving a file's blob unchanged, so
-    // a change in this hash relative to the last refresh is the sole signal to
-    // run a full bidirectional Tree reconciliation (un-ignore re-adds as well
-    // as ignore removes). When the hash is unchanged the common HEAD-advance
-    // path stays on the pure incremental diff and pays no extra cost.
+    // absent). A change relative to the base generation is the sole signal
+    // to run the full bidirectional Tree reconciliation (un-ignore re-adds
+    // as well as ignore removes).
     let new_wikiignore_hash = compute_wikiignore_hash(repo_root);
-    let wikiignore_changed = new_wikiignore_hash.as_slice() != prior_wikiignore_hash.as_slice();
+    let wikiignore_changed = match &base {
+        Some(generation) => new_wikiignore_hash != generation.fingerprint.wikiignore_hash,
+        None => true,
+    };
+
+    // Member set seeded from the base generation: carried rows stay
+    // byte-identical unless a delta replaces them.
+    let mut members: HashMap<(Source, String), GenPathRow> = base_rows
+        .into_iter()
+        .map(|row| ((row.source, row.path_rel.clone()), row))
+        .collect();
+    // Global blob identities: an oid present in `blobs` is parsed once ever
+    // (content-addressed across all generations).
+    let known_oids: HashSet<String> = {
+        let conn = store.conn();
+        let mut stmt = conn.prepare_cached("SELECT oid FROM blobs")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<HashSet<_>>>()?
+    };
+    let base_tree_paths: Vec<String> =
+        members.iter().filter(|((source, _), _)| *source == Source::Tree).map(|((_, path), _)| path.clone()).collect();
+    let existing_tree_rows: HashSet<String> =
+        members.iter().filter(|((source, _), _)| *source == Source::Tree).map(|((_, path), _)| path.clone()).collect();
+    let prior_index_oids: HashMap<PathBuf, String> = members
+        .iter()
+        .filter(|((source, _), _)| *source == Source::Index)
+        .map(|((_, path), member)| (PathBuf::from(path), member.oid.0.clone()))
+        .collect();
+    let base_worktree_rows: Vec<GenPathRow> =
+        members.values().filter(|row| row.source == Source::Worktree).cloned().collect();
+
+    let mut candidate_builder = CandidateBuilder {
+        members: &mut members,
+        new_blobs: Vec::new(),
+        queued_new: HashSet::new(),
+        known_oids,
+        non_wiki_oids: HashSet::new(),
+        fts_retokenizations: 0,
+    };
 
     // Pass 1: Tree (committed snapshot).
     let mut tree_deltas = crate::perf::scope_result("index.pass_tree", serde_json::json!({}), || {
         tree::pass_tree(repo, prior_head_tree_oid, &wiki_ignore)
     })?;
-    // Sweep existing Tree-source DB rows and emit Remove deltas for any path
-    // that is now wikiignored but was not touched by the tree diff (e.g. the
-    // wikiignore pattern was introduced in a new commit while the file itself
-    // was unchanged — the diff produces no delta for the file).
+    // Sweep the base Tree rows and emit Remove deltas for any path that is
+    // now wikiignored but was not touched by the tree diff (e.g. the
+    // wikiignore pattern landed in a commit while the file itself was
+    // unchanged — the diff produces no delta for the file).
     {
-        let mut stmt = tx.prepare("SELECT path_rel FROM paths WHERE source = ?1")?;
-        let rows: Vec<String> = stmt
-            .query_map(params![source_id(Source::Tree)], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        drop(stmt);
-        for row in rows {
+        for row in base_tree_paths {
             let pb = std::path::PathBuf::from(&row);
             if wiki_ignore.is_ignored(&pb) {
-                // Only add a Remove if the diff didn't already emit one.
                 let already_removed = tree_deltas.iter().any(|d| {
                     d.path == pb && matches!(d.action, DeltaAction::Remove)
                 });
@@ -203,20 +237,9 @@ pub fn refresh(
         }
     }
 
-    // Un-ignore direction (symmetric counterpart of the sweep above). Only run
-    // when `.wiki/.wikiignore` changed since the last refresh: a wikiignore-only
-    // commit (file blob unchanged) produces no tree diff, so a file that became
-    // un-ignored has no Add from `pass_tree` and its previously-removed Tree row
-    // would otherwise stay missing on `--source head`. Enumerate the current
-    // HEAD-tree markdown blobs; for each not-ignored entry with no existing
-    // Tree row (and no Add already queued by the diff), emit an Add so the row
-    // is re-created by reading the blob from the ODB.
+    // Un-ignore direction (symmetric counterpart of the sweep above). Only
+    // run when the wikiignore changed since the base generation.
     if wikiignore_changed {
-        let existing_tree_rows: HashSet<String> = {
-            let mut stmt = tx.prepare("SELECT path_rel FROM paths WHERE source = ?1")?;
-            let rows = stmt.query_map(params![source_id(Source::Tree)], |r| r.get::<_, String>(0))?;
-            rows.collect::<rusqlite::Result<HashSet<_>>>()?
-        };
         for (path, oid) in tree::head_tree_markdown_entries(repo)? {
             if wiki_ignore.is_ignored(&path) {
                 continue;
@@ -225,7 +248,6 @@ pub fn refresh(
             if existing_tree_rows.contains(&path_str) {
                 continue;
             }
-            // Skip if the diff already queued an Add/Rename for this path.
             let already_added = tree_deltas.iter().any(|d| {
                 d.path == path && matches!(d.action, DeltaAction::Add { .. } | DeltaAction::Rename { .. })
             });
@@ -245,16 +267,15 @@ pub fn refresh(
     }
 
     // Pass 2: Index file.
-    let prior_index_checksum_arr: [u8; 20] = if prior_index_checksum.len() == 20 {
-        let mut a = [0u8; 20];
-        a.copy_from_slice(&prior_index_checksum);
-        a
-    } else {
-        [0u8; 20]
-    };
     let index_deltas =
         crate::perf::scope_result("index.pass_index", serde_json::json!({}), || {
-            index_file::pass_index(dot_git, &prior_index_checksum_arr, &tx, &wiki_ignore, wikiignore_changed)
+            index_file::pass_index(
+                dot_git,
+                &prior_index_checksum_arr,
+                &prior_index_oids,
+                &wiki_ignore,
+                wikiignore_changed,
+            )
         })?;
 
     // Pass 3: Worktree.
@@ -265,7 +286,7 @@ pub fn refresh(
             worktree::pass_worktree(
                 repo,
                 repo_root,
-                &tx,
+                &base_worktree_rows,
                 hostile_fs,
                 &mut pass3_full_rescans,
                 &mut pass3_dir_walks,
@@ -273,87 +294,46 @@ pub fn refresh(
             )
         })?;
 
-    // Merge deltas in strict order Tree -> Index -> Worktree.
-    // For each (source, path) we want the final OID assignment to obey
-    // later-source-wins.
+    // Merge deltas in strict order Tree -> Index -> Worktree; later
+    // sources win per (source, path).
     let all_deltas: Vec<PassDelta> = tree_deltas
         .into_iter()
         .chain(index_deltas)
         .chain(worktree_deltas)
         .collect();
 
-    let deltas_applied = all_deltas.len();
-    let mut fts_retokenizations: u64 = 0;
-
-    // Per-refresh blob-identity caches. `wiki_oids` mirrors the `blobs`
-    // table (seeded once, maintained as deltas apply) so the apply loop
-    // never round-trips a COUNT per delta. `non_wiki_oids` remembers blobs
-    // that failed `parse_blob` so a non-wiki blob is read and parsed at
-    // most once per refresh — not once per source that mentions it.
-    let mut blob_cache = BlobCache {
-        wiki_oids: {
-            let mut stmt = tx.prepare_cached("SELECT oid FROM blobs")?;
-            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-            rows.collect::<rusqlite::Result<HashSet<_>>>()?
-        },
-        non_wiki_oids: HashSet::new(),
-    };
-
-    // Apply each delta.
     crate::perf::scope_result(
         "index.apply_deltas",
-        serde_json::json!({ "deltas": deltas_applied }),
+        serde_json::json!({ "deltas": all_deltas.len() }),
         || -> Result<()> {
             for delta in &all_deltas {
                 match &delta.action {
                     DeltaAction::Add { oid, blob_bytes, stat_mtime_ns } => {
-                        apply_add(
+                        candidate_builder.add(
                             repo,
                             repo_root,
-                            &tx,
                             &delta.path,
                             delta.source,
                             oid,
                             blob_bytes.as_deref(),
                             *stat_mtime_ns,
-                            &mut fts_retokenizations,
-                            &mut blob_cache,
                         )?;
                     }
                     DeltaAction::Remove => {
-                        apply_remove(&tx, &delta.path, delta.source, &mut blob_cache)?;
+                        candidate_builder.remove(delta.source, &delta.path);
                     }
                     DeltaAction::Rename { from, oid } => {
-                        if blob_cache.wiki_oids.contains(&oid.0) {
-                            // A pure rename keeps the OID and refcount — the
-                            // path swap is row-level.
-                            apply_rename(
-                                &tx,
-                                from,
-                                &delta.path,
-                                delta.source,
-                                oid,
-                                &mut blob_cache,
-                            )?;
+                        // A pure rename carries an already-known wiki blob.
+                        // For a non-wiki (never-ingested) oid the rename is
+                        // a removal at both ends — inserting a destination
+                        // row would violate the gen_paths→blobs FK, exactly
+                        // like the old decompose-into-Remove+Add guard.
+                        let wiki_known = candidate_builder.known_oids.contains(&oid.0)
+                            || candidate_builder.queued_new.contains(&oid.0);
+                        if wiki_known {
+                            candidate_builder.rename(from, &delta.path, delta.source, oid);
                         } else {
-                            // The blob OID is either non-wiki content (no
-                            // `blobs` row exists and apply_add will skip it)
-                            // or an as-yet unseen wiki blob whose `blobs`
-                            // row must be created first. Decompose into
-                            // Remove + Add for full bookkeeping.
-                            apply_remove(&tx, from, delta.source, &mut blob_cache)?;
-                            apply_add(
-                                repo,
-                                repo_root,
-                                &tx,
-                                &delta.path,
-                                delta.source,
-                                oid,
-                                None,
-                                None,
-                                &mut fts_retokenizations,
-                                &mut blob_cache,
-                            )?;
+                            candidate_builder.remove(delta.source, from);
                         }
                     }
                 }
@@ -362,281 +342,157 @@ pub fn refresh(
         },
     )?;
 
-    // Update state row. Compute new head_tree_oid from HEAD (or empty).
-    let new_head_tree = repo
-        .head_tree_id()
-        .ok()
-        .map(|id| id.to_hex().to_string())
-        .unwrap_or_default();
-    // Normalize unborn HEAD to the 40-zero sentinel so it matches what
-    // `freshness::read_head_oid` returns on the same condition. Otherwise the
-    // fast triple gate misses on every invocation against an unborn repo.
-    let new_head_oid = repo
-        .head_id()
-        .ok()
-        .map(|id| id.to_hex().to_string())
-        .unwrap_or_else(|| "0".repeat(40));
-    let new_index_checksum: Vec<u8> = match gix::index::File::at(
-        dot_git.join("index"),
-        gix::hash::Kind::Sha1,
-        false,
-        Default::default(),
-    ) {
-        Ok(file) => file
-            .checksum()
-            .map(|c| c.as_bytes().to_vec())
-            .unwrap_or_else(|| vec![0u8; 20]),
-        Err(_) => vec![0u8; 20],
+    // Canonical fingerprint of the post-refresh state — computed from the
+    // same legs the gate uses (with sentinel fallbacks for unborn HEAD /
+    // missing index), so the very next gate hits byte-identically.
+    let fingerprint: StateFingerprint =
+        freshness::published_fingerprint(repo, repo_root, dot_git, &new_wikiignore_hash);
+
+    let mut paths: Vec<GenPathRow> = candidate_builder.members.values().cloned().collect();
+    paths.sort_by(|a, b| {
+        a.path_rel
+            .cmp(&b.path_rel)
+            .then_with(|| source_rank(a.source).cmp(&source_rank(b.source)))
+    });
+
+    let candidate = PublishCandidate {
+        fingerprint,
+        publisher: Some(dot_git.to_string_lossy().to_string()),
+        paths,
+        new_blobs: std::mem::take(&mut candidate_builder.new_blobs),
     };
+    let fts_retokenizations = candidate_builder.fts_retokenizations;
 
-    // Compute the worktree freshness signal from the current on-disk state
-    // so fast_gate can detect worktree-only changes without opening gix.
-    let new_worktree_generation = freshness::compute_worktree_dir_hash(repo_root);
+    // Compute-outside-write-txn invariant: the candidate above is inert
+    // data; publish owns the only transaction of the refresh.
+    let outcome = crate::perf::scope_result("index.publish", serde_json::json!({}), || {
+        store.publish(candidate).map_err(|e| anyhow::anyhow!("publish: {e}"))
+    })?;
 
-    // Compare-and-swap on the prior generation. If another writer
-    // committed between our state read and this UPDATE, zero rows match
-    // and we must roll back — the loser does not bump any freshness
-    // signal and the caller continues to serve the prior snapshot.
-    let updated = tx.execute(
-        "UPDATE state SET head_oid = ?1, head_tree_oid = ?2, index_checksum = ?3,
-                          worktree_generation = ?4, wikiignore_hash = ?5,
-                          generation = generation + 1
-         WHERE id = 1 AND generation = ?6",
-        params![
-            new_head_oid,
-            new_head_tree,
-            new_index_checksum,
-            new_worktree_generation,
-            new_wikiignore_hash,
-            prior_generation
-        ],
-    )?;
-
-    if updated == 0 {
-        // CAS lost — roll back every delta we applied in this tx.
-        drop(tx);
-        return Ok(RefreshOutcome {
+    Ok(match outcome {
+        generations::PublishOutcome::Published { generation } => RefreshOutcome {
+            fts_retokenizations,
+            pass3_full_rescans,
+            pass3_dir_walks,
+            conflict_discarded: false,
+            served_gen_id: generation.gen_id,
+        },
+        generations::PublishOutcome::ConflictDiscarded { existing } => RefreshOutcome {
             fts_retokenizations: 0,
-            pass3_full_rescans: 0,
-            pass3_dir_walks: 0,
-            cas_lost: true,
-        });
-    }
-
-    crate::perf::scope_result("index.commit", serde_json::json!({}), || tx.commit())?;
-
-    Ok(RefreshOutcome {
-        fts_retokenizations,
-        pass3_full_rescans,
-        pass3_dir_walks,
-        cas_lost: false,
+            pass3_full_rescans,
+            pass3_dir_walks,
+            conflict_discarded: true,
+            served_gen_id: existing.gen_id,
+        },
     })
 }
 
-/// Per-refresh cache of blob identity, maintained alongside the `blobs`
-/// table so the apply loop never issues a per-delta existence COUNT and
-/// never parses the same non-wiki blob more than once.
-struct BlobCache {
-    /// OIDs currently present in `blobs` (i.e. parsed as wiki pages).
-    wiki_oids: HashSet<String>,
-    /// OIDs whose bytes failed `parse_blob` during this refresh.
-    non_wiki_oids: HashSet<String>,
+fn source_rank(source: Source) -> u8 {
+    match source {
+        Source::Tree => 0,
+        Source::Index => 1,
+        Source::Worktree => 2,
+    }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn apply_add(
-    repo: &gix::Repository,
-    repo_root: &Path,
-    tx: &rusqlite::Transaction,
-    path_rel: &Path,
-    source: Source,
-    oid: &BlobOid,
-    blob_bytes: Option<&[u8]>,
-    stat_mtime_ns: Option<i64>,
-    fts_retokenizations: &mut u64,
-    blob_cache: &mut BlobCache,
-) -> Result<()> {
-    // Look up any existing path row at (path_rel, source).
-    let path_str = path_rel.to_string_lossy().to_string();
-    let existing_oid: Option<String> = tx
-        .prepare_cached("SELECT oid FROM paths WHERE path_rel = ?1 AND source = ?2")?
-        .query_row(params![path_str, source_id(source)], |r| r.get(0))
-        .ok();
+/// Accumulates the publish candidate from merged deltas — pure in-memory
+/// computation, no database access beyond the read-only `known_oids`
+/// snapshot taken before any pass runs.
+struct CandidateBuilder<'a> {
+    /// Live member set across all three sources (seeded from the base
+    /// generation, mutated by deltas).
+    members: &'a mut HashMap<(Source, String), GenPathRow>,
+    /// Blobs newly ingested this refresh (global upserts).
+    new_blobs: Vec<(BlobOid, WikiBlobFields)>,
+    /// Oids already appended to `new_blobs` this refresh.
+    queued_new: HashSet<String>,
+    /// Oids present in the global `blobs` table at refresh start.
+    known_oids: HashSet<String>,
+    /// Oids whose bytes failed `parse_blob` during this refresh.
+    non_wiki_oids: HashSet<String>,
+    fts_retokenizations: u64,
+}
 
-    // Ensure the blob exists in the `blobs` table. If not, parse the
-    // bytes; non-wiki blobs cause us to skip the path row entirely.
-    let known_non_wiki = blob_cache.non_wiki_oids.contains(&oid.0);
-    if known_non_wiki || !blob_cache.wiki_oids.contains(&oid.0) {
-        let fields = if known_non_wiki {
-            None
-        } else {
+impl<'a> CandidateBuilder<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn add(
+        &mut self,
+        repo: &gix::Repository,
+        repo_root: &Path,
+        path_rel: &Path,
+        source: Source,
+        oid: &BlobOid,
+        blob_bytes: Option<&[u8]>,
+        stat_mtime_ns: Option<i64>,
+    ) -> Result<()> {
+        let path_str = path_rel.to_string_lossy().to_string();
+        // Non-wiki blobs never gain a member row; a stale carried row at
+        // this (path, source) is dropped.
+        if self.non_wiki_oids.contains(&oid.0) {
+            self.members.remove(&(source, path_str));
+            return Ok(());
+        }
+        if !self.known_oids.contains(&oid.0) && !self.queued_new.contains(&oid.0) {
             let bytes: Vec<u8> = match blob_bytes {
                 Some(b) => b.to_vec(),
                 None => read_blob_bytes(repo, repo_root, source, path_rel, oid)?,
             };
-            parse_blob(&bytes)
-        };
-        let Some(fields) = fields else {
-            // Not a wiki page; skip recording this path entirely. If a
-            // stale row existed at this (path, source), drop it.
-            blob_cache.non_wiki_oids.insert(oid.0.clone());
-            if let Some(prev) = existing_oid.as_ref() {
-                tx.prepare_cached("DELETE FROM paths WHERE path_rel = ?1 AND source = ?2")?
-                    .execute(params![path_str, source_id(source)])?;
-                decrement_blob(tx, &BlobOid(prev.clone()), blob_cache)?;
-            }
-            return Ok(());
-        };
-        insert_blob(tx, oid, &fields)?;
-        blob_cache.wiki_oids.insert(oid.0.clone());
-        *fts_retokenizations += 1;
-    }
-
-    match existing_oid {
-        Some(prev) if prev == oid.0 => {
-            // Same OID — still update stat_mtime_ns if the caller
-            // provided one (e.g. a Worktree pass backfill).
-            if let Some(mtime) = stat_mtime_ns {
-                tx.prepare_cached(
-                    "UPDATE paths SET stat_mtime_ns = ?1 WHERE path_rel = ?2 AND source = ?3",
-                )?
-                .execute(params![mtime, path_str, source_id(source)])?;
+            let fields: Option<WikiBlobFields> = parse_blob(&bytes);
+            match fields {
+                Some(fields) => {
+                    self.new_blobs.push((oid.clone(), fields));
+                    self.queued_new.insert(oid.0.clone());
+                    // Later deltas for the same oid must not re-parse or
+                    // re-queue: content is immutable per oid.
+                    self.known_oids.insert(oid.0.clone());
+                    self.fts_retokenizations += 1;
+                }
+                None => {
+                    self.non_wiki_oids.insert(oid.0.clone());
+                    self.members.remove(&(source, path_str));
+                    return Ok(());
+                }
             }
         }
-        Some(prev) => {
-            // Path's OID changed within the same source.
-            tx.prepare_cached(
-                "UPDATE paths SET oid = ?1, stat_mtime_ns = ?2
-                 WHERE path_rel = ?3 AND source = ?4",
-            )?
-            .execute(params![oid.0, stat_mtime_ns, path_str, source_id(source)])?;
-            increment_blob(tx, oid)?;
-            decrement_blob(tx, &BlobOid(prev), blob_cache)?;
-        }
-        None => {
-            let parent = path_rel
-                .parent()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
-            tx.prepare_cached(
-                "INSERT INTO paths (path_rel, source, oid, parent_dir, stat_mtime_ns)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-            )?
-            .execute(params![
-                path_str,
-                source_id(source),
-                oid.0,
-                parent,
-                stat_mtime_ns
-            ])?;
-            increment_blob(tx, oid)?;
-        }
+        let parent_dir =
+            path_rel.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+        self.members.insert(
+            (source, path_str),
+            GenPathRow {
+                source,
+                path_rel: path_rel.to_string_lossy().to_string(),
+                oid: oid.clone(),
+                parent_dir,
+                stat_mtime_ns,
+            },
+        );
+        Ok(())
     }
 
-    Ok(())
-}
-
-fn apply_remove(
-    tx: &rusqlite::Transaction,
-    path_rel: &Path,
-    source: Source,
-    blob_cache: &mut BlobCache,
-) -> Result<()> {
-    let path_str = path_rel.to_string_lossy().to_string();
-    let prev: Option<String> = tx
-        .prepare_cached("SELECT oid FROM paths WHERE path_rel = ?1 AND source = ?2")?
-        .query_row(params![path_str, source_id(source)], |r| r.get(0))
-        .ok();
-    if let Some(prev) = prev {
-        tx.prepare_cached("DELETE FROM paths WHERE path_rel = ?1 AND source = ?2")?
-            .execute(params![path_str, source_id(source)])?;
-        decrement_blob(tx, &BlobOid(prev), blob_cache)?;
+    fn remove(&mut self, source: Source, path_rel: &Path) {
+        self.members.remove(&(source, path_rel.to_string_lossy().to_string()));
     }
-    Ok(())
-}
 
-fn apply_rename(
-    tx: &rusqlite::Transaction,
-    from: &Path,
-    to: &Path,
-    source: Source,
-    oid: &BlobOid,
-    blob_cache: &mut BlobCache,
-) -> Result<()> {
-    let from_str = from.to_string_lossy().to_string();
-    let to_str = to.to_string_lossy().to_string();
-    let parent = to
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-    // Delete the old row — a pure rename keeps the OID and refcount, so
-    // no decrement here.
-    tx.prepare_cached("DELETE FROM paths WHERE path_rel = ?1 AND source = ?2")?
-        .execute(params![from_str, source_id(source)])?;
-    // If a row already exists at the destination (from prior-state skew
-    // or case-colliding tree entries), explicitly delete it and release
-    // its blob refcount.  Must happen before the INSERT so the FK check
-    // on the new row does not see a dangling reference.
-    let existing: Option<String> = tx
-        .prepare_cached("SELECT oid FROM paths WHERE path_rel = ?1 AND source = ?2")?
-        .query_map(params![to_str, source_id(source)], |r| r.get(0))?
-        .next()
-        .transpose()?;
-    if let Some(ref prev_oid) = existing {
-        tx.prepare_cached("DELETE FROM paths WHERE path_rel = ?1 AND source = ?2")?
-            .execute(params![to_str, source_id(source)])?;
-        decrement_blob(tx, &BlobOid(prev_oid.clone()), blob_cache)?;
+    /// Pure rename: same oid moves paths within one source. A displaced
+    /// destination row is dropped outright — blob release is implicit in
+    /// publish's set-based refcount reconciliation, which closes the old
+    /// clobbered-rename leak by construction.
+    fn rename(&mut self, from: &Path, to: &Path, source: Source, oid: &BlobOid) {
+        self.remove(source, from);
+        self.remove(source, to);
+        let parent_dir = to.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+        self.members.insert(
+            (source, to.to_string_lossy().to_string()),
+            GenPathRow {
+                source,
+                path_rel: to.to_string_lossy().to_string(),
+                oid: oid.clone(),
+                parent_dir,
+                stat_mtime_ns: None,
+            },
+        );
     }
-    // Insert the new row.
-    tx.prepare_cached(
-        "INSERT INTO paths (path_rel, source, oid, parent_dir)
-         VALUES (?1, ?2, ?3, ?4)",
-    )?
-    .execute(params![to_str, source_id(source), oid.0, parent])?;
-    Ok(())
 }
-
-fn insert_blob(tx: &rusqlite::Transaction, oid: &BlobOid, fields: &WikiBlobFields) -> Result<()> {
-    tx.prepare_cached(
-        "INSERT INTO blobs (oid, refcount, title, summary, body, aliases_text, tags_text, keywords_text)
-         VALUES (?1, 0, ?2, ?3, ?4, ?5, ?6, ?7)",
-    )?
-    .execute(params![
-        oid.0,
-        fields.title,
-        fields.summary,
-        fields.body,
-        fields.aliases_text,
-        fields.tags_text,
-        fields.keywords_text,
-    ])?;
-    Ok(())
-}
-
-fn increment_blob(tx: &rusqlite::Transaction, oid: &BlobOid) -> Result<()> {
-    tx.prepare_cached("UPDATE blobs SET refcount = refcount + 1 WHERE oid = ?1")?
-        .execute(params![oid.0])?;
-    Ok(())
-}
-
-fn decrement_blob(
-    tx: &rusqlite::Transaction,
-    oid: &BlobOid,
-    blob_cache: &mut BlobCache,
-) -> Result<()> {
-    tx.prepare_cached("UPDATE blobs SET refcount = refcount - 1 WHERE oid = ?1")?
-        .execute(params![oid.0])?;
-    let deleted = tx
-        .prepare_cached("DELETE FROM blobs WHERE oid = ?1 AND refcount <= 0")?
-        .execute(params![oid.0])?;
-    if deleted > 0 {
-        // The blob row is gone; a later delta re-adding this OID must
-        // re-insert it, so the cache may no longer claim it exists.
-        blob_cache.wiki_oids.remove(&oid.0);
-    }
-    Ok(())
-}
-
 
 #[cfg(test)]
 mod tests {
@@ -644,96 +500,93 @@ mod tests {
     use crate::index::blob::compute_blob_oid;
     use std::process::Command;
 
-    /// After the fix, `apply_add` for `Source::Worktree` uses the bytes
-    /// carried through `PassDelta::Add::blob_bytes` instead of re-reading
-    /// from disk. This test verifies that the TOCTOU window is eliminated:
-    /// even when the file changes on disk between the pass-3 read and the
-    /// apply step, the blob is stored with the original content.
+    /// `CandidateBuilder::add` uses the bytes carried through
+    /// `DeltaAction::Add::blob_bytes` instead of re-reading from disk,
+    /// eliminating the TOCTOU window between the pass-3 read and ingest:
+    /// even when the file changes on disk between read and add, the
+    /// candidate's new-blob fields come from the carried bytes.
     #[test]
-    fn worktree_apply_add_uses_carried_bytes() {
+    fn worktree_add_uses_carried_bytes() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let root = dir.path();
 
-        // Initialize a real git repository so gix::open succeeds.
         let status = Command::new("git")
             .args(["init", "-b", "main"])
             .current_dir(root)
             .status()
             .expect("git init");
         assert!(status.success(), "git init failed");
-
         let repo = gix::open(root).expect("gix open");
-        let rel = std::path::Path::new("page.md");
 
-        // Write wiki content A and compute its OID.
-        let content_a = b"---\ntitle: Original\nsummary: Original content.\n---\n\nBody original.\n";
+        let rel = Path::new("page.md");
+        let content_a =
+            b"---\ntitle: Original\nsummary: Original content.\n---\n\nBody original.\n";
         std::fs::write(root.join(rel), content_a).expect("write A");
         let oid_a = compute_blob_oid(content_a);
 
-        // Simulate a concurrent writer: change the file between the
-        // pass-3 read and the apply_add call.
-        let content_b =
-            b"---\ntitle: Modified\nsummary: Modified content.\n---\n\nBody modified.\n";
-        std::fs::write(root.join(rel), content_b).expect("write B");
-
-        // Set up an in-memory SQLite database with the wiki schema.
-        let mut conn = rusqlite::Connection::open_in_memory().expect("sqlite memory");
-        crate::index::schema::bootstrap(&conn).expect("bootstrap");
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .expect("tx");
-
-        let mut fts_retokenizations = 0u64;
-        let mut blob_cache = BlobCache {
-            wiki_oids: HashSet::new(),
+        let mut members = HashMap::new();
+        let mut builder = CandidateBuilder {
+            members: &mut members,
+            new_blobs: Vec::new(),
+            queued_new: HashSet::new(),
+            known_oids: HashSet::new(),
             non_wiki_oids: HashSet::new(),
+            fts_retokenizations: 0,
         };
 
-        // Call apply_add with the carried bytes from content_a, as would
-        // happen after the fix. The file on disk now contains content_b,
-        // but apply_add must use content_a's bytes.
-        apply_add(
-            &repo,
-            root,
-            &tx,
-            rel,
-            Source::Worktree,
-            &oid_a,
-            Some(content_a.as_ref()),
-            None,
-            &mut fts_retokenizations,
-            &mut blob_cache,
-        )
-        .expect("apply_add");
+        builder
+            .add(&repo, root, rel, Source::Worktree, &oid_a, Some(content_a.as_ref()), None)
+            .expect("add");
 
-        // Verify that the blob was inserted with content_a's fields,
-        // not content_b's — confirming the carried bytes were used.
-        let (title, summary): (String, String) = tx
-            .query_row(
-                "SELECT title, summary FROM blobs WHERE oid = ?1",
-                params![oid_a.0],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("query blob");
-        assert_eq!(
-            title, "Original",
-            "title must be from content_a, not the modified file"
+        let row = builder
+            .members
+            .get(&(Source::Worktree, "page.md".to_string()))
+            .expect("member row created");
+        assert_eq!(row.oid.0, oid_a.0);
+
+        let (new_oid, fields) =
+            builder.new_blobs.first().expect("unseen blob queued as a global upsert");
+        assert_eq!(new_oid.0, oid_a.0);
+        assert_eq!(fields.title, "Original", "fields must come from carried bytes");
+        assert_eq!(fields.summary, "Original content.");
+    }
+
+    /// A pure rename keeps the oid and drops any displaced destination row;
+    /// release bookkeeping is implicit in publish's set-based refcount
+    /// reconciliation.
+    #[test]
+    fn rename_drops_displaced_destination_row() {
+        let mut members = HashMap::new();
+        let mut builder = CandidateBuilder {
+            members: &mut members,
+            new_blobs: Vec::new(),
+            queued_new: HashSet::new(),
+            known_oids: HashSet::new(),
+            non_wiki_oids: HashSet::new(),
+            fts_retokenizations: 0,
+        };
+
+        let ghost = BlobOid("f".repeat(40));
+        let real = BlobOid("a".repeat(40));
+        builder.members.insert(
+            (Source::Tree, "dest.md".to_string()),
+            GenPathRow {
+                source: Source::Tree,
+                path_rel: "dest.md".into(),
+                oid: ghost,
+                parent_dir: String::new(),
+                stat_mtime_ns: None,
+            },
         );
-        assert_eq!(
-            summary, "Original content.",
-            "summary must be from content_a, not the modified file"
-        );
 
-        // Verify the path row was created.
-        let path_count: i64 = tx
-            .query_row(
-                "SELECT COUNT(*) FROM paths WHERE path_rel = ?1 AND source = ?2",
-                params![rel.to_string_lossy().to_string(), source_id(Source::Worktree)],
-                |row| row.get(0),
-            )
-            .expect("query paths");
-        assert_eq!(path_count, 1, "path row must exist for the worktree entry");
+        builder.rename(Path::new("source.md"), Path::new("dest.md"), Source::Tree, &real);
 
-        tx.commit().expect("commit");
+        let row = builder
+            .members
+            .get(&(Source::Tree, "dest.md".to_string()))
+            .expect("destination row present");
+        assert_eq!(row.oid, real);
+        assert!(!builder.members.contains_key(&(Source::Tree, "source.md".to_string())));
+        assert_eq!(builder.members.len(), 1, "displaced ghost row fully dropped");
     }
 }

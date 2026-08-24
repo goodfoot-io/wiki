@@ -1,5 +1,8 @@
-//! `bm25(fts, 5, 4, 3, 3, 2, 1)` query over the wiki search index, with an
-//! exact-match short-circuit on title/alias/path before the FTS scan.
+//! `bm25(fts_{gen}, 5, 4, 3, 3, 2, 1)` query over the served generation of
+//! the merged store (plan D5 serving mediation): every FTS stage targets
+//! the generation's own `fts_<gen_id>` child and every corpus join goes
+//! through `gen_paths` scoped to `(gen_id, source)` — no query ever touches
+//! a global corpus.
 
 use std::collections::HashSet;
 
@@ -7,16 +10,27 @@ use std::path::Path;
 
 use rusqlite::{Connection, params, params_from_iter};
 
+use crate::index::generations::source_sql;
 use crate::index::{DocSource, ResolvedPage, SearchResult, Snippet};
 
-/// Numeric discriminator stored in `paths.source` matching
-/// [`crate::index::passes::source_id`].
-pub(crate) fn source_filter_id(source: DocSource) -> i64 {
-    match source {
-        DocSource::Head => 0,
-        DocSource::Index => 1,
-        DocSource::WorkingTree => 2,
+impl DocSource {
+    /// The single mapping site from a serving source to its merge-order
+    /// [`Source`] — Head reads tree rows, Index reads index rows,
+    /// WorkingTree reads worktree rows. Storage literals come from
+    /// `generations::source_sql` alone; no numeric encoding exists.
+    pub(crate) fn gen_source(self) -> crate::index::Source {
+        match self {
+            DocSource::Head => crate::index::Source::Tree,
+            DocSource::Index => crate::index::Source::Index,
+            DocSource::WorkingTree => crate::index::Source::Worktree,
+        }
     }
+}
+
+/// Quoted name of one generation's FTS child. Integer ids only, so quoting
+/// is defense in depth rather than an injection surface.
+fn fts_name(gen_id: i64) -> String {
+    format!("\"fts_{gen_id}\"")
 }
 
 /// OIDs per anti-join chunk when correcting the FTS total for pre-FTS
@@ -78,12 +92,14 @@ fn fts_alias_match(token: &str) -> Option<String> {
 /// alongside the (uncapped) total match count.
 pub fn search_weighted(
     conn: &Connection,
+    gen_id: i64,
     source: DocSource,
     query: &str,
     limit: usize,
     offset: usize,
 ) -> rusqlite::Result<(Vec<SearchResult>, usize)> {
-    let src = source_filter_id(source);
+    let src = source_sql(source.gen_source());
+    let fts = fts_name(gen_id);
     let mut seen: HashSet<String> = HashSet::new(); // dedupe by blob OID
     let mut out: Vec<SearchResult> = Vec::new();
 
@@ -92,10 +108,12 @@ pub fn search_weighted(
     let q_lower = query.to_lowercase();
     {
         let mut stmt = conn.prepare(
-            "SELECT b.oid, b.title, b.summary, p.path_rel
-             FROM blobs b
-             JOIN paths p ON p.oid = b.oid AND p.source = ?1
-             WHERE lower(b.title) = ?2",
+            &format!(
+                "SELECT b.oid, b.title, b.summary, p.path_rel
+                 FROM blobs b
+                 JOIN gen_paths p ON p.oid = b.oid AND p.source = ?1 AND p.gen_id = {gen_id}
+                 WHERE lower(b.title) = ?2"
+            ),
         )?;
         let rows = stmt.query_map(params![src, q_lower], |r| {
             Ok((
@@ -133,25 +151,25 @@ pub fn search_weighted(
         let needle = q_lower.as_str();
         match fts_alias_match(needle) {
             Some(alias_expr) => {
-                let mut stmt = conn.prepare(
+                let mut stmt = conn.prepare(&format!(
                     "SELECT b.oid, b.title, b.summary, p.path_rel, b.aliases_text
                      FROM blobs b
-                     JOIN paths p ON p.oid = b.oid AND p.source = ?1
-                     JOIN fts ON fts.rowid = b.rowid
-                     WHERE fts MATCH ?2
-                     ORDER BY b.rowid",
-                )?;
+                     JOIN gen_paths p ON p.oid = b.oid AND p.source = ?1 AND p.gen_id = {gen_id}
+                     JOIN {fts} ON {fts}.rowid = b.rowid
+                     WHERE {fts} MATCH ?2
+                     ORDER BY b.rowid"
+                ))?;
                 let rows = stmt.query_map(params![src, alias_expr], map_alias_candidate_row)?;
                 collect_exact_alias_hits(rows, needle, &mut seen, &mut out)?;
             }
             None => {
-                let mut stmt = conn.prepare(
+                let mut stmt = conn.prepare(&format!(
                     "SELECT b.oid, b.title, b.summary, p.path_rel, b.aliases_text
                      FROM blobs b
-                     JOIN paths p ON p.oid = b.oid AND p.source = ?1
+                     JOIN gen_paths p ON p.oid = b.oid AND p.source = ?1 AND p.gen_id = {gen_id}
                      WHERE b.aliases_text != ''
-                     ORDER BY b.rowid",
-                )?;
+                     ORDER BY b.rowid"
+                ))?;
                 let rows = stmt.query_map(params![src], map_alias_candidate_row)?;
                 collect_exact_alias_hits(rows, needle, &mut seen, &mut out)?;
             }
@@ -161,11 +179,11 @@ pub fn search_weighted(
     // (2) Path-fragment LIKE (only when the query smells like a path).
     if query.contains('/') {
         let pat = format!("%{}%", query);
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT b.oid, b.title, b.summary, p.path_rel
-             FROM paths p JOIN blobs b ON b.oid = p.oid
-             WHERE p.path_rel LIKE ?1 AND p.source = ?2",
-        )?;
+             FROM gen_paths p JOIN blobs b ON b.oid = p.oid
+             WHERE p.path_rel LIKE ?1 AND p.source = ?2 AND p.gen_id = {gen_id}"
+        ))?;
         let rows = stmt.query_map(params![pat, src], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -206,16 +224,16 @@ pub fn search_weighted(
         // dedup across the exact / path / fts stages above without bloating
         // the row set.
         let cap = limit.saturating_add(offset).saturating_add(64) as i64;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT b.oid, b.title, p.path_rel, b.summary,
-                    snippet(fts, 5, '', '', '…', 24) AS snip
-             FROM fts
-             JOIN blobs b ON b.rowid = fts.rowid
-             JOIN paths p ON p.oid   = b.oid AND p.source = ?2
-             WHERE fts MATCH ?1
-             ORDER BY bm25(fts, 5, 4, 3, 3, 2, 1) ASC
-             LIMIT ?3",
-        )?;
+                    snippet({fts}, 5, '', '', '…', 24) AS snip
+             FROM {fts}
+             JOIN blobs b ON b.rowid = {fts}.rowid
+             JOIN gen_paths p ON p.oid = b.oid AND p.source = ?2 AND p.gen_id = {gen_id}
+             WHERE {fts} MATCH ?1
+             ORDER BY bm25({fts}, 5, 4, 3, 3, 2, 1) ASC
+             LIMIT ?3"
+        ))?;
         let rows = stmt.query_map(params![fts_query, src, cap], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -252,11 +270,13 @@ pub fn search_weighted(
     // (e.g. commands/search.rs) expect the real total.
     let total = if !fts_query.is_empty() {
         let true_fts_total: i64 = conn.query_row(
-            "SELECT COUNT(*)
-             FROM fts
-             JOIN blobs b ON b.rowid = fts.rowid
-             JOIN paths p ON p.oid = b.oid AND p.source = ?2
-             WHERE fts MATCH ?1",
+            &format!(
+                "SELECT COUNT(*)
+                 FROM {fts}
+                 JOIN blobs b ON b.rowid = {fts}.rowid
+                 JOIN gen_paths p ON p.oid = b.oid AND p.source = ?2 AND p.gen_id = {gen_id}
+                 WHERE {fts} MATCH ?1"
+            ),
             params![fts_query, src],
             |r| r.get(0),
         )?;
@@ -281,8 +301,8 @@ pub fn search_weighted(
                         let sql = format!(
                             "SELECT COUNT(*) FROM blobs b \
                              WHERE b.oid IN ({placeholders}) \
-                             AND NOT EXISTS (SELECT 1 FROM fts \
-                             WHERE fts.rowid = b.rowid AND fts MATCH ?{})",
+                             AND NOT EXISTS (SELECT 1 FROM {fts} \
+                             WHERE {fts}.rowid = b.rowid AND {fts} MATCH ?{})",
                             chunk.len() + 1
                         );
                         let bound = params_from_iter(
@@ -356,21 +376,23 @@ fn collect_exact_alias_hits(
 pub fn resolve_page(
     conn: &Connection,
     repo_root: &Path,
+    gen_id: i64,
     source: DocSource,
     input: &str,
 ) -> rusqlite::Result<Option<ResolvedPage>> {
-    let src = source_filter_id(source);
+    let src = source_sql(source.gen_source());
+    let fts = fts_name(gen_id);
     let q_lower = input.to_lowercase();
 
     // Exact title match.
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT b.rowid, b.title, b.summary, b.body, p.path_rel
          FROM blobs b
-         JOIN paths p ON p.oid = b.oid AND p.source = ?2
+         JOIN gen_paths p ON p.oid = b.oid AND p.source = ?2 AND p.gen_id = {gen_id}
          WHERE lower(b.title) = ?1
          ORDER BY b.rowid
-         LIMIT 1",
-    )?;
+         LIMIT 1"
+    ))?;
     let row: Option<(i64, String, String, String, String)> = stmt
         .query_row(params![q_lower, src], |r| {
             Ok((
@@ -404,24 +426,24 @@ pub fn resolve_page(
     // avoiding bulk IO when iterating candidates.
     let alias_hit: Option<AliasHit> = match fts_alias_match(&q_lower) {
         Some(alias_expr) => {
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare(&format!(
                 "SELECT b.rowid, b.title, b.summary, b.aliases_text, p.path_rel
                  FROM blobs b
-                 JOIN paths p ON p.oid = b.oid AND p.source = ?1
-                 JOIN fts ON fts.rowid = b.rowid
-                 WHERE fts MATCH ?2
-                 ORDER BY b.rowid",
-            )?;
+                 JOIN gen_paths p ON p.oid = b.oid AND p.source = ?1 AND p.gen_id = {gen_id}
+                 JOIN {fts} ON {fts}.rowid = b.rowid
+                 WHERE {fts} MATCH ?2
+                 ORDER BY b.rowid"
+            ))?;
             let rows = stmt.query_map(params![src, alias_expr], map_resolve_alias_row)?;
             first_exact_alias_hit(rows, &q_lower)?
         }
         None => {
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare(&format!(
                 "SELECT b.rowid, b.title, b.summary, b.aliases_text, p.path_rel
                  FROM blobs b
-                 JOIN paths p ON p.oid = b.oid AND p.source = ?1
-                 ORDER BY b.rowid",
-            )?;
+                 JOIN gen_paths p ON p.oid = b.oid AND p.source = ?1 AND p.gen_id = {gen_id}
+                 ORDER BY b.rowid"
+            ))?;
             let rows = stmt.query_map(params![src], map_resolve_alias_row)?;
             first_exact_alias_hit(rows, &q_lower)?
         }
@@ -444,13 +466,14 @@ pub fn resolve_page(
 
     // Path lookup.
     if input.contains('/') || input.ends_with(".md") {
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT b.rowid, b.title, b.summary, b.body, p.path_rel
-             FROM paths p JOIN blobs b ON b.oid = p.oid
+             FROM gen_paths p JOIN blobs b ON b.oid = p.oid
              WHERE (p.path_rel = ?1 OR instr(p.path_rel, ?2) > 0) AND p.source = ?3
+               AND p.gen_id = {gen_id}
              ORDER BY p.path_rel
-             LIMIT 1",
-        )?;
+             LIMIT 1"
+        ))?;
         let row: Option<(i64, String, String, String, String)> = stmt
             .query_row(params![input, input, src], |r| {
                 Ok((
@@ -525,13 +548,34 @@ fn first_exact_alias_hit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::schema;
+    use crate::cache::schema as store_schema;
 
-    /// In-memory index DB with the real schema (the FTS triggers populate
-    /// the virtual table as rows are inserted).
+    /// The served generation id in fixtures.
+    const GEN: i64 = 1;
+
+    /// In-memory merged-store fixture with the index tier's static DDL and
+    /// one populated per-generation FTS child (`fts_1`).
     fn test_conn() -> Connection {
         let conn = Connection::open_in_memory().expect("open in-memory db");
-        schema::bootstrap(&conn).expect("bootstrap schema");
+        conn.execute_batch(store_schema::INDEX_TIER_DDL)
+            .expect("index tier ddl");
+        conn.execute(
+            "INSERT INTO generations (gen_id, digest, head_oid, head_tree_oid, index_checksum,
+                                      wikiignore_hash, worktree_sig, publisher,
+                                      created_at, access_bucket, blob_count)
+             VALUES (?1, zeroblob(32), ?2, '', zeroblob(20), zeroblob(20), zeroblob(32),
+                     NULL, 0, 0, 0)",
+            rusqlite::params![GEN, "0".repeat(40)],
+        )
+        .expect("seed anchor generation");
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE fts_1 USING fts5(
+                 title, aliases_text, tags_text, keywords_text, summary, body,
+                 tokenize='unicode61 remove_diacritics 2',
+                 prefix='2 3 4'
+             );",
+        )
+        .expect("create fts child");
         conn
     }
 
@@ -542,7 +586,7 @@ mod tests {
         aliases: &str,
         body: &str,
         path_rel: &str,
-        source: i64,
+        source: &str,
     ) {
         conn.execute(
             "INSERT INTO blobs (oid, refcount, title, summary, body, aliases_text, tags_text, keywords_text)
@@ -551,11 +595,24 @@ mod tests {
         )
         .expect("insert blob");
         conn.execute(
-            "INSERT INTO paths (path_rel, source, oid, stat_mtime_ns, stat_size, stat_ctime_ns, parent_dir)
-             VALUES (?1, ?2, ?3, NULL, NULL, NULL, '')",
-            params![path_rel, source, oid],
+            "INSERT INTO gen_paths (gen_id, source, path_rel, oid, parent_dir)
+             VALUES (?1, ?2, ?3, ?4, '')",
+            params![GEN, source, path_rel, oid],
         )
-        .expect("insert path");
+        .expect("insert gen_path");
+        conn.execute(
+            "INSERT INTO fts_1 (rowid, title, aliases_text, tags_text, keywords_text, summary, body)
+             SELECT b.rowid, b.title, b.aliases_text, b.tags_text, b.keywords_text, b.summary, b.body
+             FROM blobs b WHERE b.oid = ?1",
+            params![oid],
+        )
+        .expect("insert fts row");
+    }
+
+    /// The literal a serving source resolves to in fixtures — the same
+    /// single-site mapping production uses.
+    fn src_lit(source: DocSource) -> &'static str {
+        source_sql(source.gen_source())
     }
 
     fn files(results: &[SearchResult]) -> Vec<&str> {
@@ -589,7 +646,7 @@ mod tests {
             "Quixotic Venture",
             "body without the query word",
             "docs/v.md",
-            source_filter_id(DocSource::WorkingTree),
+            src_lit(DocSource::WorkingTree),
         );
         insert_page(
             &conn,
@@ -598,13 +655,13 @@ mod tests {
             "",
             "filler",
             "docs/other.md",
-            source_filter_id(DocSource::WorkingTree),
+            src_lit(DocSource::WorkingTree),
         );
 
         // Lowercase query against the mixed-case alias — the exact
         // `eq_ignore_ascii_case` verdict must survive the prefilter.
         let (results, total) =
-            search_weighted(&conn, DocSource::WorkingTree, "venture", 10, 0).expect("search");
+            search_weighted(&conn, GEN, DocSource::WorkingTree, "venture", 10, 0).expect("search");
         assert_eq!(files(&results), vec!["docs/v.md"]);
         assert_eq!(total, 1);
     }
@@ -626,7 +683,7 @@ mod tests {
             "e-mail",
             "no query words here",
             "docs/mail.md",
-            source_filter_id(DocSource::WorkingTree),
+            src_lit(DocSource::WorkingTree),
         );
         insert_page(
             &conn,
@@ -635,11 +692,11 @@ mod tests {
             "e mail",
             "also no query words",
             "docs/decoy.md",
-            source_filter_id(DocSource::WorkingTree),
+            src_lit(DocSource::WorkingTree),
         );
 
         let (results, _) =
-            search_weighted(&conn, DocSource::WorkingTree, "e-mail", 10, 0).expect("search");
+            search_weighted(&conn, GEN, DocSource::WorkingTree, "e-mail", 10, 0).expect("search");
         assert_eq!(
             results.first().expect("alias hit").file,
             "docs/mail.md",
@@ -674,18 +731,18 @@ mod tests {
             "say\"hi",
             "nothing relevant",
             "docs/quoted.md",
-            source_filter_id(DocSource::WorkingTree),
+            src_lit(DocSource::WorkingTree),
         );
 
         let (results, _) =
-            search_weighted(&conn, DocSource::WorkingTree, "say\"hi", 10, 0).expect("search");
+            search_weighted(&conn, GEN, DocSource::WorkingTree, "say\"hi", 10, 0).expect("search");
         assert_eq!(files(&results), vec!["docs/quoted.md"]);
     }
 
     #[test]
     fn resolve_page_alias_match_streams_prefiltered_rows_only() {
         let conn = test_conn();
-        let src = source_filter_id(DocSource::WorkingTree);
+        let src = src_lit(DocSource::WorkingTree);
         insert_page(&conn, "o1", "Guide", "", "plain body", "docs/g.md", src);
         insert_page(
             &conn,
@@ -698,7 +755,7 @@ mod tests {
         );
 
         let repo = Path::new("/repo");
-        let page = resolve_page(&conn, repo, DocSource::WorkingTree, "hb").expect("resolve");
+        let page = resolve_page(&conn, repo, GEN, DocSource::WorkingTree, "hb").expect("resolve");
         let page = page.expect("alias hit");
         assert_eq!(page.title, "Alias Target");
         assert_eq!(page.alias.as_deref(), Some("HB"));
@@ -707,7 +764,7 @@ mod tests {
 
         // No alias anywhere → falls through to Ok(None) after title/path miss.
         let miss =
-            resolve_page(&conn, repo, DocSource::WorkingTree, "nonexistent").expect("resolve");
+            resolve_page(&conn, repo, GEN, DocSource::WorkingTree, "nonexistent").expect("resolve");
         assert!(miss.is_none());
     }
 
@@ -731,7 +788,7 @@ mod tests {
     #[test]
     fn search_total_matches_hand_computed_expectation() {
         let conn = test_conn();
-        let src = source_filter_id(DocSource::WorkingTree);
+        let src = src_lit(DocSource::WorkingTree);
         insert_page(&conn, "o1", "Intro", "", "alpha beta gamma", "docs/intro.md", src);
         insert_page(
             &conn,
@@ -762,7 +819,7 @@ mod tests {
         );
 
         let (_, total) =
-            search_weighted(&conn, DocSource::WorkingTree, "docs/zeta", 10, 0).expect("search");
+            search_weighted(&conn, GEN, DocSource::WorkingTree, "docs/zeta", 10, 0).expect("search");
         assert_eq!(total, 3, "2 FTS hits + 1 non-FTS pre-stage OID");
     }
 
@@ -773,7 +830,7 @@ mod tests {
     #[test]
     fn search_total_chunking_six_hundred_pre_fts_oids() {
         let conn = test_conn();
-        let src = source_filter_id(DocSource::WorkingTree);
+        let src = src_lit(DocSource::WorkingTree);
         for i in 0..600 {
             let matching = i % 3 == 0;
             let body = if matching { "bulk item payload" } else { "filler text" };
@@ -789,11 +846,11 @@ mod tests {
         }
 
         let (_, total) =
-            search_weighted(&conn, DocSource::WorkingTree, "bulk/item", 10, 0).expect("search");
+            search_weighted(&conn, GEN, DocSource::WorkingTree, "bulk/item", 10, 0).expect("search");
         assert_eq!(total, 600, "200 FTS-matching + 400 non-matching pre-stage OIDs");
 
         let (paged, _) =
-            search_weighted(&conn, DocSource::WorkingTree, "bulk/item", 7, 5).expect("paged");
+            search_weighted(&conn, GEN, DocSource::WorkingTree, "bulk/item", 7, 5).expect("paged");
         assert_eq!(paged.len(), 7, "paging still applies to the result window");
     }
 }

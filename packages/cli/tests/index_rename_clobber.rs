@@ -19,7 +19,8 @@ use rusqlite::Connection;
 use wiki::index::WikiIndex;
 use wiki::index::blob::compute_blob_oid;
 
-/// Open the index database for direct manipulation.
+/// Open the old-layout index database for direct manipulation.
+#[allow(dead_code)]
 fn open_index_db(repo_root: &Path) -> Connection {
     let db_path = repo_root.join(".wiki").join("wiki-index.sqlite");
     Connection::open(&db_path).expect("open index db")
@@ -30,6 +31,7 @@ fn open_index_db(repo_root: &Path) -> Connection {
 const FAKE_BYTES: &[u8] = b"---\ntitle: Ghost\nsummary: Should not survive.\n---\n\nGhost body.\n";
 
 #[test]
+#[ignore = "old .wiki layout retired in Phase 3; clobber contract re-pinned at the merged store below"]
 fn rename_onto_occupied_destination_decrements_displaced_blob() {
     let repo = common::FixtureRepo::new();
 
@@ -184,7 +186,6 @@ fn open_merged_store(repo_root: &Path) -> Connection {
 }
 
 #[test]
-#[ignore = "target layout lands in Phase 3; production still writes .wiki/wiki-index.sqlite"]
 fn rename_onto_occupied_destination_decrements_displaced_blob_in_merged_store() {
     let repo = common::FixtureRepo::new();
 
@@ -216,6 +217,13 @@ fn rename_onto_occupied_destination_decrements_displaced_blob_in_merged_store() 
             rusqlite::params!["f".repeat(40)],
         )
         .expect("insert skew generations row");
+        // The fake blob row must exist before anything references it.
+        conn.execute(
+            "INSERT INTO blobs (oid, refcount, title, summary, body, aliases_text, tags_text, keywords_text)
+             VALUES (?1, 1, ?2, ?3, ?4, '', '', '')",
+            rusqlite::params![fake_oid.0, "Ghost", "Should not survive.", "Ghost body."],
+        )
+        .expect("insert fake blobs row");
         // The dangling gen_paths row at (dest.md, 'tree') referencing the
         // fake oid — the FK-brick skew, now in generation scope.
         conn.execute(
@@ -224,12 +232,6 @@ fn rename_onto_occupied_destination_decrements_displaced_blob_in_merged_store() 
             rusqlite::params!["dest.md", fake_oid.0],
         )
         .expect("insert skew gen_paths row");
-        conn.execute(
-            "INSERT INTO blobs (oid, refcount, title, summary, body, aliases_text, tags_text, keywords_text)
-             VALUES (?1, 1, ?2, ?3, ?4, '', '', '')",
-            rusqlite::params![fake_oid.0, "Ghost", "Should not survive.", "Ghost body."],
-        )
-        .expect("insert fake blobs row");
     }
 
     // ── Phase 3: pure rename onto the occupied destination ──
@@ -249,15 +251,39 @@ fn rename_onto_occupied_destination_decrements_displaced_blob_in_merged_store() 
 
     // ── Phase 4: assert correctness ──
 
-    // The displaced fake blob must be fully released when its lone
-    // gen_paths row is clobbered by the rename.
-    let (fake_blobs, _) = index
-        .debug_blob_path_counts(&fake_oid.0)
-        .expect("debug_blob_path_counts fake oid");
-    assert_eq!(
-        fake_blobs, 0,
-        "displaced blob must be released when a rename clobbers its gen_paths row"
-    );
+    // Under generations there is no eager release to assert: publish never
+    // deletes, and the displaced fake blob legitimately still serves the
+    // retained (skew) generation it belongs to. What must hold instead is
+    // the anti-ghost invariant — its membership refcount exactly equals the
+    // number of retained generations referencing it — plus zero presence in
+    // the SERVED generation's corpus below.
+    {
+        let conn = open_merged_store(repo.root.as_path());
+        let leaked: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM blobs b
+                 WHERE b.refcount <> COALESCE(
+                     (SELECT COUNT(DISTINCT gp.gen_id) FROM gen_paths gp WHERE gp.oid = b.oid), 0)",
+                [],
+                |r| r.get(0),
+            )
+            .expect("ghost check query");
+        assert_eq!(
+            leaked, 0,
+            "no blob may carry a refcount that disagrees with its retained-generation memberships"
+        );
+        let (fake_refcount,): (i64,) = conn
+            .query_row(
+                "SELECT refcount FROM blobs WHERE oid = ?1",
+                rusqlite::params![fake_oid.0],
+                |r| Ok((r.get(0)?,)),
+            )
+            .expect("displaced blob survives serving its retained generation");
+        assert!(
+            fake_refcount >= 1,
+            "held by at least its own retained generation (the pure rename              also re-members an already-known oid, mirroring the legacy swap)"
+        );
+    }
 
     // The renamed content survives intact.
     let (src_blobs, _) = index

@@ -1,25 +1,21 @@
-//! A committed rename-with-edit (gix `Rewrite` at 50-99% similarity) must
-//! perform full blob bookkeeping, not just a path swap. The Tree pass maps
-//! the rewrite to `DeltaAction::Rename` carrying only the NEW blob OID, and
-//! `apply_rename` swaps the `paths` row without touching refcounts. After a
-//! commit that renames AND edits a page:
+//! A committed rename-with-edit (gix `Rewrite` at 50-99% similarity) under
+//! the generations freshness model (plan merged-store-generations D5).
 //!
-//! - the OLD blob's refcount is never decremented for the Tree source, so
-//!   the old `blobs` row leaks (refcount 1, zero `paths` rows) and its FTS
-//!   entry remains searchable as ghost content;
-//! - the NEW blob's refcount undercounts (2 from the Index/Worktree Add
-//!   deltas) while THREE `paths` rows reference it (Tree, Index, Worktree).
+//! The rewrite decomposes into Remove(a.md, old oid) + Add(b.md, new oid)
+//! per source. Publishing never deletes anything physical: the old blob
+//! row SURVIVES because the retained prior generation still serves it —
+//! what must never happen is a ghost: a `blobs` row whose membership
+//! refcount does not equal the number of retained generations referencing
+//! it through `gen_paths`.
 //!
-//! Expected: the old blob row is gone (`(0, 0)`) and the new blob has one
-//! `blobs` row referenced by three `paths` rows (`(1, 3)`).
+//! Expected after the rename+edit prepare:
 //!
-//! Under the current code this test fails at `prepare`: deltas apply in
-//! strict Tree -> Index -> Worktree order, so the Tree `Rename` inserts a
-//! `paths` row at the NEW OID before any delta has created its `blobs` row,
-//! and `paths.oid REFERENCES blobs(oid)` aborts the refresh with
-//! "FOREIGN KEY constraint failed" — the earliest symptom of the same
-//! missing bookkeeping. A pure rename (unchanged content, same OID) does
-//! not hit this because the old blob row already exists at that OID.
+//! - the served generation holds exactly one path row for b.md per source
+//!   (Tree + Index + Worktree = 3), zero for a.md;
+//! - both blob rows exist — old serving the retained generation, new
+//!   serving the current one — and each refcount equals its
+//!   `COUNT(DISTINCT gen_id)` membership count;
+//! - resolution serves the edited content at b.md.
 
 mod common;
 
@@ -56,8 +52,7 @@ fn committed_rename_with_edit_rebalances_blob_refcounts() {
     let new_oid = compute_blob_oid(new_bytes.as_bytes());
     assert_ne!(old_oid.0, new_oid.0, "edit must change the blob OID");
 
-    // Commit the original page and index it: old OID has refcount 3
-    // (Tree + Index + Worktree paths rows).
+    // Commit the original page and index it.
     repo.write_file("a.md", &old_bytes);
     repo.git_add("a.md");
     repo.git_commit("add a.md");
@@ -72,27 +67,30 @@ fn committed_rename_with_edit_rebalances_blob_refcounts() {
 
     let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare after rename+edit");
 
-    // The old blob must be fully released: the Tree rename plus the
-    // Index/Worktree removals take its refcount 3 -> 0, deleting the row.
-    let (old_blobs, old_paths) = index
+    // The served generation has no a.md rows left and three b.md rows
+    // (Tree from the rewrite decomposition plus Index and Worktree adds).
+    let (old_blobs, old_served_paths) = index
         .debug_blob_path_counts(&old_oid.0)
         .expect("debug_blob_path_counts old oid");
     assert_eq!(
-        (old_blobs, old_paths),
-        (0, 0),
-        "old blob row must be deleted after rename+edit; a leftover blobs \
-         row with zero paths rows is the leaked ghost blob"
+        old_served_paths, 0,
+        "a.md must be gone from the served generation's corpus"
     );
-
-    // The new blob is referenced by exactly three paths rows (Tree from the
-    // rename swap, plus Index and Worktree adds) backed by one blobs row.
     let (new_blobs, new_paths) = index
         .debug_blob_path_counts(&new_oid.0)
         .expect("debug_blob_path_counts new oid");
     assert_eq!(new_blobs, 1, "exactly one blobs row for the edited content");
-    assert_eq!(new_paths, 3, "Tree + Index + Worktree paths rows for b.md");
+    assert_eq!(new_paths, 3, "Tree + Index + Worktree gen_paths rows for b.md");
 
-    // The page must resolve at its new location.
+    // Immutability, not ghosting: the OLD blob row survives because the
+    // retained predecessor generation still serves it — and its membership
+    // refcount is exact, not leaked.
+    assert_eq!(
+        old_blobs, 1,
+        "the old blob stays alive serving its retained generation"
+    );
+
+    // The page must resolve at its new location with edited content.
     let page = index
         .resolve_page("Migration Guide")
         .expect("resolve_page")

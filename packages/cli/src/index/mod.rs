@@ -1,17 +1,18 @@
-//! Wiki search index — gix + rusqlite FTS5 implementation.
+//! Wiki search index — gix + the merged store's freshness generations
+//! (plan merged-store-generations D5/D6).
 //!
-//! Phase 1 skeleton: this module declares the public surface consumed by
-//! [`crate::commands::search`] and [`crate::commands::summary`] and the
-//! internal building blocks called out by `plan/initial.md`. Every body is
-//! `unimplemented!()`; the crate compiles but `wiki "x"` panics at runtime.
-//! Phase 2 lands skipped tests against this contract; Phase 3 fills in
-//! bodies in dependency order.
+//! Serving is generation-scoped: every query resolves against one immutable
+//! generation (`fts_<gen_id>` children plus `(gen_id, source)`-scoped
+//! `gen_paths` joins). Freshness is a canonical-digest lookup; a miss
+//! refreshes against the newest generation as delta base and publishes an
+//! entirely new one.
 
 use std::path::{Path, PathBuf};
 
 use miette::Result;
-use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
+
+use generations::GenerationsStore;
 
 pub mod blob;
 pub mod freshness;
@@ -20,7 +21,6 @@ pub mod generations;
 pub mod ingest;
 pub mod lock;
 pub mod passes;
-pub mod schema;
 pub mod search;
 pub mod state;
 
@@ -53,41 +53,54 @@ pub(crate) fn find_dot_git(start: &Path) -> Option<PathBuf> {
     }
 }
 
-/// True for [`schema::bootstrap`] errors that mean the cache DB should be
-/// deleted and rebuilt: a schema-version mismatch (`InvalidQuery`, the
-/// sentinel `bootstrap` returns for it) or a corrupt file (`NotADatabase`).
-fn rebuildable_bootstrap_error(e: &rusqlite::Error) -> bool {
-    matches!(e, rusqlite::Error::InvalidQuery)
-        || matches!(
-            e,
-            rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error {
-                    code: rusqlite::ffi::ErrorCode::NotADatabase,
-                    ..
-                },
-                _,
-            )
-        )
-}
-
-/// The `.wiki/` directory anchored at the repo root, where the index cache DB
-/// and its sidecar files live.
+/// The `.wiki/` directory anchored at the repo root. Only the interim
+/// refresh lock lives here now (it retires with the `.wiki` promotion wave);
+/// all derived state is in the merged store under the common git dir.
 pub(crate) fn wiki_dir(repo_root: &Path) -> PathBuf {
     repo_root.join(".wiki")
 }
 
-/// Path of the index cache database under `.wiki/`.
-pub(crate) fn index_db_path(repo_root: &Path) -> PathBuf {
-    wiki_dir(repo_root).join("wiki-index.sqlite")
+/// Collapse `.`/`..` segments lexically, preserving the leading root.
+///
+/// A linked worktree's common dir carries `..` segments — gix returns
+/// `…/.git/worktrees/N/../..` (spike S2) — and path joins under it need the
+/// normalized form. Mirrors `git::normalize_lexically`, which stays private
+/// to its module.
+fn normalize_lexically(path: PathBuf) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(component);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Resolve the repository's common git directory for `repo_root`
+/// (normalized; spike S2). `None` when discovery fails — callers degrade.
+fn resolve_common_dir(repo_root: &Path) -> Option<PathBuf> {
+    gix::open(repo_root)
+        .ok()
+        .map(|repo| normalize_lexically(repo.common_dir().to_path_buf()))
 }
 
 /// Stat-only check that the working tree is unchanged since the last verified
 /// index state. Resolves `.git`, opens the index DB read-only, and runs
-/// [`freshness::fast_gate`].
+/// Read-only digest gate for callers that only need the freshness verdict:
+/// compute the canonical fingerprint and look it up in the merged store.
 ///
-/// Returns `true` only when the gate confirms an unchanged tree. Any error,
-/// missing `.git`, or stale state returns `false` (fail-open toward doing the
-/// work — callers must re-hash when this is `false`).
+/// Returns `true` only when an unverified-row-safe lookup confirms the
+/// exact state as a retained generation. Any error, missing `.git`, missing
+/// store file, or stale state returns `false` (fail-open toward doing the
+/// work — callers must re-hash when this is `false`). A missing store never
+/// gets created here.
 ///
 /// Retained as a public stat helper and exercised by the worktree-freshness
 /// integration tests.
@@ -96,13 +109,27 @@ pub fn tree_unchanged(repo_root: &Path) -> bool {
     let Some(dot_git) = find_dot_git(repo_root) else {
         return false;
     };
-    let db_path = index_db_path(repo_root);
-    // Open read-only; if the DB does not exist yet there is no verified state.
-    let conn = match Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
-        Ok(c) => c,
-        Err(_) => return false,
+    let Some(common_dir) = resolve_common_dir(repo_root) else {
+        return false;
     };
-    matches!(freshness::fast_gate(&dot_git, &conn), Ok(Some(_)))
+    if !crate::cache::schema::db_path(&common_dir).exists() {
+        return false;
+    }
+    let wikiignore_hash =
+        passes::compute_wikiignore_hash(repo_root);
+    let fingerprint = match freshness::current_fingerprint(
+        repo_root,
+        &dot_git,
+        None,
+        &wikiignore_hash,
+    ) {
+        Ok(Some(fp)) => fp,
+        _ => return false,
+    };
+    match GenerationsStore::open(&common_dir) {
+        Ok(store) => matches!(store.lookup_digest(&fingerprint), Ok(Some(_))),
+        Err(_) => false,
+    }
 }
 
 /// Hard cap on the number of results `wiki "<query>"` will print.
@@ -201,7 +228,7 @@ pub struct ResolvedPage {
 ///
 /// Strict ordering for the merge pipeline is `Tree → Index → Worktree`;
 /// later sources override earlier sources for the same `path_rel`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Source {
     Tree,
     Index,
@@ -226,16 +253,17 @@ pub enum HostileFs {
 
 /// Public handle to the wiki search index.
 ///
-/// The pre-rewrite version held a Tokio current-thread runtime plus a
-/// Turso connection. The new version owns a rusqlite connection and the
-/// repo root used to resolve relative paths during result rendering.
+/// Owns one [`GenerationsStore`] handle (the merged store's index tier),
+/// the generation currently being served, and the repo root used to
+/// resolve relative paths during result rendering.
 pub struct WikiIndex {
     repo_root: PathBuf,
     dot_git: PathBuf,
     source: DocSource,
     #[allow(dead_code)]
     repo: Option<gix::Repository>,
-    conn: Connection,
+    store: GenerationsStore,
+    served_gen: Option<i64>,
     last_stats: IndexStats,
 }
 
@@ -266,45 +294,14 @@ impl WikiIndex {
             )
         })?;
 
-        // The cache DB and its sidecars live under `.wiki/`. Ensure the
-        // directory exists before opening for write.
-        let wiki = wiki_dir(repo_root);
-        std::fs::create_dir_all(&wiki)
-            .map_err(|e| miette::miette!("failed to create {}: {e}", wiki.display()))?;
-        let db_path = index_db_path(repo_root);
-        let open = || {
-            Connection::open_with_flags(
-                &db_path,
-                OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_READ_WRITE,
-            )
-            .map_err(|e| miette::miette!("failed to open wiki index at {}: {e}", db_path.display()))
-        };
-        let mut conn = open()?;
-
-        if let Err(e) = schema::bootstrap(&conn) {
-            // A schema-version mismatch (InvalidQuery) means the cache was
-            // written by a different CLI version; NotADatabase means the
-            // file is corrupt. Either way the DB is purely derived data, so
-            // discard and rebuild it rather than failing the command. Two
-            // racing processes may both take this path — POSIX unlink keeps
-            // each working on its own inode, so the worst case is one
-            // redundant rebuild, never a corrupt result.
-            if rebuildable_bootstrap_error(&e) {
-                drop(conn);
-                // Sidecars first, DB file last: a crash mid-deletion must
-                // not leave an old WAL behind for a fresh DB to replay.
-                for suffix in ["-shm", "-wal", ""] {
-                    let mut p = db_path.clone().into_os_string();
-                    p.push(suffix);
-                    let _ = std::fs::remove_file(PathBuf::from(p));
-                }
-                conn = open()?;
-                schema::bootstrap(&conn)
-                    .map_err(|e| miette::miette!("schema bootstrap failed after rebuild: {e}"))?;
-            } else {
-                return Err(miette::miette!("schema bootstrap failed: {e}"));
-            }
-        }
+        // All derived state lives in the merged store under the common git
+        // dir — one file shared by every linked worktree.
+        let common_dir = resolve_common_dir(repo_root).ok_or_else(|| {
+            miette::miette!("could not resolve the common git dir of {}", repo_root.display())
+        })?;
+        let store = GenerationsStore::open(&common_dir)
+            .map_err(|e| miette::miette!("failed to open wiki store at {}: {e}",
+                crate::cache::schema::db_path(&common_dir).display()))?;
 
         let fs_class = forced_fs_class.unwrap_or_else(|| fs_class::detect(&dot_git));
 
@@ -313,35 +310,55 @@ impl WikiIndex {
             dot_git: dot_git.clone(),
             source,
             repo: None,
-            conn,
+            store,
+            served_gen: None,
             last_stats: IndexStats::default(),
         };
 
-        // Fast triple gate — stat-only path with no gix open.
-        // A forced HostileFs::Yes skips the gate so the test can observe a
-        // Pass 3 full rescan.
+        // Digest gate: hash the canonical freshness inputs and look the
+        // generation up. A forced HostileFs::Yes skips the gate so the test
+        // can observe a Pass 3 full rescan. Any error degrades to a miss —
+        // fail-open toward rehash, exactly like the old triple gate.
         if forced_fs_class != Some(HostileFs::Yes) {
-            // Wrap the gate in a perf span: its worktree leg walks and stats the
-            // whole repo on every invocation, the single largest unmeasured
-            // per-command cost. The span surfaces that cost in wiki.log so the
-            // benchmark can attribute it to the prepare term.
             let gate = crate::perf::scope_result(
                 "index.fast_gate",
                 serde_json::json!({}),
-                || freshness::fast_gate(&index.dot_git, &index.conn),
+                || -> Result<Option<i64>> {
+                    let wikiignore_hash = passes::compute_wikiignore_hash(repo_root);
+                    let fingerprint = match freshness::current_fingerprint(
+                        repo_root,
+                        &dot_git,
+                        None,
+                        &wikiignore_hash,
+                    ) {
+                        Ok(Some(fp)) => fp,
+                        _ => return Ok(None),
+                    };
+                    Ok(index
+                        .store
+                        .lookup_digest(&fingerprint)
+                        .ok()
+                        .flatten()
+                        .map(|generation| generation.gen_id))
+                },
             );
-            match gate {
-                Ok(Some(_)) => return Ok(index),
-                Ok(None) => {}
-                Err(_) => {}
+            if let Ok(Some(gen_id)) = gate {
+                index.served_gen = Some(gen_id);
+                return Ok(index);
             }
         }
 
-        // Try to acquire the refresh lock; on contention serve the existing
-        // snapshot without blocking.
+        // Refresh: acquire the interim refresh lock (retires with the .wiki
+        // promotion wave); on contention serve the newest retained snapshot
+        // without blocking.
+        let wiki = wiki_dir(repo_root);
+        std::fs::create_dir_all(&wiki)
+            .map_err(|e| miette::miette!("failed to create {}: {e}", wiki.display()))?;
         let lock = lock::try_acquire(&wiki)
             .map_err(|e| miette::miette!("refresh lock acquire failed: {e}"))?;
         if lock.is_none() {
+            index.served_gen =
+                index.store.newest().ok().flatten().map(|generation| generation.gen_id);
             return Ok(index);
         }
 
@@ -354,12 +371,16 @@ impl WikiIndex {
                 &repo,
                 &index.repo_root,
                 &index.dot_git,
-                &mut index.conn,
+                &index.store,
                 fs_class,
             )
         })
         .map_err(|e| miette::miette!("refresh failed: {e}"))?;
-        if !outcome.cas_lost {
+        index.served_gen = Some(outcome.served_gen_id);
+        // A conflict-discard means the identical generation already existed:
+        // the refresh did no ingest work, so the counters stay at zero
+        // (the old CAS-lost contract, expressed through publish).
+        if !outcome.conflict_discarded {
             index.last_stats = IndexStats {
                 pass3_full_rescans: outcome.pass3_full_rescans,
                 fts_retokenizations: outcome.fts_retokenizations,
@@ -371,10 +392,20 @@ impl WikiIndex {
         Ok(index)
     }
 
+    /// The generation this handle serves, if any (a contended cold start
+    /// may have nothing to serve).
+    fn served(&self) -> Option<i64> {
+        self.served_gen
+    }
+
     /// Resolve a single page by title or alias (case-insensitive), or by a
     /// repo-relative path / `.md` file reference.
     pub fn resolve_page(&self, input: &str) -> Result<Option<ResolvedPage>> {
-        search::resolve_page(&self.conn, &self.repo_root, self.source, input)
+        let Some(gen_id) = self.served() else {
+            return Ok(None);
+        };
+        self.store
+            .read_txn(|conn| search::resolve_page(conn, &self.repo_root, gen_id, self.source, input))
             .map_err(|e| miette::miette!("resolve_page: {e}"))
     }
 
@@ -385,10 +416,16 @@ impl WikiIndex {
         limit: i64,
         offset: usize,
     ) -> Result<(Vec<SearchResult>, usize)> {
+        let Some(gen_id) = self.served() else {
+            return Ok((Vec::new(), 0));
+        };
         let limit_usize = if limit < 0 { 0 } else { limit as usize };
-        let (mut rows, total) =
-            search::search_weighted(&self.conn, self.source, query, limit_usize, offset)
-                .map_err(|e| miette::miette!("search_weighted: {e}"))?;
+        let (mut rows, total) = self
+            .store
+            .read_txn(|conn| {
+                search::search_weighted(conn, gen_id, self.source, query, limit_usize, offset)
+            })
+            .map_err(|e| miette::miette!("search_weighted: {e}"))?;
         // Render `file` as an absolute path so `format_search_result` can
         // `strip_prefix(repo_root)` to produce repo-relative output.
         for r in &mut rows {
@@ -409,19 +446,22 @@ impl WikiIndex {
         offset: u64,
         limit: Option<u64>,
     ) -> Result<Vec<PageRow>> {
-        let src = search::source_filter_id(self.source);
-        let mut stmt = self
-            .conn
+        let Some(gen_id) = self.served() else {
+            return Ok(Vec::new());
+        };
+        let src = generations::source_sql(self.source.gen_source());
+        let conn = self.store.conn();
+        let mut stmt = conn
             .prepare(
                 "SELECT p.path_rel, b.title, b.summary, b.aliases_text, b.tags_text
                  FROM blobs b
-                 JOIN paths p ON p.oid = b.oid
-                 WHERE p.source = ?1 AND b.title <> '' AND b.summary <> ''
+                 JOIN gen_paths p ON p.oid = b.oid AND p.gen_id = ?1
+                 WHERE p.source = ?2 AND b.title <> '' AND b.summary <> ''
                  ORDER BY b.title COLLATE NOCASE, p.path_rel",
             )
             .map_err(|e| miette::miette!("list_pages prepare: {e}"))?;
         let rows = stmt
-            .query_map(rusqlite::params![src], |r| {
+            .query_map(rusqlite::params![gen_id, src], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -469,9 +509,15 @@ impl WikiIndex {
 
     /// Up to [`SUGGESTION_LIMIT`] BM25 suggestions for a missed lookup.
     pub fn suggest(&self, query: &str) -> Result<Vec<SearchResult>> {
-        let (rows, _total) =
-            search::search_weighted(&self.conn, self.source, query, SUGGESTION_LIMIT as usize, 0)
-                .map_err(|e| miette::miette!("suggest: {e}"))?;
+        let Some(gen_id) = self.served() else {
+            return Ok(Vec::new());
+        };
+        let (rows, _total) = self
+            .store
+            .read_txn(|conn| {
+                search::search_weighted(conn, gen_id, self.source, query, SUGGESTION_LIMIT as usize, 0)
+            })
+            .map_err(|e| miette::miette!("suggest: {e}"))?;
         Ok(rows)
     }
 
@@ -489,65 +535,59 @@ impl WikiIndex {
         Self::prepare_with_fs_class_inner(repo_root, source, Some(fs_class))
     }
 
-    /// Dump every `paths` row joined to its blob title, sorted by `path_rel`.
-    /// Test-only diagnostic used by `tests/index_parity.rs`.
+    /// Dump the served generation's path rows joined to their blob titles,
+    /// sorted by `path_rel`. Test-only diagnostic used by
+    /// `tests/index_parity.rs`.
     #[allow(dead_code)]
     pub fn debug_dump_paths(&self) -> Result<Vec<(String, Source, String)>> {
-        let mut stmt = self
-            .conn
+        let Some(gen_id) = self.served() else {
+            return Ok(Vec::new());
+        };
+        let conn = self.store.conn();
+        let mut stmt = conn
             .prepare(
                 "SELECT p.path_rel, p.source, b.title
-                 FROM paths p JOIN blobs b ON b.oid = p.oid
+                 FROM gen_paths p JOIN blobs b ON b.oid = p.oid
+                 WHERE p.gen_id = ?1
                  ORDER BY p.path_rel ASC",
             )
             .map_err(|e| miette::miette!("debug_dump_paths prepare: {e}"))?;
         let rows = stmt
-            .query_map([], |row| {
+            .query_map([gen_id], |row| {
                 let path: String = row.get(0)?;
-                let source: i64 = row.get(1)?;
+                let source_lit: String = row.get(1)?;
                 let title: String = row.get(2)?;
-                let s = match source {
-                    0 => Source::Tree,
-                    1 => Source::Index,
-                    2 => Source::Worktree,
-                    _ => Source::Worktree,
-                };
-                Ok((path, s, title))
+                let source = generations::source_from_sql(&source_lit)
+                    .unwrap_or(Source::Worktree);
+                Ok((path, source, title))
             })
             .map_err(|e| miette::miette!("debug_dump_paths query: {e}"))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| miette::miette!("debug_dump_paths collect: {e}"))
     }
 
-    /// Count `blobs` and `paths` rows for a given OID.
-    /// Test-only diagnostic used by `tests/index_promotion.rs`.
+    /// Count global `blobs` rows and the served generation's `gen_paths`
+    /// rows for a given OID. Test-only diagnostic used by
+    /// `tests/index_promotion.rs` and `tests/index_rename_clobber.rs`.
     #[allow(dead_code)]
     pub fn debug_blob_path_counts(&self, oid: &str) -> Result<(usize, usize)> {
-        let blob_count: i64 = self
-            .conn
+        let conn = self.store.conn();
+        let blob_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM blobs WHERE oid = ?1", [oid], |r| {
                 r.get(0)
             })
             .map_err(|e| miette::miette!("blob_count: {e}"))?;
-        let path_count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM paths WHERE oid = ?1", [oid], |r| {
-                r.get(0)
-            })
-            .map_err(|e| miette::miette!("path_count: {e}"))?;
+        let path_count = match self.served() {
+            Some(gen_id) => conn
+                .query_row(
+                    "SELECT COUNT(*) FROM gen_paths WHERE oid = ?1 AND gen_id = ?2",
+                    rusqlite::params![oid, gen_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| miette::miette!("path_count: {e}"))?,
+            None => 0,
+        };
         Ok((blob_count as usize, path_count as usize))
-    }
-
-    /// Count `dir_mtimes` rows.
-    /// Test-only diagnostic used by `tests/index_hostile_dir_mtimes.rs` and
-    /// `tests/index_dir_mtimes_prune.rs`.
-    #[allow(dead_code)]
-    pub fn debug_dir_mtimes_count(&self) -> Result<usize> {
-        let count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM dir_mtimes", [], |r| r.get(0))
-            .map_err(|e| miette::miette!("dir_mtimes count: {e}"))?;
-        Ok(count as usize)
     }
 
     /// Return diagnostic counters accumulated during the last refresh.
@@ -572,19 +612,16 @@ pub struct PageRow {
 }
 
 /// Diagnostic counters from the most recent refresh pass.
-///
-/// All counts are zero when the index was opened read-only without refreshing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IndexStats {
-    /// Number of times Pass 3 performed a full directory rescan
-    /// (rather than the dir-mtime Merkle short-circuit).
+    /// Number of times Pass 3 performed a full rescan (hostile filesystems
+    /// disable mtime-based carry-forward entirely).
     pub pass3_full_rescans: u64,
-    /// Number of FTS rows that were deleted then re-inserted (re-tokenized)
-    /// during the most recent refresh.  A rename must not bump this counter.
+    /// Blobs newly tokenized during the most recent refresh — zero for a
+    /// pure rename (content-addressing means an existing oid never re-parses).
     pub fts_retokenizations: u64,
-    /// Number of directories Pass 3 actually descended into and stat/hashed
-    /// markdown files for. Directories whose mtime matched the recorded
-    /// `dir_mtimes` entry are skipped and do not contribute.
+    /// Number of directories Pass 3 descended into and walked. There is no
+    /// clean-dir skip anymore; carry-forward is per file.
     pub pass3_dir_walks: u64,
 }
 

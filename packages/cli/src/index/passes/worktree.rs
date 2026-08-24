@@ -1,31 +1,32 @@
 //! Pass 3 — `walkdir` walk of the worktree, with `gix::worktree::Stack`
 //! used as a prune predicate so ignored directories are skipped.
 //!
-//! On healthy filesystems we use a dir-mtime Merkle short-circuit: a
-//! directory whose mtime matches the recorded `dir_mtimes` row is treated
-//! as clean and its `.md` files are not re-stat'd or re-hashed. On a
-//! hostile filesystem (`HostileFs::Yes`) the short-circuit is disabled
-//! and the orchestrator bumps `pass3_full_rescans`; every directory is
-//! treated as dirty.
+//! Carry-forward is path-granular (plan D5/D6): a walked markdown file
+//! whose `(path_rel, stat_mtime_ns)` pair matches its base-generation row
+//! is carried forward without re-reading or re-hashing; everything else is
+//! re-ingested from this walk. There is no dir-mtime Merkle short-circuit
+//! and no `dir_mtimes` table anymore. On a hostile filesystem
+//! (`HostileFs::Yes`) the mtime evidence is never consulted — every file
+//! re-ingests and the orchestrator bumps `pass3_full_rescans`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use anyhow::Result;
-use rusqlite::params;
 use walkdir::WalkDir;
 
 use crate::index::blob::compute_blob_oid;
 use crate::index::{BlobOid, HostileFs, Source};
 use crate::wikiignore::WikiIgnore;
 
-use super::{DeltaAction, PassDelta, source_id};
+use super::{DeltaAction, PassDelta};
+use crate::index::generations::GenPathRow;
 
 pub fn pass_worktree(
     repo: &gix::Repository,
     repo_root: &Path,
-    tx: &rusqlite::Transaction,
+    base_rows: &[GenPathRow],
     hostile_fs: HostileFs,
     pass3_full_rescans: &mut u64,
     pass3_dir_walks: &mut u64,
@@ -36,53 +37,16 @@ pub fn pass_worktree(
         *pass3_full_rescans += 1;
     }
 
-    // Snapshot dir_mtimes for this pass. The Merkle decision per directory
-    // is: stat(D).mtime_ns == dir_mtimes[D] -> clean, skip files in D.
-    let prior_dir_mtimes: HashMap<PathBuf, i64> = {
-        let mut stmt = tx.prepare("SELECT path, mtime_ns FROM dir_mtimes")?;
-        let rows = stmt.query_map([], |row| {
-            let p: String = row.get(0)?;
-            let m: i64 = row.get(1)?;
-            Ok((PathBuf::from(p), m))
-        })?;
-        rows.collect::<rusqlite::Result<HashMap<_, _>>>()?
-    };
-
-    // Pre-index existing Worktree paths by parent dir so we can keep
-    // their `seen_paths` entries (for clean dirs) and reconcile vanished
-    // paths (for dirty dirs) without re-querying per file.
-    let mut paths_by_parent: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-    let mut prior_oids: HashMap<PathBuf, String> = HashMap::new();
-    {
-        let mut stmt =
-            tx.prepare("SELECT path_rel, parent_dir, oid FROM paths WHERE source = ?1")?;
-        let rows = stmt.query_map(params![source_id(Source::Worktree)], |row| {
-            let p: String = row.get(0)?;
-            let d: String = row.get(1)?;
-            let o: String = row.get(2)?;
-            Ok((PathBuf::from(p), PathBuf::from(d), o))
-        })?;
-        for r in rows {
-            let (path, parent, oid) = r?;
-            paths_by_parent.entry(parent).or_default().push(path.clone());
-            prior_oids.insert(path, oid);
-        }
-    }
-
-    // Snapshot per-file mtimes from the prior refresh. A file inside a
-    // dir-mtime-clean directory may still have been edited in-place (POSIX
-    // dir mtime only changes on entry add/remove/rename). We compare the
-    // on-disk file mtime against this map to decide whether the file truly
-    // needs re-hashing.
-    let prior_file_mtimes: HashMap<PathBuf, Option<i64>> = {
-        let mut stmt = tx.prepare("SELECT path_rel, stat_mtime_ns FROM paths WHERE source = ?1")?;
-        let rows = stmt.query_map(params![source_id(Source::Worktree)], |row| {
-            let p: String = row.get(0)?;
-            let m: Option<i64> = row.get(1)?;
-            Ok((PathBuf::from(p), m))
-        })?;
-        rows.collect::<rusqlite::Result<HashMap<_, _>>>()?
-    };
+    // Base-generation Worktree state: per-file oid and walk mtime. The
+    // `(path_rel, stat_mtime_ns)` pair IS the carry-forward key.
+    let prior_oids: HashMap<PathBuf, String> = base_rows
+        .iter()
+        .map(|row| (PathBuf::from(&row.path_rel), row.oid.0.clone()))
+        .collect();
+    let prior_mtimes: HashMap<PathBuf, Option<i64>> = base_rows
+        .iter()
+        .map(|row| (PathBuf::from(&row.path_rel), row.stat_mtime_ns))
+        .collect();
 
     // Build an excludes stack so we can prune ignored directories cheaply.
     let index = repo
@@ -98,8 +62,6 @@ pub fn pass_worktree(
 
     let mut seen_paths: HashSet<PathBuf> = HashSet::new();
     let mut deltas: Vec<PassDelta> = Vec::new();
-    // Directories whose mtime we need to record after the walk.
-    let mut new_dir_mtimes: Vec<(PathBuf, i64)> = Vec::new();
 
     let walker = WalkDir::new(repo_root).follow_links(false).into_iter();
     let walker = walker.filter_entry(|entry| {
@@ -124,15 +86,6 @@ pub fn pass_worktree(
         !platform.is_excluded()
     });
 
-    // We can't easily use the `for entry in walker` form because we want
-    // to skip an entire subtree's file entries when the dir is clean.
-    // walkdir gives us `skip_current_dir` only on the IntoIter, and
-    // filter_entry wraps it. We use a per-directory "clean" set and
-    // simply ignore file entries inside those dirs (we still descend so
-    // child dirs are evaluated independently — child mtimes are
-    // independent of parent mtimes).
-    let mut clean_dirs: HashSet<PathBuf> = HashSet::new();
-
     for entry in walker {
         let entry = match entry {
             Ok(e) => e,
@@ -145,35 +98,9 @@ pub fn pass_worktree(
         };
 
         if entry.file_type().is_dir() {
-            // Always count and decide cleanliness for every directory we
-            // descend into (including the repo root, rel == "").
-            let dir_mtime_ns = mtime_ns(path);
-            let prior = prior_dir_mtimes.get(&rel).copied();
-            let is_clean =
-                !is_hostile && dir_mtime_ns.is_some() && prior.is_some() && prior == dir_mtime_ns;
-
-            if is_clean {
-                // Carry forward this directory's known Worktree paths so
-                // they survive the removal-reconciliation pass below.
-                if let Some(children) = paths_by_parent.get(&rel) {
-                    for p in children {
-                        // A newly-wikiignored child inside an otherwise-clean
-                        // directory must NOT be carried forward, so the
-                        // removal-reconciliation sweep below purges its row.
-                        if !wiki_ignore.is_ignored(p) {
-                            seen_paths.insert(p.clone());
-                        }
-                    }
-                }
-                clean_dirs.insert(rel.clone());
-            } else {
-                *pass3_dir_walks += 1;
-                if !is_hostile
-                    && let Some(m) = dir_mtime_ns
-                {
-                    new_dir_mtimes.push((rel.clone(), m));
-                }
-            }
+            // Every descended directory counts — there is no clean-dir
+            // short-circuit anymore; carry-forward happens per file below.
+            *pass3_dir_walks += 1;
             continue;
         }
 
@@ -183,108 +110,55 @@ pub fn pass_worktree(
         if !is_markdown(&rel) {
             continue;
         }
-        // Wikiignore gate at file level (not directory pruning): never add
-        // to seen_paths so the removal-reconciliation sweep purges any
-        // previously-indexed row.
+        // Wikiignore gate at file level: never marked seen, so the removal
+        // sweep purges any previously-indexed row.
         if wiki_ignore.is_ignored(&rel) {
             continue;
         }
-        // For files inside a clean directory (parent mtime unchanged),
-        // check the per-file mtime: on POSIX, dir mtime only changes on
-        // entry add/remove/rename, so an in-place content edit leaves
-        // the dir mtime alone. If the file's mtime matches the stored
-        // value, the file is truly unchanged and can be skipped.
-        let parent = rel.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-        if clean_dirs.contains(&parent) {
-            let cur = mtime_ns(path);
-            if cur.is_some() && prior_file_mtimes.get(&rel).copied().flatten() == cur {
-                // File truly unchanged — carry forward.
-                seen_paths.insert(rel.clone());
-                continue;
-            }
-            // File mtime changed or unknown — fall through to re-hash.
-        }
-
         seen_paths.insert(rel.clone());
+
+        let cur_mtime = mtime_ns(path);
+        let prior_oid = prior_oids.get(&rel);
+        let prior_mtime = prior_mtimes.get(&rel).copied().flatten();
+
+        // Path-granular carry-forward: same path, stat-identical mtime, on
+        // a filesystem we trust for mtime evidence ⇒ keep the base row
+        // verbatim (the orchestrator seeded it already).
+        if !is_hostile && cur_mtime.is_some() && prior_mtime == cur_mtime && prior_oid.is_some() {
+            continue;
+        }
 
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(_) => continue,
         };
-        let oid = compute_blob_oid(&bytes);
+        let hashed = compute_blob_oid(&bytes);
 
-        let cur_mtime = mtime_ns(path);
-        let rel_str = rel.to_string_lossy().to_string();
-        let prior = prior_oids.get(&rel).map(|s| s.as_str());
-        if prior != Some(oid.0.as_str()) {
-            deltas.push(PassDelta {
-                path: rel,
-                source: Source::Worktree,
-                action: DeltaAction::Add {
-                    oid: BlobOid(oid.0),
-                    blob_bytes: Some(bytes),
-                    stat_mtime_ns: cur_mtime,
-                },
-            });
-        } else if let Some(mtime) = cur_mtime {
-            // OID unchanged but stat_mtime_ns may be stale (backfill
-            // from a prior version that didn't store it, or clock skew).
-            tx.execute(
-                "UPDATE paths SET stat_mtime_ns = ?1 WHERE path_rel = ?2 AND source = ?3",
-                params![mtime, rel_str, source_id(Source::Worktree)],
-            )?;
-        }
+        // Re-ingested from this walk — either the content changed (new oid
+        // ⇒ parse + queue as a global upsert) or only the mtime moved on
+        // identical content (already-known oid ⇒ the member row refreshes
+        // its mtime without re-tokenizing). Both are plain Adds; the
+        // candidate builder distinguishes them by oid knowledge.
+        deltas.push(PassDelta {
+            path: rel,
+            source: Source::Worktree,
+            action: DeltaAction::Add {
+                oid: BlobOid(hashed.0),
+                blob_bytes: Some(bytes),
+                stat_mtime_ns: cur_mtime,
+            },
+        });
     }
 
-    // Removals: Worktree paths recorded in the DB but no longer on disk
-    // (or in a vanished/dirty dir that didn't re-observe them).
-    let mut stmt = tx.prepare("SELECT path_rel FROM paths WHERE source = ?1")?;
-    let rows: Vec<String> = stmt
-        .query_map(params![source_id(Source::Worktree)], |r| {
-            r.get::<_, String>(0)
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(stmt);
-    for row in rows {
-        let pb = PathBuf::from(&row);
+    // Removals: base rows no longer observed in this walk.
+    for row in base_rows {
+        let pb = PathBuf::from(&row.path_rel);
         if !seen_paths.contains(&pb) {
             deltas.push(PassDelta {
                 path: pb,
                 source: Source::Worktree,
                 action: DeltaAction::Remove,
             });
-        }
-    }
-
-    // Record dirty-dir mtimes for next refresh.
-    for (rel, m) in &new_dir_mtimes {
-        let p = rel.to_string_lossy().to_string();
-        tx.execute(
-            "INSERT INTO dir_mtimes (path, mtime_ns) VALUES (?1, ?2)
-             ON CONFLICT(path) DO UPDATE SET mtime_ns = excluded.mtime_ns",
-            params![p, m],
-        )?;
-    }
-
-    // Prune stale dir_mtimes rows for directories that no longer exist.
-    // On hostile FS, clear all rows — they are never consulted anyway.
-    if is_hostile {
-        tx.execute("DELETE FROM dir_mtimes", [])?;
-    } else {
-        let walked_dirs: HashSet<PathBuf> = clean_dirs
-            .iter()
-            .cloned()
-            .chain(new_dir_mtimes.iter().map(|(p, _)| p.clone()))
-            .collect();
-        let mut del = tx.prepare_cached("DELETE FROM dir_mtimes WHERE path = ?1")?;
-        let mut stmt = tx.prepare("SELECT path FROM dir_mtimes")?;
-        let rows: Vec<String> = stmt
-            .query_map([], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for path in rows {
-            if !walked_dirs.contains(Path::new(&path)) {
-                del.execute(params![path])?;
-            }
         }
     }
 

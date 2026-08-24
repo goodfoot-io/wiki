@@ -217,15 +217,66 @@ const ANCHOR_REGISTRY: &[(&str, &[ColumnSpec])] = &[
     ("anchor_walk", WALK_COLUMNS),
 ];
 
-/// The index tier's static-table registry entries. Registration lands with
-/// the generations store itself (plan Phase 3): adding the tier to the
-/// probe is data, not surgery. Until then the probe verifies nothing for
-/// [`Tier::Index`]; its static table *names* are pinned in
-/// [`INDEX_STATIC_TABLES`] for tier-scoped drops.
-const INDEX_REGISTRY: &[(&str, &[ColumnSpec])] = &[];
+/// The index tier's static-table registry entries. Registered by the
+/// generations store (plan Phase 3; orchestrator-authorized data addition):
+/// the shapes mirror `index::generations`' binding DDL exactly — column
+/// order, declared types, nullability, and primary-key membership. Dynamic
+/// `fts_<gen_id>` children are invisible to this registry by construction.
+const INDEX_REGISTRY: &[(&str, &[ColumnSpec])] = &[
+    ("generations", GENERATIONS_COLUMNS),
+    ("gen_paths", GEN_PATHS_COLUMNS),
+    ("blobs", BLOBS_COLUMNS),
+];
 
 /// The index tier's binding static table names, dropped by
 /// [`drop_tier_tables`] alongside every dynamic `fts_%` child (plan D2).
+/// The index tier's static DDL — the exact text [`crate::index::generations`]
+/// pins as its binding contract artifact (checkpoint-approved): the three
+/// registry tables plus their two indexes. Dynamic `fts_<gen_id>` children
+/// are deliberately absent: they are publish-time, per-generation state
+/// (plan D5), created and dropped by the generations store alone. Applied
+/// by [`open_connection`] so a fresh store always materializes both tiers'
+/// statics (orchestrator-authorized Phase 3 wiring).
+pub(crate) const INDEX_TIER_DDL: &str = "
+CREATE TABLE IF NOT EXISTS generations (
+    gen_id          INTEGER PRIMARY KEY NOT NULL,
+    digest          BLOB    NOT NULL UNIQUE CHECK (length(digest) = 32),
+    head_oid        TEXT    NOT NULL CHECK (length(head_oid) = 40),
+    head_tree_oid   TEXT    NOT NULL CHECK (head_tree_oid = '' OR length(head_tree_oid) = 40),
+    index_checksum  BLOB    NOT NULL CHECK (length(index_checksum) = 20),
+    wikiignore_hash BLOB    NOT NULL CHECK (length(wikiignore_hash) = 20),
+    worktree_sig    BLOB    NOT NULL CHECK (length(worktree_sig) = 32),
+    publisher       TEXT,
+    created_at      INTEGER NOT NULL DEFAULT 0,
+    access_bucket   INTEGER NOT NULL DEFAULT 0,
+    blob_count      INTEGER NOT NULL CHECK (blob_count >= 0)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS gen_paths (
+    gen_id        INTEGER NOT NULL REFERENCES generations(gen_id),
+    source        TEXT    NOT NULL CHECK (source IN ('tree', 'index', 'worktree')),
+    path_rel      TEXT    NOT NULL,
+    oid           TEXT    NOT NULL REFERENCES blobs(oid),
+    parent_dir    TEXT    NOT NULL,
+    stat_mtime_ns INTEGER,
+    PRIMARY KEY (gen_id, source, path_rel)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_gen_paths_oid ON gen_paths(oid);
+CREATE INDEX IF NOT EXISTS idx_gen_paths_parent ON gen_paths(gen_id, parent_dir, source);
+
+CREATE TABLE IF NOT EXISTS blobs (
+    oid           TEXT PRIMARY KEY,
+    refcount      INTEGER NOT NULL,
+    title         TEXT    NOT NULL,
+    summary       TEXT    NOT NULL,
+    body          TEXT    NOT NULL,
+    aliases_text  TEXT    NOT NULL,
+    tags_text     TEXT    NOT NULL,
+    keywords_text TEXT    NOT NULL
+) STRICT;
+";
+
 const INDEX_STATIC_TABLES: &[&str] = &["generations", "gen_paths", "blobs"];
 
 fn registry_for(tier: Tier) -> &'static [(&'static str, &'static [ColumnSpec])] {
@@ -253,6 +304,43 @@ const WALK_COLUMNS: &[(&str, &str, bool, bool)] = &[
     ("path_at_commit", "TEXT", false, false),
     ("value", "TEXT", true, false),
     ("row_digest", "BLOB", false, false),
+];
+/// Index tier: `generations` (PK is just `gen_id`; digest uniqueness and
+/// the sentinel-length CHECKs live in the DDL, which the registry does not
+/// model).
+const GENERATIONS_COLUMNS: &[(&str, &str, bool, bool)] = &[
+    ("gen_id", "INTEGER", false, true),
+    ("digest", "BLOB", false, false),
+    ("head_oid", "TEXT", false, false),
+    ("head_tree_oid", "TEXT", false, false),
+    ("index_checksum", "BLOB", false, false),
+    ("wikiignore_hash", "BLOB", false, false),
+    ("worktree_sig", "BLOB", false, false),
+    ("publisher", "TEXT", true, false),
+    ("created_at", "INTEGER", false, false),
+    ("access_bucket", "INTEGER", false, false),
+    ("blob_count", "INTEGER", false, false),
+];
+/// Index tier: `gen_paths`, composite PK `(gen_id, source, path_rel)`.
+const GEN_PATHS_COLUMNS: &[(&str, &str, bool, bool)] = &[
+    ("gen_id", "INTEGER", false, true),
+    ("source", "TEXT", false, true),
+    ("path_rel", "TEXT", false, true),
+    ("oid", "TEXT", false, false),
+    ("parent_dir", "TEXT", false, false),
+    ("stat_mtime_ns", "INTEGER", true, false),
+];
+/// Index tier: `blobs`, PK `oid`; content-addressed and shared across
+/// generations.
+const BLOBS_COLUMNS: &[(&str, &str, bool, bool)] = &[
+    ("oid", "TEXT", false, true),
+    ("refcount", "INTEGER", false, false),
+    ("title", "TEXT", false, false),
+    ("summary", "TEXT", false, false),
+    ("body", "TEXT", false, false),
+    ("aliases_text", "TEXT", false, false),
+    ("tags_text", "TEXT", false, false),
+    ("keywords_text", "TEXT", false, false),
 ];
 
 fn table_matches(
@@ -475,7 +563,7 @@ pub fn open_connection(db_path: &Path) -> Result<Connection, CacheError> {
     conn.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS as u64))?;
     conn.execute_batch("PRAGMA journal_mode = WAL;")?;
     conn.execute_batch("PRAGMA synchronous = NORMAL; PRAGMA mmap_size = 268435456;")?;
-    for ddl in [META_DDL, FINGERPRINT_DDL, ANCHOR_WALK_DDL] {
+    for ddl in [META_DDL, FINGERPRINT_DDL, ANCHOR_WALK_DDL, INDEX_TIER_DDL] {
         conn.execute_batch(ddl)?;
     }
     conn.execute(
