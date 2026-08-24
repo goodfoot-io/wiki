@@ -163,6 +163,16 @@ pub const ANCHOR_WALK_DDL: &str = "CREATE TABLE IF NOT EXISTS anchor_walk (
     row_digest     BLOB    NOT NULL
 ) STRICT;";
 
+/// Countable diagnostic events (plan D11): quarantine/rebuild/skew-repair/
+/// gc/replay records with unix-second stamps, surfaced through the perf
+/// JSON-lines channel. Cross-tier infrastructure — deliberately absent from
+/// the registry probe (it is not a tier's served shape) and never dropped
+/// by tier-scoped invalidation.
+pub const STORE_EVENTS_DDL: &str = "CREATE TABLE IF NOT EXISTS store_events (
+    stamp INTEGER NOT NULL,
+    event TEXT NOT NULL
+) STRICT;";
+
 /// Seed the meta singleton on fresh create — idempotent (`OR IGNORE`), so
 /// re-running the seed over an already-seeded database is a no-op. Both tier
 /// epochs start at [`INITIAL_TIER_EPOCH`].
@@ -518,9 +528,16 @@ pub fn quarantine(db_path: &Path) -> Result<(), CacheError> {
 
     // Fresh create: the binding open order seeds the full schema and the
     // meta singleton. The file is pre-created through the hardened
-    // primitives; the connection is dropped — the caller opens its own.
+    // primitives. Both countable diagnostic events (plan D11) record on the
+    // fresh connection — the rename-aside above already happened, and this
+    // line running means the rebuild completed; the rows survive in the
+    // rebuilt store's ledger. Best-effort by contract: neither call can
+    // fail the quarantine.
     prepare_db_file(db_path)?;
-    drop(open_connection(db_path)?);
+    let conn = open_connection(db_path)?;
+    crate::cache::diagnostics::record(&conn, "quarantine_performed");
+    crate::cache::diagnostics::record(&conn, "rebuild_completed");
+    drop(conn);
     Ok(())
 }
 
@@ -553,8 +570,9 @@ pub(crate) fn retry_busy<T>(
 
 /// Open the database at `db_path` applying the binding open order (plan
 /// D4): `busy_timeout(1000)` → `PRAGMA journal_mode = WAL` →
-/// `synchronous = NORMAL` → `mmap_size = 268435456` → the anchor tier's DDL
-/// statements → the meta singleton seed. The timeout is set before the WAL
+/// `synchronous = NORMAL` → `mmap_size = 268435456` → both tiers' static DDL
+/// statements plus the cross-tier `store_events` ledger → the meta singleton
+/// seed. The timeout is set before the WAL
 /// switch (spike S1's empirically load-bearing ordering invariant); the
 /// switch itself can surface `SQLITE_BUSY` without consulting the busy
 /// handler, which is why the open path runs under the bounded retry wrapper.
@@ -563,7 +581,13 @@ pub fn open_connection(db_path: &Path) -> Result<Connection, CacheError> {
     conn.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS as u64))?;
     conn.execute_batch("PRAGMA journal_mode = WAL;")?;
     conn.execute_batch("PRAGMA synchronous = NORMAL; PRAGMA mmap_size = 268435456;")?;
-    for ddl in [META_DDL, FINGERPRINT_DDL, ANCHOR_WALK_DDL, INDEX_TIER_DDL] {
+    for ddl in [
+        META_DDL,
+        FINGERPRINT_DDL,
+        ANCHOR_WALK_DDL,
+        INDEX_TIER_DDL,
+        STORE_EVENTS_DDL,
+    ] {
         conn.execute_batch(ddl)?;
     }
     conn.execute(

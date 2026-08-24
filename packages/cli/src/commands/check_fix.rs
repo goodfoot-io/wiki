@@ -1,11 +1,14 @@
 use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::io;
+use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use miette::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::check::{ContentCache, anchor_cache_for_run};
 use super::drift;
@@ -760,19 +763,39 @@ pub fn run_fix_pass(
     content_cache: &mut ContentCache,
     reporter: &crate::cache::CacheReporter,
 ) -> Result<FixPlan> {
+    // Replay pending journals first (plan Decision 8): a previous run killed
+    // mid-materialization is completed from its journal before any fresh
+    // planning, so planning observes post-replay disk state. Dry runs are
+    // side-effect-free: no replay application, no staging.
+    let replay_applied = if dry_run {
+        HashMap::new()
+    } else {
+        replay_pending(repo_root)?
+    };
+
     let mut rename_map = RenameMap::build(repo_root)?;
 
     let mut fixes: Vec<Fix> = Vec::new();
     let mut skipped: Vec<SkippedFix> = Vec::new();
-    // file abs path → patched content
-    let mut patches: HashMap<PathBuf, String> = HashMap::new();
+    // file abs path → patched content. Seeded first with the replay's
+    // applied contents so every phase below reads post-replay state (the
+    // per-run content cache was warmed before the replay rewrote files).
+    let mut patches: HashMap<PathBuf, String> = replay_applied.clone();
 
     for file in files {
-        let content = match content_cache
-            .get_or_try_read(file, || std::fs::read_to_string(file))
-        {
-            Ok(c) => c.to_string(),
-            Err(_) => continue,
+        // Prefer a replay-seeded patch as the base (plan Decision 8): the
+        // content cache was warmed before journal replay rewrote this file,
+        // so the overlay — not the cache — holds current state. Matches the
+        // base-selection rule of the later fix phases.
+        let content = if let Some(patched) = patches.get(file) {
+            patched.clone()
+        } else {
+            match content_cache
+                .get_or_try_read(file, || std::fs::read_to_string(file))
+            {
+                Ok(c) => c.to_string(),
+                Err(_) => continue,
+            }
         };
 
         let frag_links = parse_fragment_links(&content);
@@ -1282,12 +1305,19 @@ pub fn run_fix_pass(
     let unverified = drift.unverified;
     let certification_skips = drift.certification_skips;
 
-    // Materialize patches to disk unless dry_run.
-    if !dry_run {
-        for (path, content) in &patches {
-            std::fs::write(path, content)
-                .map_err(|e| miette::miette!("failed to write {}: {e}", path.display()))?;
+    // Materialize patches to disk unless dry_run (plan Decision 8). A
+    // replay-seeded entry the planning phases left untouched describes
+    // content already on disk (replay hash-verified it before delivering);
+    // dropping those no-ops keeps the journal and `applied_paths` honest.
+    if !dry_run && !patches.is_empty() {
+        for (path, seeded) in &replay_applied {
+            if patches.get(path).map(|p| p == seeded).unwrap_or(false) {
+                patches.remove(path);
+            }
         }
+    }
+    if !dry_run && !patches.is_empty() {
+        materialize_with_journal(repo_root, &patches)?;
     }
 
     // `applied_paths`: every patched file, repo-relative, in deterministic
@@ -1676,6 +1706,471 @@ fn run_drift_fix_phase(
         unverified,
         certification_skips,
     })
+}
+
+// ── Fix journals (plan merged-store-generations D8) ──────────────────────────
+//
+// Crash-recovery for multi-file materialization. The bare `std::fs::write`
+// loop this replaces aborted on first error with an arbitrary subset already
+// rewritten; a SIGINT mid-loop persisted that subset silently. Every fix run
+// now materializes through a private per-worktree journal:
+//
+//   `<dot-git>/wiki/journal/<scope16>/`
+//     blob-0..blob-N   staged target contents (0600, fd-hardened)
+//     manifest.json    {version, created_at, status, scope_digest, entries}
+//
+// Status machine: prepared (staged, manifest written last) → committed (all
+// targets written) → delivered (every on-disk file hash-verifies) → journal
+// directory removed. Any interruption leaves a `prepared`/`committed`
+// journal behind; the NEXT run replays it idempotently BEFORE planning fresh
+// patches. Expired (>7-day TTL) or corrupt journals (unparseable manifest,
+// stage sha mismatch, scope-digest mismatch) are deleted and the pass
+// recomputes cleanly — never partial application.
+
+/// Journal manifest schema version.
+const JOURNAL_VERSION: u32 = 1;
+/// Time-to-live for unrecovered journals: 7 days in milliseconds.
+const JOURNAL_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Lifecycle state of a journal's manifest (`status` field).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum JournalStatus {
+    /// Staged targets exist and the manifest is on disk; application has not
+    /// been completed (or has not started).
+    Prepared,
+    /// Every staged target was written to its working-tree path.
+    Committed,
+    /// Every written file hash-verified against its recorded sha256.
+    Delivered,
+}
+
+/// One staged target inside a journal manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JournalEntry {
+    /// Repo-relative path of the working-tree file this entry rewrites.
+    path_rel: String,
+    /// Sibling stage file name holding the target content (`blob-N`).
+    stage_file: String,
+    /// Lowercase hex sha256 of the full target content.
+    sha256: String,
+}
+
+/// The `manifest.json` document (schema v1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JournalManifest {
+    version: u32,
+    /// Unix milliseconds at staging time; drives the TTL.
+    created_at: u64,
+    status: JournalStatus,
+    /// Hex sha256 binding the journal to its exact target set and repo.
+    scope_digest: String,
+    entries: Vec<JournalEntry>,
+}
+
+/// Process-wide once-flag: at most one stale-journal warning line per run,
+/// mirroring `CacheReporter`'s first-call-wins pattern.
+static STALE_JOURNAL_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Unix milliseconds for TTL stamps and `created_at`.
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The canonical repository identity bound into every scope digest: the
+/// common git dir string. Two worktrees of one repo share it, so identical
+/// target sets in either worktree collide onto one journal — safe, because
+/// journals live per-worktree while the digest pins the destination set.
+fn journal_repo_identity() -> Result<String> {
+    let dir = crate::git::common_dir()?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+/// The scope digest: SHA-256 (via [`crate::cache::key::sha256_hex`]) over
+/// the length-tagged framing of sorted `(path_rel, target_sha256)` pairs
+/// followed by the repository identity string.
+fn scope_digest(sorted_pairs: &[(String, String)], identity: &str) -> String {
+    let mut fields: Vec<&str> = Vec::with_capacity(sorted_pairs.len() * 2 + 1);
+    for (path_rel, sha) in sorted_pairs {
+        fields.push(path_rel);
+        fields.push(sha);
+    }
+    fields.push(identity);
+    crate::cache::key::sha256_hex(&crate::cache::key::canonical_fields(&fields))
+}
+
+/// A journal entry's `path_rel` must name a normal relative path strictly
+/// under the repo root. Anything else (absolute, `..`, empty) is corruption
+/// — the journal never redirects a write outside the repository.
+fn is_safe_journal_rel(path_rel: &str) -> bool {
+    if path_rel.is_empty() {
+        return false;
+    }
+    let path = Path::new(path_rel);
+    if path.is_absolute() {
+        return false;
+    }
+    path.components()
+        .all(|c| matches!(c, Component::Normal(_)))
+}
+
+/// A stage file name must be a plain sibling file name (`blob-N`).
+fn is_safe_stage_name(stage_file: &str) -> bool {
+    !stage_file.is_empty()
+        && !stage_file.contains('/')
+        && !stage_file.contains('\\')
+        && !stage_file.contains('\0')
+}
+
+/// Serialize and write `manifest.json` into the retained journal directory:
+/// truncate-in-place, write, best-effort fsync. The manifest is written
+/// LAST during staging so a crash before it leaves no half-described
+/// journal — only stage residue a replay classifies corrupt.
+fn write_manifest(dir_fd: &crate::store::fd::DirFd, manifest: &JournalManifest) -> io::Result<()> {
+    let bytes = serde_json::to_vec(manifest)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let mut file = dir_fd.create_file("manifest.json")?;
+    file.set_len(0)?;
+    file.write_all(&bytes)?;
+    let _ = file.sync_data();
+    Ok(())
+}
+
+/// A journal whose manifest parsed and whose every stage blob hash-matches
+/// its recorded sha256: ready for idempotent application.
+struct LoadedJournal {
+    /// `(path_rel, target content)` in manifest-entry order; content is
+    /// UTF-8 (validated during classification) and its sha256 equals the
+    /// recorded `entries[i].sha256`.
+    stages: Vec<(String, String)>,
+}
+
+/// Replay verdict for one journal directory.
+enum Disposition {
+    /// Valid and unexpired: apply idempotently, mark delivered, remove.
+    Apply(Box<LoadedJournal>, Box<JournalManifest>),
+    /// Expired, unparseable, stage-corrupt, or digest-mismatched: delete
+    /// and continue cleanly.
+    Stale,
+}
+
+/// Classify one journal directory without mutating anything. Every
+/// validation failure collapses to [`Disposition::Stale`] — the caller
+/// deletes stale directories and reports them through the once-per-run
+/// warning budget.
+fn classify_journal(dir: &Path, identity: &str, now: u64) -> Disposition {
+    let manifest_bytes = match std::fs::read(dir.join("manifest.json")) {
+        Ok(b) => b,
+        Err(_) => return Disposition::Stale,
+    };
+    let manifest: JournalManifest = match serde_json::from_slice(&manifest_bytes) {
+        Ok(m) => m,
+        Err(_) => return Disposition::Stale,
+    };
+    if manifest.version != JOURNAL_VERSION {
+        return Disposition::Stale;
+    }
+    // TTL: expired journals recompute cleanly regardless of integrity.
+    if now.saturating_sub(manifest.created_at) > JOURNAL_TTL_MS {
+        return Disposition::Stale;
+    }
+    if manifest.entries.is_empty() || manifest.scope_digest.len() != 64 {
+        return Disposition::Stale;
+    }
+    for entry in &manifest.entries {
+        if !is_safe_journal_rel(&entry.path_rel) || !is_safe_stage_name(&entry.stage_file) {
+            return Disposition::Stale;
+        }
+        let Ok(bytes) = std::fs::read(dir.join(&entry.stage_file)) else {
+            return Disposition::Stale;
+        };
+        if crate::cache::key::sha256_hex(&bytes) != entry.sha256 {
+            return Disposition::Stale;
+        }
+    }
+    // Digest mismatch fails toward recompute: the recorded digest must be
+    // exactly what the manifest's own entries plus the repo identity derive.
+    let mut sorted: Vec<(String, String)> = manifest
+        .entries
+        .iter()
+        .map(|e| (e.path_rel.clone(), e.sha256.clone()))
+        .collect();
+    sorted.sort();
+    if scope_digest(&sorted, identity) != manifest.scope_digest {
+        return Disposition::Stale;
+    }
+    let mut stages = Vec::with_capacity(manifest.entries.len());
+    for entry in &manifest.entries {
+        let bytes = std::fs::read(dir.join(&entry.stage_file)).expect("stage read verified above");
+        let Ok(content) = String::from_utf8(bytes) else {
+            return Disposition::Stale;
+        };
+        stages.push((entry.path_rel.clone(), content));
+    }
+    Disposition::Apply(
+        Box::new(LoadedJournal { stages }),
+        Box::new(manifest),
+    )
+}
+
+/// Apply one valid journal idempotently: skip targets whose current bytes
+/// already hash to the recorded sha256, write the rest, mark delivered,
+/// remove the directory. Any write failure propagates — fail closed, the
+/// journal stays for the next replay.
+fn replay_apply_journal(
+    dir: &Path,
+    repo_root: &Path,
+    stages: &[(String, String)],
+    manifest: JournalManifest,
+) -> Result<()> {
+    for (path_rel, content) in stages {
+        let target = repo_root.join(path_rel);
+        let content_sha = crate::cache::key::sha256_hex(content.as_bytes());
+        let already_applied = std::fs::read(&target)
+            .map(|cur| crate::cache::key::sha256_hex(&cur) == content_sha)
+            .unwrap_or(false);
+        if !already_applied {
+            std::fs::write(&target, content).map_err(|e| {
+                miette::miette!(
+                    "fix journal replay failed to write {}: {e}; journal kept for replay",
+                    target.display()
+                )
+            })?;
+        }
+    }
+    // Delivered: the state machine's terminal record before removal. A kill
+    // between this write and the directory removal leaves a delivered
+    // journal that replays as pure idempotent skips next run.
+    let mut delivered = manifest;
+    delivered.status = JournalStatus::Delivered;
+    let dir_fd = crate::store::fd::DirFd::open(dir)
+        .map_err(|e| miette::miette!("fix journal reopen failed: {e}"))?;
+    write_manifest(&dir_fd, &delivered).map_err(|e| {
+        miette::miette!("fix journal delivery stamp failed: {e}; journal kept for replay")
+    })?;
+    std::fs::remove_dir_all(dir)
+        .map_err(|e| miette::miette!("fix journal cleanup failed: {e}"))?;
+    Ok(())
+}
+
+/// Replay any pending journals under `<dot-git>/wiki/journal` BEFORE fresh
+/// patches are planned. Valid, unexpired journals are applied idempotently
+/// (targets whose current bytes already hash to the recorded sha256 are
+/// skipped), marked delivered, and removed. Expired or corrupt journals are
+/// deleted and reported through at most one stderr warning line per process.
+///
+/// Returns the applied `(absolute path → final content)` pairs so the caller
+/// can seed its planning overlay — planning must observe post-replay disk
+/// state, not the pre-replay bytes its content cache warmed.
+pub(crate) fn replay_pending(repo_root: &Path) -> Result<HashMap<PathBuf, String>> {
+    let Some(dot_git) = crate::index::find_dot_git(repo_root) else {
+        return Ok(HashMap::new());
+    };
+    let journal_root = dot_git.join("wiki").join("journal");
+    let Ok(readings) = std::fs::read_dir(&journal_root) else {
+        return Ok(HashMap::new());
+    };
+    let mut dirs: Vec<PathBuf> = readings
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
+
+    // Without the repository identity the scope digest cannot be verified;
+    // leave every journal untouched rather than discard recovery data on a
+    // technicality. The next run with resolvable identity settles them.
+    let Ok(identity_dir) = crate::git::common_dir() else {
+        return Ok(HashMap::new());
+    };
+    let identity = identity_dir.to_string_lossy().into_owned();
+    let now = unix_ms();
+
+    let mut discarded = 0usize;
+    let mut applied: HashMap<PathBuf, String> = HashMap::new();
+
+    for dir in dirs {
+        match classify_journal(&dir, &identity, now) {
+            Disposition::Stale => {
+                std::fs::remove_dir_all(&dir)
+                    .map_err(|e| miette::miette!("stale fix journal removal failed: {e}"))?;
+                discarded += 1;
+            }
+            Disposition::Apply(loaded, manifest) => {
+                let LoadedJournal { stages } = *loaded;
+                replay_apply_journal(&dir, repo_root, &stages, *manifest)?;
+                for (path_rel, content) in &stages {
+                    applied.insert(repo_root.join(path_rel), content.clone());
+                }
+            }
+        }
+    }
+
+    if discarded > 0 && !STALE_JOURNAL_WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "warning: {discarded} stale fix journal(s) discarded; recomputing cleanly"
+        );
+    }
+    Ok(applied)
+}
+
+/// Materialize `patches` through a crash-recovery journal: stage every
+/// target, write the manifest last (prepared), apply all writes, mark
+/// committed, verify every on-disk hash, mark delivered, remove the
+/// directory. Any failure leaves the journal in place for the next run's
+/// replay — fail closed, never partial application.
+fn materialize_with_journal(repo_root: &Path, patches: &HashMap<PathBuf, String>) -> Result<()> {
+    // Deterministic stage order: sorted (path_rel, sha256) pairs feed both
+    // the scope digest and the `blob-N` numbering.
+    let mut staged: Vec<(String, String, Vec<u8>)> = patches
+        .iter()
+        .map(|(abs, content)| {
+            let path_rel = abs
+                .strip_prefix(repo_root)
+                .unwrap_or(abs)
+                .to_string_lossy()
+                .replace('\\', "/");
+            (
+                path_rel,
+                crate::cache::key::sha256_hex(content.as_bytes()),
+                content.as_bytes().to_vec(),
+            )
+        })
+        .collect();
+    staged.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+
+    let dot_git = crate::index::find_dot_git(repo_root).ok_or_else(|| {
+        miette::miette!("cannot locate the git directory for fix journals")
+    })?;
+    let identity = journal_repo_identity()?;
+    let pairs: Vec<(String, String)> = staged
+        .iter()
+        .map(|(p, s, _)| (p.clone(), s.clone()))
+        .collect();
+    let digest = scope_digest(&pairs, &identity);
+    let scope16 = &digest[..16];
+
+    // The journal subtree is created exclusively through fd-hardened
+    // helpers: private 0700 components, symlink refusal on descent.
+    let journal_rel = Path::new("wiki").join("journal");
+    let git_fd = crate::store::fd::DirFd::open(&dot_git)
+        .map_err(|e| miette::miette!("fix journal root unusable: {e}"))?;
+    let journal_fd = git_fd
+        .ensure_private_subtree(&journal_rel)
+        .map_err(|e| miette::miette!("fix journal subtree unusable: {e}"))?;
+    let scope_abs = dot_git.join(&journal_rel).join(scope16);
+    if scope_abs.exists() {
+        // Replay ran before staging, so a surviving same-scope journal means
+        // something anomalous — refuse rather than overwrite recovery data.
+        return Err(miette::miette!(
+            "fix journal {} already exists; refusing to stage over it",
+            scope_abs.display()
+        ));
+    }
+    let scope_fd = journal_fd
+        .ensure_private_subtree(Path::new(scope16))
+        .map_err(|e| miette::miette!("fix journal scope dir unusable: {e}"))?;
+
+    // Stage targets first; the manifest lands last (prepared).
+    for (i, (_, _, bytes)) in staged.iter().enumerate() {
+        let name = format!("blob-{i}");
+        let mut file = scope_fd
+            .create_file(&name)
+            .map_err(|e| miette::miette!("fix journal stage {name} failed: {e}"))?;
+        file.set_len(0)
+            .map_err(|e| miette::miette!("fix journal stage {name} truncate failed: {e}"))?;
+        file.write_all(bytes)
+            .map_err(|e| miette::miette!("fix journal stage {name} write failed: {e}"))?;
+        let _ = file.sync_data();
+    }
+    let manifest = JournalManifest {
+        version: JOURNAL_VERSION,
+        created_at: unix_ms(),
+        status: JournalStatus::Prepared,
+        scope_digest: digest,
+        entries: staged
+            .iter()
+            .enumerate()
+            .map(|(i, (path_rel, sha256, _))| JournalEntry {
+                path_rel: path_rel.clone(),
+                stage_file: format!("blob-{i}"),
+                sha256: sha256.clone(),
+            })
+            .collect(),
+    };
+    write_manifest(&scope_fd, &manifest)
+        .map_err(|e| miette::miette!("fix journal manifest write failed: {e}"))?;
+
+    // Read back and hash-verify every stage BEFORE touching any target, so
+    // corrupted stages can never reach working files.
+    let mut stage_bytes = Vec::with_capacity(manifest.entries.len());
+    for entry in &manifest.entries {
+        let bytes = std::fs::read(scope_abs.join(&entry.stage_file)).map_err(|e| {
+            miette::miette!(
+                "fix journal stage {} unreadable: {e}; journal kept for replay",
+                entry.stage_file
+            )
+        })?;
+        if crate::cache::key::sha256_hex(&bytes) != entry.sha256 {
+            return Err(miette::miette!(
+                "fix journal stage {} failed integrity; journal kept for replay",
+                entry.stage_file
+            ));
+        }
+        stage_bytes.push(bytes);
+    }
+
+    // Apply: attempt EVERY write, then fail closed on any error — the
+    // journal stays prepared, and the next run replays deterministically.
+    let mut first_failure: Option<(String, std::io::Error)> = None;
+    for (i, entry) in manifest.entries.iter().enumerate() {
+        let target = repo_root.join(&entry.path_rel);
+        if let Err(e) = std::fs::write(&target, &stage_bytes[i])
+            && first_failure.is_none()
+        {
+            first_failure = Some((entry.path_rel.clone(), e));
+        }
+    }
+    if let Some((path_rel, e)) = first_failure {
+        return Err(miette::miette!(
+            "failed to write {path_rel}: {e}; fix journal kept for replay"
+        ));
+    }
+
+    // Committed: every staged target reached disk.
+    let mut committed = manifest.clone();
+    committed.status = JournalStatus::Committed;
+    write_manifest(&scope_fd, &committed)
+        .map_err(|e| miette::miette!("fix journal commit stamp failed: {e}"))?;
+
+    // Verify: every on-disk file must hash-match its recorded sha256. Any
+    // mismatch errors out fail-closed with the journal retained for replay.
+    for entry in &manifest.entries {
+        let current = std::fs::read(repo_root.join(&entry.path_rel)).map_err(|e| {
+            miette::miette!(
+                "fix journal verification unreadable {}: {e}; journal kept for replay",
+                entry.path_rel
+            )
+        })?;
+        if crate::cache::key::sha256_hex(&current) != entry.sha256 {
+            return Err(miette::miette!(
+                "fix journal verification failed for {}; journal kept for replay",
+                entry.path_rel
+            ));
+        }
+    }
+
+    // Delivered, then remove: clean delivery leaves no journal behind.
+    let mut delivered = committed;
+    delivered.status = JournalStatus::Delivered;
+    write_manifest(&scope_fd, &delivered)
+        .map_err(|e| miette::miette!("fix journal delivery stamp failed: {e}"))?;
+    std::fs::remove_dir_all(&scope_abs)
+        .map_err(|e| miette::miette!("fix journal cleanup failed: {e}"))?;
+    Ok(())
 }
 
 #[cfg(test)]

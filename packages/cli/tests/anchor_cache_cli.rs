@@ -180,29 +180,56 @@ fn clear_cache_prints_resolved_cache_path_and_exits_zero() {
     );
 }
 
-/// `--clear-cache` deletes the cache directory itself, not just the
-/// database file inside it. Stays ignored until Phase 1's real store
-/// `clear()` lands — the P1 stub is a no-op, so this check would fail
-/// today.
+/// `--clear-cache` is tier-scoped (plan D10): it empties both tiers' tables
+/// inside the store and preserves the directory, which keeps holding
+/// journals, locks, and wiki.log. A warm certified run leaves cached rows;
+/// after a clear the store serves again but holds none of them.
 #[test]
-fn clear_cache_deletes_the_cache_directory() {
-    let repo = plain_fixture();
+fn clear_cache_empties_the_tiers_and_preserves_the_directory() {
+    let repo = certified_fixture();
     let cache_dir = expected_cache_dir(&repo.root);
-    create_cache_dir(&cache_dir);
-    std::fs::write(cache_dir.join(DB_FILE_NAME), "stale bytes").expect("write db");
-    std::fs::write(cache_dir.join(INIT_LOCK_FILE_NAME), "").expect("write lock");
-    assert!(cache_dir.exists());
+
+    let warm = run(&repo.root, &["check"]);
+    assert_eq!(
+        warm.status.code(),
+        Some(0),
+        "warm run: {}",
+        String::from_utf8_lossy(&warm.stderr)
+    );
+    assert!(cache_dir.exists(), "the warm run must have cached");
 
     let out = run(&repo.root, &["check", "--clear-cache"]);
     assert_eq!(
         out.status.code(),
         Some(0),
-        "clear must exit 0 whether or not anything was deleted"
+        "clear must exit 0: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    assert_eq!(
+        trim_stdout(&out),
+        cache_dir.display().to_string(),
+        "stdout must still be exactly the resolved cache directory path"
+    );
+    // The behavior change pinned by plan D10: the directory survives.
+    assert!(cache_dir.exists(), "--clear-cache must preserve the directory");
     assert!(
-        !cache_dir.exists(),
-        "clear must remove the cache directory itself (database, sidecars, and dir)"
+        cache_dir.join(DB_FILE_NAME).exists(),
+        "the store file itself survives; only tier data dies"
     );
+
+    // Every anchor-tier table is empty again; the cleared store serves.
+    let db = cache_dir.join(DB_FILE_NAME);
+    let conn = rusqlite::Connection::open_with_flags(
+        &db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open cleared store");
+    for table in ["fingerprint", "anchor_walk"] {
+        let rows: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap_or_else(|e| panic!("{table} must exist after a clear: {e}"));
+        assert_eq!(rows, 0, "{table} must be empty after --clear-cache");
+    }
 }
 
 /// With no resolvable common dir (the cwd is inside a repo but `GIT_DIR`
@@ -459,12 +486,12 @@ fn fix_operational_fault_then_schema_rebuild_share_one_warning_budget() {
 
 // ── evaluator witnesses ──────────────────────────────────────────────────────
 
-/// `WIKI_ANCHOR_CACHE=0 wiki check --clear-cache` still deletes (plan
+/// `WIKI_ANCHOR_CACHE=0 wiki check --clear-cache` still clears (plan
 /// decision 8): clearing is cache management, not tier use — the kill
-/// switch only disables the tiers, so the printed path must not claim a
-/// deletion that did not happen.
+/// switch only disables the tiers. Tier-scoped by plan D10: the tables
+/// empty and the directory survives.
 #[test]
-fn clear_cache_under_kill_switch_still_deletes() {
+fn clear_cache_under_kill_switch_still_clears() {
     let repo = certified_fixture();
     let warm = run(&repo.root, &["check"]);
     assert_eq!(
@@ -475,6 +502,17 @@ fn clear_cache_under_kill_switch_still_deletes() {
     );
     let cache_dir = expected_cache_dir(&repo.root);
     assert!(cache_dir.exists(), "the warm run must have cached");
+    let db = cache_dir.join(DB_FILE_NAME);
+    let before: i64 = {
+        let conn = rusqlite::Connection::open_with_flags(
+            &db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("open warm store");
+        conn.query_row("SELECT count(*) FROM fingerprint", [], |r| r.get(0))
+            .expect("count warm rows")
+    };
+    assert!(before > 0, "the warm run must have cached fingerprint rows");
 
     let out = wiki(&repo.root, &["check", "--clear-cache"])
         .env("WIKI_ANCHOR_CACHE", "0")
@@ -486,15 +524,25 @@ fn clear_cache_under_kill_switch_still_deletes() {
         "clear-cache must exit 0 under the kill switch: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(
-        !cache_dir.exists(),
-        "the kill switch must not block the delete"
-    );
     assert_eq!(
         trim_stdout(&out),
         cache_dir.display().to_string(),
-        "the printed path must be the directory that was actually deleted"
+        "the printed path must be the cleared store's directory"
     );
+    assert!(
+        cache_dir.exists(),
+        "the kill switch must not block the clear, and the directory survives"
+    );
+    let after: i64 = {
+        let conn = rusqlite::Connection::open_with_flags(
+            &db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("open cleared store");
+        conn.query_row("SELECT count(*) FROM fingerprint", [], |r| r.get(0))
+            .expect("count cleared rows")
+    };
+    assert_eq!(after, 0, "the kill switch must not block the tier drops");
 }
 
 /// A held write lock on the cache DB must fail the cache open — never

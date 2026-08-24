@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -58,23 +59,45 @@ pub fn anchor_cache_add_leg(name: &str, ns: u64) {
     };
 }
 
+/// Per-run store diagnostic tallies (plan D11): the merged store publishes
+/// its `store_events` per-event counts when a connection is available on the
+/// run's path, and the aggregated `anchor_cache` record carries them under
+/// `meta.diagnostics`. `None` (kill switch, held lock, disabled cache) means
+/// the field is omitted entirely.
+static DIAGNOSTICS: Mutex<Option<BTreeMap<String, u64>>> = Mutex::new(None);
+
+/// Publish one run's store_events aggregation, replacing any earlier
+/// snapshot. An empty map clears the slot so a clean run omits the field.
+pub fn set_diagnostic_counts(counts: BTreeMap<String, u64>) {
+    if let Ok(mut slot) = DIAGNOSTICS.lock() {
+        *slot = (!counts.is_empty()).then_some(counts);
+    }
+}
+
+fn diagnostic_snapshot() -> Option<BTreeMap<String, u64>> {
+    let guard = DIAGNOSTICS.lock().ok()?;
+    guard.clone()
+}
+
 /// Emit the run's one aggregated `anchor_cache` event (plan decision 7).
 /// Called once per `wiki check` invocation, after the run body, on every
 /// path — early exits included — so a warm run reports zero legs rather
 /// than nothing. A no-op before `perf::init` resolves the log file.
 pub fn emit_anchor_cache_event() {
-    log_event(
-        "anchor_cache",
-        0.0,
-        "ok",
-        json!({
-            "hits": ANCHOR_CACHE.hits.load(Ordering::Relaxed),
-            "misses": ANCHOR_CACHE.misses.load(Ordering::Relaxed),
-            "bypasses": ANCHOR_CACHE.bypasses.load(Ordering::Relaxed),
-            "fingerprint_ms": ANCHOR_CACHE.fingerprint_ns.load(Ordering::Relaxed) as f64 / 1e6,
-            "walk_ms": ANCHOR_CACHE.walk_ns.load(Ordering::Relaxed) as f64 / 1e6,
-        }),
-    );
+    let mut meta = json!({
+        "hits": ANCHOR_CACHE.hits.load(Ordering::Relaxed),
+        "misses": ANCHOR_CACHE.misses.load(Ordering::Relaxed),
+        "bypasses": ANCHOR_CACHE.bypasses.load(Ordering::Relaxed),
+        "fingerprint_ms": ANCHOR_CACHE.fingerprint_ns.load(Ordering::Relaxed) as f64 / 1e6,
+        "walk_ms": ANCHOR_CACHE.walk_ns.load(Ordering::Relaxed) as f64 / 1e6,
+    });
+    // Countable store diagnostics (plan D11) ride in the event's payload;
+    // the `--perf` stderr echo prints only name+duration by design and is
+    // untouched by this.
+    if let Some(counts) = diagnostic_snapshot() {
+        meta["diagnostics"] = json!(counts);
+    }
+    log_event("anchor_cache", 0.0, "ok", meta);
 }
 
 pub fn enable_stderr(cli_enabled: bool) {

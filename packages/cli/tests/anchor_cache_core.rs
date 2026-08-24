@@ -184,14 +184,14 @@ fn page_writes_remain_queued_until_one_explicit_flush() {
 }
 
 #[test]
-fn clear_drops_its_connection_before_removing_files() {
+fn clear_releases_its_connection_before_the_destructive_window() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = open_store(dir.path());
     assert!(store.connection_is_open());
     store.clear().expect("clear");
     assert!(
         !store.connection_is_open(),
-        "clear must release SQLite before unlinking"
+        "clear must release SQLite before the destructive window"
     );
 }
 
@@ -891,25 +891,45 @@ fn store_walk_tampered_row_digest_is_a_miss() {
 // (b) Clear
 // ---------------------------------------------------------------------------
 
-/// clear() removes the cache entirely (plan decision 8): the database, its
-/// WAL companions, any quarantine asides, the init lock — which lives inside
-/// the deleted directory (plan decision 2) — and the `wiki/` directory
-/// itself. After a clear the cache directory does not exist, and a second
-/// clear on the now-missing cache is still a best-effort success.
+/// clear() is tier-scoped (plan D10): both tiers' static tables plus every
+/// dynamic `fts_%` child die inside one transaction under the exclusive
+/// rendezvous lock and the init lock, stale quarantine asides go, and
+/// everything else survives — the directory itself (it holds journals,
+/// rendezvous state, and the log), both lock files, the meta singleton,
+/// and the cross-tier `store_events` ledger. The cleared store probes Valid
+/// immediately, and a second clear is a best-effort success.
 #[test]
-fn clear_deletes_the_cache_directory_lock_and_asides() {
+fn clear_empties_both_tiers_and_preserves_the_directory() {
     let dir = temp_common_dir();
     let store = open_store(dir.path());
+    // Anchor-tier data.
     let key = fingerprint_key("pages/guide.md", SHA, "pages/other.md", 10, 20);
     store
         .upsert_fingerprint(&key, "pages/guide.md", SHA, "pages/other.md", 10, 20, FP)
         .expect("upsert");
-    // A quarantine rename-aside (as schema::quarantine produces it) must go
-    // with everything else.
-    let cache = db_path(dir.path())
-        .parent()
-        .expect("db path has a parent")
-        .to_path_buf();
+    // Index-tier data: one static row and one dynamic `fts_<gen_id>` child,
+    // shaped as generations.rs produces them.
+    let db = db_path(dir.path());
+    exec_on_db(
+        &db,
+        "INSERT INTO generations (gen_id, digest, head_oid, head_tree_oid, index_checksum,
+             wikiignore_hash, worktree_sig, publisher, created_at, access_bucket, blob_count)
+         VALUES (1, x'0000000000000000000000000000000000000000000000000000000000000000',
+             'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6a7b8c9d0', '',
+             x'0000000000000000000000000000000000000000',
+             x'0000000000000000000000000000000000000000',
+             x'0000000000000000000000000000000000000000000000000000000000000000',
+             NULL, 0, 0, 0);",
+    );
+    exec_on_db(&db, "CREATE VIRTUAL TABLE fts_1 USING fts5(body);");
+    // A diagnostic event recorded before the clear must survive it — the
+    // ledger is cross-tier infrastructure, never dropped by tier-scoped work.
+    {
+        let observer = rusqlite::Connection::open(&db).expect("observer");
+        wiki::cache::diagnostics::record(&observer, "quarantine_performed");
+    }
+    // A quarantine rename-aside (as schema::quarantine produces it) goes.
+    let cache = db.parent().expect("db path has a parent").to_path_buf();
     fs::write(
         cache.join(format!("{DB_FILE_NAME}.1234567890.quarantine")),
         b"aside",
@@ -919,12 +939,46 @@ fn clear_deletes_the_cache_directory_lock_and_asides() {
     assert!(lock.exists(), "the open path leaves the init lock behind");
 
     store.clear().expect("clear");
-    assert!(!cache.exists(), "the cache directory itself is deleted");
+    assert!(cache.exists(), "the directory itself is preserved");
+    assert!(lock.exists(), "the init lock file is preserved");
 
-    // Best-effort idempotence: clearing an already-deleted cache still
-    // succeeds (and leaves nothing behind).
+    // Tier tables exist again (empty shapes) with zero rows; the dynamic
+    // fts child is gone entirely; meta and the ledger survive.
+    assert_eq!(probe(&db).expect("probe"), ProbeOutcome::Valid);
+    let conn = rusqlite::Connection::open(&db).expect("reopen cleared store");
+    for table in [
+        "fingerprint",
+        "anchor_walk",
+        "generations",
+        "gen_paths",
+        "blobs",
+    ] {
+        let rows: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap_or_else(|e| panic!("cleared tier table {table} must serve: {e}"));
+        assert_eq!(rows, 0, "{table} must be empty after a clear");
+    }
+    let fts_children: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name LIKE 'fts\\_%' ESCAPE '\\'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count fts children");
+    assert_eq!(fts_children, 0, "every dynamic fts_% child must be dropped");
+    let meta_rows: i64 = conn
+        .query_row("SELECT count(*) FROM meta", [], |r| r.get(0))
+        .expect("count meta");
+    assert_eq!(meta_rows, 1, "the meta singleton survives a clear");
+    let events: i64 = conn
+        .query_row("SELECT count(*) FROM store_events", [], |r| r.get(0))
+        .expect("count store_events");
+    assert_eq!(events, 1, "the store_events ledger survives a clear");
+    drop(conn);
+
+    // Best-effort idempotence: clearing an already-empty store still succeeds.
     store.clear().expect("clear again");
-    assert!(!cache.exists());
+    assert_eq!(probe(&db).expect("probe"), ProbeOutcome::Valid);
 }
 
 // ---------------------------------------------------------------------------

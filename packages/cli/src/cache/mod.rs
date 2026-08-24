@@ -19,6 +19,7 @@
 //! is unavailable for the run — the caller falls back to uncached
 //! computation with at most one diagnostic line (plan decisions 4 and 7).
 
+pub mod diagnostics;
 pub mod key;
 pub mod rendezvous;
 pub mod schema;
@@ -76,6 +77,10 @@ enum InjectedFault {
     Operational,
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     Schema,
+    /// Overwrites the store file with garbage bytes, forcing the
+    /// corruption-class quarantine path (plan D11's witness harness).
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    Corrupt,
 }
 
 #[derive(Default)]
@@ -111,6 +116,7 @@ impl CacheReporter {
                 .extend(script.split(',').filter_map(|item| match item {
                     "operational" => Some(InjectedFault::Operational),
                     "schema" => Some(InjectedFault::Schema),
+                    "corrupt" => Some(InjectedFault::Corrupt),
                     _ => None,
                 }));
         }
@@ -194,10 +200,14 @@ pub trait AnchorCache {
         value: Option<&str>,
     ) -> Result<(), CacheError>;
 
-    /// Delete the cache contents — the database file, its WAL sidecars,
-    /// any quarantine asides, the init lock (unlinked while held), and the
-    /// `wiki/` directory itself (used by `wiki check --clear-cache`, plan
-    /// decision 8).
+    /// Clear the store's derived data — tier-scoped (plan D10/D7): drop
+    /// BOTH tiers' static tables plus every dynamic `fts_%` child inside
+    /// one transaction under the exclusive rendezvous lock and the init
+    /// lock, and delete stale `.quarantine` asides. Nothing else is
+    /// removed: the directory survives (it holds journals, both lock
+    /// files, and the log), as do the meta singleton and the cross-tier
+    /// `store_events` ledger. Used by `wiki check --clear-cache`, plan
+    /// decision 8.
     fn clear(&self) -> Result<(), CacheError>;
 }
 
@@ -288,6 +298,10 @@ impl CacheStore {
                 let conn = rusqlite::Connection::open(&db)?;
                 conn.execute_batch("DROP TABLE IF EXISTS fingerprint; CREATE TABLE fingerprint (key_digest TEXT PRIMARY KEY) STRICT;")?;
             }
+            #[cfg(debug_assertions)]
+            if injected == Some(InjectedFault::Corrupt) {
+                std::fs::write(&db, "wiki test fault: deliberately not a database")?;
+            }
             match schema::probe(&db)? {
                 schema::ProbeOutcome::Valid => {}
                 // Missing is a fresh create, never a quarantine; the DDL leg
@@ -311,11 +325,17 @@ impl CacheStore {
                 // Schema skew (plan D2): matching identity pair, deviating
                 // static shapes for one tier. Tier-scoped structural
                 // invalidation — never quarantine, never a diagnostic; the
-                // tier rebuilds silently on next use.
+                // tier rebuilds silently on next use. The repair is still a
+                // countable store event (plan D11).
                 schema::ProbeOutcome::Skew(tier) => {
                     schema::prepare_db_file(&db)?;
                     let conn = schema::open_connection(&db)?;
                     schema::drop_tier_tables(&conn, tier)?;
+                    let event = match tier {
+                        schema::Tier::Anchor => "skew_repair:anchor",
+                        schema::Tier::Index => "skew_repair:index",
+                    };
+                    diagnostics::record(&conn, event);
                     drop(conn);
                     drop(schema::open_connection(&db)?);
                 }
@@ -327,6 +347,12 @@ impl CacheStore {
             FileExt::unlock(&lock_file)?;
             drop(lock_file);
             let conn = schema::open_connection(&db)?;
+            // Surface the run's store_events tallies through the perf
+            // JSON-lines channel (plan D11): everything recorded during this
+            // open — quarantine/rebuild/skew repair included — plus any
+            // earlier ledger rows. No-op for the kill-switch and disabled
+            // paths, where the payload's diagnostics field stays omitted.
+            diagnostics::publish_counts(&conn);
             Ok(Some(CacheStore {
                 conn: RefCell::new(Some(conn)),
                 common_dir: common_dir.to_path_buf(),
@@ -655,19 +681,21 @@ impl AnchorCache for CacheStore {
     }
 
     fn clear(&self) -> Result<(), CacheError> {
-        // Close before acquiring the deletion lock: Windows refuses to
-        // remove the database or sidecars while this process retains it.
+        // Close before acquiring the locks: a general handle may retain an
+        // open database (Windows refuses removal while a descriptor is out).
         self.pending.borrow_mut().clear();
         drop(self.conn.borrow_mut().take());
-        // Take the same no-wait init lock first: never delete under a
-        // concurrent probe/quarantine (plan decision 8). The recreated
-        // subtree and lock file go through the hardened primitives (plan
-        // D9). Contention is an error — the caller reports it rather than
-        // silently skipping the clear (never a wrong-answer path).
+        // Exclusive rendezvous first (plan D7/D10): tier drops are
+        // destructive work that must exclude readers and publishers.
+        // Bounded wait; timeout ⇒ Err ⇒ the caller's single fault line.
+        let _rendezvous = rendezvous::acquire_exclusive(&self.common_dir)?;
+        // Then the same no-wait init lock the open path holds across
+        // probe/quarantine/skew repair/DDL — never interleave with those
+        // windows (plan decision 8's racing clause is an error here, which
+        // the caller reports as its one fault line).
         let common = DirFd::open(&self.common_dir)?;
         let wiki = common.ensure_private_subtree(Path::new(schema::STORE_DIR_NAME))?;
         wiki.validate_private()?;
-        let lock_path = schema::init_lock_path(&self.common_dir);
         let lock_file = wiki.create_file(schema::INIT_LOCK_FILE_NAME)?;
         match lock_file.try_lock_exclusive() {
             Ok(true) => {}
@@ -683,23 +711,32 @@ impl AnchorCache for CacheStore {
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Err(e.into()),
             Err(e) => return Err(e.into()),
         }
-        let dir = schema::store_dir(&self.common_dir);
-        // Delete the database file and its WAL companions. Best-effort:
-        // NotFound is fine (the cache may not exist); anything else surfaces
-        // as an error.
-        for name in [
-            schema::DB_FILE_NAME,
-            &format!("{}-wal", schema::DB_FILE_NAME),
-            &format!("{}-shm", schema::DB_FILE_NAME),
-        ] {
-            match fs::remove_file(dir.join(name)) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
+        // Heal-or-open, then drop BOTH tiers' static tables plus every
+        // dynamic `fts_%` child inside one transaction (plan D10). A suspect
+        // file quarantines into a fresh store with no tier data to drop; a
+        // skewed or valid store clears wholesale — recreating the empty
+        // shapes afterwards subsumes skew repair. The meta singleton and the
+        // cross-tier store_events ledger survive by construction: neither is
+        // a tier table, so [`schema::drop_tier_tables`] never touches them.
+        let db = schema::db_path(&self.common_dir);
+        match schema::probe(&db)? {
+            schema::ProbeOutcome::Missing => {}
+            schema::ProbeOutcome::Suspect(_) => schema::quarantine(&db)?,
+            schema::ProbeOutcome::Valid | schema::ProbeOutcome::Skew(_) => {
+                let conn = schema::open_connection(&db)?;
+                let tx = conn.unchecked_transaction()?;
+                schema::drop_tier_tables(&tx, schema::Tier::Anchor)?;
+                schema::drop_tier_tables(&tx, schema::Tier::Index)?;
+                tx.commit()?;
+                drop(conn);
+                drop(schema::open_connection(&db)?);
             }
         }
-        // Delete every quarantine rename-aside (`store.sqlite.<stamp>.
-        // quarantine`, as produced by schema::quarantine). Best-effort.
+        // Delete every stale quarantine rename-aside (`store.sqlite.<stamp>.
+        // quarantine`, as produced by schema::quarantine). Best-effort:
+        // NotFound is fine (there may be none); anything else surfaces as
+        // an error.
+        let dir = schema::store_dir(&self.common_dir);
         let aside_prefix = format!("{}.", schema::DB_FILE_NAME);
         match fs::read_dir(&dir) {
             Ok(entries) => {
@@ -721,29 +758,15 @@ impl AnchorCache for CacheStore {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
-        // Unlink the init lock — while still holding the flock on it. The
-        // held flock stays valid on the unlinked inode, so no concurrent
-        // probe/quarantine can interleave with the deletions above; a
-        // concurrent opener can only create a fresh lock file after the
-        // unlink, by which point the db files are gone. The lock lives
-        // inside the deleted directory (plan decision 2), so clearing the
-        // directory inherently removes it (plan decision 8).
-        match fs::remove_file(&lock_path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
-        // The directory itself must go (plan decision 8). DirectoryNotEmpty
-        // and NotFound are the racing exceptions — a concurrent opener may
-        // have recreated the cache after the unlink, or the dir never
-        // existed — never the normal outcome.
-        match fs::remove_dir(&dir) {
-            Ok(()) => {}
-            Err(e)
-                if e.kind() == io::ErrorKind::NotFound
-                    || e.kind() == io::ErrorKind::DirectoryNotEmpty => {}
-            Err(e) => return Err(e.into()),
-        }
+        // Explicit unlock mirrors the open path: on some filesystems
+        // closing a descriptor does not promptly release the advisory lock
+        // for a same-process opener.
+        FileExt::unlock(&lock_file)?;
+        drop(lock_file);
+        // Nothing else goes: the directory itself, the database file and
+        // WAL sidecars, and both lock files all stay — the directory hosts
+        // fix journals, rendezvous state, and wiki.log (plan D10), so a
+        // clear empties tables and never deletes paths.
         Ok(())
     }
 }
