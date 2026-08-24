@@ -1,8 +1,9 @@
-import { readFileSync, writeFileSync, globSync, statSync } from "node:fs";
-import { argv, stderr } from "node:process";
-import { homedir } from "node:os";
+import { readFileSync, writeFileSync, globSync, statSync, mkdtempSync, rmSync, mkdirSync, openSync } from "node:fs";
+import { argv, exit, stderr } from "node:process";
+import { homedir, tmpdir } from "node:os";
 import { dirname, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import { extractInvocations } from "./lib/detect.mjs";
 import { walkTranscript, lookupOutcome } from "./lib/transcripts.mjs";
 
@@ -14,13 +15,71 @@ for (const a of argv.slice(2)) {
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
-const CLAUDE_ROOT = flags["claude-root"] && flags["claude-root"] !== true ? resolve(String(flags["claude-root"])) : resolve(homedir(), ".claude");
-const CARDS_ROOT = flags["cards-root"] && flags["cards-root"] !== true ? resolve(String(flags["cards-root"])) : resolve(homedir(), ".cards");
+const HOST = flags.host && flags.host !== true ? String(flags.host) : null;
+let CLAUDE_ROOT = flags["claude-root"] && flags["claude-root"] !== true ? resolve(String(flags["claude-root"])) : resolve(homedir(), ".claude");
+let CARDS_ROOT = flags["cards-root"] && flags["cards-root"] !== true ? resolve(String(flags["cards-root"])) : resolve(homedir(), ".cards");
 const OUT_PATH = flags.out && flags.out !== true ? resolve(String(flags.out)) : resolve(here, "invocations.jsonl");
 const INDEX_OUT = flags["index-out"] && flags["index-out"] !== true ? resolve(String(flags["index-out"])) : resolve(here, "index.json");
 
+function sshRun(host, cmd, label) {
+  const r = spawnSync("ssh", ["-o", "BatchMode=yes", host, cmd], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  if (r.status !== 0) {
+    stderr.write(`error: ${label} on ${host} failed (exit ${r.status}): ${r.stderr || r.error}\n`);
+    exit(1);
+  }
+  return r.stdout.trim();
+}
+
+function fetchRemoteTree(host, remoteRoot, findExpr, localDir, label) {
+  const abs = sshRun(host, `test -d '${remoteRoot}' && cd '${remoteRoot}' && pwd`, `${label}: resolving root`);
+  if (!abs) {
+    stderr.write(`error: remote root ${remoteRoot} resolved empty on ${host}\n`);
+    exit(1);
+  }
+  mkdirSync(localDir, { recursive: true });
+  const tarPath = join(localDir, "..", `${label}.tar.gz`);
+  const fetch = spawnSync(
+    "ssh",
+    ["-o", "BatchMode=yes", host, `cd '${abs.replace(/'/g, "'\\''")}' && find . ${findExpr} -print0 | tar --null -T - -czf -`],
+    { stdio: ["ignore", openTar(tarPath), "pipe"], maxBuffer: 32 * 1024 * 1024 },
+  );
+  if (fetch.status !== 0) {
+    stderr.write(`error: fetching ${label} from ${host}:${abs} failed (exit ${fetch.status}): ${fetch.stderr}\n`);
+    exit(1);
+  }
+  const extract = spawnSync("tar", ["-xzf", tarPath, "-C", localDir]);
+  rmSync(tarPath, { force: true });
+  if (extract.status !== 0) {
+    stderr.write(`error: extracting ${label} archive failed (exit ${extract.status}): ${extract.stderr}\n`);
+    exit(1);
+  }
+}
+
+function openTar(path) {
+  return openSync(path, "w");
+}
+
 const invocations = [];
 const fileStats = [];
+let cleanupDir = null;
+
+if (HOST) {
+  const home = sshRun(HOST, "echo $HOME", "resolving $HOME");
+  if (!home) {
+    stderr.write(`error: $HOME resolved empty on ${HOST}\n`);
+    exit(1);
+  }
+  const remoteClaude = flags["remote-claude"] && flags["remote-claude"] !== true ? String(flags["remote-claude"]) : `${home}/.claude`;
+  const remoteCards = flags["remote-cards"] && flags["remote-cards"] !== true ? String(flags["remote-cards"]) : `${home}/.cards`;
+  cleanupDir = mkdtempSync(join(tmpdir(), "wiki-cli-analysis-"));
+  const claudeDir = join(cleanupDir, "claude");
+  const cardsDir = join(cleanupDir, "cards");
+  fetchRemoteTree(HOST, remoteClaude, `-name "*.jsonl" -type f`, claudeDir, `claude`);
+  fetchRemoteTree(HOST, remoteCards, `-name "*.json" -type f -not -path "*/node_modules/*"`, cardsDir, `cards`);
+  CLAUDE_ROOT = claudeDir;
+  CARDS_ROOT = cardsDir;
+  stderr.write(`fetched remote trees from ${HOST}: ${remoteClaude} -> ${claudeDir}, ${remoteCards} -> ${cardsDir}\n`);
+}
 
 function head(s, n = 400) {
   if (typeof s !== "string") return null;
@@ -131,6 +190,7 @@ writeFileSync(
   JSON.stringify(
     {
       generatedAt: new Date().toISOString(),
+      host: HOST,
       claudeRoot: CLAUDE_ROOT,
       cardsRoot: CARDS_ROOT,
       totals: { filesScanned: fileStats.length, invocations: invocations.length, jsonParseErrors },
@@ -140,6 +200,8 @@ writeFileSync(
     2,
   ),
 );
+
+if (cleanupDir) rmSync(cleanupDir, { recursive: true, force: true });
 
 stderr.write(`${fileStats.length} files scanned (${claudeFiles.length} transcripts, ${cardFiles.length} cards JSON), ${jsonParseErrors} unparseable, ${invocations.length} wiki CLI invocations written\n`);
 stderr.write(`invocations: ${OUT_PATH}\nindex: ${INDEX_OUT}\n`);
