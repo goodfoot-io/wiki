@@ -28,6 +28,10 @@ services:
       # stale-cache defect breaks) and the cargo registry/bin cache.
       - rustup-data:/var/lib/coaxial/rustup
       - cargo-data:/var/lib/coaxial/cargo
+      # Shared cargo build-target root (packages/cli/target symlinks here), off
+      # the virtiofs /workspace bind — same pattern as git-span and
+      # upstream-backend cargo-target volumes.
+      - wiki-cargo-target:/var/lib/coaxial/cargo-target
     environment:
       - NODE_OPTIONS=--max-old-space-size=8192
       - CLAUDE_CONFIG_DIR=/home/node/.claude
@@ -40,3 +44,4 @@ volumes:
   cards-worktrees:
   rustup-data:
   cargo-data:
+  wiki-cargo-target:
