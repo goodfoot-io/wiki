@@ -1,0 +1,490 @@
+{
+  "generatedAt": "2026-08-24T15:48:03.410Z",
+  "claudeRoot": "/home/node/.claude",
+  "cardsRoot": "/home/node/.cards",
+  "totals": {
+    "filesScanned": 228,
+    "invocations": 194,
+    "jsonParseErrors": 0
+  },
+  "files": [
+    {
+      "file": "claude:history.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:plugins/marketplaces/git-span/packages/git-span/tests/fixtures/advice/pair_only/expected.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:plugins/marketplaces/git-span/packages/git-span/tests/fixtures/advice/pair_only/sessions/s1/reads.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:plugins/marketplaces/git-span/packages/git-span/tests/fixtures/advice/pair_only/sessions/s1/touches.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:plugins/marketplaces/git-span/packages/git-span/tests/fixtures/advice/pair_only/sessions/s2/reads.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:plugins/marketplaces/git-span/packages/git-span/tests/fixtures/advice/pair_only/sessions/s2/touches.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:plugins/marketplaces/git-span/packages/git-span/tests/fixtures/advice/subsumed_pair/expected.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:plugins/marketplaces/git-span/packages/git-span/tests/fixtures/advice/subsumed_pair/sessions/s1/reads.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:plugins/marketplaces/git-span/packages/git-span/tests/fixtures/advice/subsumed_pair/sessions/s1/touches.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:plugins/marketplaces/git-span/packages/git-span/tests/fixtures/advice/subsumed_pair/sessions/s2/reads.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:plugins/marketplaces/git-span/packages/git-span/tests/fixtures/advice/subsumed_pair/sessions/s2/touches.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:plugins/marketplaces/git-span/packages/git-span/tests/fixtures/advice/triad_strong/expected.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:plugins/marketplaces/git-span/packages/git-span/tests/fixtures/advice/triad_strong/sessions/s1/reads.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:plugins/marketplaces/git-span/packages/git-span/tests/fixtures/advice/triad_strong/sessions/s1/touches.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:plugins/marketplaces/git-span/packages/git-span/tests/fixtures/advice/triad_strong/sessions/s2/reads.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:plugins/marketplaces/git-span/packages/git-span/tests/fixtures/advice/triad_strong/sessions/s2/touches.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:plugins/marketplaces/git-span/packages/git-span/tests/fixtures/advice/triad_strong/sessions/s3/reads.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:plugins/marketplaces/git-span/packages/git-span/tests/fixtures/advice/triad_strong/sessions/s3/touches.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-1-1/6e939e86-c53c-45eb-b9e6-2c614b8c1a44.jsonl",
+      "kind": "transcript",
+      "invocations": 21,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-1-1/6e939e86-c53c-45eb-b9e6-2c614b8c1a44/subagents/agent-a484a8aa0ed490e6e.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-1-1/6e939e86-c53c-45eb-b9e6-2c614b8c1a44/subagents/agent-a78e61cf6975cba88.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-2-1/aedf3f7a-c386-49a5-b2f0-4b990d95b097.jsonl",
+      "kind": "transcript",
+      "invocations": 8,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-2-1/aedf3f7a-c386-49a5-b2f0-4b990d95b097/subagents/agent-a0e4e903128d4b481.jsonl",
+      "kind": "transcript",
+      "invocations": 11,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-2-1/aedf3f7a-c386-49a5-b2f0-4b990d95b097/subagents/agent-a86627e0a8542208b.jsonl",
+      "kind": "transcript",
+      "invocations": 3,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-3-1/eb0fb715-423e-4464-b0db-b20b3eae55c4.jsonl",
+      "kind": "transcript",
+      "invocations": 71,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-3-1/eb0fb715-423e-4464-b0db-b20b3eae55c4/subagents/agent-a06672dc81fee8227.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-3-1/eb0fb715-423e-4464-b0db-b20b3eae55c4/subagents/agent-a0e19fb75e440e815.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-3-1/eb0fb715-423e-4464-b0db-b20b3eae55c4/subagents/agent-a3c20db2c2e97c233.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-3-1/eb0fb715-423e-4464-b0db-b20b3eae55c4/subagents/agent-a51502ffba5ada9ee.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-3-1/eb0fb715-423e-4464-b0db-b20b3eae55c4/subagents/agent-a6ae8e11619813f2c.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-3-1/eb0fb715-423e-4464-b0db-b20b3eae55c4/subagents/agent-a713f676fc3da893c.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-3-1/eb0fb715-423e-4464-b0db-b20b3eae55c4/subagents/agent-a78195f6a926ab552.jsonl",
+      "kind": "transcript",
+      "invocations": 1,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-3-1/eb0fb715-423e-4464-b0db-b20b3eae55c4/subagents/agent-ac061fa6eb2bcf216.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-3-1/eb0fb715-423e-4464-b0db-b20b3eae55c4/subagents/agent-acli-fixes-1f509e98fe31f221.jsonl",
+      "kind": "transcript",
+      "invocations": 5,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-3-1/eb0fb715-423e-4464-b0db-b20b3eae55c4/subagents/agent-ad07457fb67c85c15.jsonl",
+      "kind": "transcript",
+      "invocations": 18,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-3-1/eb0fb715-423e-4464-b0db-b20b3eae55c4/subagents/agent-aexperience-evaluator-a415c6f153722f8a.jsonl",
+      "kind": "transcript",
+      "invocations": 6,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-3-1/eb0fb715-423e-4464-b0db-b20b3eae55c4/subagents/agent-afailure-mode-91964e5e11f86989.jsonl",
+      "kind": "transcript",
+      "invocations": 4,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-3-1/eb0fb715-423e-4464-b0db-b20b3eae55c4/subagents/agent-aspan-reconcile-2-1b3a4537d4b6c631.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-3-1/eb0fb715-423e-4464-b0db-b20b3eae55c4/subagents/agent-aspan-reconcile-43839f0ad7e789e0.jsonl",
+      "kind": "transcript",
+      "invocations": 2,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-3-1/eb0fb715-423e-4464-b0db-b20b3eae55c4/subagents/agent-aspan-reconciler-fd372021af080629.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-4-1/127280f2-df71-4134-941e-78d9f281db49.jsonl",
+      "kind": "transcript",
+      "invocations": 26,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-4-1/127280f2-df71-4134-941e-78d9f281db49/subagents/agent-ab247e9b0816e91ce.jsonl",
+      "kind": "transcript",
+      "invocations": 1,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-4-1/127280f2-df71-4134-941e-78d9f281db49/subagents/agent-ac2feec7dd4e310f5.jsonl",
+      "kind": "transcript",
+      "invocations": 5,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-4-1/127280f2-df71-4134-941e-78d9f281db49/subagents/agent-acache-core-b489bcd72c2177bf.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-4-1/127280f2-df71-4134-941e-78d9f281db49/subagents/agent-acli-surface-1cd0c2ae2839fe3d.jsonl",
+      "kind": "transcript",
+      "invocations": 1,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-4-1/127280f2-df71-4134-941e-78d9f281db49/subagents/agent-acli-surface-2-5043dd9532edb68e.jsonl",
+      "kind": "transcript",
+      "invocations": 1,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-4-1/127280f2-df71-4134-941e-78d9f281db49/subagents/agent-adrift-wiring-2-6085eb8f0db78851.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-4-1/127280f2-df71-4134-941e-78d9f281db49/subagents/agent-adrift-wiring-fec869c391a5430f.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-4-1/127280f2-df71-4134-941e-78d9f281db49/subagents/agent-aenvironment-research-f2f6777fe4146e4e.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-4-1/127280f2-df71-4134-941e-78d9f281db49/subagents/agent-agit-span-cache-review-15572871d665709b.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-4-1/127280f2-df71-4134-941e-78d9f281db49/subagents/agent-aplan-failure-review-b90af49f1a7cb1e1.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-4-1/127280f2-df71-4134-941e-78d9f281db49/subagents/agent-aspike-gix-common-dir-585f4b6306c1b2f2.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-4-1/127280f2-df71-4134-941e-78d9f281db49/subagents/agent-aspike-multi-conn-wal-30573b1945974b38.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-4-1/127280f2-df71-4134-941e-78d9f281db49/subagents/agent-aspike-quarantine-race-0fbf272a4b410639.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-4-1/127280f2-df71-4134-941e-78d9f281db49/subagents/agent-aspike-sqlite-locking-9ea16eb5fa3efe8c.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-home-node--cards-worktrees-workspace-c52ddf65-cards-main-4-1/127280f2-df71-4134-941e-78d9f281db49/subagents/agent-aworkspace-mechanism-research-5e21addaf97c09a7.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-workspace/1ab9d654-985c-48ad-9c8e-0499061163f5.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-workspace/4855213a-e479-458c-b2a0-44beeaea41e2.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-workspace/4855213a-e479-458c-b2a0-44beeaea41e2/subagents/agent-a2606686c32dc554f.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-workspace/4855213a-e479-458c-b2a0-44beeaea41e2/subagents/agent-a6abf98face7f9478.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-workspace/4855213a-e479-458c-b2a0-44beeaea41e2/subagents/agent-afmea-wiki-mesh-e7fd36d3b316bbd2.jsonl",
+      "kind": "transcript",
+      "invocations": 1,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-workspace/4d36fb12-a8a8-4615-8d1f-a3c35650ab39.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-workspace/5f5f045f-5f37-4dd5-968d-60e177e0e14c.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-workspace/76358e77-d372-4fa3-8a2c-78bdf2ac080f.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-workspace/76358e77-d372-4fa3-8a2c-78bdf2ac080f/subagents/agent-a2f6e44d51f97d0d0.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-workspace/9d791004-c04d-4fa3-83fa-956dc263a732.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-workspace/9d791004-c04d-4fa3-83fa-956dc263a732/subagents/agent-a07eee5c002c181a8.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-workspace/9d791004-c04d-4fa3-83fa-956dc263a732/subagents/agent-a0ca0709d135be793.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-workspace/9d791004-c04d-4fa3-83fa-956dc263a732/subagents/agent-a62a876655c350c77.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-workspace/9d791004-c04d-4fa3-83fa-956dc263a732/subagents/agent-a85af84877e8b5ecf.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-workspace/9d791004-c04d-4fa3-83fa-956dc263a732/subagents/agent-aaef21d1282de2b49.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-workspace/9d791004-c04d-4fa3-83fa-956dc263a732/subagents/agent-af6db8761b915ed8f.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "claude:projects/-workspace/c866be84-c095-4009-b098-9900125f02e1.jsonl",
+      "kind": "transcript",
+      "invocations": 0,
+      "malformedLines": 0
+    },
+    {
+      "file": "cards:cards-repos/main-1/CARD.meta.json",
+      "kind": "card-json",
+      "invocations": 2
+    },
+    {
+      "file": "cards:cards-repos/main-2/CARD.meta.json",
+      "kind": "card-json",
+      "invocations": 1
+    },
+    {
+      "file": "cards:cards-repos/main-3/notes/check-pipeline-integration-map.md.meta.json",
+      "kind": "card-json",
+      "invocations": 1
+    },
+    {
+      "file": "cards:cards-repos/main-3/notes/docs-hooks-spans-surface.md.meta.json",
+      "kind": "card-json",
+      "invocations": 1
+    },
+    {
+      "file": "cards:cards-repos/main-3/notes/hook-preemption-sequencing.md.meta.json",
+      "kind": "card-json",
+      "invocations": 1
+    },
+    {
+      "file": "cards:cards-repos/main-3/notes/move-scan-linearization.md.meta.json",
+      "kind": "card-json",
+      "invocations": 1
+    },
+    {
+      "file": "cards:cards-repos/main-3/notes/moved-self-loop.md.meta.json",
+      "kind": "card-json",
+      "invocations": 1
+    },
+    {
+      "file": "cards:cards-repos/main-4/notes/benchmark-anchor-cache.md.meta.json",
+      "kind": "card-json",
+      "invocations": 1
+    }
+  ]
+}
