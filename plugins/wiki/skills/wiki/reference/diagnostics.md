@@ -2,12 +2,12 @@
 title: Wiki Check Diagnostics Reference
 summary: Every diagnostic kind, exit code, and JSON output shape wiki check can produce.
 tags: [wiki, reference]
-links-reviewed: 1
+links-reviewed: 2
 ---
 
 ## Diagnostic kinds
 
-One pass emits frontmatter/link diagnostics plus per-link anchor classification ([kinds](/packages/cli/src/commands/check.rs#L332-L339) route every hard failure):
+One pass emits frontmatter/link diagnostics plus per-link anchor classification ([kind construction](/packages/cli/src/commands/check.rs#L923-L988) routes every hard failure):
 
 | Kind | Trigger |
 |---|---|

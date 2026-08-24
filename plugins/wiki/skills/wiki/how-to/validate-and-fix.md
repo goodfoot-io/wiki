@@ -20,7 +20,7 @@ Selection follows CWD; links resolve against the repo root, so a subdirectory ru
 - `--fix` — relocate moved links, route broken targets through renames, initialize `links-reviewed:`. Worktree only.
 - `--fix-dry-run` — preview rewrites; requires `--fix`.
 - `--print-applied` — stdout = one rewritten repo-relative path per line; everything else on stderr. Lets callers stage exactly what changed.
-- `--no-exit-code` — report-only; always exit 0 (the hook's mode).
+- `--no-exit-code` — report-only; suppressed diagnostics never set the exit code (the hook's mode). Repo-discovery and argument failures still exit 2.
 - `--source worktree|index|head` — validate another snapshot: staged (`index`) for pre-commit, committed (`head`) for CI. Uncommitted pages are invisible at `head`.
 
 ## Anchor cache

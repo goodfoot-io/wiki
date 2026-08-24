@@ -1,8 +1,8 @@
 ---
-title: Searching And Reading The Wiki
-summary: Search, list, and summary commands — ranking, output shapes, title/alias/path resolution, and how to tell a wiki page from plain markdown.
+title: Search Commands And Output Shapes
+summary: Search, list, and summary — ranking, output shapes, title/alias/path resolution, and verb-dispatch vs search fallback.
 tags: [wiki, reference]
-links-reviewed: 1
+links-reviewed: 2
 ---
 
 `wiki [query]` is the default subcommand — no verb needed.
@@ -18,7 +18,11 @@ echo wiki/page.md | wiki summary   # stdin when argument omitted
 
 ## Ranking
 
-Four stages in priority order: exact title match → exact alias-token match → path fragment (only when the query contains `/`) → BM25 full-text over weighted fields — title 5, aliases 4, tags 3, keywords 3, summary 2, body 1 ([weights](/packages/cli/src/index/search.rs#L216)). Query tokens are prefix-matched; snippets come from body text. Zero matches prints nothing (human) or `[]` (JSON) and exits 0.
+Four stages in priority order: exact title match → exact alias-token match → path fragment (only when the query contains `/`) → BM25 full-text over weighted fields — title 5, aliases 4, tags 3, keywords 3, summary 2, body 1 ([weights](/packages/cli/src/index/search.rs#L216-L217)). Query tokens are prefix-matched; snippets come from body text. Zero matches prints nothing (human) or `[]` (JSON) and exits 0.
+
+## Verb dispatch vs search fallback
+
+A first token equal to `check`, `list`, or `summary` dispatches to that subcommand; anything else is a search query. Topic-word queries (`wiki drift`, `wiki stale`, `wiki reconciliation`) are searches for pages about those topics — they exit 0 whether or not they hit.
 
 ## Output shapes
 
@@ -37,4 +41,4 @@ Not found → suggestions to stderr, exit 1. Infrastructure failure → exit 2.
 
 ## Is this file even a wiki page?
 
-A `.md` file is a wiki page iff its frontmatter has both a non-empty `title` and a non-empty `summary`. Anything else is plain markdown — invisible to search, silently skipped by `wiki check`. Don't assume a file under `wiki/` is a page; check the frontmatter. A query that equals a subcommand name (`check`, `list`, `summary`) dispatches to that subcommand instead of searching.
+A `.md` file is a wiki page iff its frontmatter has both a non-empty `title` and a non-empty `summary`. Anything else is plain markdown — invisible to search, silently skipped by `wiki check`. Don't assume a file under `wiki/` is a page; check the frontmatter.

@@ -1,11 +1,11 @@
 ---
-title: Wiki Command Reference
-summary: Flat lookup — subcommands, flags, global options, environment variables, anchor grammar, diagnostic kinds, exit codes, JSON schemas, reserved names.
+title: Wiki Command Surface
+summary: Flat lookup for wiki 0.5.x — subcommands, flags, global options, environment variables, anchor grammar, binary resolution, reserved names.
 tags: [wiki, reference]
 links-reviewed: 1
 ---
 
-Surface lookup. For workflows see the other sections.
+Surface truth for **wiki 0.5.x**; verify against `wiki --help` when the extension bumps versions.
 
 ## Subcommands
 
@@ -16,6 +16,18 @@ Surface lookup. For workflows see the other sections.
 | `wiki list` | Title-ordered corpus listing. |
 | `wiki summary [title\|alias\|path]` | One page's summary; stdin when omitted. |
 
+**Not in 0.5.x**: `mesh` (moved to the git-span plugin — use `git mesh`), `pin`, `extract` (never shipped). Repeated invocations of removed verbs are a known agent failure mode.
+
+## Binary resolution
+
+Consumers resolve the binary in this order:
+
+1. `$WIKI_BIN` — absolute path override (hooks set this).
+2. `PATH` — install or symlink the CLI for bare `wiki` invocations.
+3. The VS Code extension's managed copy (`<globalStorage>/goodfoot.wiki-extension/bin/<version>/<platform>/wiki`) — version-pinned per installed extension release.
+
+Development trees additionally invoke build outputs directly (`packages/cli/target/{debug,release}/wiki`); those are not on PATH and never satisfy hooks.
+
 ## Flags
 
 | Flag | Where | Effect |
@@ -23,7 +35,7 @@ Surface lookup. For workflows see the other sections.
 | `--fix` | check | Relocate moved links, route broken through renames, initialize `links-reviewed:`. Requires worktree source. |
 | `--fix-dry-run` | check | Preview rewrites, no mutation. Requires `--fix`. |
 | `--print-applied` | check | stdout = rewritten repo-relative paths only; rest → stderr. Requires `--fix`; conflicts with dry-run and JSON. |
-| `--no-exit-code` | check | Report-only; always exit 0. |
+| `--no-exit-code` | check | Suppress validation results from the exit code (report-only). Repo-discovery and argument failures still exit 2. |
 | `--clear-cache` | check | Delete anchor cache, print path, exit 0. |
 | `--tag T`, `--limit N`, `--offset N` | list | Filter by whole token (case-insensitive); paginate title-ordered listing (default unlimited). |
 | `-l N` / `-o N` | search | Result limit (default 3) / offset. |
@@ -41,19 +53,7 @@ Surface lookup. For workflows see the other sections.
 
 ## Anchor grammar
 
-`path#Lstart-Lend` or single line `path#L5`; bare `path` = whole file. Paths resolve per [Writing A Wiki Page](./writing-a-page.md). Classification baseline: content at the commit where `links-reviewed:` last changed.
-
-## Diagnostic kinds (`check --format json`)
-
-`runtime`, `frontmatter`, `collision`, `broken_link`, `broken_anchor`, `anchor_epoch_missing`, `link_drift`, `link_broken`, `link_uncertified`, `link_unverified`.
-
-## Exit codes
-
-| Code | Meaning |
-|---|---|
-| 0 | Clean, or `--no-exit-code`. Search/list/summary: success (search exits 0 even with zero hits). |
-| 1 | Diagnostics present; summary target not found. Fix mode: unresolvable certification skips remain. |
-| 2 | Infrastructure failure: shallow clone, unreadable repo, malformed `.wikiignore`, empty corpus (non-fix check), `--fix` off-worktree, missing summary input. |
+`path#Lstart-Lend` or single line `path#L5`; bare `path` = whole file. Paths resolve per [Authoring Wiki Pages](../how-to/write-a-page.md). Classification baseline: content at the commit where `links-reviewed:` last changed.
 
 ## Reserved names
 

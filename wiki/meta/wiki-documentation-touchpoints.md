@@ -30,7 +30,7 @@ If a documentation update changes the recommended operator workflow, all of thes
 
 The [Gemini wiki gap-detection example script](/examples/githooks/scripts/gemini-wiki-gap-detection.sh) embeds wiki search guidance for automated maintenance work. If the preferred search invocation or page-discovery workflow changes, this prompt must stay aligned with the human-facing docs or automation will continue reinforcing stale instructions.
 
-The [wiki skill's skipped-fix resolution section](/plugins/wiki/skills/wiki/sections/resolving-skipped-fixes.md) defines the skipped-fix workflow (re-point the link, fix the prose, or bump `links-reviewed:`). It is not a user-facing quickstart, but it is part of the operational contract for wiki upkeep and should be checked whenever the update changes validation, certification, or page-discovery expectations.
+The [wiki skill's skipped-fix resolution section](/plugins/wiki/skills/wiki/how-to/validate-and-fix.md#when---fix-skips) defines the skipped-fix workflow (re-point the link, fix the prose, or bump `links-reviewed:`). It is not a user-facing quickstart, but it is part of the operational contract for wiki upkeep and should be checked whenever the update changes validation, certification, or page-discovery expectations.
 
 ## Update Order
 

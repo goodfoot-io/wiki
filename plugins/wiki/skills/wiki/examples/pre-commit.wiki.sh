@@ -5,19 +5,13 @@
 #   field-less pages — all in the working tree.
 # --no-exit-code makes this best-effort: the hook never aborts a commit.
 # --print-applied prints the repo-relative path of each file the run rewrote
-# to stdout (one per line); everything else goes to stderr (shown on the
-# terminal).
+# to stdout (one per line); everything else goes to stderr.
 set -e
 
-command -v wiki >/dev/null 2>&1 || exit 0
-WIKI_BIN=$(command -v wiki)
+WIKI_BIN="${WIKI_BIN:-$(command -v wiki 2>/dev/null || true)}"
+[ -n "$WIKI_BIN" ] && [ -x "$WIKI_BIN" ] || exit 0
 
-# ── Single pass: auto-fix, then stage exactly what the run rewrote ────────────
-# --fix rewrites in place (requires --source=worktree). --print-applied is the
-# machine-readable list of rewritten files, so the hook stages precisely those
-# paths — no snapshot/compare pass, and no sweeping in unrelated dirty .md
-# edits the run did not touch.
-APPLIED=$("$WIKI_BIN" check --fix --print-applied --no-exit-code --source=worktree)
+APPLIED=$("$WIKI_BIN" check --fix --print-applied --no-exit-code --source=worktree) || exit 0
 
 if [ -n "$APPLIED" ]; then
     while IFS= read -r fixed_path; do

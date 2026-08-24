@@ -4,7 +4,7 @@ summary: One best-effort wiki check --fix per commit that stages exactly the fil
 tags: [wiki, how-to]
 ---
 
-One pre-commit concern, one invocation: `wiki check --fix` repairs mechanical drift in the working tree, then the hook stages **exactly** the files that run rewrote. It is a local guard, not a commit gate: unresolvable errors print to stderr but never block (`--no-exit-code`), and a missing `wiki` binary passes silently.
+One pre-commit concern, one invocation: `wiki check --fix` repairs mechanical drift in the working tree, then the hook stages **exactly** the files that run rewrote. It is a local guard, not a commit gate: unresolvable errors print to stderr but never block (`--no-exit-code` — though repo-discovery and argument failures still exit 2), an absent binary passes silently, and the script honors an inherited `WIKI_BIN` before falling back to PATH.
 
 ## The hook
 

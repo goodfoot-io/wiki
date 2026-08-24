@@ -1,33 +1,52 @@
 ---
 name: wiki
-description: CLI for documentation in this repository - search with `wiki "[query]"` to start. Includes tools for validation, drift tracking, and authoring.
+description: Operating manual for the wiki CLI (wiki 0.5.x). Load when searching or reading wiki pages, writing or editing one, citing source with fragment links, running or interpreting `wiki check`, resolving drift or skipped fixes, certifying pages with `links-reviewed:`, excluding files via `.wiki/.wikiignore`, wiring the pre-commit hook, or locating the wiki binary.
+title: Wiki Skill
+summary: Hub for the wiki CLI — validate-and-fix loop first, page authoring, certified fragment links, binary resolution, and mechanical drift detection.
 ---
 
 <instructions>
-**Reach for `wiki "[query]"` to learn about this project.** It's the point of the wiki: ranked, source-anchored answers about how this codebase actually works — architecture, design rationale, how subsystems connect. Before grepping or guessing at unfamiliar code, search the wiki first; a maintained page beats re-deriving intent from source. Run it early and often, not just when authoring.
+Reach for `wiki "[query]"` before grepping unfamiliar code. Run it again before authoring to catch title collisions.
 
-- **Search**: `wiki "[query]"` (default subcommand). Your first move on any unfamiliar area; also run it before authoring to find the canonical title to link and to catch a collision early. `-l N`/`-o N` paginate (default 3).
-- **Check**: `wiki check --fix` is the first line of defense — run it *before* hand-editing fragment line numbers or investigating a failure. Editing cited source shifts line numbers, so a bare `wiki check` surfaces alarming `link_broken`/`link_drift` errors that are often mechanical: `--fix` relocates links whose certified content moved, and initializes `links-reviewed:` on field-less pages. The drift is often pre-existing, not from your change. Only what `--fix` leaves behind (see `resolving-skipped-fixes.md`) needs judgment. The pre-commit hook runs `--fix` automatically.
-- **Write a page**: `.md` with `title`+`summary` frontmatter (both required = page-hood); cross-link with relative markdown; cite code with **line-ranged** fragment links (`path#L10-L40`).
+Key distinctions:
 
-For anything beyond these, route by condition:
+- **Page-hood**: a `.md` file is a wiki page iff frontmatter has non-empty `title` **and** `summary`. Everything else is invisible to search and skipped by `wiki check`.
+- **The loop**: edit code or pages → `wiki check --fix` clears mechanical drift → judgment resolves what `--fix` skips → bump `links-reviewed:` only after reviewing.
+- **Scoping**: file selection follows CWD; links and anchors always resolve against the repo root.
 
-- **Setting up a new wiki, or deciding where a page belongs / whether content belongs in the wiki at all / when to restructure: Diátaxis mode separation, embed-vs-centralize, hub pages, reorganization signals**: Read `./sections/organizing-a-wiki.md`
-- **Finding a page, paginating results, listing the corpus, reading a summary, or deciding whether a `.md` file is even a wiki page**: Read `./sections/searching-and-reading.md`
-- **Writing a new page or editing one: frontmatter rules, required `title`/`summary`, reserved titles, case-insensitive collisions, page-to-page links, path resolution**: Read `./sections/writing-a-page.md`
-- **Citing source code from a page, choosing a line range vs whole-file anchor, or understanding the `links-reviewed:` anchor-epoch contract**: Read `./sections/fragment-links-and-coverage.md`
-- **Running `wiki check`: what it validates, the three diagnostic buckets, CWD scoping, `--format json`, `--no-exit-code`, `--source worktree|index|head`**: Read `./sections/running-wiki-check.md`
-- **`wiki check --fix` skipped a link and named a reason, or a cited range drifted and a decision is needed (re-point the link, fix the prose, bump `links-reviewed:`) — the judgment lives here, not in the command**: Read `./sections/resolving-skipped-fixes.md`
-- **Exact subcommand, flag, anchor grammar, certification, or reserved-name lookup**: Read `./sections/command-reference.md`
-- **Wiring `wiki` into a repo's pre-commit hook for the first time (copyable script at `./examples/pre-commit.wiki.sh`), or debugging why files were re-staged on commit — including an unrelated `.md` file getting swept into a commit (older hooks had this defect; it's a hook bug, not a CLI bug)**: Read `./sections/git-hook-setup.md`
+## Start from your job
 
-**Wiki-page and doc-only changes don't require full codebase validation.**
+- **Validating after edits, interpreting failures, resolving what `--fix` skipped**: Read [`./how-to/validate-and-fix.md`](./how-to/validate-and-fix.md)
+- **Creating or editing a page**: Read [`./how-to/write-a-page.md`](./how-to/write-a-page.md)
+- **Citing code with fragment links**: Read [`./how-to/cite-source.md`](./how-to/cite-source.md)
+- **Wiring or debugging the pre-commit hook**: Read [`./how-to/wire-the-pre-commit-hook.md`](./how-to/wire-the-pre-commit-hook.md)
+- **Deciding what belongs in the wiki, placing pages, restructuring**: Read [`./how-to/organize-a-wiki.md`](./how-to/organize-a-wiki.md)
 
-## Hook output
+## Start from a trigger
 
-Editing a wiki page (one with `title`+`summary`) fires a PostToolUse hook that runs `wiki check --fix` on it. A `<wiki>…</wiki>` block in context means one of:
-- **Residual conditions** — `--fix` fixed what it could; the block is the leftover `wiki check` output (links, frontmatter, or drift it couldn't resolve). Act on it via the route bullets above (usually `./sections/resolving-skipped-fixes.md`).
-- **Validation skipped** — the block says the `wiki` binary couldn't launch (the message is self-explanatory: install it on PATH or set `WIKI_BIN`, then re-save). The page went unvalidated.
+| You notice | Load |
+|---|---|
+| `wiki`: command not found (exit 127) | [Binary resolution](./reference/commands.md#binary-resolution) — `$WIKI_BIN` → PATH → VS Code extension's managed copy |
+| A check fails and you don't know the vocabulary | [Diagnostic kinds](./reference/diagnostics.md#diagnostic-kinds) |
+| `--fix` skipped a link, or a link drifted | [Resolve skipped fixes](./how-to/validate-and-fix.md#when---fix-skips) |
+| Exit 2 (infrastructure) | [Diagnostics: exit codes](./reference/diagnostics.md#exit-codes) — shallow clone, malformed `.wikiignore`, empty corpus, off-worktree `--fix` |
+| Check is slow or behaves stale | [`wiki check --clear-cache`](./how-to/validate-and-fix.md#anchor-cache) |
+| A check times out on a large corpus | Scope it: `wiki check path/to/page.md` or a narrower glob |
+| About to type `wiki mesh`, `wiki pin`, or `wiki extract` | Stop — not in 0.5.x. Mesh lives in git-span as `git mesh`; the others never shipped |
+| A query returned nothing | Unknown words are searches (exit 0, silent). Reserved verbs `check`/`list`/`summary` dispatch instead — quoting does **not** bypass dispatch (`wiki "check"` still runs check); rephrase so the first token differs, e.g. `wiki "check command"` |
+| A hook emitted a `<wiki>…</wiki>` block | See [PostToolUse hook output](#posttooluse-hook-output) below |
 
-No block = clean or fully auto-fixed; nothing to do.
+## Browse by mode
+
+- **`how-to/`** — validate-and-fix, write-a-page, cite-source, wire-the-pre-commit-hook, organize-a-wiki
+- **`reference/`** — [`commands.md`](./reference/commands.md) (flags, grammar, env, surface truth), [`search-and-output-shapes.md`](./reference/search-and-output-shapes.md), [`diagnostics.md`](./reference/diagnostics.md)
+- **`explanation/`** — [`anchor-contract.md`](./explanation/anchor-contract.md): why certification works the way it does
+
+## Validate the work
+
+Handoff requires `wiki check` clean and every inter-page link resolving. Wiki-only changes don't require full codebase validation.
+
+## PostToolUse hook output
+
+Editing a wiki page fires this plugin's hook (`wiki check --fix` on that file). A `<wiki>…</wiki>` block means residual diagnostics `--fix` couldn't resolve (act per [resolve skipped fixes](./how-to/validate-and-fix.md#when---fix-skips)) — or the binary couldn't launch: install it / set `WIKI_BIN`, re-save. Note the check runs under a ~25 s cap; on a large corpus a timeout is reported as *could not be launched* too — treat that as slowness and scope the check ([trigger table](#start-from-a-trigger)), not as a missing binary. No block = clean or fully auto-fixed.
 </instructions>
