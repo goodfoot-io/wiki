@@ -1868,9 +1868,9 @@ fn extent_fits(bytes: &[u8], start: u32, end: u32) -> bool {
 }
 
 /// Repo candidate files for the cross-file move scan: every tracked file
-/// readable from the current side, excluding the tool's `.wiki/` runtime
-/// storage and build output. Read through the source-aware reader so
-/// `--source head`/`index` scan the same layer the targets were read from.
+/// readable from the current side, excluding build output. Read through the
+/// source-aware reader so `--source head`/`index` scan the same layer the
+/// targets were read from.
 fn candidate_files(
     repo_root: &Path,
     source: DocSource,
@@ -1881,8 +1881,7 @@ fn candidate_files(
         if path.is_empty() {
             continue;
         }
-        if path.starts_with(".wiki/")
-            || path.starts_with("node_modules/")
+        if path.starts_with("node_modules/")
             || path.starts_with("target/")
             || path.starts_with("dist/")
         {

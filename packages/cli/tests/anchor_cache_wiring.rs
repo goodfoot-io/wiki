@@ -224,10 +224,10 @@ fn run_cached_off(cwd: &Path, args: &[&str]) -> Output {
         .expect("run wiki (kill switch)")
 }
 
-/// Run with `WIKI_PERF=1` over a fresh `wiki.log` (deleted first, per the
+/// Run with `WIKI_PERF=1` over a fresh perf log (deleted first, per the
 /// perf_integration pattern), so the log holds only this run's events.
 fn run_perf(cwd: &Path, args: &[&str]) -> Output {
-    let _ = fs::remove_file(cwd.join("wiki.log"));
+    let _ = fs::remove_file(perf_log_path(cwd));
     wiki(cwd, args)
         .env("WIKI_PERF", "1")
         .output()
@@ -316,9 +316,21 @@ fn assert_byte_identical_with_fault(baseline: &Output, faulted: &Output, label: 
     );
 }
 
-/// Parse every perf event line in `<repo_root>/wiki.log`.
+/// The perf log's D12 location: `<common-git-dir>/wiki/wiki.log`.
+fn perf_log_path(repo_root: &Path) -> PathBuf {
+    let resolved = git_output(repo_root, &["rev-parse", "--git-common-dir"]);
+    let path = PathBuf::from(&resolved);
+    let common = if path.is_absolute() {
+        path
+    } else {
+        repo_root.join(path)
+    };
+    common.join("wiki").join("wiki.log")
+}
+
+/// Parse every perf event line in the perf log.
 fn log_events(repo_root: &Path) -> Vec<Value> {
-    let contents = fs::read_to_string(repo_root.join("wiki.log")).expect("read wiki.log");
+    let contents = fs::read_to_string(perf_log_path(repo_root)).expect("read wiki.log");
     contents
         .lines()
         .map(|l| serde_json::from_str(l).expect("parse perf event"))

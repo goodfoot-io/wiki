@@ -162,9 +162,9 @@ fn read_index_trailer(index_path: &Path) -> Option<[u8; 20]> {
 /// parent directory's mtime on Linux).
 ///
 /// The walk is gitignore-aware (a superset of what the index ingests) and
-/// prunes `.git` and `.wiki` at any depth. The synthetic
-/// `.wiki/.wikiignore` mtime pair folds in so any edit to the ignore list
-/// changes the signature even though the walk prunes `.wiki/`.
+/// prunes `.git` at any depth. The repo-root `.wikiignore` mtime pair folds
+/// in so any edit to the ignore list changes the signature even for
+/// content-only pattern rewrites.
 pub(crate) fn collect_worktree_pairs(repo_root: &Path) -> Vec<(String, i64)> {
     // The parallel walker overlaps the per-entry stat round-trips across
     // threads, which dominates latency on a hostile (fuseblk) filesystem.
@@ -183,7 +183,7 @@ pub(crate) fn collect_worktree_pairs(repo_root: &Path) -> Vec<(String, i64)> {
         .parents(true)
         .filter_entry(|e| {
             let name = e.file_name();
-            name != ".git" && name != ".wiki"
+            name != ".git"
         })
         .build_parallel();
     walker.run(|| {
@@ -228,17 +228,17 @@ pub(crate) fn collect_worktree_pairs(repo_root: &Path) -> Vec<(String, i64)> {
         )
     });
 
-    // Fold .wiki/.wikiignore mtime into the signature so any edit to the
-    // ignore list busts the gate even though the walk prunes `.wiki/`.
-    // Only a stat — no WikiIgnore load here (this cannot fail closed).
+    // Fold the repo-root .wikiignore mtime into the signature so any edit
+    // to the ignore list busts the gate. Only a stat — no WikiIgnore load
+    // here (this cannot fail closed).
     {
-        let wikiignore_path = repo_root.join(".wiki").join(".wikiignore");
+        let wikiignore_path = repo_root.join(super::WIKIIGNORE_RELPATH);
         if let Ok(meta) = std::fs::metadata(&wikiignore_path)
             && let Ok(mtime) = meta.modified()
             && let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH)
         {
             pairs.lock().unwrap().push((
-                std::path::PathBuf::from(".wiki/.wikiignore"),
+                std::path::PathBuf::from(super::WIKIIGNORE_RELPATH),
                 dur.as_nanos() as i64,
             ));
         }
@@ -338,13 +338,11 @@ mod tests {
 
     #[test]
     fn worktree_signature_changes_on_wikiignore_content_change() {
-        // Editing `.wiki/.wikiignore` must bust freshness even though the
-        // walk prunes `.wiki/` — the file's mtime pair folds into the
-        // collected pairs behind the signature.
+        // Editing the repo-root `.wikiignore` must bust freshness — its
+        // mtime pair folds into the collected pairs behind the signature.
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        fs::create_dir_all(root.join(".wiki")).unwrap();
-        let ignore = root.join(".wiki").join(".wikiignore");
+        let ignore = root.join(crate::index::WIKIIGNORE_RELPATH);
 
         // Absent → present must change the signature.
         let absent = worktree_signature(&collect_worktree_pairs(root));
@@ -352,7 +350,7 @@ mod tests {
         let present = worktree_signature(&collect_worktree_pairs(root));
         assert_ne!(
             absent, present,
-            "creating .wiki/.wikiignore must change the worktree signature"
+            "creating .wikiignore must change the worktree signature"
         );
 
         // A content edit that advances the mtime must also change it.
@@ -366,7 +364,7 @@ mod tests {
         let edited = worktree_signature(&collect_worktree_pairs(root));
         assert_ne!(
             present, edited,
-            "editing .wiki/.wikiignore must change the worktree signature"
+            "editing .wikiignore must change the worktree signature"
         );
     }
 }

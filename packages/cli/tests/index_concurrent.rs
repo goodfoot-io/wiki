@@ -1,101 +1,38 @@
 //! Concurrency test: a second `wiki` process must return results without
-//! waiting on a held refresh lock.
+//! blocking forever on a held rendezvous lock (plan D7).
 //!
-//! Contract: when `.wiki/wiki-refresh.lock` is held by an external process,
-//! a `wiki search <query>` invocation exits with code 0 without blocking on
-//! the held lock (under 2s — the budget is generous to absorb VM/CI noise;
-//! blocking on a lock would take seconds or hang).
+//! Contract: when `<common>/wiki/rendezvous.lock` is held EXCLUSIVELY by an
+//! external process, a `wiki search <query>` invocation still exits 0 — it
+//! waits out the bounded budget (~10 s), then takes the floor: serve the
+//! newest retained snapshot / proceed uncached after one diagnostic line.
+//! The budget assertion is therefore generous-but-bounded: completing at
+//! all proves no unbounded hang; staying under 15 s proves the wait is
+//! bounded as designed.
 
 mod common;
 
-use std::fs::OpenOptions;
 use std::time::Instant;
 
 use assert_cmd::Command;
-use fs4::fs_std::FileExt;
+use wiki::cache::rendezvous;
 
 #[test]
-fn second_process_returns_without_waiting_on_lock() {
-    let repo = common::make_parity_fixture();
-
-    // Hold the refresh lock ourselves to simulate a long-running refresh in
-    // a sibling process.
-    let wiki_dir = repo.root.join(".wiki");
-    std::fs::create_dir_all(&wiki_dir).expect("create .wiki dir");
-    let lock_path = wiki_dir.join("wiki-refresh.lock");
-    let lock_file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&lock_path)
-        .expect("open lock file");
-    lock_file
-        .try_lock_exclusive()
-        .expect("acquire refresh lock for test");
-
-    let start = Instant::now();
-
-    // Run a second `wiki` process.  It should serve the existing snapshot
-    // (possibly empty) rather than blocking on the held lock.
-    let output = Command::cargo_bin("wiki")
-        .expect("cargo_bin wiki")
-        .current_dir(&repo.root)
-        .args(["committed"])
-        .output()
-        .expect("wiki process");
-
-    let elapsed = start.elapsed();
-
-    // Must not block. Budget is generous to absorb VM/CI overhead;
-    // actually waiting on a lock would take seconds or hang.
-    assert!(
-        elapsed.as_millis() < 2_000,
-        "second process waited {}ms — exceeded 2s budget",
-        elapsed.as_millis()
-    );
-
-    // Must exit cleanly.
-    assert!(
-        output.status.success(),
-        "wiki exited with {:?}",
-        output.status.code()
-    );
-
-    // Release the lock.
-    lock_file.unlock().expect("unlock");
-}
-
-// ── Target-layout port (plan merged-store-generations, Phase 1; wired in
-// Phase 4 per D7) ────────────────────────────────────────────────────────
-//
-// The refresh-publication guard moves to
-// `<git-common-dir>/wiki/rendezvous.lock`; the contention contract is
-// unchanged: a second process serves without blocking.
-
-#[test]
-#[ignore = "rendezvous lock wiring lands in Phase 4; production still uses .wiki/wiki-refresh.lock"]
 fn second_process_returns_without_waiting_on_rendezvous_lock() {
     let repo = common::make_parity_fixture();
+    let common = common::git_common_dir(&repo.root);
 
-    // Hold the rendezvous lock exclusively to simulate a long-running
-    // refresh publication in a sibling process.
-    let wiki_dir = common::git_common_dir(&repo.root).join("wiki");
-    std::fs::create_dir_all(&wiki_dir).expect("create common wiki dir");
-    let lock_path = wiki_dir.join("rendezvous.lock");
-    let lock_file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&lock_path)
-        .expect("open rendezvous lock file");
-    lock_file
-        .try_lock_exclusive()
-        .expect("acquire rendezvous lock for test");
+    // Hold the rendezvous exclusively to simulate a long-running refresh
+    // publication in a sibling process. Acquired through the production API
+    // so the lock file and its private parent subtree are created exactly
+    // as the open paths create them.
+    let _held = rendezvous::try_acquire_exclusive(&common)
+        .expect("rendezvous acquire")
+        .expect("free store grants exclusive");
 
     let start = Instant::now();
 
-    // Run a second `wiki` process. It should serve (uncached or stale)
-    // rather than blocking on the held rendezvous lock.
+    // Run a second `wiki` process. It must not hang: bounded wait, then the
+    // serve-stale/uncached floor.
     let output = Command::cargo_bin("wiki")
         .expect("cargo_bin wiki")
         .current_dir(&repo.root)
@@ -105,16 +42,19 @@ fn second_process_returns_without_waiting_on_rendezvous_lock() {
 
     let elapsed = start.elapsed();
 
+    // Bounded, not unbounded: under the 10 s acquisition budget plus normal
+    // run overhead.
     assert!(
-        elapsed.as_millis() < 2_000,
-        "second process waited {}ms — exceeded 2s budget",
+        elapsed.as_millis() < 15_000,
+        "second process took {}ms — exceeded the bounded-wait envelope",
         elapsed.as_millis()
     );
+
+    // Must exit cleanly regardless of which side of the floor it landed on.
     assert!(
         output.status.success(),
-        "wiki exited with {:?}",
-        output.status.code()
+        "wiki exited with {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
     );
-
-    lock_file.unlock().expect("unlock");
 }

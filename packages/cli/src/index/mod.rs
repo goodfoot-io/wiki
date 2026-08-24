@@ -14,15 +14,18 @@ use serde::Serialize;
 
 use generations::GenerationsStore;
 
+/// The promoted wikiignore location: a repo-root-relative tracked input,
+/// anchored identically to the pre-promotion location (plan D14). The one
+/// literal for every index-side consumer (freshness fold, refresh hash).
+pub(crate) const WIKIIGNORE_RELPATH: &str = ".wikiignore";
+
 pub mod blob;
 pub mod freshness;
 pub mod fs_class;
 pub mod generations;
 pub mod ingest;
-pub mod lock;
 pub mod passes;
 pub mod search;
-pub mod state;
 
 /// Walk `start` and its ancestors looking for a `.git` entry (file or dir).
 /// Returns the resolved dotgit path (the `.git` dir itself, or the path the
@@ -51,13 +54,6 @@ pub(crate) fn find_dot_git(start: &Path) -> Option<PathBuf> {
         }
         cur = cur.parent()?;
     }
-}
-
-/// The `.wiki/` directory anchored at the repo root. Only the interim
-/// refresh lock lives here now (it retires with the `.wiki` promotion wave);
-/// all derived state is in the merged store under the common git dir.
-pub(crate) fn wiki_dir(repo_root: &Path) -> PathBuf {
-    repo_root.join(".wiki")
 }
 
 /// Collapse `.`/`..` segments lexically, preserving the leading root.
@@ -89,6 +85,17 @@ fn resolve_common_dir(repo_root: &Path) -> Option<PathBuf> {
     gix::open(repo_root)
         .ok()
         .map(|repo| normalize_lexically(repo.common_dir().to_path_buf()))
+}
+
+/// Process-wide one-line budget for rendezvous degradation warnings: many
+/// handles may degrade during one run, but the run prints at most one line
+/// (the same diagnostic discipline as the anchor cache reporter).
+static RENDEZVOUS_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn warn_rendezvous_unavailable_once(context: &str, e: &std::io::Error) {
+    if !RENDEZVOUS_WARNED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        eprintln!("warning: rendezvous lock unavailable for {context} ({e}); proceeding unordered");
+    }
 }
 
 /// Stat-only check that the working tree is unchanged since the last verified
@@ -259,6 +266,7 @@ pub enum HostileFs {
 pub struct WikiIndex {
     repo_root: PathBuf,
     dot_git: PathBuf,
+    common_dir: PathBuf,
     source: DocSource,
     #[allow(dead_code)]
     repo: Option<gix::Repository>,
@@ -308,6 +316,7 @@ impl WikiIndex {
         let mut index = WikiIndex {
             repo_root: repo_root.to_path_buf(),
             dot_git: dot_git.clone(),
+            common_dir: common_dir.clone(),
             source,
             repo: None,
             store,
@@ -348,18 +357,43 @@ impl WikiIndex {
             }
         }
 
-        // Refresh: acquire the interim refresh lock (retires with the .wiki
-        // promotion wave); on contention serve the newest retained snapshot
-        // without blocking.
-        let wiki = wiki_dir(repo_root);
-        std::fs::create_dir_all(&wiki)
-            .map_err(|e| miette::miette!("failed to create {}: {e}", wiki.display()))?;
-        let lock = lock::try_acquire(&wiki)
-            .map_err(|e| miette::miette!("refresh lock acquire failed: {e}"))?;
-        if lock.is_none() {
+        // Gate miss ⇒ exclusive rendezvous (plan D7 mode table: refresh
+        // publication is an exclusive holder), bounded ~10 s wait. On
+        // timeout the floor is exactly the legacy contention behavior:
+        // serve the newest retained snapshot without refreshing.
+        let exclusive =
+            match crate::cache::rendezvous::acquire_exclusive(&common_dir) {
+                Ok(guard) => Some(guard),
+                Err(e) => {
+                    warn_rendezvous_unavailable_once("index refresh", &e);
+                    None
+                }
+            };
+        if exclusive.is_none() {
             index.served_gen =
                 index.store.newest().ok().flatten().map(|generation| generation.gen_id);
             return Ok(index);
+        }
+
+        // Double-checked locking: a sibling process may have published our
+        // exact state while we waited for the lock. A hit skips the refresh
+        // entirely; the guard drops before we return either way.
+        {
+            let wikiignore_hash = passes::compute_wikiignore_hash(repo_root);
+            let double_checked = freshness::current_fingerprint(
+                repo_root,
+                &dot_git,
+                None,
+                &wikiignore_hash,
+            )
+            .ok()
+            .flatten()
+            .and_then(|fingerprint| index.store.lookup_digest(&fingerprint).ok().flatten());
+            if let Some(generation) = double_checked {
+                index.served_gen = Some(generation.gen_id);
+                drop(exclusive);
+                return Ok(index);
+            }
         }
 
         let repo = crate::perf::scope_result("index.gix_open", serde_json::json!({}), || {
@@ -386,9 +420,29 @@ impl WikiIndex {
                 fts_retokenizations: outcome.fts_retokenizations,
                 pass3_dir_walks: outcome.pass3_dir_walks,
             };
+
+            // Maintenance pass in the same exclusive window (plan D10):
+            // recency-liveness eviction, ordered teardown, WAL truncation.
+            // Best-effort — a GC failure never fails a successful refresh.
+            let gc_started = std::time::Instant::now();
+            let gc = index.store.maintain().ok();
+            let evicted = gc.as_ref().map(|stats| stats.evicted_gen_ids.len()).unwrap_or(0);
+            if gc.is_some() && evicted > 0 {
+                crate::perf::log_event(
+                    "index.gc",
+                    gc_started.elapsed().as_secs_f64() * 1000.0,
+                    "ok",
+                    serde_json::json!({
+                        "evicted": evicted,
+                        "generations_after":
+                            gc.as_ref().map(|stats| stats.generations_after).unwrap_or(0),
+                        "bytes_after": gc.as_ref().map(|stats| stats.bytes_after).unwrap_or(0),
+                    }),
+                );
+            }
         }
+        drop(exclusive); // release before serving; no shared is held afterwards
         index.repo = Some(repo);
-        // `lock` releases on drop here.
         Ok(index)
     }
 
@@ -398,15 +452,39 @@ impl WikiIndex {
         self.served_gen
     }
 
+    /// Serve one query under the shared rendezvous (plan D7: search/list/
+    /// summary are shared holders, acquired briefly around query serving
+    /// only — never held across a refresh this run triggered, and never
+    /// upgraded to exclusive in-process). On bounded-wait timeout the floor
+    /// is serving unordered: the deferred read transaction still gives one
+    /// consistent WAL snapshot, and generations are immutable so a
+    /// concurrent publish cannot invalidate the served generation.
+    fn serve_shared_with<T>(
+        &self,
+        context: &str,
+        f: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
+    ) -> Result<T> {
+        let _guard = match crate::cache::rendezvous::acquire_shared(&self.common_dir) {
+            Ok(guard) => Some(guard),
+            Err(e) => {
+                warn_rendezvous_unavailable_once(context, &e);
+                None
+            }
+        };
+        self.store
+            .read_txn(f)
+            .map_err(|e| miette::miette!("{context}: {e}"))
+    }
+
     /// Resolve a single page by title or alias (case-insensitive), or by a
     /// repo-relative path / `.md` file reference.
     pub fn resolve_page(&self, input: &str) -> Result<Option<ResolvedPage>> {
         let Some(gen_id) = self.served() else {
             return Ok(None);
         };
-        self.store
-            .read_txn(|conn| search::resolve_page(conn, &self.repo_root, gen_id, self.source, input))
-            .map_err(|e| miette::miette!("resolve_page: {e}"))
+        self.serve_shared_with("resolve_page", |conn| {
+            search::resolve_page(conn, &self.repo_root, gen_id, self.source, input)
+        })
     }
 
     /// BM25-weighted search, paginated, returning `(rows, total)`.
@@ -420,12 +498,9 @@ impl WikiIndex {
             return Ok((Vec::new(), 0));
         };
         let limit_usize = if limit < 0 { 0 } else { limit as usize };
-        let (mut rows, total) = self
-            .store
-            .read_txn(|conn| {
-                search::search_weighted(conn, gen_id, self.source, query, limit_usize, offset)
-            })
-            .map_err(|e| miette::miette!("search_weighted: {e}"))?;
+        let (mut rows, total) = self.serve_shared_with("search_weighted", |conn| {
+            search::search_weighted(conn, gen_id, self.source, query, limit_usize, offset)
+        })?;
         // Render `file` as an absolute path so `format_search_result` can
         // `strip_prefix(repo_root)` to produce repo-relative output.
         for r in &mut rows {
@@ -450,27 +525,28 @@ impl WikiIndex {
             return Ok(Vec::new());
         };
         let src = generations::source_sql(self.source.gen_source());
-        let conn = self.store.conn();
-        let mut stmt = conn
-            .prepare(
-                "SELECT p.path_rel, b.title, b.summary, b.aliases_text, b.tags_text
-                 FROM blobs b
-                 JOIN gen_paths p ON p.oid = b.oid AND p.gen_id = ?1
-                 WHERE p.source = ?2 AND b.title <> '' AND b.summary <> ''
-                 ORDER BY b.title COLLATE NOCASE, p.path_rel",
-            )
-            .map_err(|e| miette::miette!("list_pages prepare: {e}"))?;
-        let rows = stmt
-            .query_map(rusqlite::params![gen_id, src], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                ))
-            })
-            .map_err(|e| miette::miette!("list_pages query: {e}"))?;
+        let raw_rows = self.serve_shared_with("list_pages", |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT p.path_rel, b.title, b.summary, b.aliases_text, b.tags_text
+                     FROM blobs b
+                     JOIN gen_paths p ON p.oid = b.oid AND p.gen_id = ?1
+                     WHERE p.source = ?2 AND b.title <> '' AND b.summary <> ''
+                     ORDER BY b.title COLLATE NOCASE, p.path_rel",
+                )?;
+            let rows = stmt
+                .query_map(rusqlite::params![gen_id, src], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })?;
 
         let tag_lc = tag.map(|t| t.to_lowercase());
         let split =
@@ -478,9 +554,7 @@ impl WikiIndex {
 
         let mut out: Vec<PageRow> = Vec::new();
         let mut skipped: u64 = 0;
-        for row in rows {
-            let (path_rel, title, summary, aliases_text, tags_text) =
-                row.map_err(|e| miette::miette!("list_pages row: {e}"))?;
+        for (path_rel, title, summary, aliases_text, tags_text) in raw_rows {
             let tags = split(&tags_text);
             if let Some(ref tag_lc) = tag_lc
                 && !tags.iter().any(|t| t.to_lowercase() == *tag_lc)
@@ -512,12 +586,16 @@ impl WikiIndex {
         let Some(gen_id) = self.served() else {
             return Ok(Vec::new());
         };
-        let (rows, _total) = self
-            .store
-            .read_txn(|conn| {
-                search::search_weighted(conn, gen_id, self.source, query, SUGGESTION_LIMIT as usize, 0)
-            })
-            .map_err(|e| miette::miette!("suggest: {e}"))?;
+        let (rows, _total) = self.serve_shared_with("suggest", |conn| {
+            search::search_weighted(
+                conn,
+                gen_id,
+                self.source,
+                query,
+                SUGGESTION_LIMIT as usize,
+                0,
+            )
+        })?;
         Ok(rows)
     }
 

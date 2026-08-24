@@ -2,15 +2,15 @@ use std::path::Path;
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
-/// Loaded from `.wiki/.wikiignore`. Anchored at `repo_root` so patterns like
-/// `drafts/` match `repo_root/drafts/`, not `.wiki/drafts/`.
+/// Loaded from `./.wikiignore` at the repo root. Anchored at `repo_root` so
+/// patterns like `drafts/` match `repo_root/drafts/`, not a subdirectory.
 pub struct WikiIgnore {
     inner: Gitignore,
 }
 
 impl WikiIgnore {
     pub fn load(repo_root: &Path) -> anyhow::Result<Self> {
-        let path = repo_root.join(".wiki").join(".wikiignore");
+        let path = repo_root.join(".wikiignore");
         if !path.exists() {
             return Ok(Self {
                 inner: Gitignore::empty(),
@@ -18,7 +18,7 @@ impl WikiIgnore {
         }
         // Read all content first so IO errors are reported immediately (fail closed).
         let content = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("cannot read .wiki/.wikiignore: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("cannot read ./.wikiignore: {e}"))?;
         let mut builder = GitignoreBuilder::new(repo_root); // root = repo_root
                                                             // add_line(None, line) anchors each pattern to repo_root and returns Err
                                                             // on any malformed pattern — fail closed on bad lines, not silently skipped.
@@ -27,7 +27,7 @@ impl WikiIgnore {
         for line in content.lines() {
             builder
                 .add_line(None, line)
-                .map_err(|e| anyhow::anyhow!("invalid pattern in .wiki/.wikiignore: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("invalid pattern in ./.wikiignore: {e}"))?;
         }
         let inner = builder.build().map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(Self { inner })
@@ -78,9 +78,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn write_ignore(root: &Path, content: &str) {
-        let dir = root.join(".wiki");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join(".wikiignore"), content).unwrap();
+        fs::write(root.join(".wikiignore"), content).unwrap();
     }
 
     #[test]

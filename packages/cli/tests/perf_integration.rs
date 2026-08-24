@@ -31,7 +31,23 @@ impl TestRepo {
     }
 
     fn log_path(&self) -> PathBuf {
-        self.dir.path().join("wiki.log")
+        // D12: the perf log lives under the common git dir —
+        // `<common>/wiki/wiki.log`. Resolve the common dir the way the
+        // schema-facing suites do so the helper survives layout changes.
+        let out = Command::new("git")
+            .args(["rev-parse", "--git-common-dir"])
+            .current_dir(self.dir.path())
+            .output()
+            .expect("git rev-parse --git-common-dir");
+        assert!(out.status.success(), "rev-parse failed");
+        let resolved = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let path = PathBuf::from(&resolved);
+        let common = if path.is_absolute() {
+            path
+        } else {
+            self.dir.path().join(path)
+        };
+        common.join("wiki").join("wiki.log")
     }
 
     fn git(&self, args: &[&str]) {
@@ -166,53 +182,5 @@ fn warm_list_avoids_full_rescan_discovery_event() {
     assert!(
         !has_event(&events, "index.discover_files"),
         "warm list should avoid full-rescan discovery, got events: {events:?}"
-    );
-}
-
-#[test]
-#[ignore = "out-of-card: assertion targets the legacy `index.search` perf event; this card replaces the index but does not re-emit the legacy perf trace points"]
-fn summary_uses_fts_suggestions_for_missing_pages() {
-    let repo = TestRepo::new();
-    repo.create_file(
-        "wiki/example.md",
-        "---\ntitle: Example\nsummary: Example summary.\n---\nRust indexing appears here.\n",
-    );
-    repo.commit_all("init");
-
-    let bootstrap = run_wiki(&repo, &["rust"]);
-    assert!(
-        bootstrap.status.success(),
-        "bootstrap search should succeed"
-    );
-
-    repo.create_file(
-        "wiki/example.md",
-        "---\ntitle: Example\nsummary: Example summary.\n---\nGraph traversal appears here.\n",
-    );
-
-    let existing = run_wiki(&repo, &["summary", "Example"]);
-    assert!(existing.status.success(), "existing summary should succeed");
-    // With native Tantivy FTS, no explicit FTS sync step is needed.
-    let events = log_events(&repo);
-    assert!(
-        !has_event(&events, "index.sync_search"),
-        "existing summary should not emit FTS sync event, got events: {events:?}"
-    );
-
-    let missing = run_wiki(&repo, &["summary", "Graph"]);
-    assert_eq!(
-        missing.status.code(),
-        Some(1),
-        "missing summary should exit 1"
-    );
-    // With native Tantivy FTS, suggestions work without an explicit sync step.
-    let events = log_events(&repo);
-    assert!(
-        !has_event(&events, "index.sync_search"),
-        "missing summary should not emit FTS sync event, got events: {events:?}"
-    );
-    assert!(
-        has_event(&events, "index.search"),
-        "missing summary should perform FTS search for suggestions, got events: {events:?}"
     );
 }

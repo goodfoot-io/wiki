@@ -1,7 +1,6 @@
 # Logs
 logs
 *.log
-wiki.log
 
 # Build artifacts
 target/
@@ -66,13 +65,6 @@ yarn-error.log*
 
 # VSCode extension artifacts
 *.vsix
-
-# Wiki index cache DB, SQLite sidecars, and refresh lock under .wiki/
-.wiki/wiki-index.sqlite
-.wiki/wiki-index.sqlite-shm
-.wiki/wiki-index.sqlite-wal
-.wiki/wiki-index.sqlite-journal
-.wiki/wiki-refresh.lock
 
 .yarn/install-state.gz
 

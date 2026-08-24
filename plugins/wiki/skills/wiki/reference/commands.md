@@ -2,7 +2,7 @@
 title: Wiki Command Surface
 summary: Flat lookup for wiki 0.5.x — subcommands, flags, global options, environment variables, anchor grammar, binary resolution, reserved names.
 tags: [wiki, reference]
-links-reviewed: 1
+links-reviewed: 2
 ---
 
 Surface truth for **wiki 0.5.x**; verify against `wiki --help` when the extension bumps versions.
@@ -11,7 +11,7 @@ Surface truth for **wiki 0.5.x**; verify against `wiki --help` when the extensio
 
 | Command | Purpose |
 |---|---|
-| `wiki [query]` | Default. Ranked search ([enum](/packages/cli/src/main.rs#L97-L175)). |
+| `wiki [query]` | Default. Ranked search ([enum](/packages/cli/src/main.rs#L99-L112)). |
 | `wiki check [glob]…` | Validate frontmatter, links, and anchor certification; `--fix` repairs. |
 | `wiki list` | Title-ordered corpus listing. |
 | `wiki summary [title\|alias\|path]` | One page's summary; stdin when omitted. |

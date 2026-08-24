@@ -542,10 +542,10 @@ fn deleted_directory_leaves_no_trace_in_the_serving_generation() {
     let (_tmp, store) = open_store();
 
     // Rewrite of index_dir_mtimes_prune: the stale-dir contract becomes a
-    // carry-forward count. Cold world recorded dir_mtimes rows for root +
-    // `.wiki` + subdir (3) and pruned none on delete; here there is no
-    // working-tree artifact at all — the serving generation simply holds no
-    // stale subdir rows, while retained history keeps them.
+    // carry-forward count. The old world recorded per-directory mtime rows
+    // and pruned none on delete; here there is no working-tree artifact at
+    // all — the serving generation simply holds no stale subdir rows, while
+    // retained history keeps them.
     let gen1 = published(
         &store,
         candidate(

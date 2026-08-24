@@ -149,9 +149,9 @@ pub fn span_for_command(command_name: &str) -> Span {
     Span::new(format!("command.{command_name}"))
 }
 
-pub fn init(repo_root: &Path, command_name: &str, json_output: bool) {
+pub fn init(_repo_root: &Path, command_name: &str, json_output: bool) {
     let _ = LOGGER.get_or_init(|| {
-        let path = log_path(repo_root)?;
+        let path = log_path()?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -212,9 +212,22 @@ pub fn scope_result<T, E>(
     result
 }
 
-fn log_path(repo_root: &Path) -> Option<PathBuf> {
-    fs::create_dir_all(repo_root).ok()?;
-    Some(repo_root.join("wiki.log"))
+fn log_path() -> Option<PathBuf> {
+    // D12: the log lives under the common git dir — `<common>/wiki/wiki.log`
+    // — so the working tree holds zero wiki-derived files. Resolution
+    // failure (no repo, unwritable store dir) keeps the existing fallback:
+    // `None` disables the logger for this invocation, silently.
+    //
+    // The perf logger may be the first creator of `<common>/wiki`; later
+    // fd-validated consumers (rendezvous, store) require exactly 0700, so
+    // the creation here matches store::fd's private-dir discipline instead
+    // of leaking umask modes into it (plan D9 invariant).
+    use std::os::unix::fs::PermissionsExt;
+    let common = crate::git::common_dir().ok()?;
+    let store_dir = common.join(crate::cache::schema::STORE_DIR_NAME);
+    fs::create_dir_all(&store_dir).ok()?;
+    fs::set_permissions(&store_dir, fs::Permissions::from_mode(0o700)).ok()?;
+    Some(store_dir.join("wiki.log"))
 }
 
 fn write_event(logger: &Logger, name: &str, duration_ms: f64, status: &str, meta: Value) {

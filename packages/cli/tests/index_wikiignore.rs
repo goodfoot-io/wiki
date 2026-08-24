@@ -1,6 +1,7 @@
-//! `.wiki/.wikiignore` exclusion across all three index passes.
+//! Repo-root `.wikiignore` exclusion across all three index passes (the
+//! promoted location, plan D14).
 //!
-//! Pass 3 (Worktree): A path matched by `.wiki/.wikiignore` must never be
+//! Pass 3 (Worktree): A path matched by `.wikiignore` must never be
 //! carried into `seen_paths`, so the removal-reconciliation sweep purges any
 //! previously-indexed row. Un-ignoring a path must restore visibility.
 //!
@@ -29,7 +30,7 @@ fn test_pass_worktree_removes_wikiignored_file_from_index() {
     drop(index);
 
     // Now wikiignore it and refresh.
-    repo.write_file(".wiki/.wikiignore", "drafts/\n");
+    repo.write_file(".wikiignore", "drafts/\n");
     let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare after ignore");
     assert!(
         index.resolve_page("Secret").expect("resolve").is_none(),
@@ -56,7 +57,7 @@ fn test_pass_worktree_clean_dir_carry_forward_respects_wikiignore() {
     // Add the ignore without touching docs/ dir mtime. The .wikiignore mtime
     // is folded into the freshness gate, so a refresh runs and the clean-dir
     // carry-forward must omit the wikiignored child.
-    repo.write_file(".wiki/.wikiignore", "docs/secret.md\n");
+    repo.write_file(".wikiignore", "docs/secret.md\n");
     let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare after ignore");
     assert!(
         index.resolve_page("Secret").expect("resolve").is_none(),
@@ -68,7 +69,7 @@ fn test_pass_worktree_clean_dir_carry_forward_respects_wikiignore() {
     );
 }
 
-/// Removing a pattern from `.wiki/.wikiignore` un-ignores a file that was
+/// Removing a pattern from `.wikiignore` un-ignores a file that was
 /// never indexed (it was created already-ignored): the next refresh must make
 /// it visible again. (Adopted from the competing plan.)
 #[test]
@@ -76,7 +77,7 @@ fn test_pass_worktree_uningnore_restores_visibility() {
     let repo = common::FixtureRepo::new();
     // Create the file already wikiignored; it is never indexed.
     repo.write_wiki_md("drafts/page.md", "Draft", "A draft.", "body");
-    repo.write_file(".wiki/.wikiignore", "drafts/\n");
+    repo.write_file(".wikiignore", "drafts/\n");
     repo.git_add("drafts/page.md");
     repo.git_commit("add draft");
 
@@ -90,7 +91,7 @@ fn test_pass_worktree_uningnore_restores_visibility() {
     // Un-ignore: remove the pattern. The .wikiignore mtime changes, busting
     // the freshness gate; the WalkDir walker still visits the (never-indexed)
     // file and indexes it.
-    repo.write_file(".wiki/.wikiignore", "# nothing ignored\n");
+    repo.write_file(".wikiignore", "# nothing ignored\n");
     let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare after un-ignore");
     assert!(
         index.resolve_page("Draft").expect("resolve").is_some(),
@@ -109,9 +110,9 @@ fn test_pass_tree_excludes_wikiignored_committed_file() {
     let repo = common::FixtureRepo::new();
 
     // Write the wikiignore BEFORE committing so it is present from the start.
-    repo.write_file(".wiki/.wikiignore", "drafts/\n");
+    repo.write_file(".wikiignore", "drafts/\n");
     repo.write_wiki_md("drafts/secret.md", "Secret", "Hidden draft.", "body");
-    repo.git_add(".wiki/.wikiignore");
+    repo.git_add(".wikiignore");
     repo.git_add("drafts/secret.md");
     repo.git_commit("add secret and wikiignore");
 
@@ -144,8 +145,8 @@ fn test_pass_tree_removes_newly_wikiignored_committed_file() {
     drop(index);
 
     // Second commit: introduce the wikiignore.
-    repo.write_file(".wiki/.wikiignore", "drafts/\n");
-    repo.git_add(".wiki/.wikiignore");
+    repo.write_file(".wikiignore", "drafts/\n");
+    repo.git_add(".wikiignore");
     repo.git_commit("add wikiignore");
 
     let index =
@@ -157,7 +158,7 @@ fn test_pass_tree_removes_newly_wikiignored_committed_file() {
 }
 
 /// Un-ignoring a committed file via a commit that only edits
-/// `.wiki/.wikiignore` (the file's blob unchanged across that commit) must
+/// `.wikiignore` (the file's blob unchanged across that commit) must
 /// restore the file to `--source head`. The Tree pass is diff-based and emits
 /// no delta for the unchanged file, so the bidirectional reconciliation
 /// triggered by the wikiignore content change must re-add the previously
@@ -181,8 +182,8 @@ fn test_pass_tree_uningnore_unchanged_blob_restores_head() {
     drop(index);
 
     // Commit 2: ignore doc.md — its blob is NOT touched in this commit.
-    repo.write_file(".wiki/.wikiignore", "wiki/doc.md\n");
-    repo.git_add(".wiki/.wikiignore");
+    repo.write_file(".wikiignore", "wiki/doc.md\n");
+    repo.git_add(".wikiignore");
     repo.git_commit("ignore doc");
 
     let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Head)
@@ -195,8 +196,8 @@ fn test_pass_tree_uningnore_unchanged_blob_restores_head() {
     drop(index);
 
     // Commit 3: remove the pattern — doc.md's blob is STILL unchanged.
-    repo.write_file(".wiki/.wikiignore", "# nothing ignored\n");
-    repo.git_add(".wiki/.wikiignore");
+    repo.write_file(".wikiignore", "# nothing ignored\n");
+    repo.git_add(".wikiignore");
     repo.git_commit("un-ignore doc");
 
     let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Head)
@@ -212,13 +213,13 @@ fn test_pass_tree_uningnore_unchanged_blob_restores_head() {
 // Pass 2 (Index / --source index) exclusion tests
 // ---------------------------------------------------------------------------
 
-/// Regression: an UNSTAGED `.wiki/.wikiignore` edit (git index checksum
+/// Regression: an UNSTAGED `.wikiignore` edit (git index checksum
 /// unchanged) must still cause `pass_index` to exclude the now-wikiignored
 /// file. This is the fail-open leak: previously `pass_index` saw an unchanged
 /// git index checksum and returned early, leaving stale `Source::Index` rows
 /// for files whose wikiignore status changed without a `git add`.
 ///
-/// Runtime repro: commit pub.md + doc.md; then write `.wiki/.wikiignore` =
+/// Runtime repro: commit pub.md + doc.md; then write `.wikiignore` =
 /// `wiki/doc.md` WITHOUT staging. `wiki --source index list` must NOT list
 /// doc.md.
 #[test]
@@ -245,8 +246,8 @@ fn test_pass_index_excludes_wikiignored_file_when_wikiignore_unstaged() {
     );
     drop(index);
 
-    // Write `.wiki/.wikiignore` WITHOUT staging — git index checksum unchanged.
-    repo.write_file(".wiki/.wikiignore", "wiki/doc.md\n");
+    // Write `.wikiignore` WITHOUT staging — git index checksum unchanged.
+    repo.write_file(".wikiignore", "wiki/doc.md\n");
 
     // Pass 2 must still exclude doc.md even though the git index didn't change.
     let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Index)
@@ -262,7 +263,7 @@ fn test_pass_index_excludes_wikiignored_file_when_wikiignore_unstaged() {
     drop(index);
 
     // Un-ignore: remove the pattern (still unstaged) — doc.md must come back.
-    repo.write_file(".wiki/.wikiignore", "# nothing ignored\n");
+    repo.write_file(".wikiignore", "# nothing ignored\n");
     let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Index)
         .expect("prepare index after un-ignore");
     assert!(
@@ -277,10 +278,10 @@ fn test_pass_index_excludes_wikiignored_file_when_wikiignore_unstaged() {
 fn test_pass_index_excludes_wikiignored_staged_file() {
     let repo = common::FixtureRepo::new();
 
-    repo.write_file(".wiki/.wikiignore", "drafts/\n");
+    repo.write_file(".wikiignore", "drafts/\n");
     repo.write_wiki_md("drafts/secret.md", "Secret", "Hidden draft.", "body");
     // Stage both — but do NOT commit, keeping them Index-only.
-    repo.git_add(".wiki/.wikiignore");
+    repo.git_add(".wikiignore");
     repo.git_add("drafts/secret.md");
 
     let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Index)

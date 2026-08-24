@@ -57,9 +57,11 @@ fn store_dir(repo_root: &Path) -> PathBuf {
     common::git_common_dir(repo_root).join("wiki")
 }
 
-/// Every parsed JSON-lines record in `<repo_root>/wiki.log`.
+/// Every parsed JSON-lines record in the perf log (D12 location:
+/// `<git-common-dir>/wiki/wiki.log`).
 fn log_records(repo_root: &Path) -> Vec<Value> {
-    let contents = fs::read_to_string(repo_root.join("wiki.log")).expect("read wiki.log");
+    let contents =
+        fs::read_to_string(store_dir(repo_root).join("wiki.log")).expect("read wiki.log");
     contents
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -109,7 +111,7 @@ fn forced_corruption_witnesses_quarantine_and_rebuild_in_json_lines() {
 
     // The faulted run: corruption is forced through the env; keep the log
     // clean so the last anchor_cache record is unambiguously this run's.
-    fs::remove_file(repo.root.join("wiki.log")).ok();
+    fs::remove_file(store_dir(&repo.root).join("wiki.log")).ok();
     let mut faulted = wiki(&repo.root, &["check"]);
     faulted.env("WIKI_ANCHOR_CACHE_TEST_FAULT_SEQUENCE", "corrupt");
     let out = faulted.output().expect("run corrupted check");
@@ -174,7 +176,7 @@ fn forced_schema_skew_witnesses_the_tier_scoped_repair_in_json_lines() {
     let warm = run(&repo.root, &["check"]);
     assert_eq!(warm.status.code(), Some(0));
 
-    fs::remove_file(repo.root.join("wiki.log")).ok();
+    fs::remove_file(store_dir(&repo.root).join("wiki.log")).ok();
     let mut skewed = wiki(&repo.root, &["check"]);
     skewed.env("WIKI_ANCHOR_CACHE_TEST_FAULT_SEQUENCE", "schema");
     let out = skewed.output().expect("run skewed check");

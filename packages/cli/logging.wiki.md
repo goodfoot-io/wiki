@@ -1,7 +1,7 @@
 ---
 title: Wiki Logging and Perf Instrumentation
 summary: Documents all logging and performance tracing points in the wiki CLI. 
-links-reviewed: 4
+links-reviewed: 5
 ---
 
 ## Overview
@@ -26,16 +26,17 @@ Perf scope events measure execution time and record success/error status. They a
 
 ### Index Refresh
 
-These scopes cover the cold-cache path: when the stat-only freshness gate misses, [`WikiIndex::prepare_for_source`](./src/index/mod.rs#L346-L366) opens the repository and drives the three-pass refresh.
+These scopes cover the cold-cache path: when the stat-only freshness gate misses, [`WikiIndex::prepare_for_source`](./src/index/mod.rs#L292-L479) resolves the digest gate and drives the three-pass refresh onto the generations store.
 
 | Location | Scope Name | Measures | Metadata |
 |----------|-----------|----------|----------|
-| [index/mod.rs](./src/index/mod.rs#L353-L356) | `index.gix_open` | Time to open the gix repository for a refresh | Empty object |
-| [index/mod.rs](./src/index/mod.rs#L357-L366) | `index.refresh` | Total three-pass refresh including delta apply and commit | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L175-L177) | `index.pass_tree` | Pass 1: diff `HEAD^{tree}` against the previously indexed tree | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L255-L258) | `index.pass_index` | Pass 2: git index entry scan | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L263-L272) | `index.pass_worktree` | Pass 3: worktree walk, read + hash of candidate markdown | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L303-L356) | `index.apply_deltas` | Applying all merged deltas (blob parse, FTS insert, paths/refcount bookkeeping) | `deltas` (count) |
+| [index/mod.rs](./src/index/mod.rs#L399-L401) | `index.gix_open` | Time to open the gix repository for a refresh | Empty object |
+| [index/mod.rs](./src/index/mod.rs#L403-L412) | `index.refresh` | Total three-pass refresh (candidate building against the base generation) | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L215-L269) | `index.pass_tree` | Pass 1: diff `HEAD^{tree}` against the previously indexed tree | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L271-L283) | `index.pass_index` | Pass 2: git index entry scan | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L285-L304) | `index.pass_worktree` | Pass 3: worktree walk, read + hash of candidate markdown | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L306-L366) | `index.apply_deltas` | Building the publish candidate from merged deltas (blob parse, gen_paths membership, refcount reconciliation) | `deltas` (count) |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L368-L432) | `index.publish` | Publishing the generation: fts materialization + transactional store write | Empty object |
 | [index/passes/mod.rs](./src/index/passes/mod.rs#L426-L426) | `index.commit` | SQLite transaction commit | Empty object |
 
 ### File Discovery
@@ -178,7 +179,7 @@ Events written to `wiki.log` follow this JSON schema:
 
 Two special events mark command execution boundaries:
 
-- **command_start**: Logged at [initialization](./src/perf.rs#L67-L96) with command name, json_output flag, and repo_root
+- **command_start**: Logged at [initialization](./src/perf.rs#L152-L196) with command name, json_output flag, and repo_root
 - **command_finish**: Logged at [completion](./src/perf.rs#L98-L108) with exit code and total runtime
 
 ### Log Rotation

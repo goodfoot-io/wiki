@@ -25,11 +25,11 @@ Selection follows CWD; links resolve against the repo root, so a subdirectory ru
 
 ## Anchor cache
 
-History walks memoize in `<git common dir>/wiki/anchor-cache.sqlite`, shared across worktrees, keyed by exact git-log output — history changes invalidate it naturally. Faults degrade to uncached with one warning. Slow or stale-looking checks: `wiki check --clear-cache`; `WIKI_ANCHOR_CACHE=0` disables permanently.
+History walks memoize in the merged generations store under `<git common dir>/wiki/store.sqlite`, shared across worktrees, keyed by exact git-log output — history changes invalidate it naturally. Faults degrade to uncached with one warning. Slow or stale-looking checks: `wiki check --clear-cache`; `WIKI_ANCHOR_CACHE=0` disables permanently.
 
-## `.wiki/.wikiignore`
+## `./.wikiignore`
 
-Excludes paths before any validation, on every command and source ([loader](/packages/cli/src/wikiignore.rs#L12-L34)). Gitignore syntax, anchored at repo root; a deeper `!pattern` cannot resurrect an excluded directory's children. Malformed pattern = exit 2 (fail closed). Ignored targets are exempt from `broken_link`.
+`./.wikiignore` at the repo root excludes paths before any validation, on every command and source ([loader](/packages/cli/src/wikiignore.rs#L12-L27)). Gitignore syntax, anchored at repo root; a deeper `!pattern` cannot resurrect an excluded directory's children. Malformed pattern = exit 2 (fail closed). Ignored targets are exempt from `broken_link`.
 
 ## Shallow clones fail closed
 

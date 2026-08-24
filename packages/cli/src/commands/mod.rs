@@ -1071,7 +1071,7 @@ mod tests {
             "wiki/secret.md",
             "---\ntitle: Secret\nsummary: Hidden.\n---\n",
         );
-        repo.create_file(".wiki/.wikiignore", "wiki/secret.md\n");
+        repo.create_file(".wikiignore", "wiki/secret.md\n");
         let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree, None)
             .expect("discover");
         let paths: Vec<_> = files
@@ -1091,7 +1091,7 @@ mod tests {
         repo.create_file("wiki/page.md", "---\ntitle: Page\nsummary: A page.\n---\n");
         repo.create_file("drafts/a.md", "---\ntitle: A\nsummary: A.\n---\n");
         repo.create_file("drafts/b.md", "---\ntitle: B\nsummary: B.\n---\n");
-        repo.create_file(".wiki/.wikiignore", "drafts/*.md\n");
+        repo.create_file(".wikiignore", "drafts/*.md\n");
         let files = discover_files(&[], repo.path(), repo.path(), DocSource::WorkingTree, None)
             .expect("discover");
         let paths: Vec<_> = files
@@ -1109,7 +1109,7 @@ mod tests {
     fn test_discover_wikiignore_applies_to_explicit_glob() {
         let repo = TestRepo::new();
         repo.create_file("drafts/page.md", "---\ntitle: Draft\nsummary: D.\n---\n");
-        repo.create_file(".wiki/.wikiignore", "drafts/\n");
+        repo.create_file(".wikiignore", "drafts/\n");
         let globs = vec!["drafts/page.md".to_string()];
         let files = discover_files(&globs, repo.path(), repo.path(), DocSource::WorkingTree, None)
             .expect("discover");

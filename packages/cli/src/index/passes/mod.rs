@@ -112,13 +112,13 @@ fn read_blob_bytes(
     }
 }
 
-/// SHA-1 of the `.wiki/.wikiignore` contents, or the 20-zero sentinel when
-/// the file is absent. Part of the canonical fingerprint: the Tree pass is
-/// diff-based and cannot observe a wikiignore-only commit, so a change in
+/// SHA-1 of the repo-root `.wikiignore` contents, or the 20-zero sentinel
+/// when the file is absent. Part of the canonical fingerprint: the Tree pass
+/// is diff-based and cannot observe a wikiignore-only commit, so a change in
 /// this hash relative to the base generation forces a full bidirectional
 /// Tree reconciliation.
 pub(crate) fn compute_wikiignore_hash(repo_root: &Path) -> [u8; 20] {
-    let path = repo_root.join(".wiki").join(".wikiignore");
+    let path = repo_root.join(crate::index::WIKIIGNORE_RELPATH);
     let mut out = [0u8; 20];
     if let Ok(bytes) = std::fs::read(&path) {
         let digest = gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, &bytes)
@@ -166,7 +166,7 @@ pub fn refresh(
     // wikiignored paths are never ingested regardless of source.
     let wiki_ignore = crate::wikiignore::WikiIgnore::load(repo_root)?;
 
-    // Hash the current `.wiki/.wikiignore` contents (20-zero sentinel when
+    // Hash the current `.wikiignore` contents (20-zero sentinel when
     // absent). A change relative to the base generation is the sole signal
     // to run the full bidirectional Tree reconciliation (un-ignore re-adds
     // as well as ignore removes).

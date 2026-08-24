@@ -192,7 +192,7 @@ pub fn pass_tree(
 
 /// Enumerate every markdown blob in the current HEAD tree as
 /// `(repo-relative path, blob OID)`. Used by the bidirectional Tree
-/// reconciliation when `.wiki/.wikiignore` changed since the last refresh:
+/// reconciliation when the wikiignore hash changed since the last refresh:
 /// the incremental diff cannot observe a wikiignore-only commit, so the full
 /// HEAD snapshot is needed to re-add files that became un-ignored without a
 /// blob change. Returns an empty vector when HEAD is unborn.

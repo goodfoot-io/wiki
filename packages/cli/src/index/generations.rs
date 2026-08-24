@@ -159,6 +159,7 @@ use fs4::fs_std::FileExt;
 use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
+use crate::cache::diagnostics;
 use crate::cache::schema::{self, ProbeOutcome, Tier, retry_busy};
 use crate::cache::CacheError;
 use crate::store::fd::DirFd;
@@ -185,7 +186,6 @@ pub const ZERO_WIKIIGNORE_HASH: [u8; 20] = [0u8; 20];
 /// Retention bound (plan D10): after the always-live newest generation, the
 /// next-newest 8 candidates survive eviction — a recency-liveness rule where
 /// being looked up keeps a worktree's generation warm.
-#[allow(dead_code)] // production GC wiring lands with the maintenance wave (plan Phase 6)
 pub const RETAINED_GENERATIONS: usize = 8;
 
 /// Milliseconds per hour — the `access_bucket` granularity.
@@ -358,7 +358,6 @@ pub enum PublishOutcome {
 
 /// Before/after accounting for the maintenance pass (plan D10): eviction is
 /// visible, and its disk tradeoff measurable.
-#[allow(dead_code)] // consumed by the maintenance wave (plan Phase 6)
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GcStats {
     pub generations_before: u64,
@@ -711,7 +710,6 @@ impl GenerationsStore {
     /// referenced by any retained generation → `wal_checkpoint(TRUNCATE)` →
     /// account into [`GcStats`]. Refcounts reconcile set-based in the same
     /// transaction as the deletions.
-    #[allow(dead_code)] // wired into the publisher window by the maintenance wave
     pub fn maintain(&self) -> Result<GcStats, CacheError> {
         let bytes_before = store_bytes(&self.db_file);
         let stats = retry_busy(|| {
@@ -766,6 +764,16 @@ impl GenerationsStore {
             let generations_after: i64 =
                 tx.query_row("SELECT COUNT(*) FROM generations", [], |r| r.get(0))?;
             tx.commit()?;
+
+            // GC diagnostics (plan D11), inside the caller's exclusive
+            // window: one countable row per evicted generation, then the
+            // run's JSON-lines payload picks up the refreshed counts.
+            for _gen_id in &evicted {
+                // One countable row per eviction; the id itself lives in
+                // the GcStats accounting, not the ledger.
+                diagnostics::record(&conn, "gc_generations_pruned");
+            }
+            diagnostics::publish_counts(&conn);
 
             Ok(GcStats {
                 generations_before: generations_before.max(0) as u64,

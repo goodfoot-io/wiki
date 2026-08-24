@@ -110,7 +110,7 @@ enum Commands {
     /// targets route through the rename machinery, and field-less pages
     /// carrying line-range links get the field initialized.
     ///
-    /// Files matched by `.wiki/.wikiignore` (gitignore-syntax, one
+    /// Files matched by `./.wikiignore` (gitignore-syntax, one
     /// pattern per line, matched relative to the repo root) are
     /// excluded from discovery entirely, before frontmatter or link
     /// validation ever runs. Use it to keep non-wiki Markdown (e.g.
@@ -307,6 +307,28 @@ fn run(
     let _command_span = perf::span_for_command(command_name);
     let started = Instant::now();
 
+    // Dispatch-side rendezvous classification (plan D7): plain `check` is a
+    // shared holder; `check --fix` is exclusive (multi-file journal
+    // materialization). search/list/summary/none take NO dispatch-level
+    // lock — the index tier wires its own choreography — and `--clear-cache`
+    // is excluded here because CacheStore::clear() already takes the
+    // exclusive rendezvous itself; wrapping it would contend with our own
+    // process. update-check/perf are exempt. Acquisition waits a bounded
+    // ~10 s; on timeout the command proceeds WITHOUT the lock after one
+    // stderr line — the floor is exactly today's behavior. An unresolvable
+    // common dir proceeds silently: there is no store location to contend
+    // through, and each subsystem owns its own diagnostic budget.
+    let _dispatch_rendezvous =
+        if let Some(Commands::Check { fix, clear_cache, .. }) = command.as_ref() {
+            if !clear_cache {
+                acquire_dispatch_rendezvous(!*fix)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
     let result = match command {
         Some(Commands::Check {
             globs,
@@ -387,6 +409,34 @@ fn command_name(command: Option<&Commands>, query: Option<&str>) -> &'static str
         Some(Commands::Summary { .. }) => "summary",
         None if query.is_some() => "search",
         None => "help",
+    }
+}
+
+/// Acquire the dispatch-level rendezvous lock for one command run (plan D7).
+/// `true` requests the shared mode (plain `check`), `false` the exclusive
+/// mode (`--fix`). A bounded-wait timeout (`WouldBlock`) or any other
+/// acquisition error emits exactly one stderr line and returns `None`: the
+/// command proceeds unordered, which is precisely today's behavior. An
+/// unresolvable common dir returns `None` silently — there is no store
+/// location to contend through, and every subsystem owns its own
+/// diagnostic budget.
+fn acquire_dispatch_rendezvous(
+    want_shared: bool,
+) -> Option<crate::cache::rendezvous::RendezvousGuard> {
+    let Ok(common) = crate::git::common_dir() else {
+        return None;
+    };
+    let acquired = if want_shared {
+        crate::cache::rendezvous::acquire_shared(&common)
+    } else {
+        crate::cache::rendezvous::acquire_exclusive(&common)
+    };
+    match acquired {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            eprintln!("warning: rendezvous lock unavailable ({e}); proceeding without it");
+            None
+        }
     }
 }
 

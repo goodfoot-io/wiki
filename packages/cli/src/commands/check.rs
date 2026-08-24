@@ -1075,7 +1075,7 @@ fn collect_for_files(
                         file: path.display().to_string(),
                         line: 1,
                         message:
-                            "Add a `---` frontmatter block (`title` and `summary` are required), or add this path to `.wiki/.wikiignore` if it isn't a wiki page."
+                            "Add a `---` frontmatter block (`title` and `summary` are required), or add this path to `./.wikiignore` if it isn't a wiki page."
                                 .into(),
                     });
                 }
@@ -2390,7 +2390,7 @@ mod tests {
         );
         // Wikiignore the target; do NOT create the target file so it would
         // trigger broken_link / broken_anchor if the exemption were absent.
-        repo.create_file(".wiki/.wikiignore", "src/secret.rs\n");
+        repo.create_file(".wikiignore", "src/secret.rs\n");
         repo.commit("add page with wikiignored link target");
 
         let diags =

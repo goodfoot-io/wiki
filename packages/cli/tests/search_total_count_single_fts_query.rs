@@ -60,16 +60,6 @@ fn measure_match_statements(db_path: &Path, query: &str) -> (usize, usize) {
     (MATCH_STATEMENTS.load(Ordering::SeqCst), total)
 }
 
-#[allow(dead_code)]
-fn build_index(repo: &common::FixtureRepo) -> PathBuf {
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare");
-    drop(index);
-
-    let db_path = repo.root.join(".wiki").join("wiki-index.sqlite");
-    assert!(db_path.exists(), "index DB should exist after prepare");
-    db_path
-}
-
 /// Target-layout port of [`build_index`]: the merged store at
 /// `<git-common-dir>/wiki/store.sqlite`.
 #[test]
@@ -80,88 +70,6 @@ fn build_index_at_merged_store() {
 
     let db_path = common::target_db_path(&repo.root);
     assert!(db_path.exists(), "merged store should exist after prepare");
-}
-
-#[test]
-#[ignore = "old .wiki layout retired in Phase 3; tracer bound re-pinned at the merged store below"]
-fn total_count_probes_do_not_scale_with_pre_matches() {
-    // Twelve distinct blobs sharing the exact title "Gadget". The exact-title
-    // stage collects 12 pre-FTS OIDs, and because the title text itself is
-    // indexed, every one of them also satisfies the FTS query.
-    let repo = common::FixtureRepo::new();
-    const PRE_MATCHES: usize = 12;
-    for i in 0..PRE_MATCHES {
-        repo.write_wiki_md(
-            &format!("gadget_{i}.md"),
-            "Gadget",
-            &format!("Summary variant {i}."),
-            &format!("Distinct body content {i} without further tokens."),
-        );
-    }
-    repo.git_add(".");
-    repo.git_commit("add shared-title pre-match fixtures");
-    let db_path = build_index(&repo);
-
-    let (statements, total) = measure_match_statements(&db_path, "gadget");
-
-    // Correctness guardrail: all pre-matches also match FTS, so the true
-    // uncapped total is 12 and the correction must add zero extras.
-    assert_eq!(total, PRE_MATCHES, "total must stay identical to the per-OID computation");
-
-    assert!(
-        statements <= 4,
-        "search_weighted executed {statements} FTS MATCH statements with \
-         {PRE_MATCHES} pre-FTS matches; expected <= 4 (capped scan + \
-         COUNT(*) + a single set-based correction). Unfixed code issues \
-         {} (2 + {PRE_MATCHES} probes).",
-        2 + PRE_MATCHES
-    );
-}
-
-#[test]
-#[ignore = "old .wiki layout retired in Phase 3; totals re-pinned at the merged store below"]
-fn total_count_mixed_pre_matches_some_satisfying_fts() {
-    // The card's required equivalence case: more than one pre-FTS match
-    // where SOME satisfy the FTS query and some do not. Exact-title twins
-    // are indexed text => they satisfy FTS; path-LIKE hits match on
-    // unindexed path text => they do not, and must surface as extras. The
-    // query contains '/' so the path stage engages, and the twin titles
-    // equal the whole query so the exact-title stage engages too; both
-    // surfaces feed `pre_fts_seen` from one search call.
-    let repo = common::FixtureRepo::new();
-    for i in 0..3 {
-        repo.write_wiki_md(
-            &format!("twin_{i}.md"),
-            "Gadget/No",
-            &format!("Twin summary {i}."),
-            &format!("Filler body {i}."),
-        );
-    }
-    for i in 0..3 {
-        repo.write_wiki_md(
-            &format!("docs/gadget/note-b{i}.md"),
-            &format!("Handbook {i}"),
-            &format!("Handbook summary {i}."),
-            &format!("Unrelated prose volume {i}."),
-        );
-    }
-    repo.git_add(".");
-    repo.git_commit("add mixed pre-match fixtures");
-    let db_path = build_index(&repo);
-
-    let (statements, total) = measure_match_statements(&db_path, "gadget/no");
-
-    // Truth table: exact title "Gadget/No" matches the 3 twins; path LIKE
-    // %gadget/no% matches the 3 handbooks; FTS phrase `"gadget" "no"*`
-    // matches only the twins (handbook text lacks the tokens) => 3 + 3
-    // extras = 6. Unfixed code probes all 6 pre-matches individually.
-    assert_eq!(total, 6, "extras from path-only pre-matches must be counted exactly once");
-
-    assert!(
-        statements <= 4,
-        "search_weighted executed {statements} FTS MATCH statements with 6 \
-         pre-FTS matches; expected <= 4. Unfixed code issues 8."
-    );
 }
 
 // ── Target-layout port (plan merged-store-generations, Phase 1) ──────────
