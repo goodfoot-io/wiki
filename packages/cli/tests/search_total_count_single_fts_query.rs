@@ -60,6 +60,19 @@ fn build_index(repo: &common::FixtureRepo) -> PathBuf {
     db_path
 }
 
+/// Target-layout port of [`build_index`]: the merged store at
+/// `<git-common-dir>/wiki/store.sqlite`.
+#[test]
+#[ignore = "target layout lands in Phase 3; production still writes .wiki/wiki-index.sqlite"]
+fn build_index_at_merged_store() {
+    let repo = common::FixtureRepo::new();
+    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare");
+    drop(index);
+
+    let db_path = common::target_db_path(&repo.root);
+    assert!(db_path.exists(), "merged store should exist after prepare");
+}
+
 #[test]
 fn total_count_probes_do_not_scale_with_pre_matches() {
     // Twelve distinct blobs sharing the exact title "Gadget". The exact-title
@@ -137,5 +150,42 @@ fn total_count_mixed_pre_matches_some_satisfying_fts() {
         statements <= 4,
         "search_weighted executed {statements} FTS MATCH statements with 6 \
          pre-FTS matches; expected <= 4. Unfixed code issues 8."
+    );
+}
+
+// ── Target-layout port (plan merged-store-generations, Phase 1) ──────────
+//
+// The tracer methodology and exact uncapped totals are layout-independent;
+// only the DB path moves. Under the merged store the same bound must hold
+// against `fts_<served_gen>` — the per-generation FTS children preserve
+// both the single-query correction and the totals.
+
+#[test]
+#[ignore = "target layout lands in Phase 3; production still writes .wiki/wiki-index.sqlite"]
+fn total_count_probes_do_not_scale_at_merged_store() {
+    let repo = common::FixtureRepo::new();
+    const PRE_MATCHES: usize = 12;
+    for i in 0..PRE_MATCHES {
+        repo.write_wiki_md(
+            &format!("gadget_{i}.md"),
+            "Gadget",
+            &format!("Summary variant {i}."),
+            &format!("Distinct body content {i} without further tokens."),
+        );
+    }
+    repo.git_add(".");
+    repo.git_commit("add shared-title pre-match fixtures");
+    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare");
+    drop(index);
+    let db_path = common::target_db_path(&repo.root);
+    assert!(db_path.exists(), "merged store should exist after prepare");
+
+    let (statements, total) = measure_match_statements(&db_path, "gadget");
+
+    assert_eq!(total, PRE_MATCHES, "total must stay identical to the per-OID computation");
+    assert!(
+        statements <= 4,
+        "search_weighted executed {statements} FTS MATCH statements at the \
+         merged store with {PRE_MATCHES} pre-FTS matches; expected <= 4"
     );
 }

@@ -20,17 +20,20 @@
 //! computation with at most one diagnostic line (plan decisions 4 and 7).
 
 pub mod key;
+pub mod rendezvous;
 pub mod schema;
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use fs4::fs_std::FileExt;
 use rusqlite::params;
+
+use crate::store::fd::DirFd;
 
 /// One cached tier-A row: the anchor epoch (`LinkEpoch::Commit` in the drift
 /// engine) of a page's `git log --follow --name-status` walk.
@@ -260,17 +263,15 @@ impl CacheStore {
         reporter: CacheReporter,
     ) -> Result<Option<Self>, CacheError> {
         let injected = reporter.next_injected();
-        let dir = schema::cache_dir(common_dir);
-        fs::create_dir_all(&dir)?;
-        let lock_path = schema::init_lock_path(common_dir);
         let db = schema::db_path(common_dir);
         schema::retry_busy(|| {
-            let lock_file = OpenOptions::new()
-                .create(true)
-                .read(true)
-                .write(true)
-                .truncate(false)
-                .open(&lock_path)?;
+            // Every creation path — the `wiki/` subtree, the init lock, the
+            // database file — goes through the descriptor-hardened
+            // primitives (plan D9; the Phase-2 adoption site).
+            let common = DirFd::open(common_dir)?;
+            let wiki = common.ensure_private_subtree(Path::new(schema::STORE_DIR_NAME))?;
+            wiki.validate_private()?;
+            let lock_file = wiki.create_file(schema::INIT_LOCK_FILE_NAME)?;
             let held = match lock_file.try_lock_exclusive() {
                 Ok(true) => true,
                 Ok(false) => false,
@@ -289,9 +290,12 @@ impl CacheStore {
             }
             match schema::probe(&db)? {
                 schema::ProbeOutcome::Valid => {}
-                // Missing is a fresh create, never a quarantine (plan
-                // decision 4); the DDL leg runs under the lock.
-                schema::ProbeOutcome::Missing => drop(schema::open_connection(&db)?),
+                // Missing is a fresh create, never a quarantine; the DDL leg
+                // runs under the lock.
+                schema::ProbeOutcome::Missing => {
+                    schema::prepare_db_file(&db)?;
+                    drop(schema::open_connection(&db)?);
+                }
                 schema::ProbeOutcome::Suspect(_) => {
                     schema::quarantine(&db)?;
                     // The rebuild succeeded and this run continues cached —
@@ -303,6 +307,17 @@ impl CacheStore {
                     // line — the Err propagation and the caller's fault
                     // line cover it.
                     reporter.rebuilt();
+                }
+                // Schema skew (plan D2): matching identity pair, deviating
+                // static shapes for one tier. Tier-scoped structural
+                // invalidation — never quarantine, never a diagnostic; the
+                // tier rebuilds silently on next use.
+                schema::ProbeOutcome::Skew(tier) => {
+                    schema::prepare_db_file(&db)?;
+                    let conn = schema::open_connection(&db)?;
+                    schema::drop_tier_tables(&conn, tier)?;
+                    drop(conn);
+                    drop(schema::open_connection(&db)?);
                 }
             }
             // Release the init lock before the working connection opens.
@@ -645,18 +660,15 @@ impl AnchorCache for CacheStore {
         self.pending.borrow_mut().clear();
         drop(self.conn.borrow_mut().take());
         // Take the same no-wait init lock first: never delete under a
-        // concurrent probe/quarantine (plan decision 8). Contention is an
-        // error — the caller reports it rather than silently skipping the
-        // clear (never a wrong-answer path).
-        let dir = schema::cache_dir(&self.common_dir);
-        fs::create_dir_all(&dir)?;
+        // concurrent probe/quarantine (plan decision 8). The recreated
+        // subtree and lock file go through the hardened primitives (plan
+        // D9). Contention is an error — the caller reports it rather than
+        // silently skipping the clear (never a wrong-answer path).
+        let common = DirFd::open(&self.common_dir)?;
+        let wiki = common.ensure_private_subtree(Path::new(schema::STORE_DIR_NAME))?;
+        wiki.validate_private()?;
         let lock_path = schema::init_lock_path(&self.common_dir);
-        let lock_file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)?;
+        let lock_file = wiki.create_file(schema::INIT_LOCK_FILE_NAME)?;
         match lock_file.try_lock_exclusive() {
             Ok(true) => {}
             Ok(false) => {
@@ -671,6 +683,7 @@ impl AnchorCache for CacheStore {
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Err(e.into()),
             Err(e) => return Err(e.into()),
         }
+        let dir = schema::store_dir(&self.common_dir);
         // Delete the database file and its WAL companions. Best-effort:
         // NotFound is fine (the cache may not exist); anything else surfaces
         // as an error.
@@ -685,7 +698,7 @@ impl AnchorCache for CacheStore {
                 Err(e) => return Err(e.into()),
             }
         }
-        // Delete every quarantine rename-aside (`anchor-cache.sqlite.<stamp>.
+        // Delete every quarantine rename-aside (`store.sqlite.<stamp>.
         // quarantine`, as produced by schema::quarantine). Best-effort.
         let aside_prefix = format!("{}.", schema::DB_FILE_NAME);
         match fs::read_dir(&dir) {

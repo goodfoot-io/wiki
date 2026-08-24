@@ -17,10 +17,15 @@
 //! for. The fault fixtures carry no line-range links, so the drift engine's
 //! git subprocesses never run and the bogus `GIT_DIR` disturbs nothing else.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 mod common;
+
+use wiki::cache::schema::{
+    DB_FILE_NAME, INIT_LOCK_FILE_NAME, STORE_DIR_NAME,
+};
 
 /// Spawn the wiki binary from `cwd` with a clean cache environment: both
 /// `GIT_DIR` and `WIKI_ANCHOR_CACHE` are stripped so a run only sees the
@@ -55,7 +60,18 @@ fn expected_cache_dir(repo_root: &Path) -> PathBuf {
         String::from_utf8_lossy(&out.stderr)
     );
     let common = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    repo_root.join(common).join("wiki")
+    repo_root.join(common).join(STORE_DIR_NAME)
+}
+
+/// Create the cache directory the way the production open path does —
+/// private mode 0700, which the hardened creation path enforces.
+fn create_cache_dir(cache_dir: &Path) {
+    std::fs::create_dir_all(cache_dir).expect("create cache dir");
+    std::fs::set_permissions(
+        cache_dir,
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .expect("privatize cache dir");
 }
 
 /// Every line of `stderr` that is the cache-fault warning (plan decision 7).
@@ -151,9 +167,9 @@ fn clear_cache_prints_resolved_cache_path_and_exits_zero() {
 
     // The cache directory may or may not exist; the clear path behaves the
     // same either way.
-    std::fs::create_dir_all(&expected).expect("create cache dir");
-    std::fs::write(expected.join("anchor-cache.sqlite"), "stale bytes").expect("write db");
-    std::fs::write(expected.join("anchor-cache.init.lock"), "").expect("write lock");
+    create_cache_dir(&expected);
+    std::fs::write(expected.join(DB_FILE_NAME), "stale bytes").expect("write db");
+    std::fs::write(expected.join(INIT_LOCK_FILE_NAME), "").expect("write lock");
 
     let second = run(&repo.root, &["check", "--clear-cache"]);
     assert_eq!(second.status.code(), Some(0));
@@ -172,9 +188,9 @@ fn clear_cache_prints_resolved_cache_path_and_exits_zero() {
 fn clear_cache_deletes_the_cache_directory() {
     let repo = plain_fixture();
     let cache_dir = expected_cache_dir(&repo.root);
-    std::fs::create_dir_all(&cache_dir).expect("create cache dir");
-    std::fs::write(cache_dir.join("anchor-cache.sqlite"), "stale bytes").expect("write db");
-    std::fs::write(cache_dir.join("anchor-cache.init.lock"), "").expect("write lock");
+    create_cache_dir(&cache_dir);
+    std::fs::write(cache_dir.join(DB_FILE_NAME), "stale bytes").expect("write db");
+    std::fs::write(cache_dir.join(INIT_LOCK_FILE_NAME), "").expect("write lock");
     assert!(cache_dir.exists());
 
     let out = run(&repo.root, &["check", "--clear-cache"]);

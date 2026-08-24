@@ -14,6 +14,7 @@
 //! All fixtures live in temp dirs — never in the workspace tree.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -22,8 +23,8 @@ use tempfile::TempDir;
 use wiki::cache::key::{fingerprint_key, sha256_hex, walk_key};
 use wiki::cache::schema::{
     ANCHOR_WALK_DDL, APPLICATION_ID, BUSY_TIMEOUT_MS, DB_FILE_NAME, FINGERPRINT_DDL, META_DDL,
-    ProbeOutcome, SCHEMA_VERSION, SEMANTIC_EPOCH, SuspectKind, db_path, init_lock_path,
-    open_connection, probe, quarantine,
+    ProbeOutcome, SCHEMA_VERSION, SuspectKind, Tier, db_path, init_lock_path, open_connection,
+    probe, quarantine,
 };
 use wiki::cache::{AnchorCache, CacheStore, WalkRow};
 
@@ -58,14 +59,17 @@ fn temp_common_dir() -> TempDir {
     TempDir::new().expect("tempdir")
 }
 
-/// The database path under `common_dir`, with the `wiki/` directory created.
+/// The database path under `common_dir`, with the `wiki/` directory created
+/// private (0700 — the mode the production open path enforces).
 fn db_path_for(common_dir: &TempDir) -> PathBuf {
     let path = db_path(common_dir.path());
-    fs::create_dir_all(path.parent().expect("db path has a parent")).expect("create wiki dir");
+    let dir = path.parent().expect("db path has a parent");
+    fs::create_dir_all(dir).expect("create wiki dir");
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).expect("privatize wiki dir");
     path
 }
 
-/// Craft a healthy anchor-cache database at `db_path` — the binding DDL consts
+/// Craft a healthy store database at `db_path` — the binding DDL consts
 /// executed against a connection, seeded with the binding identity values.
 /// This is exactly the state the real open path creates on a fresh file.
 fn craft_valid_db(db_path: &Path) {
@@ -74,8 +78,8 @@ fn craft_valid_db(db_path: &Path) {
         conn.execute_batch(ddl).expect("create table");
     }
     conn.execute_batch(&format!(
-        "INSERT OR REPLACE INTO meta (id, application_id, schema_version, semantic_epoch, created_at) \
-         VALUES (1, {APPLICATION_ID}, {SCHEMA_VERSION}, {SEMANTIC_EPOCH}, strftime('%s', 'now'));"
+        "INSERT OR REPLACE INTO meta (id, application_id, schema_version, anchor_epoch, index_epoch) \
+         VALUES (1, '{APPLICATION_ID}', {SCHEMA_VERSION}, 0, 0);"
     ))
     .expect("seed meta");
 }
@@ -124,9 +128,7 @@ fn probe_rejects_malformed_fingerprint_binding_schema_and_open_rebuilds() {
     drop(conn);
     assert!(matches!(
         wiki::cache::schema::probe(&db).unwrap(),
-        wiki::cache::schema::ProbeOutcome::Suspect(
-            wiki::cache::schema::SuspectKind::SchemaMismatch
-        )
+        wiki::cache::schema::ProbeOutcome::Skew(Tier::Anchor)
     ));
     drop(open_store(dir.path()));
     assert_eq!(
@@ -148,9 +150,7 @@ fn probe_rejects_malformed_walk_binding_schema_and_open_rebuilds() {
     drop(conn);
     assert!(matches!(
         wiki::cache::schema::probe(&db).unwrap(),
-        wiki::cache::schema::ProbeOutcome::Suspect(
-            wiki::cache::schema::SuspectKind::SchemaMismatch
-        )
+        wiki::cache::schema::ProbeOutcome::Skew(Tier::Anchor)
     ));
     drop(open_store(dir.path()));
     assert_eq!(
@@ -444,7 +444,7 @@ fn probe_classifies_a_foreign_application_id_as_meta_mismatch() {
     let dir = temp_common_dir();
     let db = db_path_for(&dir);
     craft_valid_db(&db);
-    exec_on_db(&db, "UPDATE meta SET application_id = 0x12345678;");
+    exec_on_db(&db, "UPDATE meta SET application_id = 'foreign-tool';");
     assert_eq!(
         probe(&db).expect("probe"),
         ProbeOutcome::Suspect(SuspectKind::MetaMismatch)

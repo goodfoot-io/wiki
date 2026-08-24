@@ -560,7 +560,10 @@ fn corrupted_cache_faults_once_and_rebuilds() {
 }
 
 /// A meta-valid database with either tier's binding table malformed is
-/// quarantined before use, then warms normally on the following run.
+/// schema skew (plan D2), not corruption: the next run repairs it with
+/// tier-scoped structural invalidation — silently, byte-identical to the
+/// baseline (no quarantine warning) — and warms normally on the following
+/// run.
 #[test]
 fn malformed_tier_schemas_rebuild_transparently_and_then_hit() {
     for (table, ddl) in [
@@ -577,8 +580,7 @@ fn malformed_tier_schemas_rebuild_transparently_and_then_hit() {
         drop(conn);
 
         let rebuilt = run(&repo.root, &["check"]);
-        assert_byte_identical_with_fault(&baseline, &rebuilt, table);
-        assert_eq!(quarantine_warnings(&rebuilt.stderr).len(), 1, "{table}");
+        assert_byte_identical(&baseline, &rebuilt, table);
         assert_eq!(probe(&repo.db()).unwrap(), ProbeOutcome::Valid, "{table}");
 
         let warm = run_perf(&repo.root, &["check"]);

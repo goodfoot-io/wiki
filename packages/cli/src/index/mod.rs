@@ -16,6 +16,7 @@ use serde::Serialize;
 pub mod blob;
 pub mod freshness;
 pub mod fs_class;
+pub mod generations;
 pub mod ingest;
 pub mod lock;
 pub mod passes;

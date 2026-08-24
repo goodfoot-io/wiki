@@ -97,6 +97,42 @@ fn git(repo_root: &Path, args: &[&str]) {
     assert!(status.success(), "git {:?} failed in {:?}", args, repo_root);
 }
 
+/// Resolve the repository's common git dir via
+/// `git rev-parse --git-common-dir`, absolutized against `repo_root`.
+///
+/// Every linked worktree of one repository shares this directory; the
+/// merged store lives at `<common>/wiki/store.sqlite`. Target-layout port
+/// helper for the spec suites relocated by the merged-store card.
+pub fn git_common_dir(repo_root: &Path) -> PathBuf {
+    let out = Command::new("git")
+        .current_dir(repo_root)
+        .args(["rev-parse", "--git-common-dir"])
+        .output()
+        .expect("spawn git rev-parse");
+    assert!(
+        out.status.success(),
+        "git rev-parse --git-common-dir failed in {:?}: {}",
+        repo_root,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let resolved = String::from_utf8(out.stdout)
+        .expect("utf8 output")
+        .trim()
+        .to_string();
+    let path = PathBuf::from(&resolved);
+    if path.is_absolute() {
+        path
+    } else {
+        repo_root.join(path)
+    }
+}
+
+/// The merged store's database file for `repo_root`:
+/// `<git-common-dir>/wiki/store.sqlite`.
+pub fn target_db_path(repo_root: &Path) -> PathBuf {
+    git_common_dir(repo_root).join("wiki").join("store.sqlite")
+}
+
 /// Build the "parity" fixture repo:
 ///   - one committed `.md` (wiki-eligible)
 ///   - one staged-only `.md` (wiki-eligible)

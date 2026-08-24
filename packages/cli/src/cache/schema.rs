@@ -1,42 +1,52 @@
-//! Schema, probe, and open ordering for the anchor cache (plan decisions
-//! 3–4; the git-span reference shape is recorded in the similar-implementation
-//! note).
+//! Schema, probe, and open ordering for the consolidated wiki store
+//! (plan decisions D1–D4).
 //!
 //! ## Storage layout (binding)
 //!
-//! Database file: `<common-dir>/wiki/anchor-cache.sqlite`; init lock:
-//! `<common-dir>/wiki/anchor-cache.init.lock` (0-byte, fs4
-//! `try_lock_exclusive` no-wait, held only during probe/quarantine/DDL).
-//! The lock is never deleted by the open path, and only by `clear()`: it
-//! lives inside the deleted directory (plan decision 2), so clearing the
-//! cache inherently removes it — `clear()` unlinks it while still holding
-//! the flock (plan decision 8). One repository — plain checkout or any
-//! linked worktree — resolves one common dir, so worktrees share one cache.
+//! Database file: `<common-dir>/wiki/store.sqlite`; init lock:
+//! `<common-dir>/wiki/store.init.lock` (0-byte, fs4
+//! `try_lock_exclusive` no-wait, held only during probe/quarantine/skew
+//! repair/DDL). The lock is never deleted by the open path, and only by
+//! `clear()`: it lives inside the deleted directory, so clearing the store
+//! inherently removes it — `clear()` unlinks it while still holding the
+//! flock. One repository — plain checkout or any linked worktree — resolves
+//! one common dir, so every worktree shares one store. Every creation path
+//! (the `wiki/` subtree, both lock files, the database file) goes through
+//! [`crate::store::fd`] (plan D9).
 //!
 //! ## Open order (binding)
 //!
-//! 1. `busy_timeout(1000)` — set *before* any pragma that can contend
-//!    (git-span's ordering invariant).
-//! 2. `PRAGMA journal_mode = WAL` — the mode switch can surface
-//!    `SQLITE_BUSY` without consulting the busy handler (spike S1); the
-//!    bounded retry wrapper covers it, the init lock prevents the four-way
-//!    cold-start race.
-//! 3. Schema — the three `CREATE TABLE` statements below, idempotent, plus
-//!    the meta singleton seed.
+//! 1. `busy_timeout(1000)` — set *before* any pragma that can contend; the
+//!    WAL switch can surface `SQLITE_BUSY` without consulting the busy
+//!    handler, and this ordering is empirically load-bearing (spike S1).
+//! 2. `PRAGMA journal_mode = WAL`, then the reconciled durability policy
+//!    (plan D4): `synchronous = NORMAL` and a 256 MiB `mmap_size`.
+//! 3. Schema — the anchor tier's `CREATE TABLE` statements below,
+//!    idempotent, plus the meta singleton seed.
 //!
-//! ## Probe and quarantine (binding)
+//! ## Probe: identity pair vs schema skew (binding)
 //!
-//! The open path probes the file read-only — `SELECT count(*) FROM
-//! sqlite_master` — before any write pragma. Quarantine triggers are
-//! *exactly* `SQLITE_NOTADB`, `SQLITE_CORRUPT`, and a meta mismatch
-//! (`application_id` / `schema_version` / `semantic_epoch` differing from
-//! [`APPLICATION_ID`] / [`SCHEMA_VERSION`] / [`SEMANTIC_EPOCH`], or a
-//! missing meta row); a missing file is a fresh create, not a quarantine.
-//! `SQLITE_BUSY` is never a quarantine trigger — it is retried. Quarantine
-//! (rename aside with a timestamp, delete `-wal`/`-shm` companions, create
-//! fresh) runs under the no-wait init lock with a TOCTOU re-probe of the
-//! rename target, and at most one recreate happens before the run gives up:
-//! any error at any point disables the cache for the run.
+//! The open path probes the file read-only before any write pragma.
+//! **Corruption-class** events quarantine the whole store: `SQLITE_NOTADB`,
+//! `SQLITE_CORRUPT`, or a foreign identity pair — `meta.application_id` /
+//! `meta.schema_version` differing from [`APPLICATION_ID`] /
+//! [`SCHEMA_VERSION`], or a missing meta row/table. A missing *file* is a
+//! fresh create, not a quarantine. `SQLITE_BUSY` is never a trigger — it is
+//! retried.
+//!
+//! A matching identity pair with deviating **static** table shapes is
+//! **schema skew, not corruption** (plan D2): the outcome is tier-scoped
+//! structural invalidation ([`drop_tier_tables`] — drop that tier's static
+//! tables plus, for [`Tier::Index`], every dynamic `fts_%` child), never
+//! whole-store quarantine — one tier's evolution cannot discard the other
+//! tier's data. Dynamic `fts_<gen_id>` tables are invisible to the registry
+//! probe. The per-tier epochs in the meta singleton are consumer state:
+//! they are checked after a valid probe, never by it.
+//!
+//! Quarantine (rename aside with a timestamp, delete `-wal`/`-shm`
+//! companions, create fresh) runs under the no-wait init lock with a TOCTOU
+//! re-probe of the rename target, and at most one recreate happens before
+//! the run gives up: any error at any point disables the cache for the run.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -46,47 +56,82 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, params};
 
 use crate::cache::CacheError;
 
-/// `meta.application_id` — the ASCII bytes "waca" ("wiki anchor cache").
-pub const APPLICATION_ID: i64 = 0x7761_6361;
+/// `meta.application_id` — identifies the consolidated wiki store. A
+/// database whose identity pair does not match is foreign and quarantined.
+pub const APPLICATION_ID: &str = "wkst";
 
-/// The schema version this build reads and writes.
+/// The schema version this build reads and writes. Together with
+/// [`APPLICATION_ID`] this forms the identity pair verified by
+/// [`probe`].
 pub const SCHEMA_VERSION: i64 = 1;
 
-/// Bump to invalidate all cached rows without a schema change.
-pub const SEMANTIC_EPOCH: i64 = 1;
+/// Seed value for the per-tier bulk-invalidation epochs (`anchor_epoch`,
+/// `index_epoch`). Epochs are consumer state (plan D2): bumped to invalidate
+/// one tier's rows, checked after a valid probe, never by it.
+pub const INITIAL_TIER_EPOCH: i64 = 0;
 
-/// Busy timeout, set before the WAL pragma (git-span's ordering invariant).
+/// Busy timeout, set before the WAL pragma (spike S1's ordering invariant).
 pub const BUSY_TIMEOUT_MS: u32 = 1000;
 
+/// The store directory name under the repository's common git dir.
+pub const STORE_DIR_NAME: &str = "wiki";
+
 /// Database file name under `<common-dir>/wiki/`.
-pub const DB_FILE_NAME: &str = "anchor-cache.sqlite";
+pub const DB_FILE_NAME: &str = "store.sqlite";
 
 /// Init lock file name under `<common-dir>/wiki/`.
-pub const INIT_LOCK_FILE_NAME: &str = "anchor-cache.init.lock";
+pub const INIT_LOCK_FILE_NAME: &str = "store.init.lock";
 
-/// The cache directory under a repository's common git dir.
+/// Rendezvous lock file name under `<common-dir>/wiki/`
+/// ([`crate::cache::rendezvous`], plan D7).
+pub const RENDEZVOUS_LOCK_FILE_NAME: &str = "rendezvous.lock";
+
+/// The store directory under a repository's common git dir.
+pub fn store_dir(common_dir: &Path) -> PathBuf {
+    common_dir.join(STORE_DIR_NAME)
+}
+
+/// The store directory under a repository's common git dir (historical
+/// name kept for the clear-cache path printer in `commands/check.rs`).
 pub fn cache_dir(common_dir: &Path) -> PathBuf {
-    common_dir.join("wiki")
+    store_dir(common_dir)
 }
 
 /// The database file path.
 pub fn db_path(common_dir: &Path) -> PathBuf {
-    cache_dir(common_dir).join(DB_FILE_NAME)
+    store_dir(common_dir).join(DB_FILE_NAME)
 }
 
 /// The init lock file path.
 pub fn init_lock_path(common_dir: &Path) -> PathBuf {
-    cache_dir(common_dir).join(INIT_LOCK_FILE_NAME)
+    store_dir(common_dir).join(INIT_LOCK_FILE_NAME)
 }
 
-/// Meta singleton row: identity columns plus creation time. The `id = 1`
-/// CHECK keeps the table single-row by construction.
+/// The rendezvous lock file path.
+pub fn rendezvous_lock_path(common_dir: &Path) -> PathBuf {
+    store_dir(common_dir).join(RENDEZVOUS_LOCK_FILE_NAME)
+}
+
+/// Which tier of the consolidated store a table, epoch, or invalidation
+/// belongs to (plan D2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    /// Tier A/F: the anchor cache (`fingerprint`, `anchor_walk`).
+    Anchor,
+    /// The index cache (`generations`, `gen_paths`, `blobs`, dynamic
+    /// `fts_<gen_id>` children); owned by the generations store.
+    Index,
+}
+
+/// Meta singleton row: the identity pair plus the per-tier
+/// bulk-invalidation epochs (plan D2). The `id = 1` CHECK keeps the table
+/// single-row by construction.
 pub const META_DDL: &str = "CREATE TABLE IF NOT EXISTS meta (
     id              INTEGER PRIMARY KEY CHECK (id = 1),
-    application_id  INTEGER NOT NULL,
+    application_id  TEXT    NOT NULL,
     schema_version  INTEGER NOT NULL,
-    semantic_epoch  INTEGER NOT NULL,
-    created_at      INTEGER NOT NULL
+    anchor_epoch    INTEGER NOT NULL,
+    index_epoch     INTEGER NOT NULL
 ) STRICT;";
 
 /// Fingerprint tier (tier F): `key_digest` is the 64-hex sha256 of the
@@ -119,46 +164,75 @@ pub const ANCHOR_WALK_DDL: &str = "CREATE TABLE IF NOT EXISTS anchor_walk (
 ) STRICT;";
 
 /// Seed the meta singleton on fresh create — idempotent (`OR IGNORE`), so
-/// re-running the seed over an already-seeded database is a no-op.
-/// `created_at` is a unix timestamp (INTEGER, matching the git-span reference
-/// shape).
+/// re-running the seed over an already-seeded database is a no-op. Both tier
+/// epochs start at [`INITIAL_TIER_EPOCH`].
 pub const META_INSERT_SQL: &str =
-    "INSERT OR IGNORE INTO meta (id, application_id, schema_version, semantic_epoch, created_at)
-VALUES (1, ?, ?, ?, strftime('%s', 'now'));";
+    "INSERT OR IGNORE INTO meta (id, application_id, schema_version, anchor_epoch, index_epoch)
+VALUES (1, ?, ?, ?, ?);";
 
 /// Read-only liveness probe, run before any write pragma.
 pub const PROBE_SQL: &str = "SELECT count(*) FROM sqlite_master;";
 
-/// Meta identity check; a missing row or any mismatched column is a
-/// meta mismatch (quarantine trigger).
-pub const META_VERIFY_SQL: &str =
-    "SELECT application_id, schema_version, semantic_epoch FROM meta WHERE id = 1;";
+/// Meta identity check; a missing row or a mismatched identity column is a
+/// meta mismatch (quarantine trigger). The per-tier epochs are deliberately
+/// absent — consumer state, never probe state (plan D2).
+pub const META_VERIFY_SQL: &str = "SELECT application_id, schema_version FROM meta WHERE id = 1;";
 
 /// Outcome of the read-only probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeOutcome {
-    /// The file is a healthy wiki anchor cache.
+    /// The file is a healthy wiki store.
     Valid,
     /// The file does not exist — a fresh create, not a quarantine.
     Missing,
-    /// The file exists but is suspect; see [`SuspectKind`].
+    /// The file is corruption-class suspect; see [`SuspectKind`]. Quarantine.
     Suspect(SuspectKind),
+    /// A matching identity pair with deviating static table shapes for one
+    /// tier — schema skew (plan D2): tier-scoped structural invalidation
+    /// ([`drop_tier_tables`]), never whole-store quarantine.
+    Skew(Tier),
 }
 
-/// Why a probed file is suspect.
+/// Why a probed file is corruption-class suspect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SuspectKind {
     /// `SQLITE_NOTADB` — not a database at all.
     NotADatabase,
     /// `SQLITE_CORRUPT` — damaged database file.
     Corrupt,
-    /// Meta row absent, or `application_id` / `schema_version` /
-    /// `semantic_epoch` mismatch — a database written by a different tool or
-    /// schema.
+    /// Meta row absent, or the identity pair (`application_id`,
+    /// `schema_version`) differs from [`APPLICATION_ID`] /
+    /// [`SCHEMA_VERSION`] — a database written by a different tool or an
+    /// incompatible schema version.
     MetaMismatch,
-    /// One of the binding tier tables is absent or has the wrong columns,
-    /// declared types, nullability, or primary-key shape.
-    SchemaMismatch,
+}
+
+/// One registry entry: a binding static table and its required columns
+/// `(name, declared type, nullable, primary key)` (plan D3).
+type ColumnSpec = (&'static str, &'static str, bool, bool);
+
+/// The anchor tier's static-table registry entries (plan D3).
+const ANCHOR_REGISTRY: &[(&str, &[ColumnSpec])] = &[
+    ("fingerprint", FINGERPRINT_COLUMNS),
+    ("anchor_walk", WALK_COLUMNS),
+];
+
+/// The index tier's static-table registry entries. Registration lands with
+/// the generations store itself (plan Phase 3): adding the tier to the
+/// probe is data, not surgery. Until then the probe verifies nothing for
+/// [`Tier::Index`]; its static table *names* are pinned in
+/// [`INDEX_STATIC_TABLES`] for tier-scoped drops.
+const INDEX_REGISTRY: &[(&str, &[ColumnSpec])] = &[];
+
+/// The index tier's binding static table names, dropped by
+/// [`drop_tier_tables`] alongside every dynamic `fts_%` child (plan D2).
+const INDEX_STATIC_TABLES: &[&str] = &["generations", "gen_paths", "blobs"];
+
+fn registry_for(tier: Tier) -> &'static [(&'static str, &'static [ColumnSpec])] {
+    match tier {
+        Tier::Anchor => ANCHOR_REGISTRY,
+        Tier::Index => INDEX_REGISTRY,
+    }
 }
 
 const FINGERPRINT_COLUMNS: &[(&str, &str, bool, bool)] = &[
@@ -209,14 +283,17 @@ fn table_matches(
             }))
 }
 
-/// Probe `db_path` read-only and classify it (plan decision 4): a missing
-/// file is [`ProbeOutcome::Missing`] — checked before any open, so a probe
-/// never creates the file — then [`PROBE_SQL`] (the liveness leg) and
-/// [`META_VERIFY_SQL`] (the identity leg). `SQLITE_BUSY` on either leg
-/// surfaces as `Err` for the caller's bounded wrapper to retry — a busy
-/// database is healthy, never suspect. A readable database that is not our
-/// shape (meta row absent or differing, or no meta table at all) is
-/// [`SuspectKind::MetaMismatch`]: foreign files are never adopted.
+/// Probe `db_path` read-only and classify it: a missing file is
+/// [`ProbeOutcome::Missing`] — checked before any open, so a probe never
+/// creates the file — then [`PROBE_SQL`] (the liveness leg), the identity
+/// pair (the identity leg), and the per-tier static-table registry (plan
+/// D3). `SQLITE_BUSY` on any leg surfaces as `Err` for the caller's bounded
+/// wrapper to retry — a busy database is healthy, never suspect. A readable
+/// database that is not ours (meta row absent or identity pair differing,
+/// or no meta table at all) is [`SuspectKind::MetaMismatch`]: foreign files
+/// are never adopted. A matching identity pair with deviating static shapes
+/// is [`ProbeOutcome::Skew`] for the owning tier — structural invalidation,
+/// not corruption.
 pub fn probe(db_path: &Path) -> Result<ProbeOutcome, CacheError> {
     if !db_path.exists() {
         return Ok(ProbeOutcome::Missing);
@@ -237,27 +314,26 @@ pub fn probe(db_path: &Path) -> Result<ProbeOutcome, CacheError> {
         },
         Err(e) => return Err(e.into()),
     }
-    // Identity leg: the file is a readable database — is it ours?
+    // Identity leg: the file is a readable database — is it ours? The pair
+    // only; epochs are consumer state (plan D2).
     let meta = conn.query_row(META_VERIFY_SQL, [], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-        ))
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
     });
     match meta {
-        Ok((application_id, schema_version, semantic_epoch))
-            if application_id == APPLICATION_ID
-                && schema_version == SCHEMA_VERSION
-                && semantic_epoch == SEMANTIC_EPOCH =>
+        Ok((application_id, schema_version))
+            if application_id == APPLICATION_ID && schema_version == SCHEMA_VERSION =>
         {
-            if table_matches(&conn, "fingerprint", FINGERPRINT_COLUMNS)?
-                && table_matches(&conn, "anchor_walk", WALK_COLUMNS)?
+            // Registry leg: verify every registered tier's static tables;
+            // dynamic `fts_%` children are invisible here by construction.
+            for (tier, tables) in [(Tier::Anchor, ANCHOR_REGISTRY), (Tier::Index, INDEX_REGISTRY)]
             {
-                Ok(ProbeOutcome::Valid)
-            } else {
-                Ok(ProbeOutcome::Suspect(SuspectKind::SchemaMismatch))
+                for (name, expected) in tables {
+                    if !table_matches(&conn, name, expected)? {
+                        return Ok(ProbeOutcome::Skew(tier));
+                    }
+                }
             }
+            Ok(ProbeOutcome::Valid)
         }
         Ok(_) => Ok(ProbeOutcome::Suspect(SuspectKind::MetaMismatch)),
         Err(rusqlite::Error::QueryReturnedNoRows) => {
@@ -273,6 +349,50 @@ pub fn probe(db_path: &Path) -> Result<ProbeOutcome, CacheError> {
         },
         Err(e) => Err(e.into()),
     }
+}
+
+/// Tier-scoped structural invalidation (plan D2): drop `tier`'s static
+/// registry tables plus — for [`Tier::Index`] — every dynamic `fts_%` child
+/// table. Rows die with their tables, so this one primitive serves schema-skew
+/// repair, tier-epoch bulk invalidation, and the later tier-scoped
+/// clear-cache. Dropping one tier's tables never touches the other tier's.
+pub fn drop_tier_tables(conn: &Connection, tier: Tier) -> Result<(), CacheError> {
+    for (name, _) in registry_for(tier) {
+        conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{name}\";"))?;
+    }
+    if tier == Tier::Index {
+        // Static tables by name (the index tier's registration in the
+        // verified-shape registry lands with the generations store) plus
+        // every dynamic `fts_<gen_id>` child. The `\_` escape keeps the
+        // pattern on the literal underscore: `fts_%` unescaped would also
+        // match names like `ftsX`.
+        for name in INDEX_STATIC_TABLES {
+            conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{name}\";"))?;
+        }
+        let mut stmt = conn.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'fts\\_%' ESCAPE '\\';",
+        )?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for name in names {
+            let quoted = name.replace('"', "\"\"");
+            conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{quoted}\";"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Route the database file's creation through the descriptor-hardened
+/// primitives (plan D9): validate the containing private subtree and create
+/// the file owner-only with symlink refusal. An existing file is opened,
+/// never truncated — SQLite adopts it as-is.
+pub(crate) fn prepare_db_file(db_path: &Path) -> Result<(), CacheError> {
+    let dir = db_path.parent().expect("db path has a parent");
+    let dir_fd = crate::store::fd::DirFd::open(dir)?;
+    dir_fd.validate_private()?;
+    dir_fd.create_file(DB_FILE_NAME)?;
+    Ok(())
 }
 
 /// Quarantine a suspect database: rename it aside with a timestamp, delete
@@ -309,7 +429,9 @@ pub fn quarantine(db_path: &Path) -> Result<(), CacheError> {
     }
 
     // Fresh create: the binding open order seeds the full schema and the
-    // meta singleton. The connection is dropped — the caller opens its own.
+    // meta singleton. The file is pre-created through the hardened
+    // primitives; the connection is dropped — the caller opens its own.
+    prepare_db_file(db_path)?;
     drop(open_connection(db_path)?);
     Ok(())
 }
@@ -342,21 +464,28 @@ pub(crate) fn retry_busy<T>(
 }
 
 /// Open the database at `db_path` applying the binding open order (plan
-/// decision 4): `busy_timeout(1000)` → `PRAGMA journal_mode = WAL` → the
-/// three DDL statements → the meta singleton seed. The timeout is set before
-/// the WAL switch (git-span's ordering invariant); the switch itself can
-/// surface `SQLITE_BUSY` without consulting the busy handler (spike S1),
-/// which is why the open path runs under the bounded retry wrapper.
+/// D4): `busy_timeout(1000)` → `PRAGMA journal_mode = WAL` →
+/// `synchronous = NORMAL` → `mmap_size = 268435456` → the anchor tier's DDL
+/// statements → the meta singleton seed. The timeout is set before the WAL
+/// switch (spike S1's empirically load-bearing ordering invariant); the
+/// switch itself can surface `SQLITE_BUSY` without consulting the busy
+/// handler, which is why the open path runs under the bounded retry wrapper.
 pub fn open_connection(db_path: &Path) -> Result<Connection, CacheError> {
     let conn = Connection::open(db_path)?;
     conn.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS as u64))?;
     conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+    conn.execute_batch("PRAGMA synchronous = NORMAL; PRAGMA mmap_size = 268435456;")?;
     for ddl in [META_DDL, FINGERPRINT_DDL, ANCHOR_WALK_DDL] {
         conn.execute_batch(ddl)?;
     }
     conn.execute(
         META_INSERT_SQL,
-        params![APPLICATION_ID, SCHEMA_VERSION, SEMANTIC_EPOCH],
+        params![
+            APPLICATION_ID,
+            SCHEMA_VERSION,
+            INITIAL_TIER_EPOCH,
+            INITIAL_TIER_EPOCH
+        ],
     )?;
     Ok(conn)
 }

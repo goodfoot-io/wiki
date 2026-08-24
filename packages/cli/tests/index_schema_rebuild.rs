@@ -59,3 +59,38 @@ fn corrupt_cache_file_rebuilds() {
         .expect("Seed present after rebuild");
     assert_eq!(page.title, "Seed");
 }
+
+// ── Target-layout port (plan merged-store-generations, Phase 1) ──────────
+//
+// The merged store lives at `<git-common-dir>/wiki/store.sqlite`; once the
+// freshness rewrite serves generations from it, the rebuild contract moves
+// with it — and no `.wiki/` directory may ever appear on any checkout.
+
+#[test]
+#[ignore = "target layout lands in Phase 3; production still writes .wiki/wiki-index.sqlite"]
+fn merged_store_corruption_rebuilds_without_creating_wiki_dir() {
+    let repo = seeded_repo();
+
+    drop(WikiIndex::prepare(repo.root.as_path()).expect("initial prepare"));
+
+    let db = common::target_db_path(&repo.root);
+    assert!(db.exists(), "merged store must exist after prepare");
+    // Clobber the DB (sidecars first, so no WAL replays over the garbage).
+    for suffix in ["-shm", "-wal"] {
+        let mut p = db.clone().into_os_string();
+        p.push(suffix);
+        let _ = std::fs::remove_file(std::path::PathBuf::from(p));
+    }
+    std::fs::write(&db, b"this is not a sqlite database").expect("corrupt db file");
+
+    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare must rebuild, not fail");
+    let page = index
+        .resolve_page("Seed")
+        .expect("resolve_page")
+        .expect("Seed present after rebuild");
+    assert_eq!(page.title, "Seed");
+    assert!(
+        !repo.root.join(".wiki").exists(),
+        "no .wiki directory may appear on any checkout under the merged store"
+    );
+}

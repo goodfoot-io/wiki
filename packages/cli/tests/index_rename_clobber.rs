@@ -170,3 +170,104 @@ fn rename_onto_occupied_destination_decrements_displaced_blob() {
         page.file
     );
 }
+
+// ── Target-layout port (plan merged-store-generations, Phase 1) ──────────
+//
+// Same skew scenario, injected through the merged store's static tier:
+// `generations` + `gen_paths` (TEXT source literals) + global `blobs`.
+// Pins the DDL shape and the displaced-blob release under generations.
+
+/// Open the merged store for direct manipulation.
+fn open_merged_store(repo_root: &Path) -> Connection {
+    let db_path = common::target_db_path(repo_root);
+    Connection::open(&db_path).expect("open merged store")
+}
+
+#[test]
+#[ignore = "target layout lands in Phase 3; production still writes .wiki/wiki-index.sqlite"]
+fn rename_onto_occupied_destination_decrements_displaced_blob_in_merged_store() {
+    let repo = common::FixtureRepo::new();
+
+    // ── Phase 1: create and then delete `dest.md` so the index is clean ──
+    let dest_bytes = "---\ntitle: Destination\nsummary: Original occupant.\n---\n\nDest body.\n";
+
+    repo.write_file("dest.md", dest_bytes);
+    repo.git_add("dest.md");
+    repo.git_commit("add dest.md");
+    drop(WikiIndex::prepare(repo.root.as_path()).expect("prepare dest"));
+
+    // Delete dest.md so the tree no longer contains it.
+    repo.git_rm("dest.md");
+    repo.git_commit("remove dest.md");
+    drop(WikiIndex::prepare(repo.root.as_path()).expect("prepare after remove"));
+
+    // ── Phase 2: inject prior-state skew into the merged store ──
+    let fake_oid = compute_blob_oid(FAKE_BYTES);
+
+    {
+        let conn = open_merged_store(repo.root.as_path());
+        // A generation row to anchor the skew (all CHECK widths honored).
+        conn.execute(
+            "INSERT INTO generations (digest, head_oid, head_tree_oid, index_checksum,
+                                      wikiignore_hash, worktree_sig, publisher,
+                                      created_at, access_bucket, blob_count)
+             VALUES (zeroblob(32), ?1, '', zeroblob(20), zeroblob(20), zeroblob(32),
+                     NULL, 0, 0, 1)",
+            rusqlite::params!["f".repeat(40)],
+        )
+        .expect("insert skew generations row");
+        // The dangling gen_paths row at (dest.md, 'tree') referencing the
+        // fake oid — the FK-brick skew, now in generation scope.
+        conn.execute(
+            "INSERT INTO gen_paths (gen_id, source, path_rel, oid, parent_dir)
+             VALUES (last_insert_rowid(), 'tree', ?1, ?2, '')",
+            rusqlite::params!["dest.md", fake_oid.0],
+        )
+        .expect("insert skew gen_paths row");
+        conn.execute(
+            "INSERT INTO blobs (oid, refcount, title, summary, body, aliases_text, tags_text, keywords_text)
+             VALUES (?1, 1, ?2, ?3, ?4, '', '', '')",
+            rusqlite::params![fake_oid.0, "Ghost", "Should not survive.", "Ghost body."],
+        )
+        .expect("insert fake blobs row");
+    }
+
+    // ── Phase 3: pure rename onto the occupied destination ──
+    let source_bytes =
+        "---\ntitle: Source\nsummary: Will be renamed.\n---\n\nSource body.\n";
+    let source_oid = compute_blob_oid(source_bytes.as_bytes());
+
+    repo.write_file("source.md", source_bytes);
+    repo.git_add("source.md");
+    repo.git_commit("add source.md");
+    drop(WikiIndex::prepare(repo.root.as_path()).expect("prepare source"));
+
+    repo.git_mv("source.md", "dest.md");
+    repo.git_commit("rename source.md -> dest.md");
+
+    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare after rename");
+
+    // ── Phase 4: assert correctness ──
+
+    // The displaced fake blob must be fully released when its lone
+    // gen_paths row is clobbered by the rename.
+    let (fake_blobs, _) = index
+        .debug_blob_path_counts(&fake_oid.0)
+        .expect("debug_blob_path_counts fake oid");
+    assert_eq!(
+        fake_blobs, 0,
+        "displaced blob must be released when a rename clobbers its gen_paths row"
+    );
+
+    // The renamed content survives intact.
+    let (src_blobs, _) = index
+        .debug_blob_path_counts(&source_oid.0)
+        .expect("debug_blob_path_counts source oid");
+    assert_eq!(src_blobs, 1, "exactly one blobs row for the renamed content");
+
+    let page = index
+        .resolve_page("Source")
+        .expect("resolve_page")
+        .expect("page must survive the rename");
+    assert!(page.file.ends_with("dest.md"), "resolves to dest.md: {}", page.file);
+}
