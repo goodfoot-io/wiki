@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   app:
     init: true
@@ -19,9 +17,16 @@ services:
       # Host-backed home directory: persists Rust toolchain, .claude config,
       # zsh history, and Tailscale state across rebuilds without named volumes.
       - ${HOME}/devcontainer/wiki:/home/node:cached
+      # opencode's SQLite DB (WAL mode) + logs must not live on virtiofs: WAL
+      # commits over the host boundary generate constant sync-write disk load
+      # and fsevent storms. Container-native named volume shadows just this dir.
+      - opencode-data:/home/node/.local/share/opencode
     environment:
       - NODE_OPTIONS=--max-old-space-size=8192
       - CLAUDE_CONFIG_DIR=/home/node/.claude
     # No dns: pin — `tailscale up --accept-dns` manages /etc/resolv.conf
     # (MagicDNS at 100.100.100.100, with split-DNS to upstreams).
     command: sleep infinity
+
+volumes:
+  opencode-data:
