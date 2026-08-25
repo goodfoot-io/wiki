@@ -2,10 +2,20 @@ import { type SpawnSyncReturns, spawnSync } from 'node:child_process';
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
-import { getFilePath, type Logger, postToolUseHook, postToolUseOutput } from '@goodfoot/claude-code-hooks';
 
 const FRONTMATTER_SCAN_BYTES = 4096;
 const FRONTMATTER_SCAN_LINES = 30;
+const DEFAULT_WIKI_CHECK_TIMEOUT_MS = 25000;
+
+/**
+ * Structural subset of the SDK loggers the platform adapters receive. The core
+ * must not depend on any one SDK, so both the Claude and Codex loggers satisfy
+ * this shape as-is.
+ */
+export interface WikiCheckLogger {
+  info(message: string, context?: Record<string, unknown>): void;
+  warn(message: string, context?: Record<string, unknown>): void;
+}
 
 /**
  * Read a bounded byte prefix from disk for the frontmatter head scan. A
@@ -15,7 +25,7 @@ const FRONTMATTER_SCAN_LINES = 30;
  * tail — including a split multibyte character at the window boundary — is
  * never scanned.
  */
-function readFrontmatterPrefix(absPath: string): string {
+export function readFrontmatterPrefix(absPath: string): string {
   const buf = Buffer.alloc(FRONTMATTER_SCAN_BYTES);
   const fd = openSync(absPath, 'r');
   try {
@@ -64,11 +74,12 @@ export function isWikiFile(filePath: string, cwd: string): boolean {
   return title.length > 0 && summary.length > 0;
 }
 
-function sessionTrackingFile(sessionId: string): string {
+/** Per-session scratch file listing every wiki file the session has touched. */
+export function sessionTrackingFile(sessionId: string): string {
   return join(tmpdir(), `wiki-check-${sessionId}.txt`);
 }
 
-function trackWikiFile(sessionId: string, filePath: string): void {
+export function trackWikiFile(sessionId: string, filePath: string): void {
   const trackingFile = sessionTrackingFile(sessionId);
   let existing: string[] = [];
   if (existsSync(trackingFile)) {
@@ -83,10 +94,10 @@ function trackWikiFile(sessionId: string, filePath: string): void {
   }
 }
 
-const WIKI_EXECUTABLE = process.platform === 'win32' ? 'wiki.exe' : 'wiki';
+export const WIKI_EXECUTABLE = process.platform === 'win32' ? 'wiki.exe' : 'wiki';
 
 /** Compare dotted numeric versions (e.g. `0.5.74`); returns a<b => negative. */
-function compareSemver(a: string, b: string): number {
+export function compareSemver(a: string, b: string): number {
   const pa = a.split('.').map((n) => Number.parseInt(n, 10));
   const pb = b.split('.').map((n) => Number.parseInt(n, 10));
   for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
@@ -99,7 +110,7 @@ function compareSemver(a: string, b: string): number {
 }
 
 /** Candidate VS Code `globalStorage` roots across editions and platforms. */
-function vscodeGlobalStorageRoots(): string[] {
+export function vscodeGlobalStorageRoots(): string[] {
   const home = homedir();
   const roots = [
     join(home, '.vscode-server', 'data', 'User', 'globalStorage'),
@@ -124,7 +135,7 @@ function vscodeGlobalStorageRoots(): string[] {
  * hook subprocess never inherits it — we must find it on disk. Newest version
  * wins. Returns null when no managed binary is present.
  */
-function findManagedWikiBinary(): string | null {
+export function findManagedWikiBinary(): string | null {
   for (const root of vscodeGlobalStorageRoots()) {
     const binRoot = join(root, 'goodfoot.wiki-extension', 'bin');
     if (!existsSync(binRoot)) continue;
@@ -155,13 +166,13 @@ function findManagedWikiBinary(): string | null {
 }
 
 /**
- * Resolve an absolute path to the `wiki` binary, tolerant of the fact that a
- * Claude Code hook subprocess does not inherit the extension-augmented terminal
- * PATH. Resolution order: `WIKI_BIN` override, then PATH, then the extension's
- * managed binary. Falls back to the bare name so the caller's spawn surfaces a
- * clear ENOENT when nothing is found.
+ * Resolve an absolute path to the `wiki` binary, tolerant of the fact that an
+ * agent-hook subprocess does not inherit the extension-augmented terminal PATH.
+ * Resolution order: `WIKI_BIN` override, then PATH, then the extension's managed
+ * binary. Falls back to the bare name so the caller's spawn surfaces a clear
+ * ENOENT when nothing is found.
  */
-export function resolveWikiBinary(logger: Logger): string {
+export function resolveWikiBinary(logger?: WikiCheckLogger): string {
   const override = process.env.WIKI_BIN;
   if (override && existsSync(override)) return override;
 
@@ -177,88 +188,70 @@ export function resolveWikiBinary(logger: Logger): string {
 
   const managed = findManagedWikiBinary();
   if (managed) {
-    logger.info('resolved wiki binary from VS Code globalStorage', { path: managed });
+    logger?.info('resolved wiki binary from VS Code globalStorage', { path: managed });
     return managed;
   }
 
   return WIKI_EXECUTABLE;
 }
 
+/** Outcome of one `wiki check --fix` invocation. */
+export type WikiCheckStatus = 'clean' | 'residual' | 'unavailable';
+
+export interface WikiCheckResult {
+  status: WikiCheckStatus;
+  /**
+   * Combined stdout/stderr: residual diagnostics when `status` is `'residual'`,
+   * the launch-failure detail when `'unavailable'`. Absent when there is
+   * nothing to surface.
+   */
+  output?: string;
+}
+
+export interface WikiCheckOptions {
+  /** Absolute or PATH-resolvable path to the `wiki` binary to spawn. */
+  binary: string;
+  /** Spawn timeout in milliseconds; defaults to {@link DEFAULT_WIKI_CHECK_TIMEOUT_MS}. */
+  timeoutMs?: number;
+  /** Working directory for the spawn; defaults to the current process cwd. */
+  cwd?: string;
+}
+
+/**
+ * Run `wiki check --fix <file>` once and classify the outcome:
+ * - `'clean'` — exit 0; the page was validated (and auto-fixed in place).
+ * - `'residual'` — non-zero exit with collected diagnostics the agent must resolve.
+ * - `'unavailable'` — the binary could not be launched at all (or the spawn threw).
+ *
+ * Never throws: every failure mode lands in the result so adapters can decide
+ * their own fail-open/fail-closed surfacing.
+ */
+export function runWikiCheck(filePath: string, options: WikiCheckOptions): WikiCheckResult {
+  let result: SpawnSyncReturns<string>;
+  try {
+    result = spawnSync(options.binary, ['check', '--fix', filePath], {
+      cwd: options.cwd,
+      encoding: 'utf8',
+      timeout: options.timeoutMs ?? DEFAULT_WIKI_CHECK_TIMEOUT_MS,
+      env: { ...process.env }
+    });
+  } catch (err) {
+    return { status: 'unavailable', output: err instanceof Error ? err.message : String(err) };
+  }
+
+  if (isLaunchFailure(result)) {
+    return { status: 'unavailable', output: result.error?.message ?? 'spawn failed' };
+  }
+
+  if (result.status !== 0) {
+    const output = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
+    return output ? { status: 'residual', output } : { status: 'residual' };
+  }
+
+  return { status: 'clean' };
+}
+
 /** True when a spawn failed because the binary itself could not be launched. */
 function isLaunchFailure(result: SpawnSyncReturns<string>): boolean {
   return result.error != null;
 }
-
-/**
- * Fail-closed surfacing: when the `wiki` binary cannot be launched, the page's
- * links and line-range drift went unvalidated. The hook fires after the write, so
- * it cannot block — but it must make the gap loud rather than passing silently.
- */
-function wikiUnavailableOutput(filePath: string, wikiBin: string, detail: string) {
-  const message =
-    `wiki validation was SKIPPED — the \`wiki\` binary could not be launched (${detail}).\n` +
-    `Resolved binary: ${wikiBin}\n` +
-    `Fragment links and line-range drift for ${filePath} were NOT validated.\n` +
-    'Install the wiki CLI on PATH, or set WIKI_BIN to its absolute path, then re-save the file.';
-  const block = `<wiki>\n${message}\n</wiki>`;
-  return postToolUseOutput({
-    systemMessage: block,
-    hookSpecificOutput: { additionalContext: block }
-  });
-}
-
-export default postToolUseHook({ matcher: 'Edit|Write|NotebookEdit', timeout: 60000 }, (input, { logger }) => {
-  const filePath = getFilePath(input);
-  if (!filePath) return null;
-
-  if (!isWikiFile(filePath, input.cwd)) return null;
-
-  trackWikiFile(input.session_id, filePath);
-
-  const wikiBin = resolveWikiBinary(logger);
-
-  // ── Single invocation: auto-fix line-range drift and frontmatter.
-  // --fix relocates drifted links and initializes links-reviewed in place;
-  // a non-zero exit means residual, unfixable wiki conditions the agent must
-  // resolve by hand.
-  const sections: string[] = [];
-
-  try {
-    const result = spawnSync(wikiBin, ['check', '--fix', filePath], {
-      cwd: input.cwd,
-      encoding: 'utf8',
-      timeout: 25000,
-      env: { ...process.env }
-    });
-
-    if (isLaunchFailure(result)) {
-      // The binary is missing or failed to launch. The page is now unvalidated —
-      // surface it instead of failing open.
-      const detail = result.error?.message ?? 'spawn failed';
-      logger.warn('wiki check execution error', { error: detail, wikiBin });
-      return wikiUnavailableOutput(filePath, wikiBin, detail);
-    }
-
-    if (result.status !== 0) {
-      const output = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
-      if (output) {
-        logger.info('wiki check failed', { file: filePath, status: result.status });
-        sections.push(output);
-      }
-    }
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    logger.warn('wiki check threw', { error: detail, wikiBin });
-    return wikiUnavailableOutput(filePath, wikiBin, detail);
-  }
-
-  if (sections.length === 0) return null;
-
-  const output = sections.join('\n\n');
-  return postToolUseOutput({
-    systemMessage: `<wiki>\n${output}\n</wiki>`,
-    hookSpecificOutput: {
-      additionalContext: `<wiki>\n${output}\n</wiki>`
-    }
-  });
-});

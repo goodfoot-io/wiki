@@ -39,10 +39,21 @@ else
   exit 1
 fi
 
+# Fail closed when rebuilding the agent-hooks bundles dirties the committed
+# plugin trees: a stale or hand-edited bundle must never ship silently.
+agent_hooks_bundles_fresh() {
+  if [ -n "$(git status --porcelain -- plugins-claude/wiki/hooks plugins-codex/wiki/hooks plugins-opencode/wiki/dist)" ]; then
+    echo "ERROR: rebuild produced uncommitted bundle changes — commit the rebuilt plugin bundles" >&2
+    return 1
+  fi
+}
+
 {
   yarn typecheck &&
   yarn lint &&
   "$LOCAL_WIKI" check &&
+  yarn workspace @goodfoot/agent-hooks build &&
+  agent_hooks_bundles_fresh &&
   yarn test &&
   eval "$BUILD_CMD"
 } 2>&1 | tee yarn-validate-output.log

@@ -1,5 +1,5 @@
 .githooks/pre-commit.wiki.sh rk64:b18f8f1e9e8cfae7
-plugins/wiki/skills/wiki/examples/pre-commit.wiki.sh rk64:b18f8f1e9e8cfae7
-plugins/wiki/skills/wiki/sections/git-hook-setup.md#L9-L41 rk64:4862d2815016bb7b
+skills/wiki/examples/pre-commit.wiki.sh rk64:b18f8f1e9e8cfae7
+skills/wiki/how-to/wire-the-pre-commit-hook.md rk64:4862d2815016bb7b
 
 The live hook, its examples twin, and the git-hook-setup reproduction are byte-identical copies of the pre-commit script; the examples twin is the copyable reference shipped to other repos, so a drift between the live hook and either copy silently changes what every repo adopting the example stages on commit. The mesh anchor that previously tracked this coupling died with the wiki mesh.

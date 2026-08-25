@@ -1225,7 +1225,7 @@
     },
     {
       "anchor_file": ".wiki/wiki/hook-implementation-documentation",
-      "path": "plugins/wiki/skills/wiki/sections/git-hook-setup.md",
+      "path": "skills/wiki/sections/git-hook-setup.md",
       "start": 15,
       "end": 94,
       "stored": "6765efe266c47953",
@@ -1475,7 +1475,7 @@
     },
     {
       "anchor_file": ".wiki/wiki/pre-commit-hook-copies",
-      "path": "plugins/wiki/skills/wiki/examples/pre-commit.wiki.sh",
+      "path": "skills/wiki/examples/pre-commit.wiki.sh",
       "start": 10,
       "end": 21,
       "stored": "5e688a9502a18ed4",
@@ -1815,7 +1815,7 @@
     },
     {
       "anchor_file": ".wiki/wiki/skill-routing-to-hook-docs",
-      "path": "plugins/wiki/skills/wiki/SKILL.md",
+      "path": "skills/wiki/SKILL.md",
       "start": 24,
       "end": 24,
       "stored": "e329971c397e6eae",
@@ -1825,7 +1825,7 @@
     },
     {
       "anchor_file": ".wiki/wiki/skill-routing-to-hook-docs",
-      "path": "plugins/wiki/skills/wiki/sections/git-hook-setup.md",
+      "path": "skills/wiki/sections/git-hook-setup.md",
       "start": 1,
       "end": 93,
       "stored": "9072a432b074916d",

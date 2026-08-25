@@ -15,9 +15,10 @@ esac
 
 # Base the bump on the MAXIMUM product version across every manifest, not just
 # packages/cli. The pre-commit.plugin-version.sh hook auto-bumps each changed
-# plugin's plugins/*/.claude-plugin/plugin.json (and its marketplace.json
-# plugins[] entry) on every commit that touches plugin files, so the plugin
-# version routinely runs ahead of the CLI source-of-truth. Bumping only from
+# plugin's plugins-{claude,codex,opencode}/<name>/ manifests (and its
+# marketplace.json plugins[] entry) on every commit that touches plugin files,
+# so the plugin version routinely runs ahead of the CLI source-of-truth.
+# Bumping only from
 # the CLI version would then move the release version *backwards* relative to
 # the plugin and republish an already-used number. Taking the max guarantees
 # the new version is ahead of everything already shipped.
@@ -57,10 +58,20 @@ NEW_VERSION=$(REPO_ROOT="$REPO_ROOT" BUMP_LEVEL="$LEVEL" node -e '
   }
 
   // Plugin manifests — the surface the auto-bump hook moves ahead of the CLI.
-  const pluginsDir = path.join(root, "plugins");
-  if (fs.existsSync(pluginsDir)) {
-    for (const d of fs.readdirSync(pluginsDir)) {
-      addJsonVersion(path.join(pluginsDir, d, ".claude-plugin/plugin.json"));
+  // One plugin spans three platform trees with a per-platform manifest:
+  //   plugins-claude/<name>/.claude-plugin/plugin.json
+  //   plugins-codex/<name>/.codex-plugin/plugin.json
+  //   plugins-opencode/<name>/package.json
+  const platformTrees = [
+    ["plugins-claude", ".claude-plugin/plugin.json"],
+    ["plugins-codex", ".codex-plugin/plugin.json"],
+    ["plugins-opencode", "package.json"],
+  ];
+  for (const [dir, manifestRel] of platformTrees) {
+    const treeDir = path.join(root, dir);
+    if (!fs.existsSync(treeDir)) continue;
+    for (const name of fs.readdirSync(treeDir)) {
+      addJsonVersion(path.join(treeDir, name, manifestRel));
     }
   }
 

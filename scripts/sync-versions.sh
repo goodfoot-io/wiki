@@ -148,19 +148,31 @@ if [ -f "$cargo_lock" ] && [ -f "$cargo_toml" ]; then
   fi
 fi
 
-# Update plugin manifests under plugins/*/.claude-plugin/plugin.json
-for plugin_dir in "$REPO_ROOT"/plugins/*/; do
-  plugin_json="$plugin_dir/.claude-plugin/plugin.json"
-  if [ -f "$plugin_json" ]; then
-    current=$(read_version "$plugin_json")
-    if [ -n "$current" ] && [ "$current" != "$VERSION" ]; then
-      set_version "$plugin_json" "$VERSION"
-      echo "Updated: $plugin_json ($current -> $VERSION)"
-      updated=$((updated + 1))
-    else
-      echo "OK:      $plugin_json (already $VERSION)"
+# Update plugin manifests across the three platform plugin trees:
+#   plugins-claude/<name>/.claude-plugin/plugin.json
+#   plugins-codex/<name>/.codex-plugin/plugin.json
+#   plugins-opencode/<name>/package.json
+for platform_manifest in \
+  "claude .claude-plugin/plugin.json" \
+  "codex .codex-plugin/plugin.json" \
+  "opencode package.json"
+do
+  platform="${platform_manifest%% *}"
+  manifest_rel="${platform_manifest#* }"
+  for plugin_dir in "$REPO_ROOT"/plugins-$platform/*/; do
+    [ -d "$plugin_dir" ] || continue
+    plugin_json="${plugin_dir}${manifest_rel}"
+    if [ -f "$plugin_json" ]; then
+      current=$(read_version "$plugin_json")
+      if [ -n "$current" ] && [ "$current" != "$VERSION" ]; then
+        set_version "$plugin_json" "$VERSION"
+        echo "Updated: $plugin_json ($current -> $VERSION)"
+        updated=$((updated + 1))
+      else
+        echo "OK:      $plugin_json (already $VERSION)"
+      fi
     fi
-  fi
+  done
 done
 
 # Update marketplace manifest at .claude-plugin/marketplace.json

@@ -3,7 +3,7 @@ title: Wiki CLI
 summary: Fragment link parsing, validation pipeline, and command reference for the wiki CLI tool.
 tags:
   - tooling
-links-reviewed: 3
+links-reviewed: 4
 ---
 
 The wiki CLI validates and maintains fragment links between wiki pages and source code. For the maintenance map of every operator-facing doc and automation prompt that should be checked when CLI behavior changes, see [Wiki Documentation Touchpoints](../meta/wiki-documentation-touchpoints.md).
@@ -18,7 +18,7 @@ The [check command](/packages/cli/src/commands/check.rs#L281-L295) runs a full v
 
 ## PostToolUse Hook
 
-Claude Code integration is owned by the [PostToolUse hook](/packages/claude-code-hooks/src/post-tool-use.ts), a TypeScript handler shipped with the Claude Code plugin rather than a CLI subcommand. When a `.md` file inside the wiki directory is written or edited, the hook shells out to `wiki check --fix` on that file and surfaces any remaining validation errors so the agent can address them immediately.
+Claude Code integration is owned by the [PostToolUse hook](/packages/agent-hooks/src/claude/post-tool-use.ts), a TypeScript handler shipped with the Claude Code plugin rather than a CLI subcommand. When a `.md` file inside the wiki directory is written or edited, the hook shells out to `wiki check --fix` on that file and surfaces any remaining validation errors so the agent can address them immediately.
 
 ## Navigation and Discovery
 

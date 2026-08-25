@@ -1,6 +1,7 @@
 import { Logger, type PostToolUseInput } from '@goodfoot/claude-code-hooks';
 import { afterEach, describe, expect, it } from 'vitest';
-import hook, { resolveWikiBinary } from '../src/post-tool-use.js';
+import hook from '../../src/claude/post-tool-use.js';
+import { resolveWikiBinary } from '../../src/common/wiki-check.js';
 
 const logger = new Logger();
 

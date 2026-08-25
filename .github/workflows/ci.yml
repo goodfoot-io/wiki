@@ -77,6 +77,19 @@ jobs:
       - name: Install dependencies
         run: yarn install
 
+      - name: Build agent-hooks bundles
+        run: yarn workspace @goodfoot/agent-hooks build
+
+      - name: Check generated bundles fresh
+        run: |
+          if [ -n "$(git status --porcelain -- plugins-claude/wiki/hooks plugins-codex/wiki/hooks plugins-opencode/wiki/dist)" ]; then
+            echo "ERROR: rebuild produced uncommitted bundle changes — commit the rebuilt plugin bundles"
+            exit 1
+          fi
+
+      - name: Test agent-hooks
+        run: yarn workspace @goodfoot/agent-hooks test
+
       - name: Download CLI binary
         uses: actions/download-artifact@v4
         with:

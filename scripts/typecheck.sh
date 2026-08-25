@@ -46,7 +46,7 @@ typecheck_ts_package() {
 }
 
 typecheck_ts_package "$WORKSPACE_ROOT/packages/extension"
-typecheck_ts_package "$WORKSPACE_ROOT/packages/claude-code-hooks"
+typecheck_ts_package "$WORKSPACE_ROOT/packages/agent-hooks"
 
 for PID in "${PIDS[@]}"; do
   wait "$PID" || EXIT=1

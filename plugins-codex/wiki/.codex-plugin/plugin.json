@@ -1,0 +1,31 @@
+{
+  "name": "wiki",
+  "version": "0.5.124",
+  "description": "Wiki documentation system — fragment-linked documentation with change detection, full-text search, and automated maintenance",
+  "author": {
+    "name": "Goodfoot Media LLC",
+    "email": "contact@goodfoot.io"
+  },
+  "homepage": "https://github.com/goodfoot-io/wiki",
+  "repository": "https://github.com/goodfoot-io/wiki",
+  "license": "MIT",
+  "keywords": [
+    "wiki",
+    "documentation",
+    "fragment-links",
+    "wikilinks"
+  ],
+  "interface": {
+    "displayName": "wiki",
+    "capabilities": [
+      "Validates wiki pages after every file edit, surfacing residual diagnostics inline",
+      "Auto-fixes frontmatter, fragment-link, and citation drift via the wiki check --fix flow",
+      "Keeps fragment-linked documentation from silently drifting as code changes"
+    ],
+    "defaultPrompt": [
+      "Run a wiki check across my edits, fix what it reports, and explain any drift it found."
+    ],
+    "brandColor": "#2F6FEB",
+    "composerIcon": "link"
+  }
+}

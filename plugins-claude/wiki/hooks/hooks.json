@@ -6,7 +6,7 @@
           {
             "type": "command",
             "command": "node \"$CLAUDE_PLUGIN_ROOT\"/hooks/bin/post-tool-use.mjs",
-            "timeout": 60000
+            "timeout": 60
           }
         ],
         "matcher": "Edit|Write|NotebookEdit"
@@ -16,7 +16,6 @@
   "__generated": {
     "files": [
       "post-tool-use.mjs"
-    ],
-    "timestamp": "2026-06-09T15:10:39.392Z"
+    ]
   }
 }

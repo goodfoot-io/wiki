@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { isWikiFile } from '../src/post-tool-use.js';
+import { isWikiFile } from '../src/common/wiki-check.js';
 
 const IO_BUDGET_BYTES = 64 * 1024;
 const BIG_FILE_BYTES = 8 * 1024 * 1024;

@@ -4,7 +4,7 @@ A fast, Rust-powered wiki toolkit for local-first Markdown knowledge bases. This
 
 - **`@goodfoot/wiki`** — a standalone CLI for indexing, searching, linking, and rendering Markdown wikis
 - **Wiki Viewer** — a VS Code extension that renders wiki pages with live markdown-link navigation
-- **Agent plugins** — a ready-to-install Claude Code plugin that teaches coding agents to read and write the wiki
+- **Agent plugins** — ready-to-install plugins for Claude Code, Codex, and OpenCode that teach coding agents to read and write the wiki
 
 Documentation is stored as plain Markdown with relative-path links and optional frontmatter — nothing proprietary, no database you can't read.
 
@@ -42,10 +42,20 @@ wiki list
 
 ### Agent integration
 
-The wiki validates itself through the **Claude Code plugin** under
-[plugins/wiki/](./plugins/wiki/), whose PostToolUse hook shells out to
-`wiki check --fix` whenever an agent writes or edits a Markdown file. Install it
-via the Claude Code plugin marketplace.
+The wiki validates itself through coding-agent plugins built from a single hook
+source: [packages/agent-hooks/](./packages/agent-hooks) owns one TypeScript
+PostToolUse implementation, compiled into all three plugin trees, whose hook
+shells out to `wiki check --fix` whenever an agent writes or edits a Markdown
+file. The wiki skill every plugin ships is authored once at
+[skills/wiki/](./skills/wiki/) and symlinked into each tree.
+
+- **Claude Code** — install the `wiki` plugin from the local marketplace defined
+  in [.claude-plugin/marketplace.json](./.claude-plugin/marketplace.json)
+- **Codex** — install from the local marketplace defined in
+  [.agents/plugins/marketplace.json](./.agents/plugins/marketplace.json)
+- **OpenCode** — register [`plugins-opencode/wiki/`](./plugins-opencode/wiki/)
+  via the `plugin` array in `opencode.json`, or install the npm-ready
+  **@goodfoot/opencode-wiki** package
 
 To keep the index synchronized outside an agent, copy the sample git hooks from
 [examples/githooks/](./examples/githooks/) into `.git/hooks/` — see
@@ -78,11 +88,18 @@ Install **Wiki Viewer** from the [VS Code Marketplace](https://marketplace.visua
 .
 ├── packages/
 │   ├── cli/            # @goodfoot/wiki — Rust CLI (Cargo workspace root)
-│   └── extension/      # Wiki Viewer VS Code extension (TypeScript)
+│   ├── extension/      # Wiki Viewer VS Code extension (TypeScript)
+│   └── agent-hooks/    # @goodfoot/agent-hooks — single hook source for all three plugins
 ├── npm/
 │   └── wiki-*/         # Platform-specific binary distribution packages
-├── plugins/
-│   └── wiki/           # Agent plugin: hooks + skills (see below)
+├── plugins-claude/
+│   └── wiki/           # Claude Code plugin: generated hooks + symlinked skills
+├── plugins-codex/
+│   └── wiki/           # Codex plugin: generated hooks + symlinked skills
+├── plugins-opencode/
+│   └── wiki/           # @goodfoot/opencode-wiki — OpenCode plugin and npm package
+├── skills/
+│   └── wiki/           # Single-source wiki skill, shared by every plugin tree
 ├── examples/
 │   └── githooks/       # Sample post-commit / post-merge hooks for Claude, Gemini
 ├── docs/
@@ -95,14 +112,24 @@ Install **Wiki Viewer** from the [VS Code Marketplace](https://marketplace.visua
 
 The Rust CLI lives in `packages/cli/`; `packages/cli/package.json` is the single source of truth for the version (propagated by `scripts/sync-versions.sh`). The VS Code extension is a standard TypeScript package built with esbuild and packaged via `vsce`.
 
-## Agent plugin marketplace
+## Agent plugins
 
-The `plugins/wiki/` directory is a plugin distributed through the **Claude Code** plugin marketplace. It provides:
+One hook source builds three platform plugins. `packages/agent-hooks/` owns the
+PostToolUse implementation, and `yarn workspace @goodfoot/agent-hooks build`
+emits the generated bundles committed under `plugins-claude/wiki/hooks/`,
+`plugins-codex/wiki/hooks/`, and `plugins-opencode/wiki/dist/` — validation
+fails closed if a rebuild ever leaves one of them stale. Each tree provides:
 
 - **Hooks** — a `PostToolUse` hook that runs `wiki check --fix` after an agent writes or edits a Markdown file, keeping links and frontmatter valid
-- **Skills** — a `wiki` skill that teaches agents how to query and author wiki articles using the CLI, including markdown-link conventions and frontmatter rules
+- **Skills** — the wiki skill authored once at [skills/wiki/](./skills/wiki/) and shared through relative symlinks, teaching agents how to query and author wiki articles using the CLI
 
-Install via the marketplace integration in Claude Code, or copy `examples/githooks/*.sh` into `.git/hooks/` for a minimal manual setup. See [examples/githooks/README.md](./examples/githooks/README.md) for the manual install instructions.
+Install per platform:
+
+- **Claude Code** — [.claude-plugin/marketplace.json](./.claude-plugin/marketplace.json) exposes the plugin at [plugins-claude/wiki/](./plugins-claude/wiki/) through the Claude Code marketplace integration
+- **Codex** — [.agents/plugins/marketplace.json](./.agents/plugins/marketplace.json) exposes the plugin at [plugins-codex/wiki/](./plugins-codex/wiki/) through the matching codex flow; review its hooks once via `/hooks` (fail-closed trust)
+- **OpenCode** — [opencode.json](./opencode.json) registers [`plugins-opencode/wiki/`](./plugins-opencode/wiki/) in place; that directory doubles as the npm-publishable **@goodfoot/opencode-wiki** package
+
+Or copy `examples/githooks/*.sh` into `.git/hooks/` for a minimal manual setup. See [examples/githooks/README.md](./examples/githooks/README.md) for the manual install instructions.
 
 ## Quick start (contributors)
 

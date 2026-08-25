@@ -1,0 +1,36 @@
+{
+  "name": "@goodfoot/opencode-wiki",
+  "version": "0.5.124",
+  "description": "In-session wiki validation for OpenCode: checks and fixes fragment-linked documentation after edit/write calls, plus an installer for the wiki skill.",
+  "license": "MIT",
+  "private": false,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "bin": {
+    "opencode-wiki": "bin/opencode-wiki.mjs"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "skills"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "author": {
+    "name": "Goodfoot Media LLC",
+    "url": "https://github.com/goodfoot-io"
+  },
+  "homepage": "https://github.com/goodfoot-io/wiki",
+  "repository": "https://github.com/goodfoot-io/wiki",
+  "keywords": [
+    "wiki",
+    "documentation",
+    "fragment-links",
+    "wikilinks",
+    "opencode",
+    "plugin"
+  ]
+}

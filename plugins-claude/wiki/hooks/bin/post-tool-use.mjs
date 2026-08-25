@@ -6,13 +6,7 @@ const require = __createRequire(import.meta.url);
 const __filename = __fileURLToPath(import.meta.url);
 const __dirname = __pathDirname(__filename);
 
-// src/post-tool-use.ts
-import { spawnSync } from "node:child_process";
-import { closeSync as closeSync2, existsSync as existsSync2, openSync as openSync2, readdirSync, readFileSync, readSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
-
-// node_modules/@goodfoot/claude-code-hooks/dist/env.js
+// ../../node_modules/@goodfoot/claude-code-hooks/dist/env.js
 import * as fs from "node:fs";
 var CLAUDE_ENV_VARS = {
   /**
@@ -55,7 +49,7 @@ function escapeShellValue(value) {
   return `'${escaped}'`;
 }
 
-// node_modules/@goodfoot/claude-code-hooks/dist/hooks.js
+// ../../node_modules/@goodfoot/claude-code-hooks/dist/hooks.js
 function createHookFunction(hookEventName, config, handler) {
   const hookFn = async (input, context) => {
     return await handler(input, context);
@@ -71,7 +65,7 @@ function postToolUseHook(config, handler) {
   return createHookFunction("PostToolUse", config, handler);
 }
 
-// node_modules/@goodfoot/claude-code-hooks/dist/logger.js
+// ../../node_modules/@goodfoot/claude-code-hooks/dist/logger.js
 import { closeSync, existsSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 var LOG_LEVELS = ["debug", "info", "warn", "error"];
@@ -449,7 +443,7 @@ var logger = new Logger({
   logEnvVar: process.env.CLAUDE_CODE_HOOKS_LOG_ENV_VAR ?? "CLAUDE_CODE_HOOKS_LOG_FILE"
 });
 
-// node_modules/@goodfoot/claude-code-hooks/dist/outputs.js
+// ../../node_modules/@goodfoot/claude-code-hooks/dist/outputs.js
 var EXIT_CODES = {
   /** Handler completed successfully. Claude Code parses stdout as JSON. */
   SUCCESS: 0,
@@ -467,7 +461,7 @@ function createHookSpecificOutputBuilder(hookType) {
 }
 var postToolUseOutput = /* @__PURE__ */ createHookSpecificOutputBuilder("PostToolUse");
 
-// node_modules/@goodfoot/claude-code-hooks/dist/runtime.js
+// ../../node_modules/@goodfoot/claude-code-hooks/dist/runtime.js
 async function readStdin() {
   return new Promise((resolve2, reject) => {
     const chunks = [];
@@ -628,7 +622,7 @@ async function execute(hookFn) {
   process.exit(EXIT_CODES.SUCCESS);
 }
 
-// node_modules/@goodfoot/claude-code-hooks/dist/tool-helpers.js
+// ../../node_modules/@goodfoot/claude-code-hooks/dist/tool-helpers.js
 function getFilePath(input) {
   const toolInput = input.tool_input;
   if (toolInput && typeof toolInput === "object" && "file_path" in toolInput) {
@@ -638,9 +632,14 @@ function getFilePath(input) {
   return null;
 }
 
-// src/post-tool-use.ts
+// src/common/wiki-check.ts
+import { spawnSync } from "node:child_process";
+import { closeSync as closeSync2, existsSync as existsSync2, openSync as openSync2, readdirSync, readFileSync, readSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 var FRONTMATTER_SCAN_BYTES = 4096;
 var FRONTMATTER_SCAN_LINES = 30;
+var DEFAULT_WIKI_CHECK_TIMEOUT_MS = 25e3;
 function readFrontmatterPrefix(absPath) {
   const buf = Buffer.alloc(FRONTMATTER_SCAN_BYTES);
   const fd = openSync2(absPath, "r");
@@ -757,22 +756,49 @@ function resolveWikiBinary(logger2) {
   }
   const managed = findManagedWikiBinary();
   if (managed) {
-    logger2.info("resolved wiki binary from VS Code globalStorage", { path: managed });
+    logger2?.info("resolved wiki binary from VS Code globalStorage", { path: managed });
     return managed;
   }
   return WIKI_EXECUTABLE;
 }
+function runWikiCheck(filePath, options) {
+  let result;
+  try {
+    result = spawnSync(options.binary, ["check", "--fix", filePath], {
+      cwd: options.cwd,
+      encoding: "utf8",
+      timeout: options.timeoutMs ?? DEFAULT_WIKI_CHECK_TIMEOUT_MS,
+      env: { ...process.env }
+    });
+  } catch (err) {
+    return { status: "unavailable", output: err instanceof Error ? err.message : String(err) };
+  }
+  if (isLaunchFailure(result)) {
+    return { status: "unavailable", output: result.error?.message ?? "spawn failed" };
+  }
+  if (result.status !== 0) {
+    const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
+    return output ? { status: "residual", output } : { status: "residual" };
+  }
+  return { status: "clean" };
+}
 function isLaunchFailure(result) {
   return result.error != null;
+}
+
+// src/claude/post-tool-use.ts
+var WIKI_CHECK_TIMEOUT_MS = 25e3;
+function wikiContextBlock(output) {
+  return `<wiki>
+${output}
+</wiki>`;
 }
 function wikiUnavailableOutput(filePath, wikiBin, detail) {
   const message = `wiki validation was SKIPPED \u2014 the \`wiki\` binary could not be launched (${detail}).
 Resolved binary: ${wikiBin}
 Fragment links and line-range drift for ${filePath} were NOT validated.
 Install the wiki CLI on PATH, or set WIKI_BIN to its absolute path, then re-save the file.`;
-  const block = `<wiki>
-${message}
-</wiki>`;
+  const block = wikiContextBlock(message);
   return postToolUseOutput({
     systemMessage: block,
     hookSpecificOutput: { additionalContext: block }
@@ -784,44 +810,22 @@ var post_tool_use_default = postToolUseHook({ matcher: "Edit|Write|NotebookEdit"
   if (!isWikiFile(filePath, input.cwd)) return null;
   trackWikiFile(input.session_id, filePath);
   const wikiBin = resolveWikiBinary(logger2);
-  const sections = [];
-  try {
-    const result = spawnSync(wikiBin, ["check", "--fix", filePath], {
-      cwd: input.cwd,
-      encoding: "utf8",
-      timeout: 25e3,
-      env: { ...process.env }
-    });
-    if (isLaunchFailure(result)) {
-      const detail = result.error?.message ?? "spawn failed";
-      logger2.warn("wiki check execution error", { error: detail, wikiBin });
-      return wikiUnavailableOutput(filePath, wikiBin, detail);
-    }
-    if (result.status !== 0) {
-      const output2 = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
-      if (output2) {
-        logger2.info("wiki check failed", { file: filePath, status: result.status });
-        sections.push(output2);
-      }
-    }
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    logger2.warn("wiki check threw", { error: detail, wikiBin });
+  const result = runWikiCheck(filePath, { binary: wikiBin, timeoutMs: WIKI_CHECK_TIMEOUT_MS, cwd: input.cwd });
+  if (result.status === "unavailable") {
+    const detail = result.output ?? "spawn failed";
+    logger2.warn("wiki check execution error", { error: detail, wikiBin });
     return wikiUnavailableOutput(filePath, wikiBin, detail);
   }
-  if (sections.length === 0) return null;
-  const output = sections.join("\n\n");
-  return postToolUseOutput({
-    systemMessage: `<wiki>
-${output}
-</wiki>`,
-    hookSpecificOutput: {
-      additionalContext: `<wiki>
-${output}
-</wiki>`
-    }
-  });
+  if (result.status === "residual" && result.output) {
+    logger2.info("wiki check failed", { file: filePath });
+    const block = wikiContextBlock(result.output);
+    return postToolUseOutput({
+      systemMessage: block,
+      hookSpecificOutput: { additionalContext: block }
+    });
+  }
+  return null;
 });
 
-// src/post-tool-use-entry.ts
+// src/claude/post-tool-use-entry.ts
 execute(post_tool_use_default);

@@ -5,7 +5,7 @@ tags:
   - meta
   - wiki
   - tooling
-links-reviewed: 4
+links-reviewed: 5
 ---
 
 This page is the maintenance map for future wiki documentation updates. When command behavior or recommended usage changes, update the implementation-facing source of truth first, then walk the operator-facing documents and automation references listed here so guidance does not drift.
@@ -20,7 +20,7 @@ The primary source of truth for top-level CLI behavior is the [Clap configuratio
 
 These files are the public guidance surfaces most likely to drift when the CLI contract changes:
 
-- The [wiki skill instructions](/plugins/wiki/skills/wiki/SKILL.md) are the highest-leverage agent workflow contract for discovering pages, choosing where to write, validating fragment links, and updating related pages — `CLAUDE.md` itself no longer carries wiki-specific instructions.
+- The [wiki skill instructions](/skills/wiki/SKILL.md) are the highest-leverage agent workflow contract for discovering pages, choosing where to write, validating fragment links, and updating related pages — `CLAUDE.md` itself no longer carries wiki-specific instructions.
 - The [advanced usage page](../reference/wiki-cli-advanced-usage.md) holds the less common CLI behaviors such as stdin handling, file paths, explicit glob targeting, and JSON output.
 - The [feedback log](./wiki-feedback.md) is where observed friction from doc or CLI mismatches should be recorded after the change is understood.
 
@@ -30,14 +30,14 @@ If a documentation update changes the recommended operator workflow, all of thes
 
 The [Gemini wiki gap-detection example script](/examples/githooks/scripts/gemini-wiki-gap-detection.sh) embeds wiki search guidance for automated maintenance work. If the preferred search invocation or page-discovery workflow changes, this prompt must stay aligned with the human-facing docs or automation will continue reinforcing stale instructions.
 
-The [wiki skill's skipped-fix resolution section](/plugins/wiki/skills/wiki/how-to/validate-and-fix.md#when---fix-skips) defines the skipped-fix workflow (re-point the link, fix the prose, or bump `links-reviewed:`). It is not a user-facing quickstart, but it is part of the operational contract for wiki upkeep and should be checked whenever the update changes validation, certification, or page-discovery expectations.
+The [wiki skill's skipped-fix resolution section](/skills/wiki/how-to/validate-and-fix.md#when---fix-skips) defines the skipped-fix workflow (re-point the link, fix the prose, or bump `links-reviewed:`). It is not a user-facing quickstart, but it is part of the operational contract for wiki upkeep and should be checked whenever the update changes validation, certification, or page-discovery expectations.
 
 ## Update Order
 
 When wiki documentation behavior changes, use this order:
 
 1. Confirm the implementation in [CLI parsing and dispatch](/packages/cli/src/main.rs#L39-L95) and [top-level command routing](/packages/cli/src/main.rs#L322-L404).
-2. Update the agent workflow contract in [the wiki skill](/plugins/wiki/skills/wiki/SKILL.md).
+2. Update the agent workflow contract in [the wiki skill](/skills/wiki/SKILL.md).
 3. Update secondary references such as [Wiki CLI Advanced Usage](../reference/wiki-cli-advanced-usage.md), [Wiki CLI Feedback](./wiki-feedback.md), and [the Gemini maintenance example](/examples/githooks/scripts/gemini-wiki-gap-detection.sh).
 4. Run `wiki check --fix` on the touched pages, then bump their `links-reviewed:` fields so the re-anchored links re-certify.
 

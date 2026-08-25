@@ -19,7 +19,7 @@ After making any changes to code or configuration files, lint, type check, and r
 
 ## Skills
 
-Skills are located in `.agents/skills/`. Load a skill before performing specialized tasks (e.g., wiki documentation).
+Platform-shared skills are authored in `skills/` (e.g., the wiki skill referenced by all three plugin trees). `.agents/skills/` mirrors/exposes repo-dev skills for agent discovery — it is not the authoring home. Load a skill before performing specialized tasks (e.g., wiki documentation).
 
 ## Wiki
 

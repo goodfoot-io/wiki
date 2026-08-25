@@ -1,0 +1,26 @@
+{
+  "name": "@goodfoot/agent-hooks",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "yarn build:hooks && yarn build:hooks:codex && yarn build:opencode",
+    "build:hooks": "yarn claude-code-hooks -i \"src/claude/post-tool-use.ts\" -o \"../../plugins-claude/wiki/hooks/hooks.json\" --no-sourcemap",
+    "build:hooks:codex": "yarn codex-hooks -i \"src/codex/post-tool-use.ts\" -o \"../../plugins-codex/wiki/hooks/hooks.json\" --plugin-root --no-sourcemap",
+    "build:opencode": "node -e \"require('esbuild').buildSync({ entryPoints: ['src/opencode/index.ts'], absWorkingDir: process.cwd(), bundle: true, platform: 'node', format: 'esm', minify: false, sourcemap: false, outfile: '../../plugins-opencode/wiki/dist/index.js' })\"",
+    "claude-code-hooks": "node scripts/hooks-cli-wrapper.js @goodfoot/claude-code-hooks",
+    "codex-hooks": "node scripts/hooks-cli-wrapper.js @goodfoot/codex-hooks",
+    "lint": "npx biome check src test scripts",
+    "typecheck": "tsgo --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@goodfoot/codex-hooks": "^1.3.0"
+  },
+  "devDependencies": {
+    "@goodfoot/claude-code-hooks": "^1.9.0",
+    "@typescript/native-preview": "^7.0.0-dev",
+    "typescript": "^5.9.3",
+    "vitest": "^3.0.0"
+  }
+}

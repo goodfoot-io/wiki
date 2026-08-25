@@ -7,13 +7,13 @@
   "metadata": {
     "description": "Wiki documentation system with CLI and VSCode extension",
     "version": "1.0.72",
-    "pluginRoot": "./plugins"
+    "pluginRoot": "./plugins-claude"
   },
   "plugins": [
     {
       "name": "wiki",
       "version": "0.5.124",
-      "source": "./plugins/wiki",
+      "source": "./plugins-claude/wiki",
       "description": "Wiki documentation system — fragment-linked documentation with change detection, full-text search, and automated maintenance",
       "author": {
         "name": "Goodfoot Media LLC"

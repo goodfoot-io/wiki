@@ -1,4 +1,4 @@
-packages/claude-code-hooks/src/post-tool-use.ts rk64:be7c65baa74a2ce1
+packages/agent-hooks/src/claude/post-tool-use.ts rk64:be7c65baa74a2ce1
 packages/cli/src/commands/check.rs#L281-L295 rk64:ca50894963c47164
 packages/cli/src/commands/search.rs rk64:4bcc02eb16e7fdef
 packages/cli/src/commands/summary.rs#L72-L82 rk64:0ce82663ffe5539f

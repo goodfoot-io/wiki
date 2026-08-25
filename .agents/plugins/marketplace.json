@@ -8,7 +8,7 @@
       "name": "wiki",
       "source": {
         "source": "local",
-        "path": "../../plugins/wiki"
+        "path": "./plugins-codex/wiki"
       },
       "category": "Documentation"
     }
