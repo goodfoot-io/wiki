@@ -679,6 +679,8 @@ __metadata:
   resolution: "@goodfoot/wiki-claude-code-hooks@workspace:packages/claude-code-hooks"
   dependencies:
     "@goodfoot/claude-code-hooks": "npm:^1.9.0"
+    "@typescript/native-preview": "npm:^7.0.0-dev"
+    typescript: "npm:^5.9.3"
     vitest: "npm:^3.0.0"
   languageName: unknown
   linkType: soft
