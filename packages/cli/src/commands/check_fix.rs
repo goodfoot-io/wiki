@@ -762,14 +762,33 @@ pub fn run_fix_pass(
     dry_run: bool,
     content_cache: &mut ContentCache,
     reporter: &crate::cache::CacheReporter,
+    scanned_journals: ScannedJournals,
 ) -> Result<FixPlan> {
     // Replay pending journals first (plan Decision 8): a previous run killed
     // mid-materialization is completed from its journal before any fresh
-    // planning, so planning observes post-replay disk state. Dry runs run
-    // the identical scan virtually (evaluation F5): valid journals seed the
-    // planning basis without writing working files or consuming journal
-    // state, so the preview proposes only what execution will actually do.
-    let replay_targets = replay_pending(repo_root, /* apply */ !dry_run)?;
+    // planning, so planning observes post-replay disk state. The scan was
+    // performed ONCE by the caller (evaluation F-C) before the pre-check;
+    // here real runs dispose and apply it — dry runs consume it virtually:
+    // valid journals seed the planning basis without writing working files
+    // or consuming journal state, so the preview proposes only what
+    // execution will actually do.
+    let replay_targets = if dry_run {
+        let mut virtual_targets: HashMap<PathBuf, ReplayedTarget> = HashMap::new();
+        for journal in &scanned_journals.valid {
+            for (path_rel, content) in &journal.stages {
+                virtual_targets.insert(
+                    repo_root.join(path_rel),
+                    ReplayedTarget {
+                        content: content.clone(),
+                        written_this_run: false,
+                    },
+                );
+            }
+        }
+        virtual_targets
+    } else {
+        apply_scanned_journals(repo_root, &scanned_journals)?
+    };
 
     let mut rename_map = RenameMap::build(repo_root)?;
 
@@ -1777,7 +1796,7 @@ struct JournalEntry {
 
 /// The `manifest.json` document (schema v1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct JournalManifest {
+pub(crate) struct JournalManifest {
     version: u32,
     /// Unix milliseconds at staging time; drives the TTL.
     created_at: u64,
@@ -1988,35 +2007,52 @@ pub(crate) struct ReplayedTarget {
     pub(crate) written_this_run: bool,
 }
 
-/// Replay any pending journals under `<dot-git>/wiki/journal` BEFORE fresh
-/// patches are planned.
-///
-/// * `apply == true` (real runs): valid, unexpired journals are applied
-///   idempotently — targets whose current bytes already hash to the recorded
-///   sha256 are skipped, the rest written — then marked delivered and
-///   removed. Expired or corrupt journals are deleted and reported through
-///   at most one stderr warning line per process.
-/// * `apply == false` (dry runs, evaluation F5): the identical scan runs
-///   read-only. Valid journals seed the planning basis with their staged
-///   contents WITHOUT writing working files, stamping delivery, or removing
-///   anything; stale journals are left untouched and silent. The dry run's
-///   planning basis therefore equals a real run's post-replay state, so the
-///   preview never proposes fixes that execution's replay would satisfy.
-///
-/// Returns every covered `(absolute path → post-replay content +
-/// written-this-run)` pair so the caller can seed its planning overlay —
-/// planning must observe post-replay disk state, not the pre-replay bytes
-/// its content cache warmed.
-pub(crate) fn replay_pending(
-    repo_root: &Path,
-    apply: bool,
-) -> Result<HashMap<PathBuf, ReplayedTarget>> {
+/// One validated, ready-to-apply journal directory produced by
+/// [`scan_fix_journals`].
+pub(crate) struct PendingJournal {
+    /// The `<scope16>` directory (delivered stamp + removal happen here).
+    pub(crate) dir: PathBuf,
+    /// Parsed manifest — carried so application can stamp delivery without
+    /// re-parsing.
+    pub(crate) manifest: JournalManifest,
+    /// Validated `(repo-relative path, target content)` pairs in manifest
+    /// order; every sha256 and path-safety check already passed.
+    pub(crate) stages: Vec<(String, String)>,
+}
+
+/// The result of the run's SINGLE read-only journal classification
+/// (evaluation F-C): valid journals awaiting application and stale
+/// directories awaiting disposal. Produced before the pre-check, consumed
+/// by [`run_fix_pass`] — one classification, never re-scanned, so the
+/// once-per-process warning budget cannot fire twice.
+pub(crate) struct ScannedJournals {
+    pub(crate) valid: Vec<PendingJournal>,
+    pub(crate) stale: Vec<PathBuf>,
+}
+
+impl ScannedJournals {
+    /// No journals pending — the unit-test/default shape.
+    pub(crate) fn none() -> Self {
+        Self {
+            valid: Vec::new(),
+            stale: Vec::new(),
+        }
+    }
+}
+
+/// Classify every journal under `<dot-git>/wiki/journal` READ-ONLY: parse,
+/// TTL-check, verify stage integrity and the scope digest. Nothing is
+/// mutated — stale directories are reported, not deleted, and valid
+/// journals are neither stamped nor removed. Callers seed dry-run previews
+/// from the returned stages directly; real runs hand the whole structure to
+/// [`run_fix_pass`], which disposes and applies atomically before planning.
+pub(crate) fn scan_fix_journals(repo_root: &Path) -> Result<ScannedJournals> {
     let Some(dot_git) = crate::index::find_dot_git(repo_root) else {
-        return Ok(HashMap::new());
+        return Ok(ScannedJournals::none());
     };
     let journal_root = dot_git.join("wiki").join("journal");
     let Ok(readings) = std::fs::read_dir(&journal_root) else {
-        return Ok(HashMap::new());
+        return Ok(ScannedJournals::none());
     };
     let mut dirs: Vec<PathBuf> = readings
         .filter_map(|e| e.ok())
@@ -2029,40 +2065,55 @@ pub(crate) fn replay_pending(
     // leave every journal untouched rather than discard recovery data on a
     // technicality. The next run with resolvable identity settles them.
     let Ok(identity_dir) = crate::git::common_dir() else {
-        return Ok(HashMap::new());
+        return Ok(ScannedJournals::none());
     };
     let identity = identity_dir.to_string_lossy().into_owned();
     let now = unix_ms();
 
-    let mut discarded = 0usize;
-    let mut targets: HashMap<PathBuf, ReplayedTarget> = HashMap::new();
-
+    let mut valid = Vec::new();
+    let mut stale = Vec::new();
     for dir in dirs {
         match classify_journal(&dir, &identity, now) {
-            Disposition::Stale => {
-                if apply {
-                    std::fs::remove_dir_all(&dir)
-                        .map_err(|e| miette::miette!("stale fix journal removal failed: {e}"))?;
-                    discarded += 1;
-                }
-            }
-            Disposition::Apply(loaded, manifest) => {
-                let LoadedJournal { stages } = *loaded;
-                let written_rels = if apply {
-                    replay_apply_journal(&dir, repo_root, &stages, *manifest)?
-                } else {
-                    Vec::new()
-                };
-                for (path_rel, content) in &stages {
-                    targets.insert(
-                        repo_root.join(path_rel),
-                        ReplayedTarget {
-                            content: content.clone(),
-                            written_this_run: written_rels.iter().any(|w| w == path_rel),
-                        },
-                    );
-                }
-            }
+            Disposition::Stale => stale.push(dir),
+            Disposition::Apply(loaded, manifest) => valid.push(PendingJournal {
+                dir,
+                manifest: *manifest,
+                stages: loaded.stages,
+            }),
+        }
+    }
+    Ok(ScannedJournals { valid, stale })
+}
+
+/// Apply a scanned set: dispose every stale directory (fail-closed on
+/// error), then apply each valid journal idempotently — targets whose
+/// current bytes already hash to the recorded sha256 are skipped, the rest
+/// written, marked delivered, and removed. At most one stderr warning line
+/// for the discarded count. Returns every covered target with its
+/// written-this-run flag.
+fn apply_scanned_journals(
+    repo_root: &Path,
+    scanned: &ScannedJournals,
+) -> Result<HashMap<PathBuf, ReplayedTarget>> {
+    let mut discarded = 0usize;
+    for dir in &scanned.stale {
+        std::fs::remove_dir_all(dir)
+            .map_err(|e| miette::miette!("stale fix journal removal failed: {e}"))?;
+        discarded += 1;
+    }
+
+    let mut targets: HashMap<PathBuf, ReplayedTarget> = HashMap::new();
+    for journal in &scanned.valid {
+        let written_rels =
+            replay_apply_journal(&journal.dir, repo_root, &journal.stages, journal.manifest.clone())?;
+        for (path_rel, content) in &journal.stages {
+            targets.insert(
+                repo_root.join(path_rel),
+                ReplayedTarget {
+                    content: content.clone(),
+                    written_this_run: written_rels.iter().any(|w| w == path_rel),
+                },
+            );
         }
     }
 
@@ -2330,6 +2381,7 @@ mod tests {
             /* dry_run */ true,
             &mut ContentCache::new(),
             &reporter,
+            ScannedJournals::none(),
         )
         .expect("fix pass");
 
@@ -2397,6 +2449,7 @@ mod tests {
             /* dry_run */ true,
             &mut ContentCache::new(),
             &reporter,
+            ScannedJournals::none(),
         )
         .expect("fix pass");
 

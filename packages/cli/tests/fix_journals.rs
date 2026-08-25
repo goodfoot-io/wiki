@@ -775,3 +775,168 @@ fn dry_run_preview_matches_subsequent_real_run() {
     assert_eq!(read_page(root, "wiki/b.md"), fixed_content(&content_b));
     assert_eq!(read_page(root, "wiki/c.md"), fixed_content(&content_c));
 }
+
+// ── F-C: dry-run diagnostic layer + exit gate converge with pending replay ───
+
+/// Extract every output line mentioning `rel`, sorted — the comparable
+/// diagnostic surface across runs.
+fn diagnostic_lines(out: &Output, rel: &str) -> Vec<String> {
+    let mut lines: Vec<String> = combined(out)
+        .lines()
+        .filter(|l| l.contains(rel))
+        .map(str::to_owned)
+        .collect();
+    lines.sort();
+    lines
+}
+
+/// F-C control (a): a prepared journal holding the fixed pages must make the
+/// dry run's diagnostics AND exit gate describe the execution it previews —
+/// no stale broken-link lines, exit 0, "no fixes to apply" — while touching
+/// neither working files nor journal state. The following real run replays
+/// and exits 0 too.
+#[test]
+fn dry_run_exit_gate_converges_with_pending_journal() {
+    let tmp = init_repo();
+    let root = tmp.path();
+    seed_rename_fixture(root);
+
+    let content_a = read_page(root, "wiki/a.md");
+    let content_b = read_page(root, "wiki/b.md");
+    let staged = stage_prepared_journal(
+        root,
+        &[
+            ("wiki/a.md", &fixed_content(&content_a)),
+            ("wiki/b.md", &fixed_content(&content_b)),
+        ],
+        now_ms(),
+        None,
+    );
+
+    let preview = wiki_check_fix(root, &["--fix-dry-run"]);
+    let text = combined(&preview);
+    assert_eq!(
+        preview.status.code(),
+        Some(0),
+        "dry-run exit gate must reflect post-replay reality:\n{text}"
+    );
+    assert!(
+        !text.contains("Broken Link") && !text.contains("broken_link"),
+        "stale pre-replay diagnostics must not leak into the preview:\n{text}"
+    );
+    assert!(
+        !text.contains("fix:"),
+        "preview proposes nothing when replay satisfies everything:\n{text}"
+    );
+    // Nothing written; journal intact for the real run.
+    assert_eq!(read_page(root, "wiki/a.md"), content_a);
+    assert_eq!(read_page(root, "wiki/b.md"), content_b);
+    assert!(staged.dir.exists(), "dry run must not consume the journal");
+
+    let real = wiki_check_fix(root, &[]);
+    assert_eq!(
+        real.status.code(),
+        Some(0),
+        "the following real run exits 0 via replay:\n{}",
+        combined(&real)
+    );
+    assert!(!staged.dir.exists(), "real run consumed the journal");
+}
+
+/// F-C control (b): the journaled file carries MULTIPLE diagnostic classes
+/// pre-fix — broken_link from a renamed target plus broken_anchor on an
+/// existing target whose heading was renamed (both auto-fixable, so both
+/// land in one staged journal). A third page outside journal scope keeps a
+/// permanent broken_link. The dry run must report neither stale class for
+/// the journaled file while reporting the out-of-scope breakage exactly as
+/// execution does; exit gates agree.
+#[test]
+fn dry_run_diagnostics_match_real_run_post_replay() {
+    let tmp = init_repo();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    // Two target pages whose `Setup guide` heading will be renamed; old.md
+    // is ALSO renamed as a file (broken_link class), guide.md stays put
+    // (broken_anchor class). gone.md is deleted outright with no successor.
+    let target_v1 = "---\ntitle: T\nsummary: T.\n---\n\n## Setup guide\n\nbody\n";
+    std::fs::write(root.join("docs/old.md"), target_v1).unwrap();
+    std::fs::write(root.join("docs/guide.md"), target_v1).unwrap();
+    std::fs::write(
+        root.join("docs/gone.md"),
+        "---\ntitle: Gone\nsummary: Gone.\n---\n\nbody\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("wiki/a.md"),
+        "---\ntitle: A\nsummary: A.\n---\n\nSee [alpha](../docs/old.md) and [guide](../docs/guide.md#setup-guide).\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("wiki/c.md"),
+        "---\ntitle: C\nsummary: C.\n---\n\nSee [gamma](../docs/gone.md).\n",
+    )
+    .unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "seed"]);
+    git(root, &["mv", "docs/old.md", "docs/new.md"]);
+    std::fs::write(
+        root.join("docs/new.md"),
+        "---\ntitle: T\nsummary: T.\n---\n\n## Install\n\nbody\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("docs/guide.md"),
+        "---\ntitle: Guide\nsummary: Guide.\n---\n\n## Install\n\nbody\n",
+    )
+    .unwrap();
+    git(root, &["rm", "-q", "docs/gone.md"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "rename file, rename heading, delete"]);
+
+    // Exactly what an uninterrupted killed run would have staged: both
+    // classes fixed in one content.
+    let fixed_a = "---\ntitle: A\nsummary: A.\n---\n\nSee [alpha](../docs/new.md) and [guide](../docs/guide.md#install).\n";
+    let _staged = stage_prepared_journal(root, &[("wiki/a.md", fixed_a)], now_ms(), None);
+
+    // Preview: neither of a.md's stale classes appears; c.md's genuine
+    // breakage remains as a skip proposal; gate exits 1 like execution.
+    let preview = wiki_check_fix(root, &["--fix-dry-run"]);
+    let preview_text = combined(&preview);
+    assert_eq!(
+        preview.status.code(),
+        Some(1),
+        "out-of-journal breakage keeps the preview at exit 1:\n{preview_text}"
+    );
+    assert!(
+        !preview_text.contains("wiki/a.md"),
+        "journaled file's stale diagnostics must not appear:\n{preview_text}"
+    );
+    assert!(
+        preview_text.contains("skip: wiki/c.md")
+            && preview_text.contains("no successor in git history"),
+        "out-of-journal breakage must still be reported:\n{preview_text}"
+    );
+
+    // Execution: replays a.md, reports the same c.md breakage through its
+    // own channels, same gate outcome.
+    let real = wiki_check_fix(root, &[]);
+    assert_eq!(
+        real.status.code(),
+        Some(1),
+        "c.md keeps the real run at exit 1:\n{}",
+        combined(&real)
+    );
+    let real_text = combined(&real);
+    assert!(
+        !real_text.contains("wiki/a.md"),
+        "replay-satisfied file must not reappear in execution output:\n{real_text}"
+    );
+    assert!(
+        real_text.contains("skipped: wiki/c.md:6")
+            && real_text.contains("no successor in git history"),
+        "execution must report the same c.md reason:\n{real_text}"
+    );
+    // The journaled file landed on disk through replay.
+    assert_eq!(read_page(root, "wiki/a.md"), fixed_a);
+}

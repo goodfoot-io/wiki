@@ -311,3 +311,181 @@ fn quarantine_surfaces_through_json_lines() {
         "JSON-lines must carry quarantine/rebuild diagnostic counts; log:\n{log}"
     );
 }
+
+// ── Round-2 repair wave: store-fault fail-open (F-A) ────────────────────
+
+/// Corrupt a byte range of the store file.
+fn corrupt_store(common: &std::path::Path, offset: u64, len: usize) {
+    let db = common.join("wiki").join("store.sqlite");
+    let mut bytes = std::fs::read(&db).expect("read store");
+    assert!(
+        bytes.len() as u64 > offset + len as u64,
+        "store too small to corrupt"
+    );
+    for b in &mut bytes[offset as usize..offset as usize + len] {
+        *b = 0xFF;
+    }
+    std::fs::write(&db, bytes).expect("write corrupted store");
+}
+
+/// F-A witness (1): probe-passing header corruption (schema-format field,
+/// bytes 44–47) must recover transparently — byte-identical output vs the
+/// pre-corruption reference, at most one diagnostic line, and a healthy
+/// store afterwards.
+#[test]
+fn header_corruption_recovers_byte_identical() {
+    let repo = common::FixtureRepo::new();
+    repo.write_wiki_md(
+        "page.md",
+        "Header Corruption Page",
+        "Corruption witness page.",
+        "witness body",
+    );
+    repo.git_add("page.md");
+    repo.git_commit("add page");
+
+    // Reference on the healthy warm store.
+    let reference = run_wiki(&repo.root, &["--format", "json", "list"]);
+    assert!(reference.status.success());
+    let reference_out = stdout_of(&reference);
+
+    // Overwrite the schema-format field.
+    let common = common::git_common_dir(&repo.root);
+    corrupt_store(&common, 44, 4);
+
+    let recovered = run_wiki(&repo.root, &["--format", "json", "list"]);
+    assert!(
+        recovered.status.success(),
+        "corrupted-header run must exit 0, got {:?}: {}",
+        recovered.status.code(),
+        stderr_of(&recovered)
+    );
+    assert_eq!(
+        stdout_of(&recovered),
+        reference_out,
+        "output must be byte-identical to the pre-corruption reference"
+    );
+    assert!(
+        warning_lines(&stderr_of(&recovered)) <= 1,
+        "at most one diagnostic line: {}",
+        stderr_of(&recovered)
+    );
+
+    // The store is healthy after the run: an uncontended follow-up answers
+    // identically without any further fault path.
+    let followup = run_wiki(&repo.root, &["--format", "json", "list"]);
+    assert!(followup.status.success());
+    assert_eq!(stdout_of(&followup), reference_out);
+}
+
+/// F-A witness (2): corruption that only bites at publish time (linked
+/// worktree scenario class) degrades to exit 0 with uncached-reference
+/// results — never `publish: ... database disk image is malformed` exit 2.
+#[test]
+fn publish_time_corruption_degrades_to_uncached_reference() {
+    let repo = common::FixtureRepo::new();
+    repo.write_wiki_md(
+        "alpha.md",
+        "Alpha Publish",
+        "Publish-corruption witness.",
+        "distinctive publish witness prose",
+    );
+    repo.git_add("alpha.md");
+    repo.git_commit("add alpha");
+
+    // Reference from a healthy store.
+    let reference = run_wiki(&repo.root, &["--format", "json", "witness"]);
+    assert!(reference.status.success());
+    let reference_out = stdout_of(&reference);
+    assert!(!reference_out.trim().is_empty());
+
+    // Corrupt deep into the file — past the small hot tables' pages, where
+    // publish-time writes (fts shadow tables, blob upserts) trip first.
+    let common = common::git_common_dir(&repo.root);
+    let db = common.join("wiki").join("store.sqlite");
+    let size = std::fs::metadata(&db).expect("db metadata").len();
+    let tail_offset = size.saturating_sub(256).max(100);
+    corrupt_store(&common, tail_offset, 64);
+
+    let degraded = run_wiki(&repo.root, &["--format", "json", "witness"]);
+    assert!(
+        degraded.status.success(),
+        "publish-fault run must exit 0 via the uncached floor, got {:?}: {}",
+        degraded.status.code(),
+        stderr_of(&degraded)
+    );
+    assert_eq!(
+        stdout_of(&degraded),
+        reference_out,
+        "uncached-floor answers must equal the healthy-store reference"
+    );
+    assert!(
+        warning_lines(&stderr_of(&degraded)) <= 1,
+        "at most one diagnostic line: {}",
+        stderr_of(&degraded)
+    );
+
+    // The forced quarantine/rebuild means the NEXT run is healthy again.
+    let healed = run_wiki(&repo.root, &["--format", "json", "witness"]);
+    assert!(healed.status.success());
+    assert_eq!(stdout_of(&healed), reference_out);
+}
+
+/// F-A witness (3): BUSY during index open (a long writer transaction on
+/// the store from another process) maps exhausted-BUSY onto the contention
+/// floor — exit 0, correct uncached answers, one line, bounded.
+#[test]
+fn busy_open_degrades_to_uncached_answers() {
+    let repo = common::FixtureRepo::new();
+    repo.write_wiki_md(
+        "busy.md",
+        "Busy Witness Page",
+        "Witness for open-time contention.",
+        "contention witness prose",
+    );
+    repo.git_add("busy.md");
+    repo.git_commit("add busy");
+
+    // Reference while uncontended.
+    let reference = run_wiki(&repo.root, &["--format", "json", "contention"]);
+    assert!(reference.status.success());
+    let reference_out = stdout_of(&reference);
+
+    // Hold a write transaction across the command's open window.
+    let db = common::git_common_dir(&repo.root).join("wiki").join("store.sqlite");
+    let holder = std::thread::spawn(move || {
+        let conn = rusqlite::Connection::open(&db).expect("holder conn");
+        conn.execute_batch("BEGIN IMMEDIATE; CREATE TABLE hold_open (x INTEGER);")
+            .expect("take write lock");
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+        let _ = conn.execute_batch("ROLLBACK;");
+    });
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let started = Instant::now();
+    let degraded = run_wiki(&repo.root, &["--format", "json", "contention"]);
+    let elapsed = started.elapsed();
+
+    holder.join().expect("holder thread");
+
+    assert!(
+        degraded.status.success(),
+        "busy-open run must exit 0 via the contention floor, got {:?}: {}",
+        degraded.status.code(),
+        stderr_of(&degraded)
+    );
+    assert!(
+        elapsed.as_millis() < 15_000,
+        "bounded duration exceeded: {elapsed:?}"
+    );
+    assert_eq!(
+        stdout_of(&degraded),
+        reference_out,
+        "the contention floor answers with correct uncached results"
+    );
+    assert!(
+        warning_lines(&stderr_of(&degraded)) <= 1,
+        "at most one diagnostic line: {}",
+        stderr_of(&degraded)
+    );
+}

@@ -104,10 +104,30 @@ fn warn_rendezvous_unavailable_once(context: &str, e: &std::io::Error) {
 static STORE_DEGRADED_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-fn warn_store_degraded_once() {
+fn warn_store_degraded_once(reason: &str) {
     if !STORE_DEGRADED_WARNED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        eprintln!("warning: wiki store unavailable ({reason}); serving uncached for this run");
+    }
+}
+
+fn is_busy_error(err: &crate::cache::CacheError) -> bool {
+    matches!(
+        err,
+        crate::cache::CacheError::Sqlite(rusqlite::Error::SqliteFailure(f, _))
+            if f.code == rusqlite::ErrorCode::DatabaseBusy
+    )
+}
+
+/// Process-wide one-line budget for losing the pinned generation between
+/// the gate pin and query time (plan F-B): the run says so once, then
+/// answers from a fresh rebuild instead of silently going empty.
+static SERVED_LOST_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn warn_served_lost_once() {
+    if !SERVED_LOST_WARNED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         eprintln!(
-            "warning: wiki store busy mid-init in another process; serving uncached for this run"
+            "warning: served generation no longer readable; rebuilding for this run"
         );
     }
 }
@@ -325,7 +345,7 @@ impl WikiIndex {
             .map_err(|e| miette::miette!("failed to open wiki store at {}: {e}",
                 crate::cache::schema::db_path(&common_dir).display()))?;
         if store.is_degraded() {
-            warn_store_degraded_once();
+            warn_store_degraded_once("busy mid-init in another process");
         }
 
         let fs_class = forced_fs_class.unwrap_or_else(|| fs_class::detect(&dot_git));
@@ -428,16 +448,36 @@ impl WikiIndex {
             gix::open(&index.repo_root).map_err(Box::new)
         })
         .map_err(|e| miette::miette!("gix::open({}) failed: {e}", index.repo_root.display()))?;
-        let outcome = crate::perf::scope_result("index.refresh", serde_json::json!({}), || {
-            passes::refresh(
-                &repo,
-                &index.repo_root,
-                &index.dot_git,
-                &index.store,
-                fs_class,
-            )
-        })
-        .map_err(|e| miette::miette!("refresh failed: {e}"))?;
+        let outcome =
+            crate::perf::scope_result("index.refresh", serde_json::json!({}), || {
+                passes::refresh(
+                    &repo,
+                    &index.repo_root,
+                    &index.dot_git,
+                    &index.store,
+                    fs_class,
+                )
+            });
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            // Store-level fault at refresh/publish time (plan F-A): the
+            // command's answers must not depend on cache state. One line, a
+            // best-effort forced quarantine so the NEXT run recovers on disk
+            // too, then this run answers from the uncached ephemeral tier.
+            // Non-store faults (gix, parse) still propagate.
+            Err(e) => {
+                let store_fault = e
+                    .downcast_ref::<crate::cache::CacheError>()
+                    .is_some_and(|ce| !is_busy_error(ce));
+                if store_fault {
+                    generations::quarantine_forced(&crate::cache::schema::db_path(
+                        &common_dir,
+                    ));
+                }
+                warn_store_degraded_once(&e.to_string());
+                return Self::finish_uncached(index, fs_class);
+            }
+        };
         index.served_gen = Some(outcome.served_gen_id);
         // A conflict-discard means the identical generation already existed:
         // the refresh did no ingest work, so the counters stay at zero
@@ -567,15 +607,39 @@ impl WikiIndex {
             .map_err(|e| miette::miette!("{context}: {e}"))
     }
 
+    /// The F-B floor: a serve-time verification miss (generation evicted
+    /// or unreadable between gate pin and query) is a REBUILD, not a silent
+    /// empty. One diagnostic line, then a fresh prepare — whose own
+    /// gate/refresh republishes this worktree's state — answers the query.
+    fn rebuild_floor(&self, context: &str) -> Result<Option<WikiIndex>> {
+        warn_served_lost_once();
+        let rebuilt = Self::prepare_for_source(&self.repo_root, self.source)?;
+        if rebuilt.served().is_none() {
+            let _ = context;
+            return Ok(None);
+        }
+        Ok(Some(rebuilt))
+    }
+
     /// Resolve a single page by title or alias (case-insensitive), or by a
     /// repo-relative path / `.md` file reference.
     pub fn resolve_page(&self, input: &str) -> Result<Option<ResolvedPage>> {
         let Some(gen_id) = self.served() else {
             return Ok(None);
         };
-        self.serve_shared_with("resolve_page", |conn| {
+        if let Some(page) = self.serve_shared_with("resolve_page", |conn| {
             search::resolve_page(conn, &self.repo_root, gen_id, self.source, input)
-        })
+        })? {
+            return Ok(Some(page));
+        }
+        let Some(rebuilt) = self.rebuild_floor("resolve_page")? else {
+            return Ok(None);
+        };
+        let gen_id = rebuilt.served().expect("rebuild_floor checked");
+        rebuilt
+            .store
+            .read_txn(|conn| search::resolve_page(conn, &self.repo_root, gen_id, self.source, input))
+            .map_err(|e| miette::miette!("resolve_page: {e}"))
     }
 
     /// BM25-weighted search, paginated, returning `(rows, total)`.
@@ -589,12 +653,33 @@ impl WikiIndex {
             return Ok((Vec::new(), 0));
         };
         let limit_usize = if limit < 0 { 0 } else { limit as usize };
-        let (mut rows, total) = self
+        let served = self
             .serve_shared_with("search_weighted", |conn| {
                 search::search_weighted(conn, gen_id, self.source, query, limit_usize, offset)
                     .map(Some)
-            })?
-            .unwrap_or((Vec::new(), 0));
+            })?;
+        let (mut rows, total) = match served {
+            Some(pair) => pair,
+            None => {
+                let Some(rebuilt) = self.rebuild_floor("search_weighted")? else {
+                    return Ok((Vec::new(), 0));
+                };
+                let gen_id = rebuilt.served().expect("rebuild_floor checked");
+                rebuilt
+                    .store
+                    .read_txn(|conn| {
+                        search::search_weighted(
+                            conn,
+                            gen_id,
+                            self.source,
+                            query,
+                            limit_usize,
+                            offset,
+                        )
+                    })
+                    .map_err(|e| miette::miette!("search_weighted: {e}"))?
+            }
+        };
         // Render `file` as an absolute path so `format_search_result` can
         // `strip_prefix(repo_root)` to produce repo-relative output.
         for r in &mut rows {
@@ -604,6 +689,52 @@ impl WikiIndex {
             }
         }
         Ok((rows, total))
+    }
+
+    /// The shared-rendezvous leg of `list_pages`: verified read under the
+    /// courtesy lock; `None` ⇒ serve-time verification miss (plan F-B).
+    fn serve_list_pages(
+        &self,
+        gen_id: i64,
+        src: &str,
+    ) -> Result<Option<RawPageRows>> {
+        self.serve_shared_with("list_pages", |conn| {
+            Self::list_pages_raw(conn, gen_id, src).map(Some)
+        })
+    }
+
+    /// The rebuild leg: same query against a fresh handle's store, no
+    /// rendezvous (this process just published it).
+    fn serve_list_pages_raw(&self, gen_id: i64, src: &str) -> Result<RawPageRows> {
+        self.store
+            .read_txn(|conn| Self::list_pages_raw(conn, gen_id, src))
+            .map_err(|e| miette::miette!("list_pages: {e}"))
+    }
+
+    fn list_pages_raw(
+        conn: &rusqlite::Connection,
+        gen_id: i64,
+        src: &str,
+    ) -> rusqlite::Result<RawPageRows> {
+        let mut stmt = conn.prepare(
+            "SELECT p.path_rel, b.title, b.summary, b.aliases_text, b.tags_text
+             FROM blobs b
+             JOIN gen_paths p ON p.oid = b.oid AND p.gen_id = ?1
+             WHERE p.source = ?2 AND b.title <> '' AND b.summary <> ''
+             ORDER BY b.title COLLATE NOCASE, p.path_rel",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![gen_id, src], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// Enumerate wiki pages (non-empty title and summary) for this index's
@@ -619,29 +750,18 @@ impl WikiIndex {
             return Ok(Vec::new());
         };
         let src = generations::source_sql(self.source.gen_source());
-        let raw_rows = self.serve_shared_with("list_pages", |conn| {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT p.path_rel, b.title, b.summary, b.aliases_text, b.tags_text
-                     FROM blobs b
-                     JOIN gen_paths p ON p.oid = b.oid AND p.gen_id = ?1
-                     WHERE p.source = ?2 AND b.title <> '' AND b.summary <> ''
-                     ORDER BY b.title COLLATE NOCASE, p.path_rel",
-                )?;
-            let rows = stmt
-                .query_map(rusqlite::params![gen_id, src], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, String>(4)?,
-                    ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(Some(rows))
-        })?
-        .unwrap_or_default();
+        let raw_rows = self.serve_list_pages(gen_id, src)?;
+        let raw_rows = match raw_rows {
+            Some(rows) => rows,
+            None => {
+                let Some(rebuilt) = self.rebuild_floor("list_pages")? else {
+                    return Ok(Vec::new());
+                };
+                let gen_id = rebuilt.served().expect("rebuild_floor checked");
+                rebuilt.serve_list_pages_raw(gen_id, src)?
+            }
+        };
+
 
         let tag_lc = tag.map(|t| t.to_lowercase());
         let split =
@@ -681,7 +801,7 @@ impl WikiIndex {
         let Some(gen_id) = self.served() else {
             return Ok(Vec::new());
         };
-        let (rows, _total) = self
+        let served = self
             .serve_shared_with("suggest", |conn| {
                 search::search_weighted(
                     conn,
@@ -692,9 +812,30 @@ impl WikiIndex {
                     0,
                 )
                 .map(Some)
-            })?
-            .unwrap_or((Vec::new(), 0));
-        Ok(rows)
+            })?;
+        match served {
+            Some((rows, _)) => Ok(rows),
+            None => {
+                let Some(rebuilt) = self.rebuild_floor("suggest")? else {
+                    return Ok(Vec::new());
+                };
+                let gen_id = rebuilt.served().expect("rebuild_floor checked");
+                rebuilt
+                    .store
+                    .read_txn(|conn| {
+                        search::search_weighted(
+                            conn,
+                            gen_id,
+                            self.source,
+                            query,
+                            SUGGESTION_LIMIT as usize,
+                            0,
+                        )
+                        .map(|(rows, _)| rows)
+                    })
+                    .map_err(|e| miette::miette!("suggest: {e}"))
+            }
+        }
     }
 
     /// Open the index for `source`, injecting a filesystem classification
@@ -776,6 +917,9 @@ impl WikiIndex {
         self.last_stats
     }
 }
+
+/// Raw `list_pages` projection before tag/offset/limit post-processing.
+type RawPageRows = Vec<(String, String, String, String, String)>;
 
 /// One wiki page row enumerated by [`WikiIndex::list_pages`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -913,6 +1057,8 @@ mod list_pages_tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         create_file(root, "keep.md", &page("Keep", "kept summary", ""));
+        // Body carries a distinctive token the rebuild assertions query for.
+        // `page()` writes body text "body"; search uses it below.
         commit_repo(root);
 
         let index = WikiIndex::prepare_for_source(root, DocSource::WorkingTree).unwrap();
@@ -962,13 +1108,28 @@ mod list_pages_tests {
         }
         index.store.maintain().unwrap();
 
-        // The pinned generation may now be evicted; every query must still
-        // answer Ok (empty after degradation), never Err.
-        let (rows, total) = index.search_weighted("body", 10, 0).unwrap();
-        assert_eq!(total, 0, "evicted generation degrades to an empty serve");
-        assert!(rows.is_empty());
-        assert!(index.resolve_page("Keep").unwrap().is_none());
-        assert!(index.list_pages(None, 0, None).unwrap().is_empty());
+        // The pinned generation may now be evicted. Per plan D5 + F-B this
+        // is a REBUILD miss, not a silent empty: every query must answer
+        // Ok with THIS worktree's correct corpus (keep.md), never Err and
+        // never a false no-match.
+        let (rows, total) = index.search_weighted("kept", 10, 0).unwrap();
+        assert_eq!(
+            total, 1,
+            "serve-miss must rebuild and return correct results, got {rows:?}"
+        );
+        assert!(rows.iter().any(|r| r.title == "Keep"));
+
+        let page = index
+            .resolve_page("Keep")
+            .unwrap()
+            .expect("rebuilt resolve must find Keep");
+        assert_eq!(page.title, "Keep");
+
+        let pages = index.list_pages(None, 0, None).unwrap();
+        assert!(
+            pages.iter().any(|p| p.title == "Keep"),
+            "rebuilt listing must contain Keep, got {pages:?}"
+        );
     }
 
     #[test]

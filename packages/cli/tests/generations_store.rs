@@ -854,8 +854,9 @@ fn best_effort_access_touch_never_fails_lookup() {
 
 /// F1 witness: a second connection holding a write transaction on the store
 /// file must make open and publish take the bounded retry path — completing
-/// when the holder releases mid-retries, erroring gracefully when it holds
-/// throughout — NEVER panicking on the one-shot-capture pattern.
+/// when the holder releases mid-retries, degrading gracefully when it holds
+/// throughout (publish errors; open lands on the contention floor) — NEVER
+/// panicking on the one-shot-capture pattern.
 #[test]
 fn busy_write_txn_during_open_and_publish_degrades_not_panics() {
     // Part A — publish retries to success when the writer releases early.
@@ -910,8 +911,9 @@ fn busy_write_txn_during_open_and_publish_degrades_not_panics() {
     }
 
     // Part C — open under a held write txn: the DDL leg hits BUSY, the
-    // bounded wrapper retries, exhaustion surfaces as Err — no panic, no
-    // process abort.
+    // bounded wrapper retries, and exhaustion maps onto the contention
+    // floor (plan F-A) — an ephemeral degraded handle, never a panic and
+    // never a propagated error.
     {
         let tmp = tempfile::tempdir().expect("tempdir");
         {
@@ -924,11 +926,10 @@ fn busy_write_txn_during_open_and_publish_degrades_not_panics() {
             .execute_batch("BEGIN IMMEDIATE; CREATE TABLE hold_c (x INTEGER);")
             .expect("take write lock");
 
-        let outcome = GenerationsStore::open(tmp.path());
-        let err = outcome.expect_err("exhausted retries must surface as Err");
+        let store = GenerationsStore::open(tmp.path()).expect("contention floor must succeed");
         assert!(
-            matches!(err, wiki::cache::CacheError::Sqlite(_)),
-            "graceful CacheError on open under contention, got {err:?}"
+            store.is_degraded(),
+            "exhausted BUSY at open must land on the uncached ephemeral floor"
         );
     }
 }

@@ -54,6 +54,15 @@ impl ContentCache {
         }
     }
 
+    /// Seed a virtual content override for `path` (evaluation F-C): the
+    /// next read — including the parallel warm, which skips already-cached
+    /// paths — observes these bytes instead of reading disk. The dry-run
+    /// pre-check uses this to observe crash-recovery journals as if already
+    /// replayed. Never written back to disk by the cache itself.
+    pub(crate) fn seed_virtual(&mut self, path: &Path, content: String) {
+        self.cache.insert(path.to_path_buf(), content);
+    }
+
     /// Pre-read the given working-tree paths in parallel and populate the cache.
     /// Only successful reads are inserted; failures are left absent so the serial
     /// read path still runs read_fn and produces the exact error diagnostic.
@@ -444,6 +453,33 @@ fn run_inner(
     // post-fix re-check each construct their own cache handle.
     let cache_reporter = crate::cache::CacheReporter::for_invocation();
 
+    // Fix-arm journal coordination (evaluation F-C): ONE read-only journal
+    // classification per run, taken before the pre-check and handed to
+    // `run_fix_pass` so nothing ever classifies twice. In dry-run mode the
+    // validated stages seed the pre-check's content basis — the diagnostic
+    // layer then reads journaled targets as if already replayed, so the
+    // preview's diagnostics AND exit gate describe the execution a real run
+    // would perform. Real runs stay byte-identical to before: no seeding,
+    // and physical application still happens inside `run_fix_pass` just
+    // before planning.
+    let scanned_journals = if fix {
+        match check_fix::scan_fix_journals(repo_root) {
+            Ok(s) => Some(s),
+            Err(e) => return Ok(hard_exit(&e)),
+        }
+    } else {
+        None
+    };
+    if let Some(scanned) = scanned_journals.as_ref()
+        && fix_dry_run
+    {
+        for journal in &scanned.valid {
+            for (path_rel, content) in &journal.stages {
+                content_cache.seed_virtual(&repo_root.join(path_rel), content.clone());
+            }
+        }
+    }
+
     let diagnostics = match collect_for_files(
         &files,
         &index_files,
@@ -467,6 +503,7 @@ fn run_inner(
             fix_dry_run,
             &mut content_cache,
             &cache_reporter,
+            scanned_journals.unwrap_or_else(check_fix::ScannedJournals::none),
         ) {
             Ok(p) => p,
             Err(e) => return Ok(hard_exit(&e)),

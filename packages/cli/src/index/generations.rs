@@ -446,55 +446,91 @@ impl GenerationsStore {
             return Ok(store);
         }
 
+        // First construction attempt under the held lock. Any fault that
+        // survives the probe's legs (plan F-A: probe-passing header
+        // corruption) or any store-level unusable state gets the SAME
+        // quarantine-and-rebuild path as Suspect stores — once; a second
+        // failure degrades to the uncached ephemeral floor instead of
+        // failing the command. Exhausted BUSY is contention, not
+        // corruption: it maps straight onto the floor, never a quarantine.
+        let mut outcome = Self::construct_under_lock(&db_file);
+        if let Err(first) = &outcome
+            && !is_busy_exhausted(first)
+        {
+            quarantine_forced(&db_file);
+            outcome = Self::construct_under_lock(&db_file);
+        }
+        let store = match outcome {
+            Ok(store) => store,
+            // Contention floor and second-failure floor alike (plan F-A):
+            // fully functional in-memory serving for this run, one line
+            // from the caller's budget.
+            Err(_) => {
+                FileExt::unlock(&lock_file)?;
+                drop(lock_file);
+                let store = Self::open_ephemeral()?;
+                store.degraded.set(true);
+                return Ok(store);
+            }
+        };
+        FileExt::unlock(&lock_file)?;
+        drop(lock_file);
+        Ok(store)
+    }
+
+    /// One construction attempt against the shared file: probe arms,
+    /// hardened connects, tier DDL, epoch enforcement, diagnostics
+    /// surfacing. Re-entrant across `retry_busy` attempts (plan F1).
+    fn construct_under_lock(db_file: &Path) -> Result<Self, CacheError> {
         let mut repaired = false;
-        let store = retry_busy(|| {
-            match schema::probe(&db_file)? {
+        retry_busy(|| {
+            match schema::probe(db_file)? {
                 ProbeOutcome::Valid => {}
                 // Missing is a fresh create, never a quarantine; the DDL leg
                 // runs under the held lock through the hardened prepare.
                 ProbeOutcome::Missing => {
-                    schema::prepare_db_file(&db_file)?;
-                    drop(schema::open_connection(&db_file)?);
+                    schema::prepare_db_file(db_file)?;
+                    drop(schema::open_connection(db_file)?);
                 }
                 ProbeOutcome::Suspect(_) => {
-                    schema::quarantine(&db_file)?;
+                    schema::quarantine(db_file)?;
                     repaired = true;
                 }
                 // Schema skew (plan D2): matching identity pair, deviating
                 // static shapes. Only this tier's skew is ours to repair; an
                 // anchor-tier skew is repaired by the anchor's own next use.
                 ProbeOutcome::Skew(Tier::Index) => {
-                    schema::prepare_db_file(&db_file)?;
-                    let conn = schema::open_connection(&db_file)?;
+                    schema::prepare_db_file(db_file)?;
+                    let conn = schema::open_connection(db_file)?;
                     schema::drop_tier_tables(&conn, Tier::Index)?;
                     crate::cache::diagnostics::record(&conn, "index_tier_skew_repaired");
                     repaired = true;
                     drop(conn);
-                    drop(schema::open_connection(&db_file)?);
+                    drop(schema::open_connection(db_file)?);
                 }
                 ProbeOutcome::Skew(Tier::Anchor) => {}
             }
 
-            let conn = schema::open_connection(&db_file)?;
+            let conn = schema::open_connection(db_file)?;
             // This tier's static DDL, atomic and idempotent.
             apply_index_tier_ddl(&conn)?;
 
             // Enforce the meta singleton's index_epoch leg here: a store
-            // missing or corrupting it fails this open rather than serving
-            // unowned generations (plan D2 — consumer state, consumer
-            // enforcement). The value itself matters only when a tier-scoped
-            // bump lands (clear-cache wave).
+            // missing or corrupting it fails this attempt rather than
+            // serving unowned generations (plan D2 — consumer state,
+            // consumer enforcement). The value itself matters only when a
+            // tier-scoped bump lands (clear-cache wave).
             conn.query_row("SELECT index_epoch FROM meta WHERE id = 1", [], |row| {
                 row.get::<_, i64>(0)
             })?;
 
-            // Surface any repair the held branch just performed (plan
-            // F9-support): publish the refreshed counts into the run's perf
-            // slot (the `check` path attaches them to its aggregate event),
-            // and — because search/list/summary never emit that aggregate —
-            // also emit a dedicated index-tier event so read-only commands
-            // carry the quarantine/rebuild/skew counts in their JSON-lines
-            // with zero extra stderr noise.
+            // Surface any repair this attempt performed (plan F9-support):
+            // publish the refreshed counts into the run's perf slot (the
+            // `check` path attaches them to its aggregate event), and —
+            // because search/list/summary never emit that aggregate — also
+            // emit a dedicated index-tier event so read-only commands carry
+            // the quarantine/rebuild/skew counts in their JSON-lines with
+            // zero extra stderr noise.
             crate::cache::diagnostics::publish_counts(&conn);
             if repaired {
                 let mut counts = serde_json::Map::new();
@@ -517,14 +553,11 @@ impl GenerationsStore {
 
             Ok(Self {
                 conn: RefCell::new(conn),
-                db_file: db_file.clone(),
+                db_file: db_file.to_path_buf(),
                 degraded: Cell::new(false),
                 txn_depth: Cell::new(0),
             })
-        })?;
-        FileExt::unlock(&lock_file)?;
-        drop(lock_file);
-        Ok(store)
+        })
     }
 
     /// An ephemeral, purely in-memory instance of the index tier: identical
@@ -1046,6 +1079,46 @@ impl GenerationsStore {
                 }
             }
         })
+    }
+}
+
+/// True when the error is an exhausted-`SQLITE_BUSY` result: contention,
+/// never corruption — routed to the contention floor, never quarantined.
+fn is_busy_exhausted(err: &CacheError) -> bool {
+    matches!(
+        err,
+        CacheError::Sqlite(rusqlite::Error::SqliteFailure(f, _))
+            if f.code == rusqlite::ErrorCode::DatabaseBusy
+    )
+}
+
+/// Quarantine WITHOUT the TOCTOU Valid short-circuit (plan F-A): corruption
+/// that passes the probe's liveness+identity+registry legs would otherwise
+/// be re-validated as healthy by [`schema::quarantine`]'s re-probe and
+/// persist forever. Rename aside, clear sidecars, reseed through the
+/// hardened prepare — best-effort, recording the same ledger events as the
+/// foundation's quarantine so diagnostic counts stay consistent.
+pub(crate) fn quarantine_forced(db_file: &Path) {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let aside =
+        db_file.with_file_name(format!("{}.{stamp}.quarantine", schema::DB_FILE_NAME));
+    if std::fs::rename(db_file, &aside).is_err() {
+        return; // nothing aside-able; the retry attempt will surface reality
+    }
+    for sidecar in [
+        format!("{}-wal", schema::DB_FILE_NAME),
+        format!("{}-shm", schema::DB_FILE_NAME),
+    ] {
+        let _ = std::fs::remove_file(db_file.with_file_name(sidecar));
+    }
+    if schema::prepare_db_file(db_file).is_ok()
+        && let Ok(conn) = schema::open_connection(db_file)
+    {
+        crate::cache::diagnostics::record(&conn, "quarantine_performed");
+        crate::cache::diagnostics::record(&conn, "rebuild_completed");
     }
 }
 
