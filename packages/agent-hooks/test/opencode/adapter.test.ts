@@ -49,25 +49,30 @@ describe('opencode adapter', () => {
   });
 
   describe('tool filtering', () => {
-    it('runs the wiki check only for edit and write tools', async () => {
+    it('runs the wiki check only for write-shaped tools (edit, write, apply_patch)', async () => {
       const wikiPath = makeFile('page.md', '---\ntitle: T\nsummary: S\n---\nbody');
       let calls = 0;
       const hooks = assemblePlugin({
         directory: fixtureDir,
         resolveBinary: () => '/definitely/not/a/real/wiki-binary',
-        executeCheck: (filePath, options) => {
+        executeCheck: () => {
           calls += 1;
-          return { status: 'clean' as const, filePath, binary: options.binary };
+          return { status: 'clean' as const };
         }
       });
 
       await hooks['tool.execute.after'](afterInput('bash', { command: 'ls' }), afterOutput());
       await hooks['tool.execute.after'](afterInput('read', { filePath: wikiPath }), afterOutput());
+      await hooks['tool.execute.after'](afterInput('glob', { pattern: '**/*.md' }), afterOutput());
       expect(calls).toBe(0);
 
       await hooks['tool.execute.after'](afterInput('edit', { filePath: wikiPath }), afterOutput());
       await hooks['tool.execute.after'](afterInput('write', { filePath: wikiPath }), afterOutput());
-      expect(calls).toBe(2);
+      await hooks['tool.execute.after'](
+        afterInput('apply_patch', { patchText: `*** Begin Patch\n*** Update File: ${wikiPath}\n*** End Patch` }),
+        afterOutput()
+      );
+      expect(calls).toBe(3);
     });
   });
 
@@ -123,6 +128,67 @@ describe('opencode adapter', () => {
     });
   });
 
+  describe('apply_patch writes', () => {
+    function patchFor(...paths: string[]): { patchText: string } {
+      const lines = ['*** Begin Patch', ...paths.map((p) => `*** Update File: ${p}`), '*** End Patch'];
+      return { patchText: lines.join('\n') };
+    }
+
+    it('runs the wiki check for each patched wiki member and aggregates one block', async () => {
+      const first = makeFile('one.md', '---\ntitle: One\nsummary: First\n---\nbody');
+      const second = makeFile('two.md', '---\ntitle: Two\nsummary: Second\n---\nbody');
+      makeFile('plain.md', '# just markdown');
+      process.env.WIKI_BIN = makeBinary('echo "drift in $3" ; exit 1');
+      const hooks = assemblePlugin({ directory: fixtureDir });
+
+      try {
+        const output = afterOutput();
+        await hooks['tool.execute.after'](afterInput('apply_patch', patchFor(first, second, 'plain.md')), output);
+        expect(output.output?.startsWith('tool ran')).toBe(true);
+        expect(output.output).toContain('\n<wiki>\n');
+        expect(output.output?.endsWith('</wiki>')).toBe(true);
+        // Both patched members checked, the non-wiki one never spawned.
+        expect(output.output).toContain(`drift in ${first}`);
+        expect(output.output).toContain(`drift in ${second}`);
+        expect(output.output).not.toContain('plain.md');
+        // Aggregated into a single wrapped block, like the codex adapter.
+        expect(output.output?.match(/<wiki>/g)).toHaveLength(1);
+      } finally {
+        delete process.env.WIKI_BIN;
+      }
+    });
+
+    it('is a silent no-op when a patch touches only non-wiki files', async () => {
+      const plain = makeFile('plain.md', '# just markdown');
+      process.env.WIKI_BIN = makeBinary('echo "should not run" ; exit 1');
+      const hooks = assemblePlugin({ directory: fixtureDir });
+
+      try {
+        const output = afterOutput();
+        await hooks['tool.execute.after'](afterInput('apply_patch', patchFor(plain)), output);
+        expect(output.output).toBe('tool ran');
+      } finally {
+        delete process.env.WIKI_BIN;
+      }
+    });
+
+    it('appends the loud SKIPPED notice when the binary is missing for a patched page', async () => {
+      const wikiPath = makeFile('page.md', '---\ntitle: T\nsummary: S\n---\nbody');
+      const hooks = assemblePlugin({
+        directory: fixtureDir,
+        resolveBinary: () => '/definitely/not/a/real/wiki-binary'
+      });
+
+      const output = afterOutput();
+      await expect(
+        hooks['tool.execute.after'](afterInput('apply_patch', patchFor(wikiPath)), output)
+      ).resolves.toBeUndefined();
+      expect(output.output).toContain('wiki validation was SKIPPED');
+      expect(output.output).toContain(wikiPath);
+      expect(output.output?.startsWith('tool ran')).toBe(true);
+    });
+  });
+
   describe('fail-open contract', () => {
     it('is a silent no-op for non-wiki files', async () => {
       const plain = makeFile('plain.md', '# just markdown');
@@ -140,7 +206,7 @@ describe('opencode adapter', () => {
       }
     });
 
-    it('never throws when the wiki binary is missing', async () => {
+    it('appends the loud SKIPPED notice when the wiki binary is missing', async () => {
       const wikiPath = makeFile('page.md', '---\ntitle: T\nsummary: S\n---\nbody');
       const hooks = assemblePlugin({
         directory: fixtureDir,
@@ -151,7 +217,10 @@ describe('opencode adapter', () => {
       await expect(
         hooks['tool.execute.after'](afterInput('edit', { filePath: wikiPath }), output)
       ).resolves.toBeUndefined();
-      expect(output.output).toBe('tool ran');
+      expect(output.output?.startsWith('tool ran')).toBe(true);
+      expect(output.output).toContain('\n<wiki>\n');
+      expect(output.output).toContain('wiki validation was SKIPPED');
+      expect(output.output?.endsWith('</wiki>')).toBe(true);
     });
 
     it('never throws when the injected check itself explodes', async () => {

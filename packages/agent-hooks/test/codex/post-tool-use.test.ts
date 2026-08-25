@@ -3,13 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type HookContext, Logger, type PostToolUseInput } from '@goodfoot/codex-hooks';
 import { afterEach, describe, expect, it } from 'vitest';
-import {
-  createHandler,
-  extractPatchedFilePaths,
-  default as hook,
-  narrowPatchText,
-  WIKI_POST_MATCHER
-} from '../../src/codex/post-tool-use.js';
+import { createHandler, default as hook, narrowPatchText, WIKI_POST_MATCHER } from '../../src/codex/post-tool-use.js';
 
 const logger = new Logger();
 const ctx: HookContext = { logger };
@@ -82,17 +76,6 @@ describe('codex post-tool-use', () => {
       expect(narrowPatchText({ command: 42 })).toBeNull();
       expect(narrowPatchText(null)).toBeNull();
       expect(narrowPatchText('string-input')).toBeNull();
-    });
-
-    it('extracts add, update, and delete paths deduplicated', () => {
-      const patch = [
-        '*** Begin Patch',
-        '*** Update File: a.md',
-        '*** Add File: b.md',
-        '*** Delete File: a.md',
-        '*** End Patch'
-      ].join('\n');
-      expect(extractPatchedFilePaths(patch)).toEqual(['a.md', 'b.md']);
     });
   });
 

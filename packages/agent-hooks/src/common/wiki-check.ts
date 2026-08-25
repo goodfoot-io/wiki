@@ -1,6 +1,6 @@
 import { type SpawnSyncReturns, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { closeSync, existsSync, openSync, readdirSync, readSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
 const FRONTMATTER_SCAN_BYTES = 4096;
@@ -72,26 +72,6 @@ export function isWikiFile(filePath: string, cwd: string): boolean {
   }
 
   return title.length > 0 && summary.length > 0;
-}
-
-/** Per-session scratch file listing every wiki file the session has touched. */
-export function sessionTrackingFile(sessionId: string): string {
-  return join(tmpdir(), `wiki-check-${sessionId}.txt`);
-}
-
-export function trackWikiFile(sessionId: string, filePath: string): void {
-  const trackingFile = sessionTrackingFile(sessionId);
-  let existing: string[] = [];
-  if (existsSync(trackingFile)) {
-    existing = readFileSync(trackingFile, 'utf-8')
-      .split('\n')
-      .map((l) => l.trim())
-      .filter(Boolean);
-  }
-  if (!existing.includes(filePath)) {
-    existing.push(filePath);
-    writeFileSync(trackingFile, `${existing.join('\n')}\n`, 'utf-8');
-  }
 }
 
 export const WIKI_EXECUTABLE = process.platform === 'win32' ? 'wiki.exe' : 'wiki';
@@ -169,12 +149,17 @@ export function findManagedWikiBinary(): string | null {
  * Resolve an absolute path to the `wiki` binary, tolerant of the fact that an
  * agent-hook subprocess does not inherit the extension-augmented terminal PATH.
  * Resolution order: `WIKI_BIN` override, then PATH, then the extension's managed
- * binary. Falls back to the bare name so the caller's spawn surfaces a clear
- * ENOENT when nothing is found.
+ * binary. A set-but-rejected override is logged before fall-through so a
+ * mispinned path never silently resolves against a different binary. Falls back
+ * to the bare name so the caller's spawn surfaces a clear ENOENT when nothing
+ * is found.
  */
 export function resolveWikiBinary(logger?: WikiCheckLogger): string {
   const override = process.env.WIKI_BIN;
   if (override && existsSync(override)) return override;
+  if (override) {
+    logger?.warn('WIKI_BIN override rejected — path does not exist', { wikiBin: override });
+  }
 
   const whichCmd = process.platform === 'win32' ? 'where' : 'which';
   const onPath = spawnSync(whichCmd, [WIKI_EXECUTABLE], { encoding: 'utf8' });
@@ -254,4 +239,38 @@ export function runWikiCheck(filePath: string, options: WikiCheckOptions): WikiC
 /** True when a spawn failed because the binary itself could not be launched. */
 function isLaunchFailure(result: SpawnSyncReturns<string>): boolean {
   return result.error != null;
+}
+
+/** Wrap surfaced output in the `<wiki>` context block all three platforms share. */
+export function wikiContextBlock(output: string): string {
+  return `<wiki>\n${output}\n</wiki>`;
+}
+
+/**
+ * Fail-closed surfacing text: when the `wiki` binary cannot be launched, the
+ * page's links and line-range drift went unvalidated. The hook fires after the
+ * write, so it cannot block — but it must make the gap loud rather than silent.
+ * One implementation so all three platform adapters emit identical bytes.
+ */
+export function wikiUnavailableBlock(filePath: string, wikiBin: string, detail: string): string {
+  const message =
+    `wiki validation was SKIPPED — the \`wiki\` binary could not be launched (${detail}).\n` +
+    `Resolved binary: ${wikiBin}\n` +
+    `Fragment links and line-range drift for ${filePath} were NOT validated.\n` +
+    'Install the wiki CLI on PATH, or set WIKI_BIN to its absolute path, then re-save the file.';
+  return wikiContextBlock(message);
+}
+
+/**
+ * Extract every file path an apply_patch patch text declares. Shared by the
+ * codex and opencode adapters: shell-shaped tools carry no statically
+ * recoverable target file, so this envelope is what feeds the wiki check there.
+ */
+export function extractPatchedFilePaths(patchText: string): string[] {
+  const paths: string[] = [];
+  for (const match of patchText.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)) {
+    const path = match[1].trim();
+    if (path.length > 0 && !paths.includes(path)) paths.push(path);
+  }
+  return paths;
 }

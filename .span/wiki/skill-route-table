@@ -1,8 +1,8 @@
-plugins/wiki/skills/wiki/SKILL.md#L13-L22 rk64:2d458284be740642
 plugins/wiki/skills/wiki/sections/command-reference.md rk64:10d0e7d73f160c13
 plugins/wiki/skills/wiki/sections/fragment-links-and-coverage.md rk64:a4839307dd078892
 plugins/wiki/skills/wiki/sections/resolving-skipped-fixes.md rk64:58b1c192d59ba48c
 plugins/wiki/skills/wiki/sections/searching-and-reading.md rk64:b26891f2ae4f1f4b
 plugins/wiki/skills/wiki/sections/writing-a-page.md rk64:ca82a9d010b68fc3
+skills/wiki/SKILL.md#L13-L22 rk64:6c39a77f71170a0a
 
 The SKILL.md route table and the section files it routes to are the skill's routing contract: each bullet names a section path and the subject it covers, so a section that changes focus silently falsifies its bullet unless the bullet is updated in the same edit, and a bullet must keep pointing at a section that exists and covers the routed subject.

@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { compareSemver, runWikiCheck } from '../../src/common/wiki-check.js';
+import { compareSemver, extractPatchedFilePaths, runWikiCheck } from '../../src/common/wiki-check.js';
 
 let fixtureDir: string | undefined;
 let counter = 0;
@@ -78,5 +78,22 @@ describe('compareSemver', () => {
     expect(compareSemver('0.5.10', '0.5.9')).toBeGreaterThan(0);
     expect(compareSemver('1.0.0', '1.0.0')).toBe(0);
     expect(compareSemver('0.6', '0.5.74')).toBeGreaterThan(0);
+  });
+});
+
+describe('extractPatchedFilePaths', () => {
+  it('extracts add, update, and delete paths deduplicated', () => {
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: a.md',
+      '*** Add File: b.md',
+      '*** Delete File: a.md',
+      '*** End Patch'
+    ].join('\n');
+    expect(extractPatchedFilePaths(patch)).toEqual(['a.md', 'b.md']);
+  });
+
+  it('returns nothing for a patch that declares no files', () => {
+    expect(extractPatchedFilePaths('*** Begin Patch\n*** End Patch')).toEqual([]);
   });
 });

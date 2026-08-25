@@ -2,7 +2,9 @@
  * OpenCode plugin entry — wires the shared wiki-check core into the host's
  * `Hooks` shape. OpenCode loads this module in-process via file:// and calls
  * the default export once at startup; the returned `tool.execute.after`
- * appends `<wiki>` context blocks to the tool result text.
+ * appends `<wiki>` context blocks to the tool result text: residual
+ * diagnostics, or the loud SKIPPED notice when the binary cannot be launched
+ * (surfacing parity with the claude/codex adapters).
  *
  * Fail-open by contract: the whole after-hook body is guarded because an
  * uncaught error would surface on a fail-closed host loader — a missed
@@ -10,13 +12,22 @@
  */
 
 import { isAbsolute, resolve as resolvePath } from 'node:path';
-import { isWikiFile, resolveWikiBinary, runWikiCheck, type WikiCheckResult } from '../common/wiki-check.js';
+import {
+  extractPatchedFilePaths,
+  isWikiFile,
+  resolveWikiBinary,
+  runWikiCheck,
+  type WikiCheckResult,
+  wikiContextBlock,
+  wikiUnavailableBlock
+} from '../common/wiki-check.js';
 import type { OpencodeAfterOutput, OpencodePluginInput, OpencodeToolInput, WikiOpencodeHooks } from './types.js';
 
 export type { OpencodeAfterOutput, OpencodePluginInput, OpencodeToolInput, WikiOpencodeHooks } from './types.js';
 
 /** Tool ids whose writes can touch wiki members (no notebook concept on opencode). */
-const EDIT_TOOL_IDS = new Set(['edit', 'write']);
+const WRITE_TOOL_IDS = new Set(['edit', 'write']);
+const PATCH_TOOL_ID = 'apply_patch';
 
 const WIKI_CHECK_TIMEOUT_MS = 25000;
 
@@ -38,8 +49,22 @@ function narrowFilePath(args: unknown, directory: string): string | null {
   return isAbsolute(raw) ? raw : resolvePath(directory, raw);
 }
 
-function wikiContextBlock(output: string): string {
-  return `<wiki>\n${output}\n</wiki>`;
+/** Narrow the apply_patch tool-call args ({patchText}, gpt-models only). */
+function narrowPatchTextArgs(args: unknown): string | null {
+  if (args === null || typeof args !== 'object' || !('patchText' in args)) return null;
+  const raw = (args as { patchText: unknown }).patchText;
+  if (typeof raw !== 'string' || raw.length === 0) return null;
+  return raw;
+}
+
+/** Candidate target paths for one tool call, before the wiki-membership gate. */
+function candidatePaths(toolId: string, args: unknown, directory: string): string[] {
+  if (toolId === PATCH_TOOL_ID) {
+    const patchText = narrowPatchTextArgs(args);
+    return patchText === null ? [] : extractPatchedFilePaths(patchText);
+  }
+  const filePath = narrowFilePath(args, directory);
+  return filePath === null ? [] : [filePath];
 }
 
 /**
@@ -59,23 +84,41 @@ export function assemblePlugin(deps: PluginDeps = {}): WikiOpencodeHooks {
     try {
       if (input === null || typeof input !== 'object') return;
       const toolId = typeof input.tool === 'string' ? input.tool : '';
-      if (!EDIT_TOOL_IDS.has(toolId)) return;
+      if (toolId !== PATCH_TOOL_ID && !WRITE_TOOL_IDS.has(toolId)) return;
 
-      const filePath = narrowFilePath(input.args, directory);
-      if (filePath === null) return;
-      if (!isWikiFile(filePath, directory)) return;
+      const paths = candidatePaths(toolId, input.args, directory).map((p) =>
+        isAbsolute(p) ? p : resolvePath(directory, p)
+      );
+      // Frontmatter gate first, so silence means either "not a wiki member" or
+      // "validated" — never an unnoticed skip.
+      const wikiPaths = paths.filter((p) => isWikiFile(p, directory));
+      if (wikiPaths.length === 0) return;
 
-      const result = executeCheck(filePath, { binary: resolveBinary() });
-      // Residual diagnostics only: a clean pass injected nothing, and an
-      // unavailable binary fails open silently on this platform — the hook
-      // cannot block, so there is no loud channel to skip through.
-      if (result.status !== 'residual') return;
-      const diagnostics = result.output;
-      if (!diagnostics) return;
+      const wikiBin = resolveBinary();
+
+      // Single pass over every touched wiki member: --fix auto-repairs drift in
+      // place; non-zero exits mean residual conditions the agent must resolve.
+      const sections: string[] = [];
+      let unavailableDetail: string | null = null;
+      for (const filePath of wikiPaths) {
+        const result = executeCheck(filePath, { binary: wikiBin });
+        if (result.status === 'unavailable') {
+          unavailableDetail ??= result.output ?? 'spawn failed';
+          continue;
+        }
+        if (result.status === 'residual' && result.output) sections.push(result.output);
+      }
+      if (sections.length === 0 && unavailableDetail === null) return;
       if (output === null || typeof output !== 'object') return;
 
+      // Unavailable wins over collected residuals, mirroring the codex adapter:
+      // an unlaunched binary invalidates any partial sibling diagnostics too.
+      const payload =
+        unavailableDetail !== null
+          ? wikiUnavailableBlock(wikiPaths[0], wikiBin, unavailableDetail)
+          : wikiContextBlock(sections.join('\n\n'));
       const prior = typeof output.output === 'string' ? output.output : '';
-      output.output = `${prior}\n${wikiContextBlock(diagnostics)}`;
+      output.output = `${prior}\n${payload}`;
     } catch {
       // Fail-open: swallow everything; see module doc.
     }

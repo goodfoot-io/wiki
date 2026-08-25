@@ -634,8 +634,8 @@ function getFilePath(input) {
 
 // src/common/wiki-check.ts
 import { spawnSync } from "node:child_process";
-import { closeSync as closeSync2, existsSync as existsSync2, openSync as openSync2, readdirSync, readFileSync, readSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { closeSync as closeSync2, existsSync as existsSync2, openSync as openSync2, readdirSync, readSync } from "node:fs";
+import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 var FRONTMATTER_SCAN_BYTES = 4096;
 var FRONTMATTER_SCAN_LINES = 30;
@@ -673,21 +673,6 @@ function isWikiFile(filePath, cwd) {
     if (summaryMatch) summary = summaryMatch[1].trim().replace(/^['"]|['"]$/g, "");
   }
   return title.length > 0 && summary.length > 0;
-}
-function sessionTrackingFile(sessionId) {
-  return join(tmpdir(), `wiki-check-${sessionId}.txt`);
-}
-function trackWikiFile(sessionId, filePath) {
-  const trackingFile = sessionTrackingFile(sessionId);
-  let existing = [];
-  if (existsSync2(trackingFile)) {
-    existing = readFileSync(trackingFile, "utf-8").split("\n").map((l) => l.trim()).filter(Boolean);
-  }
-  if (!existing.includes(filePath)) {
-    existing.push(filePath);
-    writeFileSync(trackingFile, `${existing.join("\n")}
-`, "utf-8");
-  }
 }
 var WIKI_EXECUTABLE = process.platform === "win32" ? "wiki.exe" : "wiki";
 function compareSemver(a, b) {
@@ -748,6 +733,9 @@ function findManagedWikiBinary() {
 function resolveWikiBinary(logger2) {
   const override = process.env.WIKI_BIN;
   if (override && existsSync2(override)) return override;
+  if (override) {
+    logger2?.warn("WIKI_BIN override rejected \u2014 path does not exist", { wikiBin: override });
+  }
   const whichCmd = process.platform === "win32" ? "where" : "which";
   const onPath = spawnSync(whichCmd, [WIKI_EXECUTABLE], { encoding: "utf8" });
   if (onPath.status === 0 && onPath.stdout) {
@@ -785,20 +773,23 @@ function runWikiCheck(filePath, options) {
 function isLaunchFailure(result) {
   return result.error != null;
 }
-
-// src/claude/post-tool-use.ts
-var WIKI_CHECK_TIMEOUT_MS = 25e3;
 function wikiContextBlock(output) {
   return `<wiki>
 ${output}
 </wiki>`;
 }
-function wikiUnavailableOutput(filePath, wikiBin, detail) {
+function wikiUnavailableBlock(filePath, wikiBin, detail) {
   const message = `wiki validation was SKIPPED \u2014 the \`wiki\` binary could not be launched (${detail}).
 Resolved binary: ${wikiBin}
 Fragment links and line-range drift for ${filePath} were NOT validated.
 Install the wiki CLI on PATH, or set WIKI_BIN to its absolute path, then re-save the file.`;
-  const block = wikiContextBlock(message);
+  return wikiContextBlock(message);
+}
+
+// src/claude/post-tool-use.ts
+var WIKI_CHECK_TIMEOUT_MS = 25e3;
+function wikiUnavailableOutput(filePath, wikiBin, detail) {
+  const block = wikiUnavailableBlock(filePath, wikiBin, detail);
   return postToolUseOutput({
     systemMessage: block,
     hookSpecificOutput: { additionalContext: block }
@@ -808,7 +799,6 @@ var post_tool_use_default = postToolUseHook({ matcher: "Edit|Write|NotebookEdit"
   const filePath = getFilePath(input);
   if (!filePath) return null;
   if (!isWikiFile(filePath, input.cwd)) return null;
-  trackWikiFile(input.session_id, filePath);
   const wikiBin = resolveWikiBinary(logger2);
   const result = runWikiCheck(filePath, { binary: wikiBin, timeoutMs: WIKI_CHECK_TIMEOUT_MS, cwd: input.cwd });
   if (result.status === "unavailable") {

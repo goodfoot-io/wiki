@@ -3,8 +3,8 @@ import { isAbsolute as isAbsolute2, resolve as resolvePath } from "node:path";
 
 // src/common/wiki-check.ts
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { closeSync, existsSync, openSync, readdirSync, readSync } from "node:fs";
+import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 var FRONTMATTER_SCAN_BYTES = 4096;
 var FRONTMATTER_SCAN_LINES = 30;
@@ -102,6 +102,9 @@ function findManagedWikiBinary() {
 function resolveWikiBinary(logger) {
   const override = process.env.WIKI_BIN;
   if (override && existsSync(override)) return override;
+  if (override) {
+    logger?.warn("WIKI_BIN override rejected \u2014 path does not exist", { wikiBin: override });
+  }
   const whichCmd = process.platform === "win32" ? "where" : "which";
   const onPath = spawnSync(whichCmd, [WIKI_EXECUTABLE], { encoding: "utf8" });
   if (onPath.status === 0 && onPath.stdout) {
@@ -139,9 +142,30 @@ function runWikiCheck(filePath, options) {
 function isLaunchFailure(result) {
   return result.error != null;
 }
+function wikiContextBlock(output) {
+  return `<wiki>
+${output}
+</wiki>`;
+}
+function wikiUnavailableBlock(filePath, wikiBin, detail) {
+  const message = `wiki validation was SKIPPED \u2014 the \`wiki\` binary could not be launched (${detail}).
+Resolved binary: ${wikiBin}
+Fragment links and line-range drift for ${filePath} were NOT validated.
+Install the wiki CLI on PATH, or set WIKI_BIN to its absolute path, then re-save the file.`;
+  return wikiContextBlock(message);
+}
+function extractPatchedFilePaths(patchText) {
+  const paths = [];
+  for (const match of patchText.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)) {
+    const path = match[1].trim();
+    if (path.length > 0 && !paths.includes(path)) paths.push(path);
+  }
+  return paths;
+}
 
 // src/opencode/index.ts
-var EDIT_TOOL_IDS = /* @__PURE__ */ new Set(["edit", "write"]);
+var WRITE_TOOL_IDS = /* @__PURE__ */ new Set(["edit", "write"]);
+var PATCH_TOOL_ID = "apply_patch";
 var WIKI_CHECK_TIMEOUT_MS = 25e3;
 function narrowFilePath(args, directory) {
   if (args === null || typeof args !== "object" || !("filePath" in args)) return null;
@@ -149,10 +173,19 @@ function narrowFilePath(args, directory) {
   if (typeof raw !== "string" || raw.length === 0) return null;
   return isAbsolute2(raw) ? raw : resolvePath(directory, raw);
 }
-function wikiContextBlock(output) {
-  return `<wiki>
-${output}
-</wiki>`;
+function narrowPatchTextArgs(args) {
+  if (args === null || typeof args !== "object" || !("patchText" in args)) return null;
+  const raw = args.patchText;
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  return raw;
+}
+function candidatePaths(toolId, args, directory) {
+  if (toolId === PATCH_TOOL_ID) {
+    const patchText = narrowPatchTextArgs(args);
+    return patchText === null ? [] : extractPatchedFilePaths(patchText);
+  }
+  const filePath = narrowFilePath(args, directory);
+  return filePath === null ? [] : [filePath];
 }
 function assemblePlugin(deps = {}) {
   const directory = deps.directory ?? process.cwd();
@@ -162,18 +195,27 @@ function assemblePlugin(deps = {}) {
     try {
       if (input === null || typeof input !== "object") return;
       const toolId = typeof input.tool === "string" ? input.tool : "";
-      if (!EDIT_TOOL_IDS.has(toolId)) return;
-      const filePath = narrowFilePath(input.args, directory);
-      if (filePath === null) return;
-      if (!isWikiFile(filePath, directory)) return;
-      const result = executeCheck(filePath, { binary: resolveBinary() });
-      if (result.status !== "residual") return;
-      const diagnostics = result.output;
-      if (!diagnostics) return;
+      if (toolId !== PATCH_TOOL_ID && !WRITE_TOOL_IDS.has(toolId)) return;
+      const paths = candidatePaths(toolId, input.args, directory).map((p) => isAbsolute2(p) ? p : resolvePath(directory, p));
+      const wikiPaths = paths.filter((p) => isWikiFile(p, directory));
+      if (wikiPaths.length === 0) return;
+      const wikiBin = resolveBinary();
+      const sections = [];
+      let unavailableDetail = null;
+      for (const filePath of wikiPaths) {
+        const result = executeCheck(filePath, { binary: wikiBin });
+        if (result.status === "unavailable") {
+          unavailableDetail ??= result.output ?? "spawn failed";
+          continue;
+        }
+        if (result.status === "residual" && result.output) sections.push(result.output);
+      }
+      if (sections.length === 0 && unavailableDetail === null) return;
       if (output === null || typeof output !== "object") return;
+      const payload = unavailableDetail !== null ? wikiUnavailableBlock(wikiPaths[0], wikiBin, unavailableDetail) : wikiContextBlock(sections.join("\n\n"));
       const prior = typeof output.output === "string" ? output.output : "";
       output.output = `${prior}
-${wikiContextBlock(diagnostics)}`;
+${payload}`;
     } catch {
     }
   };

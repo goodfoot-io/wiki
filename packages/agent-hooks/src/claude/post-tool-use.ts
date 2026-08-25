@@ -1,12 +1,14 @@
 import { getFilePath, postToolUseHook, postToolUseOutput } from '@goodfoot/claude-code-hooks';
-import { isWikiFile, resolveWikiBinary, runWikiCheck, trackWikiFile } from '../common/wiki-check.js';
+import {
+  isWikiFile,
+  resolveWikiBinary,
+  runWikiCheck,
+  wikiContextBlock,
+  wikiUnavailableBlock
+} from '../common/wiki-check.js';
 
 /** The hook's own spawn timeout is separately bounded below the registration budget. */
 const WIKI_CHECK_TIMEOUT_MS = 25000;
-
-function wikiContextBlock(output: string): string {
-  return `<wiki>\n${output}\n</wiki>`;
-}
 
 /**
  * Fail-closed surfacing: when the `wiki` binary cannot be launched, the page's
@@ -14,12 +16,7 @@ function wikiContextBlock(output: string): string {
  * it cannot block — but it must make the gap loud rather than passing silently.
  */
 function wikiUnavailableOutput(filePath: string, wikiBin: string, detail: string) {
-  const message =
-    `wiki validation was SKIPPED — the \`wiki\` binary could not be launched (${detail}).\n` +
-    `Resolved binary: ${wikiBin}\n` +
-    `Fragment links and line-range drift for ${filePath} were NOT validated.\n` +
-    'Install the wiki CLI on PATH, or set WIKI_BIN to its absolute path, then re-save the file.';
-  const block = wikiContextBlock(message);
+  const block = wikiUnavailableBlock(filePath, wikiBin, detail);
   return postToolUseOutput({
     systemMessage: block,
     hookSpecificOutput: { additionalContext: block }
@@ -31,8 +28,6 @@ export default postToolUseHook({ matcher: 'Edit|Write|NotebookEdit', timeout: 60
   if (!filePath) return null;
 
   if (!isWikiFile(filePath, input.cwd)) return null;
-
-  trackWikiFile(input.session_id, filePath);
 
   const wikiBin = resolveWikiBinary(logger);
 
