@@ -1,6 +1,6 @@
 {
   "name": "@goodfoot/wiki-darwin-arm64",
-  "version": "0.5.118",
+  "version": "0.5.127",
   "description": "Platform-specific binary for @goodfoot/wiki",
   "license": "MIT",
   "os": [

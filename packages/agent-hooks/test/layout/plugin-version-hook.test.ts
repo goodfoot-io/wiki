@@ -67,24 +67,38 @@ describe('pre-commit.plugin-version.sh', () => {
     const hook = spawnSync('bash', [hookScript], { cwd: scratch, env, encoding: 'utf8' });
     expect(hook.status, `hook failed: ${hook.stderr}`).toBe(0);
 
+    // Expectations derive from the LIVE fixture versions, not absolute numbers:
+    // the pin is on behavior (one shared increment across all four surfaces),
+    // which must hold no matter what `yarn bump` has moved the repo to.
+    const bumpPatch = (v: string): string => {
+      const [maj, min, pat] = v.split('.').map(Number);
+      return `${maj}.${min}.${pat + 1}`;
+    };
+    const baseManifestVersion = firstVersion(readFileSync(join(repoRoot, FIXTURES[0]), 'utf8'));
+    expect(baseManifestVersion).toMatch(/^\d+\.\d+\.\d+$/);
+    const bumpedManifestVersion = bumpPatch(baseManifestVersion);
+    const liveMarketplace = readFileSync(join(repoRoot, FIXTURES[3]), 'utf8');
+    const baseMetadataVersion = firstVersion(liveMarketplace);
+    const bumpedMetadataVersion = bumpPatch(baseMetadataVersion);
+
     const indexed = (relative: string): string =>
       spawnSync('git', ['show', `:${relative}`], { cwd: scratch, encoding: 'utf8' }).stdout;
 
     // (a) one shared increment across all three manifests + marketplace surfaces, in the INDEX
-    expect(firstVersion(indexed(FIXTURES[0]))).toBe('0.5.125');
-    expect(firstVersion(indexed(FIXTURES[1]))).toBe('0.5.125');
-    expect(firstVersion(indexed(FIXTURES[2]))).toBe('0.5.125');
+    expect(firstVersion(indexed(FIXTURES[0]))).toBe(bumpedManifestVersion);
+    expect(firstVersion(indexed(FIXTURES[1]))).toBe(bumpedManifestVersion);
+    expect(firstVersion(indexed(FIXTURES[2]))).toBe(bumpedManifestVersion);
     const indexedMarketplace = indexed(FIXTURES[3]);
-    expect(firstVersion(indexedMarketplace)).toBe('1.0.73'); // metadata.version rides one increment too
+    expect(firstVersion(indexedMarketplace)).toBe(bumpedMetadataVersion); // metadata.version rides one increment too
     const marketplaceDoc = JSON.parse(indexedMarketplace) as { plugins?: { name: string; version?: string }[] };
-    expect(marketplaceDoc.plugins?.[0]).toMatchObject({ name: 'wiki', version: '0.5.125' });
+    expect(marketplaceDoc.plugins?.[0]).toMatchObject({ name: 'wiki', version: bumpedManifestVersion });
 
     // (b) the unrelated unstaged edit survives: present in the worktree, absent from the index blob
     const worktreeManifest = readFileSync(opencodeManifest, 'utf8');
     expect(worktreeManifest).toContain('[local-wip]');
-    expect(worktreeManifest).toContain('"version": "0.5.125"');
+    expect(worktreeManifest).toContain(`"version": "${bumpedManifestVersion}"`);
     const indexBlob = indexed(FIXTURES[2]);
-    expect(indexBlob).toContain('"version": "0.5.125"');
+    expect(indexBlob).toContain(`"version": "${bumpedManifestVersion}"`);
     expect(indexBlob).not.toContain('[local-wip]');
 
     // (d) static portability guard: the first-match sed address form that BSD
