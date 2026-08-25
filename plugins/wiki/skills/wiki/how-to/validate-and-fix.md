@@ -2,7 +2,7 @@
 title: Validate And Fix Wiki Pages
 summary: The check loop — invoking wiki check, reading outcomes, auto-repair semantics, cache and ignore handling, and resolving every fix that was skipped.
 tags: [wiki, how-to]
-links-reviewed: 1
+links-reviewed: 2
 ---
 
 ```bash
