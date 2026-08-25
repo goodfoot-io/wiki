@@ -196,7 +196,9 @@ function assemblePlugin(deps = {}) {
       if (input === null || typeof input !== "object") return;
       const toolId = typeof input.tool === "string" ? input.tool : "";
       if (toolId !== PATCH_TOOL_ID && !WRITE_TOOL_IDS.has(toolId)) return;
-      const paths = candidatePaths(toolId, input.args, directory).map((p) => isAbsolute2(p) ? p : resolvePath(directory, p));
+      const paths = candidatePaths(toolId, input.args, directory).map(
+        (p) => isAbsolute2(p) ? p : resolvePath(directory, p)
+      );
       const wikiPaths = paths.filter((p) => isWikiFile(p, directory));
       if (wikiPaths.length === 0) return;
       const wikiBin = resolveBinary();
