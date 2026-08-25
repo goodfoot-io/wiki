@@ -2,7 +2,7 @@
   "name": "wiki-extension",
   "displayName": "Wiki",
   "description": "Wiki language features, search, and CLI integration for Markdown files.",
-  "version": "0.5.127",
+  "version": "0.5.128",
   "publisher": "goodfoot",
   "type": "module",
   "engines": {

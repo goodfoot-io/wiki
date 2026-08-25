@@ -2147,7 +2147,7 @@ dependencies = [
 
 [[package]]
 name = "wiki"
-version = "0.5.127"
+version = "0.5.128"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2168,6 +2168,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "walkdir",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

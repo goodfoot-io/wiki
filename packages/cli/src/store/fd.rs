@@ -28,29 +28,55 @@
 //! Known boundary: SQLite opens the database by path, so the final handoff
 //! to SQLite cannot carry the descriptor — this module pins, validates, and
 //! pre-creates the file; the residual window between validation and SQLite's
-//! own open is outside std's reach. Non-Linux unix targets compile a reduced
-//! form (`lstat` checks only; the uid check is skipped) — the supported
-//! environment is Linux, where the kernel enforces `O_NOFOLLOW`.
+//! own open is outside std's reach. Non-Linux targets compile a reduced
+//! form: other unix targets skip the uid check, and Windows additionally
+//! swaps `(device, inode)` for `(volume serial, file index)` (zeros when the
+//! filesystem cannot report them, degrading revalidation to the lstat
+//! checks) and skips POSIX mode validation entirely — NTFS has no mode
+//! bits, so privacy rests on the ACLs inherited from the store directory.
+//! The supported environment is Linux, where the kernel enforces
+//! `O_NOFOLLOW`.
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt as WindowsOpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 
 /// The one mode a wiki-derived private directory may have: owner-only.
+/// Enforced on unix (see `apply_private_dir_mode`); retained as the
+/// documented contract on targets without POSIX mode bits.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub const PRIVATE_DIR_MODE: u32 = 0o700;
 
 /// Creation mode for lock and database files: owner read/write only.
+#[cfg(unix)]
 const PRIVATE_FILE_MODE: u32 = 0o600;
 
 #[cfg(target_os = "linux")]
 const DIR_OPEN_FLAGS: i32 = libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC;
 #[cfg(target_os = "linux")]
 const FILE_OPEN_FLAGS: i32 = libc::O_NOFOLLOW | libc::O_CLOEXEC;
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 const DIR_OPEN_FLAGS: i32 = 0;
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 const FILE_OPEN_FLAGS: i32 = 0;
+// Win32 `CreateFileW` flags. `FILE_FLAG_BACKUP_SEMANTICS` is what makes
+// opening a directory handle legal at all; `FILE_FLAG_OPEN_REPARSE_POINT`
+// refuses to traverse a symlink final component — the `O_NOFOLLOW`
+// analogue. Typed `u32` to match `OpenOptionsExt::custom_flags` here.
+#[cfg(windows)]
+const DIR_OPEN_FLAGS: u32 = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT;
+#[cfg(windows)]
+const FILE_OPEN_FLAGS: u32 = FILE_FLAG_OPEN_REPARSE_POINT;
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
 /// A retained, validated descriptor for one directory under the store's
 /// subtree. Cloning the `PathBuf` would reopen the race this type exists to
@@ -78,11 +104,12 @@ impl DirFd {
                 format!("{}: not a directory", path.display()),
             ));
         }
+        let (dev, ino) = file_identity(&file)?;
         Ok(Self {
             file,
             path: path.to_path_buf(),
-            dev: meta.dev(),
-            ino: meta.ino(),
+            dev,
+            ino,
         })
     }
 
@@ -101,27 +128,27 @@ impl DirFd {
     /// instead of silently redirecting writes into an impostor directory.
     pub fn revalidate(&self) -> io::Result<()> {
         let held = self.file.metadata()?;
-        if !held.is_dir() || held.dev() != self.dev || held.ino() != self.ino {
+        let held_id = file_identity(&self.file)?;
+        if !held.is_dir() || held_id != (self.dev, self.ino) {
             return Err(rebound_error(
                 &self.path,
-                &format!("{}:{}", held.dev(), held.ino()),
+                &format!("{}:{}", held_id.0, held_id.1),
                 &format!("{}:{}", self.dev, self.ino),
             ));
         }
         match fs::symlink_metadata(&self.path) {
-            Ok(now)
-                if !now.is_symlink()
-                    && now.is_dir()
-                    && now.dev() == self.dev
-                    && now.ino() == self.ino =>
-            {
-                Ok(())
+            Ok(now) => {
+                let now_id = identity_at(&self.path, &now)?;
+                if !now.is_symlink() && now.is_dir() && now_id == (self.dev, self.ino) {
+                    Ok(())
+                } else {
+                    Err(rebound_error(
+                        &self.path,
+                        &format!("{}:{}", now_id.0, now_id.1),
+                        &format!("{}:{}", self.dev, self.ino),
+                    ))
+                }
             }
-            Ok(now) => Err(rebound_error(
-                &self.path,
-                &format!("{}:{}", now.dev(), now.ino()),
-                &format!("{}:{}", self.dev, self.ino),
-            )),
             Err(e) => Err(e),
         }
     }
@@ -155,10 +182,7 @@ impl DirFd {
                 Ok(_) => {}
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
                     fs::create_dir(&current)?;
-                    fs::set_permissions(
-                        &current,
-                        fs::Permissions::from_mode(PRIVATE_DIR_MODE),
-                    )?;
+                    apply_private_dir_mode(&current)?;
                 }
                 Err(e) => return Err(e),
             }
@@ -195,14 +219,14 @@ impl DirFd {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
-        OpenOptions::new()
+        let mut options = OpenOptions::new();
+        options
             .read(true)
             .write(true)
             .create(true)
-            .truncate(false)
-            .mode(PRIVATE_FILE_MODE)
-            .custom_flags(FILE_OPEN_FLAGS)
-            .open(&path)
+            .truncate(false);
+        apply_private_file_options(&mut options);
+        options.open(&path)
     }
 }
 
@@ -212,6 +236,85 @@ fn reject_symlink(path: &Path) -> io::Result<()> {
         Ok(_) => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+/// The captured identity pair behind rebinding validation, read from a
+/// retained handle: `(device, inode)` via `fstat` on unix; `(volume serial,
+/// file index)` via `GetFileInformationByHandle` on Windows — std's
+/// by-handle accessors are still nightly-gated (`windows_by_handle`). A
+/// filesystem that reports no index yields zeros, which degrades
+/// revalidation to the path-lstat checks — the documented reduced form for
+/// non-Linux targets — instead of failing every open.
+#[cfg(unix)]
+fn file_identity(file: &File) -> io::Result<(u64, u64)> {
+    let meta = file.metadata()?;
+    Ok((meta.dev(), meta.ino()))
+}
+
+#[cfg(windows)]
+fn file_identity(file: &File) -> io::Result<(u64, u64)> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    // SAFETY: `info` is a valid, fully initialized `BY_HANDLE_FILE_INFORMATION`
+    // for the call's duration and the retained handle is owned by `file`.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: the raw handle is live (borrowed from `file`) and `info` is a
+    // correctly sized out-parameter.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((
+        u64::from(info.dwVolumeSerialNumber),
+        (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    ))
+}
+
+/// Identity pair for the rebinding check's path-side view. Unix reads it
+/// straight off the `lstat` result. Windows has no stable by-handle access
+/// from `symlink_metadata`, so it re-opens the path with the module's
+/// no-follow directory flags and queries the resulting handle — that open
+/// itself refuses a symlinked final component, preserving the check's
+/// swap-detection semantics.
+#[cfg(unix)]
+fn identity_at(_path: &Path, meta: &fs::Metadata) -> io::Result<(u64, u64)> {
+    Ok((meta.dev(), meta.ino()))
+}
+
+#[cfg(windows)]
+fn identity_at(path: &Path, _meta: &fs::Metadata) -> io::Result<(u64, u64)> {
+    let probe = OpenOptions::new()
+        .read(true)
+        .custom_flags(DIR_OPEN_FLAGS)
+        .open(path)?;
+    file_identity(&probe)
+}
+
+/// Create-time hardening for directories: explicit `chmod 0700`,
+/// umask-independent. Windows has no POSIX mode bits to apply; a fresh
+/// directory inherits the parent's ACLs (the documented reduced form).
+#[cfg(unix)]
+fn apply_private_dir_mode(path: &Path) -> io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(PRIVATE_DIR_MODE))
+}
+
+#[cfg(windows)]
+fn apply_private_dir_mode(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// Creation-mode + no-follow flags for files under the store. Unix applies
+/// an explicit `0600` (umask-independent); Windows has no POSIX mode bits —
+/// new files inherit the parent directory's ACLs (the documented reduced
+/// form).
+#[cfg(unix)]
+fn apply_private_file_options(options: &mut OpenOptions) {
+    options.mode(PRIVATE_FILE_MODE).custom_flags(FILE_OPEN_FLAGS);
+}
+
+#[cfg(windows)]
+fn apply_private_file_options(options: &mut OpenOptions) {
+    options.custom_flags(FILE_OPEN_FLAGS);
 }
 
 fn symlink_refused(path: &Path) -> io::Error {
@@ -246,17 +349,28 @@ fn validate_private_meta(meta: &fs::Metadata, path: &Path) -> io::Result<()> {
             ));
         }
     }
-    let mode = meta.permissions().mode() & 0o777;
-    if mode != PRIVATE_DIR_MODE {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!(
-                "{}: mode {:o} is not private (expected {:o})",
-                path.display(),
-                mode,
-                PRIVATE_DIR_MODE
-            ),
-        ));
+    #[cfg(unix)]
+    {
+        let mode = meta.permissions().mode() & 0o777;
+        if mode != PRIVATE_DIR_MODE {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{}: mode {:o} is not private (expected {:o})",
+                    path.display(),
+                    mode,
+                    PRIVATE_DIR_MODE
+                ),
+            ));
+        }
+        Ok(())
     }
-    Ok(())
+    #[cfg(windows)]
+    {
+        // No POSIX mode bits exist to validate on Windows; privacy rests on
+        // the ACLs inherited from the store directory (the documented
+        // reduced form). Identity was already proven by `revalidate`.
+        let _ = (meta, path);
+        Ok(())
+    }
 }

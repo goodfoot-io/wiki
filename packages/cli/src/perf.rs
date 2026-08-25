@@ -221,12 +221,17 @@ fn log_path() -> Option<PathBuf> {
     // The perf logger may be the first creator of `<common>/wiki`; later
     // fd-validated consumers (rendezvous, store) require exactly 0700, so
     // the creation here matches store::fd's private-dir discipline instead
-    // of leaking umask modes into it (plan D9 invariant).
-    use std::os::unix::fs::PermissionsExt;
+    // of leaking umask modes into it (plan D9 invariant). Windows has no
+    // POSIX mode bits; the directory inherits ACLs as in store::fd's
+    // reduced form.
     let common = crate::git::common_dir().ok()?;
     let store_dir = common.join(crate::cache::schema::STORE_DIR_NAME);
     fs::create_dir_all(&store_dir).ok()?;
-    fs::set_permissions(&store_dir, fs::Permissions::from_mode(0o700)).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&store_dir, fs::Permissions::from_mode(0o700)).ok()?;
+    }
     Some(store_dir.join("wiki.log"))
 }
 
