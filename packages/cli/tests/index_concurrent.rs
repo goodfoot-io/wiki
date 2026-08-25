@@ -489,3 +489,98 @@ fn busy_open_degrades_to_uncached_answers() {
         stderr_of(&degraded)
     );
 }
+
+// ── Round-2 sweep: publish-fault quarantine must actually fire (F-A r2) ──
+
+/// Freelist-field corruption (header bytes 32–39) passes every probe leg,
+/// so only a refresh that needs a NEW generation trips it. Before the
+/// type-preserving wrap, the publish fault arrived un-classifiable and the
+/// forced quarantine never fired — the worktree paid uncached cost plus one
+/// warning PER RUN forever. Now: run 1 degrades uncached (one line) AND
+/// heals the store on disk (fresh aside present); run 2 is healthy with no
+/// warning at all.
+#[test]
+fn publish_fault_quarantine_heals_store_on_disk() {
+    let repo = common::FixtureRepo::new();
+    repo.write_wiki_md(
+        "heal.md",
+        "Heal Witness Page",
+        "Freelist corruption witness.",
+        "freelist witness prose",
+    );
+    repo.git_add("heal.md");
+    repo.git_commit("add heal page");
+
+    let common = common::git_common_dir(&repo.root);
+    let wiki_dir = common.join("wiki");
+
+    // Reference: cold uncontended run for the CURRENT (v2) corpus.
+    repo.write_wiki_md(
+        "heal.md",
+        "Heal Witness Page",
+        "Freelist corruption witness, edited.",
+        "freelist witness prose two",
+    );
+    match std::fs::remove_dir_all(&wiki_dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => panic!("re-cold failed: {e}"),
+    }
+    let reference = run_wiki(&repo.root, &["--format", "json", "witness"]);
+    assert!(reference.status.success());
+    let reference_out = stdout_of(&reference);
+    assert!(!reference_out.trim().is_empty());
+
+    // Corrupt the freelist header field (probe-passing)...
+    corrupt_store(&common, 32, 8);
+
+    // ...then bust the freshness fingerprint WITHOUT changing the corpus:
+    // rewriting identical bytes advances the worktree signature, so the
+    // next refresh must publish a NEW generation into the malformed file.
+    let same_bytes = std::fs::read(repo.root.join("heal.md")).expect("read heal.md");
+    std::fs::write(repo.root.join("heal.md"), &same_bytes).expect("mtime bump");
+
+    // Run 1: refresh publishes into a malformed file, the fault classifies
+    // as store-level ⇒ uncached floor + forced heal.
+    let first = run_wiki(&repo.root, &["--format", "json", "witness"]);
+    assert!(
+        first.status.success(),
+        "publish-fault run must exit 0 via the floor, got {:?}: {}",
+        first.status.code(),
+        stderr_of(&first)
+    );
+    assert_eq!(
+        stdout_of(&first),
+        reference_out,
+        "the floor answers with correct results for this worktree"
+    );
+    assert_eq!(
+        warning_lines(&stderr_of(&first)),
+        1,
+        "exactly one degradation line on the faulting run: {}",
+        stderr_of(&first)
+    );
+
+    // Healing leg: the forced quarantine left an aside behind and rebuilt
+    // the store on disk.
+    let asides: Vec<_> = std::fs::read_dir(&wiki_dir)
+        .expect("wiki dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".quarantine"))
+        .collect();
+    assert!(
+        !asides.is_empty(),
+        "a fresh quarantine aside must exist after the healed run"
+    );
+
+    // Run 2: healthy path — correct results, ZERO warnings.
+    let second = run_wiki(&repo.root, &["--format", "json", "witness"]);
+    assert!(second.status.success(), "post-heal run must succeed");
+    assert_eq!(stdout_of(&second), reference_out);
+    assert_eq!(
+        warning_lines(&stderr_of(&second)),
+        0,
+        "the healed store must serve without any degradation warning: {}",
+        stderr_of(&second)
+    );
+}

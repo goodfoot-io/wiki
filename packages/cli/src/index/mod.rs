@@ -627,10 +627,15 @@ impl WikiIndex {
         let Some(gen_id) = self.served() else {
             return Ok(None);
         };
-        if let Some(page) = self.serve_shared_with("resolve_page", |conn| {
-            search::resolve_page(conn, &self.repo_root, gen_id, self.source, input)
+        // The closure wraps its result in Some (search/list/suggest
+        // pattern): a genuine title/alias/path no-match surfaces as
+        // Some(None) — an ORDINARY answer — so the helper's outer None can
+        // mean exclusively a serve-time verification miss (plan F-B round
+        // 2): interactive misses must never take the rebuild floor.
+        if let Some(resolved) = self.serve_shared_with("resolve_page", |conn| {
+            search::resolve_page(conn, &self.repo_root, gen_id, self.source, input).map(Some)
         })? {
-            return Ok(Some(page));
+            return Ok(resolved);
         }
         let Some(rebuilt) = self.rebuild_floor("resolve_page")? else {
             return Ok(None);
@@ -1049,6 +1054,29 @@ mod list_pages_tests {
         assert_eq!(both, vec!["CapPage".to_string(), "FooPage".to_string()]);
     }
 
+    /// Round-2 F1 witness: on a warm, healthy store, a genuine
+    /// title/alias no-match is an ORDINARY answer — it must not fire the
+    /// served-generation-lost warning or take the rebuild floor (the
+    /// pre-fix behavior rebuilt on every interactive miss).
+    #[test]
+    fn warm_resolve_miss_does_not_trigger_rebuild_floor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        create_file(root, "real.md", &page("Real Page", "a real summary", ""));
+        commit_repo(root);
+
+        let index = WikiIndex::prepare_for_source(root, DocSource::WorkingTree).unwrap();
+        let warned_before = SERVED_LOST_WARNED.load(std::sync::atomic::Ordering::SeqCst);
+
+        let miss = index.resolve_page("NoSuchPageAnywhere").unwrap();
+        assert!(miss.is_none(), "genuine miss still resolves to None");
+        assert_eq!(
+            warned_before,
+            SERVED_LOST_WARNED.load(std::sync::atomic::Ordering::SeqCst),
+            "an ordinary resolve miss must never fire the rebuild warning"
+        );
+    }
+
     /// F2 witness (end to end): a handle whose served generation is
     /// evicted by GC churn while held must degrade its queries to empty —
     /// never surface `no such table: fts_N` as a command error.
@@ -1130,6 +1158,11 @@ mod list_pages_tests {
             pages.iter().any(|p| p.title == "Keep"),
             "rebuilt listing must contain Keep, got {pages:?}"
         );
+
+        // And the escalation is loud exactly where it should be: the churn
+        // genuinely fired the rebuild warning (the warm-miss twin asserts
+        // the negative side).
+        assert!(SERVED_LOST_WARNED.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]

@@ -14,7 +14,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::index::freshness;
 use crate::index::generations::{
@@ -364,9 +364,16 @@ pub fn refresh(
     let fts_retokenizations = candidate_builder.fts_retokenizations;
 
     // Compute-outside-write-txn invariant: the candidate above is inert
-    // data; publish owns the only transaction of the refresh.
+    // data; publish owns the only transaction of the refresh. The error is
+    // wrapped with `.context()` — NOT string interpolation, which would
+    // erase `CacheError`'s type and blind the command-level taxonomy's
+    // downcast (plan F-A round 2: publish faults must classify as store
+    // faults so forced quarantine fires).
     let outcome = crate::perf::scope_result("index.publish", serde_json::json!({}), || {
-        store.publish(candidate).map_err(|e| anyhow::anyhow!("publish: {e}"))
+        store
+            .publish(candidate)
+            .map_err(anyhow::Error::from)
+            .context("publish")
     })?;
 
     Ok(match outcome {

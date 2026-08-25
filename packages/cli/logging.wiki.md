@@ -1,7 +1,7 @@
 ---
 title: Wiki Logging and Perf Instrumentation
 summary: Documents all logging and performance tracing points in the wiki CLI. 
-links-reviewed: 5
+links-reviewed: 6
 ---
 
 ## Overview
@@ -37,7 +37,6 @@ These scopes cover the cold-cache path: when the stat-only freshness gate misses
 | [index/passes/mod.rs](./src/index/passes/mod.rs#L285-L304) | `index.pass_worktree` | Pass 3: worktree walk, read + hash of candidate markdown | Empty object |
 | [index/passes/mod.rs](./src/index/passes/mod.rs#L306-L366) | `index.apply_deltas` | Building the publish candidate from merged deltas (blob parse, gen_paths membership, refcount reconciliation) | `deltas` (count) |
 | [index/passes/mod.rs](./src/index/passes/mod.rs#L368-L432) | `index.publish` | Publishing the generation: fts materialization + transactional store write | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L426-L426) | `index.commit` | SQLite transaction commit | Empty object |
 
 ### File Discovery
 
