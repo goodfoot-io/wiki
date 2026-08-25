@@ -142,7 +142,11 @@ describe('codex post-tool-use', () => {
 
     it('surfaces a loud skip block when the binary cannot be launched', async () => {
       const wikiPath = makeWikiFixture();
-      process.env.WIKI_BIN = '/definitely/not/a/real/wiki-binary';
+      // An existing but non-executable override stops resolution deterministically
+      // (existsSync passes, spawn fails with EACCES) regardless of ambient PATH.
+      const deadBinary = join(fixtureDir ?? tmpdir(), `stub-dead-${(counter += 1)}`);
+      writeFileSync(deadBinary, '#!/bin/sh\nexit 0\n', 'utf-8');
+      process.env.WIKI_BIN = deadBinary;
       const patch = `*** Begin Patch\n*** Update File: ${wikiPath}\n*** End Patch`;
 
       try {
