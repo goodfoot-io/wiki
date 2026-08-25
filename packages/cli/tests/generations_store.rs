@@ -849,3 +849,201 @@ fn best_effort_access_touch_never_fails_lookup() {
     assert!(hit.is_some(), "hot reads are never failed by bookkeeping");
     assert!(elapsed < Duration::from_secs(10), "best-effort touch must be bounded, took {elapsed:?}");
 }
+
+// ── Adversarial repair wave: runtime-witnessed findings ─────────────────
+
+/// F1 witness: a second connection holding a write transaction on the store
+/// file must make open and publish take the bounded retry path — completing
+/// when the holder releases mid-retries, erroring gracefully when it holds
+/// throughout — NEVER panicking on the one-shot-capture pattern.
+#[test]
+fn busy_write_txn_during_open_and_publish_degrades_not_panics() {
+    // Part A — publish retries to success when the writer releases early.
+    {
+        let (_tmp, store) = open_store();
+        let db = store.path().to_path_buf();
+        let holder = Connection::open(&db).expect("holder connection");
+        holder
+            .execute_batch("BEGIN IMMEDIATE; CREATE TABLE hold_a (x INTEGER);")
+            .expect("take write lock");
+
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let _ = holder.execute_batch("ROLLBACK;");
+        });
+
+        let started = std::time::Instant::now();
+        let outcome = store.publish(candidate(
+            fingerprint(21),
+            &[Page::new("a.md", "Alpha", 100)],
+        ));
+        releaser.join().expect("releaser thread");
+        match outcome.expect("publish must complete after bounded retry") {
+            PublishOutcome::Published { .. } => {}
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(40),
+            "the retry loop must actually have waited out the holder"
+        );
+    }
+
+    // Part B — publish errors gracefully (never panics) when the writer
+    // holds through the whole bounded budget.
+    {
+        let (_tmp, store) = open_store();
+        let db = store.path().to_path_buf();
+        let holder = Connection::open(&db).expect("holder connection");
+        holder
+            .execute_batch("BEGIN IMMEDIATE; CREATE TABLE hold_b (x INTEGER);")
+            .expect("take write lock");
+
+        let outcome = store.publish(candidate(
+            fingerprint(22),
+            &[Page::new("b.md", "Beta", 200)],
+        ));
+        let err = outcome.expect_err("exhausted retries must surface as Err");
+        assert!(
+            matches!(err, wiki::cache::CacheError::Sqlite(_)),
+            "the exhausted-busy error must be the graceful CacheError, got {err:?}"
+        );
+    }
+
+    // Part C — open under a held write txn: the DDL leg hits BUSY, the
+    // bounded wrapper retries, exhaustion surfaces as Err — no panic, no
+    // process abort.
+    {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        {
+            let warm = GenerationsStore::open(tmp.path()).expect("prime the store");
+            drop(warm);
+        }
+        let holder = Connection::open(tmp.path().join("wiki").join("store.sqlite"))
+            .expect("holder connection");
+        holder
+            .execute_batch("BEGIN IMMEDIATE; CREATE TABLE hold_c (x INTEGER);")
+            .expect("take write lock");
+
+        let outcome = GenerationsStore::open(tmp.path());
+        let err = outcome.expect_err("exhausted retries must surface as Err");
+        assert!(
+            matches!(err, wiki::cache::CacheError::Sqlite(_)),
+            "graceful CacheError on open under contention, got {err:?}"
+        );
+    }
+}
+
+/// F2 witness (store level): retention sorts `(access_bucket ASC,
+/// created_at ASC)`, so within one hour bucket the OLDEST generation is the
+/// first eviction victim once more than RETAINED_GENERATIONS+1 exist. A
+/// gate-pinned gen id must therefore fail serve-time verification after
+/// such churn instead of answering `no such table`.
+#[test]
+fn served_generation_verification_degrades_after_gc_eviction() {
+    let (_tmp, store) = open_store();
+
+    let first = published(
+        &store,
+        candidate(fingerprint(1), &[Page::new("pinned.md", "Pinned", 100)]),
+    );
+    assert!(store.generation_is_served(first.gen_id));
+
+    // Churn eleven same-hour generations past it (distinct fingerprints,
+    // identical corpus shape).
+    for seed in 2..=12u8 {
+        published(
+            &store,
+            candidate(
+                fingerprint(seed),
+                &[Page::new("shared.md", "Shared", 42), Page::new(&format!("u{seed}.md"), &format!("U{seed}"), seed as i64)],
+            ),
+        );
+    }
+
+    let stats = store.maintain().expect("maintain");
+    assert!(
+        stats.evicted_gen_ids.contains(&first.gen_id),
+        "the oldest same-hour generation must be the deterministic victim: {:?}",
+        stats.evicted_gen_ids
+    );
+    assert!(
+        !store.generation_is_served(first.gen_id),
+        "an evicted pinned generation must verify as unserved (miss semantics), not Err"
+    );
+}
+
+/// F6 witness (both legs): with another process holding the init lock, open
+/// must degrade to an ephemeral handle without touching the shared file —
+/// no umask-permissioned database leak when absent, no NotADatabase hard
+/// failure over a corrupt file mid-repair — and recover normally once the
+/// lock frees.
+#[test]
+fn init_lock_held_degrades_without_hardening_leak_or_hard_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Leg A — held init lock + ABSENT database: degrade; nothing leaks.
+    {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wiki_dir = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki_dir).expect("create wiki dir");
+        std::fs::set_permissions(&wiki_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("privatize");
+        let lock_path = wiki_dir.join(wiki::cache::schema::INIT_LOCK_FILE_NAME);
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&lock_path)
+            .expect("create init lock");
+        fs4::fs_std::FileExt::try_lock_exclusive(&lock).expect("hold init lock");
+
+        let store = GenerationsStore::open(tmp.path()).expect("degraded open must succeed");
+        assert!(store.is_degraded(), "mid-init window must degrade");
+        assert!(
+            !wiki::cache::schema::db_path(tmp.path()).exists(),
+            "degradation must never create a shared-side database file"
+        );
+    }
+
+    // Leg B — held init lock + GARBAGE database: degrade, never surface
+    // NotADatabase as an error while the sibling owns the repair window.
+    {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wiki_dir = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki_dir).expect("create wiki dir");
+        std::fs::set_permissions(&wiki_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("privatize");
+        let db = wiki::cache::schema::db_path(tmp.path());
+        std::fs::write(&db, b"this is not a sqlite database - garbage bytes").expect("corrupt");
+        let lock_path = wiki_dir.join(wiki::cache::schema::INIT_LOCK_FILE_NAME);
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&lock_path)
+            .expect("create init lock");
+        fs4::fs_std::FileExt::try_lock_exclusive(&lock).expect("hold init lock");
+
+        let store = GenerationsStore::open(tmp.path()).expect("degraded open must succeed");
+        assert!(store.is_degraded(), "corrupt-under-lock must degrade, not hard-error");
+    }
+
+    // Recovery — once the lock frees, a normal open repairs (quarantines)
+    // and lands on a healthy, non-degraded handle.
+    {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wiki_dir = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki_dir).expect("create wiki dir");
+        std::fs::set_permissions(&wiki_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("privatize");
+        let db = wiki::cache::schema::db_path(tmp.path());
+        std::fs::write(&db, b"garbage bytes again").expect("corrupt");
+
+        let store = GenerationsStore::open(tmp.path()).expect("uncontended open");
+        assert!(!store.is_degraded());
+        assert!(
+            wiki::index::generations::GenerationsStore::open(tmp.path())
+                .expect("reopen")
+                .generation_is_served(0) == false,
+            "fresh quarantine leaves zero generations; reopen stays healthy"
+        );
+    }
+}

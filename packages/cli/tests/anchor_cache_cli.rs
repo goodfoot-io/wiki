@@ -17,6 +17,7 @@
 //! for. The fault fixtures carry no line-range links, so the drift engine's
 //! git subprocesses never run and the bogus `GIT_DIR` disturbs nothing else.
 
+use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -180,23 +181,65 @@ fn clear_cache_prints_resolved_cache_path_and_exits_zero() {
     );
 }
 
-/// `--clear-cache` is tier-scoped (plan D10): it empties both tiers' tables
+/// `--clear-cache` is tier-scoped (plan D10): it empties BOTH tiers' tables
 /// inside the store and preserves the directory, which keeps holding
-/// journals, locks, and wiki.log. A warm certified run leaves cached rows;
-/// after a clear the store serves again but holds none of them.
+/// journals, locks, and wiki.log. The store is warmed by two commands so the
+/// index tier is genuinely populated — `list` publishes generations with
+/// `gen_paths`/`blobs` children and `fts_<gen>` tables, `check` fills the
+/// anchor tier — because a parent-first drop order fails silently-uselessly
+/// on populated stores (FK-drop-order regression, finding F7a): exit 0 and
+/// a printed path while NOTHING was cleared, plus one misleading warning.
+/// After a clear on a populated store: every tier emptied, fts children
+/// gone, asides swept, no warning, exit 0.
 #[test]
 fn clear_cache_empties_the_tiers_and_preserves_the_directory() {
     let repo = certified_fixture();
     let cache_dir = expected_cache_dir(&repo.root);
 
-    let warm = run(&repo.root, &["check"]);
+    let warm_anchor = run(&repo.root, &["check"]);
     assert_eq!(
-        warm.status.code(),
+        warm_anchor.status.code(),
         Some(0),
-        "warm run: {}",
-        String::from_utf8_lossy(&warm.stderr)
+        "warm anchor run: {}",
+        String::from_utf8_lossy(&warm_anchor.stderr)
     );
-    assert!(cache_dir.exists(), "the warm run must have cached");
+    let warm_index = run(&repo.root, &["list"]);
+    assert_eq!(
+        warm_index.status.code(),
+        Some(0),
+        "warm index run: {}",
+        String::from_utf8_lossy(&warm_index.stderr)
+    );
+    assert!(cache_dir.exists(), "the warm runs must have cached");
+
+    // Both tiers must be non-empty before the clear — this witness is only
+    // meaningful against a populated store.
+    let db = cache_dir.join(DB_FILE_NAME);
+    let count_of = |sql: &str| -> i64 {
+        let conn = rusqlite::Connection::open_with_flags(
+            &db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("open warm store");
+        conn.query_row(sql, [], |r| r.get(0))
+            .unwrap_or_else(|e| panic!("counting warm rows ({sql}): {e}"))
+    };
+    assert!(count_of("SELECT count(*) FROM fingerprint") > 0, "anchor tier warmed");
+    assert!(count_of("SELECT count(*) FROM generations") > 0, "index tier warmed");
+    assert!(count_of("SELECT count(*) FROM gen_paths") > 0, "index membership warmed");
+    assert!(
+        count_of(
+            "SELECT count(*) FROM sqlite_master WHERE name LIKE 'fts\\_%' ESCAPE '\\'"
+        ) > 0,
+        "an fts child table warmed"
+    );
+
+    // A stale quarantine aside must not survive the clear.
+    fs::write(
+        cache_dir.join(format!("{DB_FILE_NAME}.1234567890.quarantine")),
+        b"aside",
+    )
+    .expect("write stale aside");
 
     let out = run(&repo.root, &["check", "--clear-cache"]);
     assert_eq!(
@@ -210,26 +253,40 @@ fn clear_cache_empties_the_tiers_and_preserves_the_directory() {
         cache_dir.display().to_string(),
         "stdout must still be exactly the resolved cache directory path"
     );
+    assert!(
+        fault_warnings(&out.stderr).is_empty(),
+        "a successful clear must not emit the misleading unavailable-warning: {:?}",
+        fault_warnings(&out.stderr)
+    );
+
     // The behavior change pinned by plan D10: the directory survives.
     assert!(cache_dir.exists(), "--clear-cache must preserve the directory");
     assert!(
         cache_dir.join(DB_FILE_NAME).exists(),
         "the store file itself survives; only tier data dies"
     );
-
-    // Every anchor-tier table is empty again; the cleared store serves.
-    let db = cache_dir.join(DB_FILE_NAME);
-    let conn = rusqlite::Connection::open_with_flags(
-        &db,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .expect("open cleared store");
-    for table in ["fingerprint", "anchor_walk"] {
-        let rows: i64 = conn
-            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
-            .unwrap_or_else(|e| panic!("{table} must exist after a clear: {e}"));
-        assert_eq!(rows, 0, "{table} must be empty after --clear-cache");
+    for sql in [
+        "SELECT count(*) FROM fingerprint",
+        "SELECT count(*) FROM anchor_walk",
+        "SELECT count(*) FROM generations",
+        "SELECT count(*) FROM gen_paths",
+        "SELECT count(*) FROM blobs",
+    ] {
+        assert_eq!(
+            count_of(sql),
+            0,
+            "{sql} must be zero after --clear-cache on a populated store"
+        );
     }
+    assert_eq!(
+        count_of("SELECT count(*) FROM sqlite_master WHERE name LIKE 'fts\\_%' ESCAPE '\\'"),
+        0,
+        "every dynamic fts_% child must be dropped by --clear-cache"
+    );
+    assert!(
+        !cache_dir.join(format!("{DB_FILE_NAME}.1234567890.quarantine")).exists(),
+        "stale quarantine asides are swept"
+    );
 }
 
 /// With no resolvable common dir (the cwd is inside a repo but `GIT_DIR`

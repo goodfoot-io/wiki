@@ -449,34 +449,116 @@ pub fn probe(db_path: &Path) -> Result<ProbeOutcome, CacheError> {
     }
 }
 
+/// The tier's candidate drop set: the registered static tables plus — for
+/// [`Tier::Index`] — every dynamic `fts_<gen_id>` child. Deduplicated,
+/// declaration order preserved.
+fn tier_drop_candidates(conn: &Connection, tier: Tier) -> Result<Vec<String>, CacheError> {
+    let mut names: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (name, _) in registry_for(tier) {
+        if seen.insert(name.to_ascii_lowercase()) {
+            names.push((*name).to_owned());
+        }
+    }
+    if tier == Tier::Index {
+        for name in INDEX_STATIC_TABLES {
+            if seen.insert(name.to_ascii_lowercase()) {
+                names.push((*name).to_owned());
+            }
+        }
+        // Every dynamic `fts_<gen_id>` child. The `\_` escape keeps the
+        // pattern on the literal underscore: `fts_%` unescaped would also
+        // match names like `ftsX`.
+        let mut stmt = conn.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'fts\\_%' ESCAPE '\\';",
+        )?;
+        let dynamic = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for name in dynamic {
+            if seen.insert(name.to_ascii_lowercase()) {
+                names.push(name);
+            }
+        }
+    }
+    Ok(names)
+}
+
+/// Order `names` children-first, derived live from each table's declared
+/// foreign keys (`PRAGMA foreign_key_list`). Bundled rusqlite builds SQLite
+/// with `foreign_keys=ON` enforced by default, and a DROP TABLE under
+/// enforcement runs an implicit DELETE whose rows any still-standing child
+/// table's immediate FKs will reject — so dropping a parent before its
+/// children fails the whole statement (and, inside a transaction, the whole
+/// teardown). Computing the order from metadata rather than hard-coding it
+/// keeps future registry additions safe without per-callsite edits. Tables
+/// referencing nothing in the set sort first; a hypothetical FK cycle (not
+/// expressible in this schema) degrades to declaration order rather than
+/// looping forever.
+fn child_first_drop_order(
+    conn: &Connection,
+    names: &[String],
+) -> Result<Vec<String>, CacheError> {
+    let index_of: std::collections::HashMap<String, usize> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.to_ascii_lowercase(), i))
+        .collect();
+    // children[j]: candidates declaring an FK to candidate j.
+    let mut children: Vec<std::collections::HashSet<usize>> =
+        vec![std::collections::HashSet::new(); names.len()];
+    for (i, name) in names.iter().enumerate() {
+        let quoted = name.replace('"', "\"\"");
+        let parents = conn
+            .prepare(&format!("PRAGMA foreign_key_list(\"{quoted}\")"))?
+            .query_map([], |row| row.get::<_, String>(2))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for parent in parents {
+            if let Some(&j) = index_of.get(&parent.to_ascii_lowercase())
+                && j != i
+            {
+                children[j].insert(i);
+            }
+        }
+    }
+    let mut emitted = vec![false; names.len()];
+    let mut order = Vec::with_capacity(names.len());
+    loop {
+        let mut progressed = false;
+        for i in 0..names.len() {
+            if !emitted[i] && children[i].iter().all(|&c| emitted[c]) {
+                emitted[i] = true;
+                order.push(names[i].clone());
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    for (i, was_emitted) in emitted.iter().enumerate() {
+        if !was_emitted {
+            order.push(names[i].clone());
+        }
+    }
+    Ok(order)
+}
+
 /// Tier-scoped structural invalidation (plan D2): drop `tier`'s static
 /// registry tables plus — for [`Tier::Index`] — every dynamic `fts_%` child
 /// table. Rows die with their tables, so this one primitive serves schema-skew
 /// repair, tier-epoch bulk invalidation, and the later tier-scoped
 /// clear-cache. Dropping one tier's tables never touches the other tier's.
+///
+/// Drops run in [`child_first_drop_order`] — children before their parents —
+/// because `foreign_keys=ON` (the bundled build's default) makes a
+/// parent-first DROP fail against any populated child (finding F7): it broke
+/// both `clear()` teardowns and every opens' skew repair on populated stores.
 pub fn drop_tier_tables(conn: &Connection, tier: Tier) -> Result<(), CacheError> {
-    for (name, _) in registry_for(tier) {
-        conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{name}\";"))?;
-    }
-    if tier == Tier::Index {
-        // Static tables by name (the index tier's registration in the
-        // verified-shape registry lands with the generations store) plus
-        // every dynamic `fts_<gen_id>` child. The `\_` escape keeps the
-        // pattern on the literal underscore: `fts_%` unescaped would also
-        // match names like `ftsX`.
-        for name in INDEX_STATIC_TABLES {
-            conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{name}\";"))?;
-        }
-        let mut stmt = conn.prepare(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'fts\\_%' ESCAPE '\\';",
-        )?;
-        let names = stmt
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        for name in names {
-            let quoted = name.replace('"', "\"\"");
-            conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{quoted}\";"))?;
-        }
+    let candidates = tier_drop_candidates(conn, tier)?;
+    for name in child_first_drop_order(conn, &candidates)? {
+        let quoted = name.replace('"', "\"\"");
+        conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{quoted}\";"))?;
     }
     Ok(())
 }

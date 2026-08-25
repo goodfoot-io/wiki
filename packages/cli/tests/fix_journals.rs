@@ -548,3 +548,230 @@ fn replay_emits_at_most_one_warning_line() {
         "both stale journals are removed"
     );
 }
+
+// ── F4: --print-applied must report replay-written files ─────────────────────
+
+/// F4 control (a): a staged journal whose targets differ from disk is
+/// replayed by the run; `--print-applied` must list every file the replay
+/// physically wrote — scripts pipe this list into `git add`.
+#[test]
+fn print_applied_lists_replay_written_files() {
+    let tmp = init_repo();
+    let root = tmp.path();
+    seed_rename_fixture(root);
+
+    let content_a = read_page(root, "wiki/a.md");
+    let content_b = read_page(root, "wiki/b.md");
+    let staged = stage_prepared_journal(
+        root,
+        &[
+            ("wiki/a.md", &fixed_content(&content_a)),
+            ("wiki/b.md", &fixed_content(&content_b)),
+        ],
+        now_ms(),
+        None,
+    );
+
+    let out = wiki_check_fix(root, &["--print-applied"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "replay run exits 0:\n{}",
+        combined(&out)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut lines: Vec<&str> = stdout.lines().collect();
+    lines.sort();
+    assert_eq!(
+        lines,
+        vec!["wiki/a.md", "wiki/b.md"],
+        "--print-applied must list every replay-written file; got:\n{stdout}"
+    );
+    assert_eq!(read_page(root, "wiki/a.md"), fixed_content(&content_a));
+    assert_eq!(read_page(root, "wiki/b.md"), fixed_content(&content_b));
+    assert!(
+        !staged.dir.exists(),
+        "the replayed journal must be consumed"
+    );
+}
+
+/// F4 control (b): targets already at target bytes are pure idempotent
+/// skips — the journal is consumed silently and `--print-applied` lists
+/// nothing, because this run touched no working file.
+#[test]
+fn print_applied_excludes_idempotent_skips() {
+    let tmp = init_repo();
+    let root = tmp.path();
+    seed_rename_fixture(root);
+
+    let content_a = read_page(root, "wiki/a.md");
+    let content_b = read_page(root, "wiki/b.md");
+    let staged = stage_prepared_journal(
+        root,
+        &[
+            ("wiki/a.md", &fixed_content(&content_a)),
+            ("wiki/b.md", &fixed_content(&content_b)),
+        ],
+        now_ms(),
+        None,
+    );
+    // The kill residue landed EVERYTHING before dying.
+    std::fs::write(root.join("wiki/a.md"), fixed_content(&content_a)).unwrap();
+    std::fs::write(root.join("wiki/b.md"), fixed_content(&content_b)).unwrap();
+
+    let out = wiki_check_fix(root, &["--print-applied"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "all-skip replay exits 0:\n{}",
+        combined(&out)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "--print-applied must exclude pure idempotent skips; got:\n{stdout}"
+    );
+    assert!(!staged.dir.exists(), "the journal is still consumed");
+}
+
+/// F4 discriminator (partial subset): the journal covers two files but only
+/// B's bytes were left unapplied — `--print-applied` lists exactly B, not
+/// the skipped A and not nothing.
+#[test]
+fn print_applied_lists_only_the_replay_written_subset() {
+    let tmp = init_repo();
+    let root = tmp.path();
+    seed_rename_fixture(root);
+
+    let content_a = read_page(root, "wiki/a.md");
+    let content_b = read_page(root, "wiki/b.md");
+    let staged = stage_prepared_journal(
+        root,
+        &[
+            ("wiki/a.md", &fixed_content(&content_a)),
+            ("wiki/b.md", &fixed_content(&content_b)),
+        ],
+        now_ms(),
+        None,
+    );
+    // A was rewritten before the kill; B was not.
+    std::fs::write(root.join("wiki/a.md"), fixed_content(&content_a)).unwrap();
+
+    let out = wiki_check_fix(root, &["--print-applied"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "partial-subset replay exits 0:\n{}",
+        combined(&out)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        vec!["wiki/b.md"],
+        "--print-applied must list exactly the replay-written subset; got:\n{stdout}"
+    );
+    assert!(!staged.dir.exists(), "journal consumed");
+}
+
+// ── F5: dry-run previews against post-replay reality ─────────────────────────
+
+/// F5 control (a): with a pending journal satisfying every pending fix, the
+/// dry-run preview proposes NOTHING (a real run's replay would satisfy it
+/// all), while touching neither working files nor journal state.
+#[test]
+fn dry_run_preview_reflects_pending_journal() {
+    let tmp = init_repo();
+    let root = tmp.path();
+    seed_rename_fixture(root);
+
+    let content_a = read_page(root, "wiki/a.md");
+    let content_b = read_page(root, "wiki/b.md");
+    let staged = stage_prepared_journal(
+        root,
+        &[
+            ("wiki/a.md", &fixed_content(&content_a)),
+            ("wiki/b.md", &fixed_content(&content_b)),
+        ],
+        now_ms(),
+        None,
+    );
+
+    let out = wiki_check_fix(root, &["--fix-dry-run"]);
+    let text = combined(&out);
+    assert!(
+        !text.contains("fix:"),
+        "preview must not propose fixes the pending replay satisfies:\n{text}"
+    );
+    // Nothing written: both pages stay broken on disk.
+    assert_eq!(read_page(root, "wiki/a.md"), content_a);
+    assert_eq!(read_page(root, "wiki/b.md"), content_b);
+    // The journal survives the preview untouched.
+    assert!(staged.dir.exists(), "dry run must not consume the journal");
+}
+
+/// F5 control (b): preview ≈ execution. A third page outside the journal's
+/// scope keeps one genuine fix pending; the dry-run proposes exactly that
+/// fix, and the following real run reports exactly it too (plus completing
+/// the replay). Final state converges to fully fixed.
+#[test]
+fn dry_run_preview_matches_subsequent_real_run() {
+    let tmp = init_repo();
+    let root = tmp.path();
+    // Fixture + a third linking page committed BEFORE the rename, so its
+    // link breaks identically but stays outside the journal scope below.
+    write_page(root, "docs/old.md", "Old", "The old target page.");
+    write_page(root, "wiki/a.md", "A", "See [alpha](../docs/old.md).");
+    write_page(root, "wiki/b.md", "B", "See [beta](../docs/old.md).");
+    write_page(root, "wiki/c.md", "C", "See [gamma](../docs/old.md).");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "seed"]);
+    git(root, &["mv", "docs/old.md", "docs/new.md"]);
+    git(root, &["commit", "-q", "-m", "rename target"]);
+
+    let content_a = read_page(root, "wiki/a.md");
+    let content_b = read_page(root, "wiki/b.md");
+    let content_c = read_page(root, "wiki/c.md");
+    let _staged = stage_prepared_journal(
+        root,
+        &[
+            ("wiki/a.md", &fixed_content(&content_a)),
+            ("wiki/b.md", &fixed_content(&content_b)),
+        ],
+        now_ms(),
+        None,
+    );
+
+    // Preview: only c.md's fix remains proposable.
+    let preview = wiki_check_fix(root, &["--fix-dry-run"]);
+    let preview_text = combined(&preview);
+    assert!(
+        preview_text.contains("fix: wiki/c.md"),
+        "preview must propose exactly the out-of-journal fix:\n{preview_text}"
+    );
+    assert!(
+        !preview_text.contains("wiki/a.md") && !preview_text.contains("wiki/b.md"),
+        "preview must not propose journal-satisfied fixes:\n{preview_text}"
+    );
+
+    // Execution: reports exactly the same fix, completes the replay, and
+    // converges everything.
+    let real = wiki_check_fix(root, &[]);
+    assert_eq!(
+        real.status.code(),
+        Some(0),
+        "real run exits 0:\n{}",
+        combined(&real)
+    );
+    let real_text = combined(&real);
+    assert!(
+        real_text.contains("fixed: wiki/c.md"),
+        "real run must report exactly the previewed fix:\n{real_text}"
+    );
+    assert!(
+        !real_text.contains("fixed: wiki/a.md") && !real_text.contains("fixed: wiki/b.md"),
+        "real run must not re-report replay-satisfied fixes:\n{real_text}"
+    );
+    assert_eq!(read_page(root, "wiki/a.md"), fixed_content(&content_a));
+    assert_eq!(read_page(root, "wiki/b.md"), fixed_content(&content_b));
+    assert_eq!(read_page(root, "wiki/c.md"), fixed_content(&content_c));
+}

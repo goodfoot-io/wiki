@@ -98,6 +98,20 @@ fn warn_rendezvous_unavailable_once(context: &str, e: &std::io::Error) {
     }
 }
 
+/// Process-wide one-line budget for store-availability degradation (plan
+/// F6): a mid-repair window in another process makes this run serve from an
+/// ephemeral in-memory tier; the run prints at most one line about it.
+static STORE_DEGRADED_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn warn_store_degraded_once() {
+    if !STORE_DEGRADED_WARNED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        eprintln!(
+            "warning: wiki store busy mid-init in another process; serving uncached for this run"
+        );
+    }
+}
+
 /// Stat-only check that the working tree is unchanged since the last verified
 /// index state. Resolves `.git`, opens the index DB read-only, and runs
 /// Read-only digest gate for callers that only need the freshness verdict:
@@ -310,6 +324,9 @@ impl WikiIndex {
         let store = GenerationsStore::open(&common_dir)
             .map_err(|e| miette::miette!("failed to open wiki store at {}: {e}",
                 crate::cache::schema::db_path(&common_dir).display()))?;
+        if store.is_degraded() {
+            warn_store_degraded_once();
+        }
 
         let fs_class = forced_fs_class.unwrap_or_else(|| fs_class::detect(&dot_git));
 
@@ -358,9 +375,7 @@ impl WikiIndex {
         }
 
         // Gate miss ⇒ exclusive rendezvous (plan D7 mode table: refresh
-        // publication is an exclusive holder), bounded ~10 s wait. On
-        // timeout the floor is exactly the legacy contention behavior:
-        // serve the newest retained snapshot without refreshing.
+        // publication is an exclusive holder), bounded ~10 s wait.
         let exclusive =
             match crate::cache::rendezvous::acquire_exclusive(&common_dir) {
                 Ok(guard) => Some(guard),
@@ -370,9 +385,22 @@ impl WikiIndex {
                 }
             };
         if exclusive.is_none() {
-            index.served_gen =
-                index.store.newest().ok().flatten().map(|generation| generation.gen_id);
-            return Ok(index);
+            // Timeout floor (plan F3): NEVER serve a foreign `newest()` —
+            // another worktree's uncommitted corpus is not this run's
+            // answer. Scope any served generation to this worktree's own
+            // canonical digest; if none is retained, fall back to uncached
+            // computation: a full refresh against an ephemeral in-memory
+            // tier, answering exactly what an uncontended cold run would.
+            let wikiignore_hash = passes::compute_wikiignore_hash(repo_root);
+            let own = freshness::current_fingerprint(repo_root, &dot_git, None, &wikiignore_hash)
+                .ok()
+                .flatten()
+                .and_then(|fingerprint| index.store.lookup_digest(&fingerprint).ok().flatten());
+            if let Some(generation) = own {
+                index.served_gen = Some(generation.gen_id);
+                return Ok(index);
+            }
+            return Self::finish_uncached(index, fs_class);
         }
 
         // Double-checked locking: a sibling process may have published our
@@ -446,6 +474,43 @@ impl WikiIndex {
         Ok(index)
     }
 
+    /// The uncached floor for contended runs (plan F3, cold-store leg):
+    /// swap to an ephemeral in-memory tier and run the full refresh against
+    /// it — no shared-file contact, no rendezvous needed — so the answers
+    /// derive solely from this worktree's git/filesystem state and equal
+    /// what an uncontended run would print.
+    fn finish_uncached(mut index: WikiIndex, fs_class: HostileFs) -> Result<Self> {
+        let mem = GenerationsStore::open_ephemeral()
+            .map_err(|e| miette::miette!("ephemeral wiki store failed: {e}"))?;
+        index.store = mem;
+        index.served_gen = None;
+
+        let repo = crate::perf::scope_result("index.gix_open", serde_json::json!({}), || {
+            gix::open(&index.repo_root).map_err(Box::new)
+        })
+        .map_err(|e| miette::miette!("gix::open({}) failed: {e}", index.repo_root.display()))?;
+        let outcome = crate::perf::scope_result("index.refresh_uncached", serde_json::json!({}), || {
+            passes::refresh(
+                &repo,
+                &index.repo_root,
+                &index.dot_git,
+                &index.store,
+                fs_class,
+            )
+        })
+        .map_err(|e| miette::miette!("uncached refresh failed: {e}"))?;
+        index.served_gen = Some(outcome.served_gen_id);
+        if !outcome.conflict_discarded {
+            index.last_stats = IndexStats {
+                pass3_full_rescans: outcome.pass3_full_rescans,
+                fts_retokenizations: outcome.fts_retokenizations,
+                pass3_dir_walks: outcome.pass3_dir_walks,
+            };
+        }
+        index.repo = Some(repo);
+        Ok(index)
+    }
+
     /// The generation this handle serves, if any (a contended cold start
     /// may have nothing to serve).
     fn served(&self) -> Option<i64> {
@@ -462,17 +527,43 @@ impl WikiIndex {
     fn serve_shared_with<T>(
         &self,
         context: &str,
-        f: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
-    ) -> Result<T> {
-        let _guard = match crate::cache::rendezvous::acquire_shared(&self.common_dir) {
-            Ok(guard) => Some(guard),
+        f: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<Option<T>>,
+    ) -> Result<Option<T>> {
+        let Some(gen_id) = self.served() else {
+            return Ok(None);
+        };
+        // Try-once for the shared courtesy: a held exclusive means a
+        // publisher is mid-refresh; waiting out its full budget would stall
+        // every query by design-latency. Generations are immutable and the
+        // deferred read txn gives a consistent WAL snapshot, so on
+        // contention this run proceeds unordered immediately (one-line
+        // budget applies).
+        let _guard = match crate::cache::rendezvous::try_acquire_shared(&self.common_dir) {
+            Ok(Some(guard)) => Some(guard),
+            Ok(None) => {
+                warn_rendezvous_unavailable_once(context, &std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "held by a publisher",
+                ));
+                None
+            }
             Err(e) => {
                 warn_rendezvous_unavailable_once(context, &e);
                 None
             }
         };
+        // Plan D5 fail-open, verified inside the same read transaction as
+        // the query: a generation evicted between the lock-free gate pin
+        // and this acquisition (or whose fts child was torn down) is an
+        // ordinary miss — the caller degrades to its empty shape — never a
+        // `no such table` command error.
         self.store
-            .read_txn(f)
+            .read_txn(|conn| {
+                if !GenerationsStore::verify_served(conn, gen_id)? {
+                    return Ok(None);
+                }
+                f(conn)
+            })
             .map_err(|e| miette::miette!("{context}: {e}"))
     }
 
@@ -498,9 +589,12 @@ impl WikiIndex {
             return Ok((Vec::new(), 0));
         };
         let limit_usize = if limit < 0 { 0 } else { limit as usize };
-        let (mut rows, total) = self.serve_shared_with("search_weighted", |conn| {
-            search::search_weighted(conn, gen_id, self.source, query, limit_usize, offset)
-        })?;
+        let (mut rows, total) = self
+            .serve_shared_with("search_weighted", |conn| {
+                search::search_weighted(conn, gen_id, self.source, query, limit_usize, offset)
+                    .map(Some)
+            })?
+            .unwrap_or((Vec::new(), 0));
         // Render `file` as an absolute path so `format_search_result` can
         // `strip_prefix(repo_root)` to produce repo-relative output.
         for r in &mut rows {
@@ -545,8 +639,9 @@ impl WikiIndex {
                     ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows)
-        })?;
+            Ok(Some(rows))
+        })?
+        .unwrap_or_default();
 
         let tag_lc = tag.map(|t| t.to_lowercase());
         let split =
@@ -586,16 +681,19 @@ impl WikiIndex {
         let Some(gen_id) = self.served() else {
             return Ok(Vec::new());
         };
-        let (rows, _total) = self.serve_shared_with("suggest", |conn| {
-            search::search_weighted(
-                conn,
-                gen_id,
-                self.source,
-                query,
-                SUGGESTION_LIMIT as usize,
-                0,
-            )
-        })?;
+        let (rows, _total) = self
+            .serve_shared_with("suggest", |conn| {
+                search::search_weighted(
+                    conn,
+                    gen_id,
+                    self.source,
+                    query,
+                    SUGGESTION_LIMIT as usize,
+                    0,
+                )
+                .map(Some)
+            })?
+            .unwrap_or((Vec::new(), 0));
         Ok(rows)
     }
 
@@ -805,6 +903,72 @@ mod list_pages_tests {
             .collect();
         both.sort();
         assert_eq!(both, vec!["CapPage".to_string(), "FooPage".to_string()]);
+    }
+
+    /// F2 witness (end to end): a handle whose served generation is
+    /// evicted by GC churn while held must degrade its queries to empty —
+    /// never surface `no such table: fts_N` as a command error.
+    #[test]
+    fn query_under_held_handle_survives_gc_churn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        create_file(root, "keep.md", &page("Keep", "kept summary", ""));
+        commit_repo(root);
+
+        let index = WikiIndex::prepare_for_source(root, DocSource::WorkingTree).unwrap();
+        assert!(
+            index.search_weighted("body", 10, 0).is_ok(),
+            "sanity: serving works before the churn"
+        );
+
+        // Churn eleven same-hour generations past the pinned one.
+        use crate::index::generations::{
+            GenPathRow, PublishCandidate, StateFingerprint,
+        };
+        for seed in 2u8..=12 {
+            let fingerprint = StateFingerprint {
+                head_oid: format!("{:040x}", seed as u64 + 1),
+                head_tree_oid: format!("{:040x}", seed as u64 + 2),
+                index_checksum: [seed; 20],
+                wikiignore_hash: [seed ^ 0xA5; 20],
+                worktree_sig: [seed; 32],
+            };
+            let oid = BlobOid(format!("{:040x}", seed as u64));
+            index
+                .store
+                .publish(PublishCandidate {
+                    fingerprint,
+                    publisher: Some("churn-test".into()),
+                    paths: vec![GenPathRow {
+                        source: Source::Worktree,
+                        path_rel: "shared.md".into(),
+                        oid: oid.clone(),
+                        parent_dir: String::new(),
+                        stat_mtime_ns: Some(seed as i64),
+                    }],
+                    new_blobs: vec![(
+                        oid,
+                        crate::index::ingest::WikiBlobFields {
+                            title: format!("Churn {seed}"),
+                            summary: "churn corpus".into(),
+                            body: "\nbody\n".into(),
+                            aliases_text: String::new(),
+                            tags_text: String::new(),
+                            keywords_text: String::new(),
+                        },
+                    )],
+                })
+                .unwrap();
+        }
+        index.store.maintain().unwrap();
+
+        // The pinned generation may now be evicted; every query must still
+        // answer Ok (empty after degradation), never Err.
+        let (rows, total) = index.search_weighted("body", 10, 0).unwrap();
+        assert_eq!(total, 0, "evicted generation degrades to an empty serve");
+        assert!(rows.is_empty());
+        assert!(index.resolve_page("Keep").unwrap().is_none());
+        assert!(index.list_pages(None, 0, None).unwrap().is_empty());
     }
 
     #[test]

@@ -378,10 +378,15 @@ pub struct GcStats {
 /// Single-handle, single-thread discipline: a held write transaction
 /// borrows the connection exclusively, so reads through the same handle
 /// wait for it to close. Production serves strictly after publish returns.
+#[derive(Debug)]
 pub struct GenerationsStore {
     conn: RefCell<Connection>,
     #[allow(dead_code)] // read via path(); the binary reaches neither yet
     db_file: PathBuf,
+    /// Set when this handle serves an ephemeral in-memory tier because the
+    /// shared store was untouchable (mid-repair window, plan F6). Purely
+    /// informational: the caller owns the single diagnostic line.
+    degraded: Cell<bool>,
     /// Depth of write transactions opened through this handle. Mirrors the
     /// connection's autocommit state because every write transaction routes
     /// through [`Self::with_write_txn`] / publish / maintain by construction.
@@ -400,51 +405,75 @@ impl GenerationsStore {
     /// below is idempotent, this process proceeds directly to its working
     /// connection rather than degrading (index serving has no uncached mode).
     pub fn open(common_dir: &Path) -> Result<Self, CacheError> {
-        let mut db_file = Some(schema::db_path(common_dir));
-        retry_busy(|| {
-            let db_file = db_file.take().expect("open runs once per store");
-            // Every creation path goes through the descriptor-hardened
-            // primitives (plan D9), exactly like the anchor tier's open.
-            let common_fd = DirFd::open(common_dir)?;
-            let wiki = common_fd.ensure_private_subtree(Path::new(schema::STORE_DIR_NAME))?;
-            wiki.validate_private()?;
-            let lock_file = wiki.create_file(schema::INIT_LOCK_FILE_NAME)?;
-            let held = match lock_file.try_lock_exclusive() {
-                Ok(true) => true,
-                Ok(false) => false,
+        let db_file = schema::db_path(common_dir);
+
+        // Every creation path goes through the descriptor-hardened
+        // primitives (plan D9), exactly like the anchor tier's open. The
+        // init lock is acquired with a short bounded re-wait (not the full
+        // busy budget): its purpose is mutual exclusion for the rare
+        // probe/quarantine/skew-repair window, and a sibling holding it
+        // means this process may degrade instead of queueing behind a
+        // repair it cannot see.
+        let common_fd = DirFd::open(common_dir)?;
+        let wiki = common_fd.ensure_private_subtree(Path::new(schema::STORE_DIR_NAME))?;
+        wiki.validate_private()?;
+        let lock_file = wiki.create_file(schema::INIT_LOCK_FILE_NAME)?;
+        let mut init_held = false;
+        for _ in 0..5 {
+            let acquired = match lock_file.try_lock_exclusive() {
+                Ok(held) => held,
                 // Some platforms surface `WouldBlock` as Err instead of
                 // Ok(false) (index/lock.rs precedent).
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
                 Err(e) => return Err(e.into()),
             };
-
-            if held {
-                match schema::probe(&db_file)? {
-                    ProbeOutcome::Valid => {}
-                    // Missing is a fresh create, never a quarantine.
-                    ProbeOutcome::Missing => {
-                        schema::prepare_db_file(&db_file)?;
-                        drop(schema::open_connection(&db_file)?);
-                    }
-                    ProbeOutcome::Suspect(_) => {
-                        schema::quarantine(&db_file)?;
-                    }
-                    // Schema skew (plan D2): matching identity pair,
-                    // deviating static shapes. Only this tier's skew is ours
-                    // to repair; an anchor-tier skew is repaired by the
-                    // anchor's own next use and does not block us.
-                    ProbeOutcome::Skew(Tier::Index) => {
-                        schema::prepare_db_file(&db_file)?;
-                        let conn = schema::open_connection(&db_file)?;
-                        schema::drop_tier_tables(&conn, Tier::Index)?;
-                        drop(conn);
-                        drop(schema::open_connection(&db_file)?);
-                    }
-                    ProbeOutcome::Skew(Tier::Anchor) => {}
-                }
-                FileExt::unlock(&lock_file)?;
+            if acquired {
+                init_held = true;
+                break;
             }
-            drop(lock_file);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        if !init_held {
+            // Mid-repair window in another process (plan F6): never touch
+            // the shared file — no creation through a bare open (which
+            // would leak a umask-permissioned database) and no adoption of
+            // a possibly-quarantined file. Fail open to an ephemeral
+            // in-memory tier: fully functional serving for this run, zero
+            // disk contact.
+            let store = Self::open_ephemeral()?;
+            store.degraded.set(true);
+            return Ok(store);
+        }
+
+        let mut repaired = false;
+        let store = retry_busy(|| {
+            match schema::probe(&db_file)? {
+                ProbeOutcome::Valid => {}
+                // Missing is a fresh create, never a quarantine; the DDL leg
+                // runs under the held lock through the hardened prepare.
+                ProbeOutcome::Missing => {
+                    schema::prepare_db_file(&db_file)?;
+                    drop(schema::open_connection(&db_file)?);
+                }
+                ProbeOutcome::Suspect(_) => {
+                    schema::quarantine(&db_file)?;
+                    repaired = true;
+                }
+                // Schema skew (plan D2): matching identity pair, deviating
+                // static shapes. Only this tier's skew is ours to repair; an
+                // anchor-tier skew is repaired by the anchor's own next use.
+                ProbeOutcome::Skew(Tier::Index) => {
+                    schema::prepare_db_file(&db_file)?;
+                    let conn = schema::open_connection(&db_file)?;
+                    schema::drop_tier_tables(&conn, Tier::Index)?;
+                    crate::cache::diagnostics::record(&conn, "index_tier_skew_repaired");
+                    repaired = true;
+                    drop(conn);
+                    drop(schema::open_connection(&db_file)?);
+                }
+                ProbeOutcome::Skew(Tier::Anchor) => {}
+            }
 
             let conn = schema::open_connection(&db_file)?;
             // This tier's static DDL, atomic and idempotent.
@@ -459,7 +488,61 @@ impl GenerationsStore {
                 row.get::<_, i64>(0)
             })?;
 
-            Ok(Self { conn: RefCell::new(conn), db_file, txn_depth: Cell::new(0) })
+            // Surface any repair the held branch just performed (plan
+            // F9-support): publish the refreshed counts into the run's perf
+            // slot (the `check` path attaches them to its aggregate event),
+            // and — because search/list/summary never emit that aggregate —
+            // also emit a dedicated index-tier event so read-only commands
+            // carry the quarantine/rebuild/skew counts in their JSON-lines
+            // with zero extra stderr noise.
+            crate::cache::diagnostics::publish_counts(&conn);
+            if repaired {
+                let mut counts = serde_json::Map::new();
+                if let Ok(mut stmt) =
+                    conn.prepare("SELECT event, count(*) FROM store_events GROUP BY event")
+                    && let Ok(rows) =
+                        stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                {
+                    for row in rows.flatten() {
+                        counts.insert(row.0, serde_json::json!(row.1));
+                    }
+                }
+                crate::perf::log_event(
+                    "index.store_repair",
+                    0.0,
+                    "ok",
+                    serde_json::json!({ "diagnostics": counts }),
+                );
+            }
+
+            Ok(Self {
+                conn: RefCell::new(conn),
+                db_file: db_file.clone(),
+                degraded: Cell::new(false),
+                txn_depth: Cell::new(0),
+            })
+        })?;
+        FileExt::unlock(&lock_file)?;
+        drop(lock_file);
+        Ok(store)
+    }
+
+    /// An ephemeral, purely in-memory instance of the index tier: identical
+    /// schema and behavior, zero disk contact. The uncached floor for
+    /// contended runs (plans F3/F6) — every answer derives from this
+    /// worktree's own git/filesystem state, never from a foreign
+    /// generation.
+    pub(crate) fn open_ephemeral() -> Result<Self, CacheError> {
+        let conn = schema::open_connection(Path::new(":memory:"))?;
+        apply_index_tier_ddl(&conn)?;
+        conn.query_row("SELECT index_epoch FROM meta WHERE id = 1", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        Ok(Self {
+            conn: RefCell::new(conn),
+            db_file: PathBuf::from(":memory:"),
+            degraded: Cell::new(false),
+            txn_depth: Cell::new(0),
         })
     }
 
@@ -566,11 +649,14 @@ impl GenerationsStore {
     /// transaction so it always equals each oid's
     /// `COUNT(DISTINCT gen_id)` membership count.
     pub fn publish(&self, candidate: PublishCandidate) -> Result<PublishOutcome, CacheError> {
-        let mut candidate = Some(candidate);
+        // The closure captures the candidate by reference and stays
+        // re-entrant across retry_busy attempts (plan F1): a first-attempt
+        // SQLITE_BUSY must retry the whole attempt, never panic on a
+        // one-shot take. Nothing inside consumes the candidate; the returned
+        // Generation clones the small fingerprint.
+        let publisher = candidate.publisher.clone();
+        let digest = candidate.fingerprint.digest();
         retry_busy(|| {
-            let candidate = candidate.take().expect("publish runs once per call");
-            let publisher = candidate.publisher.clone();
-            let digest = candidate.fingerprint.digest();
             let mut conn = self.conn.borrow_mut();
             let _guard = TxnGuard::new(&self.txn_depth);
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -636,7 +722,7 @@ impl GenerationsStore {
                     candidate.fingerprint.index_checksum,
                     candidate.fingerprint.wikiignore_hash,
                     candidate.fingerprint.worktree_sig,
-                    publisher,
+                    publisher.clone(),
                     created_at,
                     created_at / MILLIS_PER_HOUR,
                     blob_count,
@@ -691,9 +777,9 @@ impl GenerationsStore {
             Ok(PublishOutcome::Published {
                 generation: Generation {
                     gen_id,
-                    fingerprint: candidate.fingerprint,
+                    fingerprint: candidate.fingerprint.clone(),
                     digest,
-                    publisher,
+                    publisher: publisher.clone(),
                     created_at,
                     access_bucket: created_at / MILLIS_PER_HOUR,
                     blob_count,
@@ -867,6 +953,14 @@ impl GenerationsStore {
         Ok(out)
     }
 
+    /// Fail-open convenience wrapper over [`Self::verify_served`] on this
+    /// handle's connection: would a query against `gen_id` serve right now?
+    #[allow(dead_code)] // acceptance-check surface; binary serves via read txns
+    pub fn generation_is_served(&self, gen_id: i64) -> bool {
+        let conn = self.conn.borrow();
+        Self::verify_served(&conn, gen_id).unwrap_or(false)
+    }
+
     /// The newest generation by `(created_at, gen_id)` — the refresh delta
     /// base (plan D5). `None` on a cold store.
     pub fn newest(&self) -> Result<Option<Generation>, CacheError> {
@@ -881,6 +975,34 @@ impl GenerationsStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Serve-time verification, run INSIDE each serving read transaction
+    /// (plan D5 fail-open): the generation row must still exist and its
+    /// per-generation FTS child must be present. A retained-generation GC
+    /// racing a lock-free gate pin can orphan a pinned gen id; verification
+    /// turns that from `no such table` into an ordinary miss.
+    pub(crate) fn verify_served(conn: &Connection, gen_id: i64) -> rusqlite::Result<bool> {
+        let fts_present: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [format!("fts_{gen_id}")],
+            |r| r.get(0),
+        )?;
+        if fts_present == 0 {
+            return Ok(false);
+        }
+        let row_present: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM generations WHERE gen_id = ?1",
+            [gen_id],
+            |r| r.get(0),
+        )?;
+        Ok(row_present > 0)
+    }
+
+    /// True when this handle serves the ephemeral in-memory tier because
+    /// the shared store was untouchable at open time (plan F6 floor).
+    pub fn is_degraded(&self) -> bool {
+        self.degraded.get()
     }
 
     /// True iff this handle currently sits inside a write transaction.
@@ -902,14 +1024,17 @@ impl GenerationsStore {
     #[allow(dead_code)] // sanctioned generic writer; first production caller is the journals wave
     pub fn with_write_txn<T>(
         &self,
-        f: impl FnOnce(&Self) -> Result<T, CacheError>,
+        mut f: impl FnMut(&Self) -> Result<T, CacheError>,
     ) -> Result<T, CacheError> {
-        let mut f = Some(f);
+        // Re-entrant across retry_busy attempts (plan F1): a BUSY on
+        // BEGIN IMMEDIATE — or on any statement inside `f` — rolls the
+        // transaction back before the retry re-invokes `f`, so no partial
+        // work can double-apply.
         retry_busy(|| {
             let mut conn = self.conn.borrow_mut();
             let _guard = TxnGuard::new(&self.txn_depth);
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let outcome = f.take().expect("with_write_txn runs once")(self);
+            let outcome = f(self);
             match outcome {
                 Ok(value) => {
                     tx.commit()?;

@@ -159,6 +159,57 @@ fn probe_rejects_malformed_walk_binding_schema_and_open_rebuilds() {
     );
 }
 
+/// Index-tier skew repair on a POPULATED store (FK-drop-order regression,
+/// finding F7b): with `foreign_keys` enforced by default, dropping the
+/// parent `generations` table before its children (`gen_paths` declares FKs
+/// to it) fails the whole repair — and since the repair runs on every
+/// command's open path, that was a permanent open lockout until manual
+/// store deletion. The repair must stay silent and child-first: the skewed
+/// tier's tables (rows included) die in dependency order and the store
+/// probes Valid again.
+#[test]
+fn index_skew_repair_on_a_populated_store_is_silent_and_fk_safe() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = db_path(dir.path());
+    drop(open_store(dir.path()));
+    exec_on_db(
+        &db,
+        "INSERT INTO generations (gen_id, digest, head_oid, head_tree_oid, index_checksum,
+             wikiignore_hash, worktree_sig, publisher, created_at, access_bucket, blob_count)
+         VALUES (1, x'0000000000000000000000000000000000000000000000000000000000000000',
+             'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6a7b8c9d0', '',
+             x'0000000000000000000000000000000000000000',
+             x'0000000000000000000000000000000000000000',
+             x'0000000000000000000000000000000000000000000000000000000000000000',
+             NULL, 0, 0, 1);",
+    );
+    exec_on_db(
+        &db,
+        "INSERT INTO blobs (oid, refcount, title, summary, body, aliases_text, tags_text,
+             keywords_text)
+         VALUES ('a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6a7b8c9d0', 1, 't', 's', 'b', '', '', '');",
+    );
+    exec_on_db(
+        &db,
+        "INSERT INTO gen_paths (gen_id, source, path_rel, oid, parent_dir)
+         VALUES (1, 'tree', 'p.md', 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6a7b8c9d0', '');",
+    );
+    // The injected shape deviation: a renamed binding column.
+    exec_on_db(&db, "ALTER TABLE generations RENAME COLUMN digest TO digest_x;");
+    assert!(matches!(
+        probe(&db).expect("probe"),
+        ProbeOutcome::Skew(Tier::Index)
+    ));
+
+    // Any command's open heals this silently. Before the child-first drop
+    // order this line failed with FOREIGN KEY constraint failed.
+    drop(open_store(dir.path()));
+    assert_eq!(
+        probe(&db).expect("probe after repair"),
+        ProbeOutcome::Valid
+    );
+}
+
 #[test]
 fn page_writes_remain_queued_until_one_explicit_flush() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -907,8 +958,11 @@ fn clear_empties_both_tiers_and_preserves_the_directory() {
     store
         .upsert_fingerprint(&key, "pages/guide.md", SHA, "pages/other.md", 10, 20, FP)
         .expect("upsert");
-    // Index-tier data: one static row and one dynamic `fts_<gen_id>` child,
-    // shaped as generations.rs produces them.
+    // Index-tier data: an FK-linked family exactly as generations.rs
+    // produces it — parent generation, referenced blob, membership row —
+    // plus one dynamic `fts_<gen_id>` child. The child rows are load-bearing:
+    // under foreign_keys=ON a parent-first DROP order fails the whole
+    // teardown transaction on precisely this shape.
     let db = db_path(dir.path());
     exec_on_db(
         &db,
@@ -919,7 +973,18 @@ fn clear_empties_both_tiers_and_preserves_the_directory() {
              x'0000000000000000000000000000000000000000',
              x'0000000000000000000000000000000000000000',
              x'0000000000000000000000000000000000000000000000000000000000000000',
-             NULL, 0, 0, 0);",
+             NULL, 0, 0, 1);",
+    );
+    exec_on_db(
+        &db,
+        "INSERT INTO blobs (oid, refcount, title, summary, body, aliases_text, tags_text,
+             keywords_text)
+         VALUES ('a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6a7b8c9d0', 1, 't', 's', 'b', '', '', '');",
+    );
+    exec_on_db(
+        &db,
+        "INSERT INTO gen_paths (gen_id, source, path_rel, oid, parent_dir)
+         VALUES (1, 'tree', 'p.md', 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6a7b8c9d0', '');",
     );
     exec_on_db(&db, "CREATE VIRTUAL TABLE fts_1 USING fts5(body);");
     // A diagnostic event recorded before the clear must survive it — the
@@ -941,6 +1006,12 @@ fn clear_empties_both_tiers_and_preserves_the_directory() {
     store.clear().expect("clear");
     assert!(cache.exists(), "the directory itself is preserved");
     assert!(lock.exists(), "the init lock file is preserved");
+    assert!(
+        !cache
+            .join(format!("{DB_FILE_NAME}.1234567890.quarantine"))
+            .exists(),
+        "stale quarantine asides are swept"
+    );
 
     // Tier tables exist again (empty shapes) with zero rows; the dynamic
     // fts child is gone entirely; meta and the ledger survive.

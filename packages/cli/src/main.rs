@@ -126,11 +126,14 @@ enum Commands {
         #[arg(long = "fix")]
         fix: bool,
         /// Print what would be rewritten without modifying any files (requires --fix).
+        /// Pending crash-recovery journals are accounted for as if already replayed,
+        /// so the proposal matches what a real run will do.
         #[arg(long = "fix-dry-run", requires = "fix")]
         fix_dry_run: bool,
         /// Print only the repo-relative path of each file the run rewrote to
         /// stdout (one per line); route the fix/skip summary, advisories, and
-        /// diagnostics to stderr. Lets callers stage exactly what this run touched.
+        /// diagnostics to stderr. Lets callers stage exactly what this run touched
+        /// — including files completed by crash-recovery journal replay.
         #[arg(
             long = "print-applied",
             requires = "fix",

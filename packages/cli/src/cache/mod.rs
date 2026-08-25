@@ -50,23 +50,32 @@ pub struct WalkRow {
     pub value: Option<String>,
 }
 
-/// A cache fault. Every variant means the cache is unavailable for the run;
-/// the caller falls back to uncached computation with at most one diagnostic
-/// line (plan decision 7). Transient `SQLITE_BUSY` is retried internally by
-/// the bounded wrapper (plan decision 6) and never quarantines — it surfaces
-/// here only after the retries are exhausted.
+/// A store fault, raised by machinery both tiers share (probe/quarantine/
+/// skew repair/DDL, fd hardening, locks) or by either tier's connection.
+/// The Display labels name the shared store layer — never one tier —
+/// because the same value type serves both; tier context comes from each
+/// caller's own wrapping (the anchor reporter's
+/// `warning: anchor cache unavailable (...)` line, the index open path's
+/// `failed to open wiki store ...`). Labeling shared faults after one tier
+/// misattributed every other tier's failure to that tier.
+///
+/// For the anchor tier every variant means the cache is unavailable for the
+/// run; the caller falls back to uncached computation with at most one
+/// diagnostic line (plan decision 7). Transient `SQLITE_BUSY` is retried
+/// internally by the bounded wrapper (plan decision 6) and never
+/// quarantines — it surfaces here only after the retries are exhausted.
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
     /// Filesystem operation failed (lock, quarantine rename, sidecar delete,
     /// directory create).
-    #[error("anchor cache I/O failure: {0}")]
+    #[error("wiki store I/O failure: {0}")]
     Io(#[from] std::io::Error),
     /// SQLite operation failed (probe, open, statement).
-    #[error("anchor cache SQLite failure: {0}")]
+    #[error("wiki store SQLite failure: {0}")]
     Sqlite(#[from] rusqlite::Error),
     /// The database was corrupt (NOTADB / CORRUPT / meta mismatch) and the
     /// single quarantine-and-recreate attempt also failed.
-    #[error("anchor cache is corrupt and could not be recreated: {0}")]
+    #[error("wiki store is corrupt and could not be recreated: {0}")]
     Corrupt(String),
 }
 
@@ -828,5 +837,38 @@ impl AnchorCache for NoopCache {
 
     fn clear(&self) -> Result<(), CacheError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Shared-layer fault labels never claim a tier (finding F8): both
+    /// tiers construct these values, so "anchor cache ..." on an index-tier
+    /// failure misattributed every index fault to the anchor cache. The
+    /// tier context is each caller's own wrapping.
+    #[test]
+    fn shared_fault_labels_never_claim_a_tier() {
+        let io = CacheError::from(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "gone",
+        ));
+        let sqlite = CacheError::from(rusqlite::Error::InvalidQuery);
+        let corrupt = CacheError::Corrupt("witness".into());
+        for error in [io.to_string(), sqlite.to_string(), corrupt.to_string()] {
+            assert!(
+                !error.contains("anchor"),
+                "shared faults must not claim the anchor tier: {error}"
+            );
+            assert!(
+                !error.contains("index"),
+                "shared faults must not claim the index tier: {error}"
+            );
+            assert!(
+                error.starts_with("wiki store "),
+                "shared faults must name the store layer: {error}"
+            );
+        }
     }
 }

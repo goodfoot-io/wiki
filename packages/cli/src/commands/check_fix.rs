@@ -765,22 +765,23 @@ pub fn run_fix_pass(
 ) -> Result<FixPlan> {
     // Replay pending journals first (plan Decision 8): a previous run killed
     // mid-materialization is completed from its journal before any fresh
-    // planning, so planning observes post-replay disk state. Dry runs are
-    // side-effect-free: no replay application, no staging.
-    let replay_applied = if dry_run {
-        HashMap::new()
-    } else {
-        replay_pending(repo_root)?
-    };
+    // planning, so planning observes post-replay disk state. Dry runs run
+    // the identical scan virtually (evaluation F5): valid journals seed the
+    // planning basis without writing working files or consuming journal
+    // state, so the preview proposes only what execution will actually do.
+    let replay_targets = replay_pending(repo_root, /* apply */ !dry_run)?;
 
     let mut rename_map = RenameMap::build(repo_root)?;
 
     let mut fixes: Vec<Fix> = Vec::new();
     let mut skipped: Vec<SkippedFix> = Vec::new();
     // file abs path → patched content. Seeded first with the replay's
-    // applied contents so every phase below reads post-replay state (the
+    // post-replay contents so every phase below reads post-replay state (the
     // per-run content cache was warmed before the replay rewrote files).
-    let mut patches: HashMap<PathBuf, String> = replay_applied.clone();
+    let mut patches: HashMap<PathBuf, String> = replay_targets
+        .iter()
+        .map(|(path, target)| (path.clone(), target.content.clone()))
+        .collect();
 
     for file in files {
         // Prefer a replay-seeded patch as the base (plan Decision 8): the
@@ -1305,25 +1306,43 @@ pub fn run_fix_pass(
     let unverified = drift.unverified;
     let certification_skips = drift.certification_skips;
 
-    // Materialize patches to disk unless dry_run (plan Decision 8). A
-    // replay-seeded entry the planning phases left untouched describes
-    // content already on disk (replay hash-verified it before delivering);
-    // dropping those no-ops keeps the journal and `applied_paths` honest.
-    if !dry_run && !patches.is_empty() {
-        for (path, seeded) in &replay_applied {
-            if patches.get(path).map(|p| p == seeded).unwrap_or(false) {
-                patches.remove(path);
-            }
-        }
+    // A replay-seeded entry the planning phases left untouched describes
+    // content the real run already has (or will have, via replay) on disk
+    // before staging — dropping those no-ops spares a pointless
+    // re-materialization journal. Files the replay PHYSICALLY WROTE this
+    // run re-enter the applied accounting below (evaluation F4: pruning is
+    // about sparing writes, never about hiding them from --print-applied).
+    let noop_seeds: Vec<PathBuf> = replay_targets
+        .iter()
+        .filter(|(path, target)| {
+            patches.get(*path).map(|c| c == &target.content).unwrap_or(false)
+        })
+        .map(|(path, _)| path.clone())
+        .collect();
+    for path in noop_seeds {
+        patches.remove(&path);
     }
     if !dry_run && !patches.is_empty() {
         materialize_with_journal(repo_root, &patches)?;
     }
 
-    // `applied_paths`: every patched file, repo-relative, in deterministic
-    // order — `--print-applied` prints exactly this list (Decision 7).
-    let mut applied_paths: Vec<String> = patches
-        .keys()
+    // `applied_paths`: every file THIS RUN touched — planned patches AND
+    // targets the replay physically wrote — repo-relative, deterministic
+    // order. Pure idempotent skips (disk already at target bytes before
+    // this run touched nothing) are excluded. Dry runs write nothing, so
+    // their replay contributes no entries here (and no output channel
+    // prints the field) (Decision 7 / evaluation F4).
+    // `--print-applied` prints exactly this list.
+    let mut applied_abs: Vec<&PathBuf> = patches.keys().collect();
+    if !dry_run {
+        applied_abs.extend(
+            replay_targets
+                .iter()
+                .filter_map(|(path, target)| target.written_this_run.then_some(path)),
+        );
+    }
+    let mut applied_paths: Vec<String> = applied_abs
+        .iter()
         .map(|p| {
             p.strip_prefix(repo_root)
                 .unwrap_or(p)
@@ -1919,13 +1938,16 @@ fn classify_journal(dir: &Path, identity: &str, now: u64) -> Disposition {
 /// Apply one valid journal idempotently: skip targets whose current bytes
 /// already hash to the recorded sha256, write the rest, mark delivered,
 /// remove the directory. Any write failure propagates — fail closed, the
-/// journal stays for the next replay.
+/// journal stays for the next replay. Returns the repo-relative paths whose
+/// bytes THIS call physically wrote (pure idempotent skips excluded) — the
+/// `--print-applied` contract counts them (evaluation F4).
 fn replay_apply_journal(
     dir: &Path,
     repo_root: &Path,
     stages: &[(String, String)],
     manifest: JournalManifest,
-) -> Result<()> {
+) -> Result<Vec<String>> {
+    let mut written_rels: Vec<String> = Vec::new();
     for (path_rel, content) in stages {
         let target = repo_root.join(path_rel);
         let content_sha = crate::cache::key::sha256_hex(content.as_bytes());
@@ -1939,6 +1961,7 @@ fn replay_apply_journal(
                     target.display()
                 )
             })?;
+            written_rels.push(path_rel.clone());
         }
     }
     // Delivered: the state machine's terminal record before removal. A kill
@@ -1953,19 +1976,41 @@ fn replay_apply_journal(
     })?;
     std::fs::remove_dir_all(dir)
         .map_err(|e| miette::miette!("fix journal cleanup failed: {e}"))?;
-    Ok(())
+    Ok(written_rels)
+}
+
+/// One replay-classified target: the post-replay content plus whether THIS
+/// run's replay physically wrote the file. `written_this_run` is false for
+/// pure idempotent skips (disk already at target bytes) and for dry-run
+/// virtual classification, which writes nothing (evaluation F4/F5).
+pub(crate) struct ReplayedTarget {
+    pub(crate) content: String,
+    pub(crate) written_this_run: bool,
 }
 
 /// Replay any pending journals under `<dot-git>/wiki/journal` BEFORE fresh
-/// patches are planned. Valid, unexpired journals are applied idempotently
-/// (targets whose current bytes already hash to the recorded sha256 are
-/// skipped), marked delivered, and removed. Expired or corrupt journals are
-/// deleted and reported through at most one stderr warning line per process.
+/// patches are planned.
 ///
-/// Returns the applied `(absolute path → final content)` pairs so the caller
-/// can seed its planning overlay — planning must observe post-replay disk
-/// state, not the pre-replay bytes its content cache warmed.
-pub(crate) fn replay_pending(repo_root: &Path) -> Result<HashMap<PathBuf, String>> {
+/// * `apply == true` (real runs): valid, unexpired journals are applied
+///   idempotently — targets whose current bytes already hash to the recorded
+///   sha256 are skipped, the rest written — then marked delivered and
+///   removed. Expired or corrupt journals are deleted and reported through
+///   at most one stderr warning line per process.
+/// * `apply == false` (dry runs, evaluation F5): the identical scan runs
+///   read-only. Valid journals seed the planning basis with their staged
+///   contents WITHOUT writing working files, stamping delivery, or removing
+///   anything; stale journals are left untouched and silent. The dry run's
+///   planning basis therefore equals a real run's post-replay state, so the
+///   preview never proposes fixes that execution's replay would satisfy.
+///
+/// Returns every covered `(absolute path → post-replay content +
+/// written-this-run)` pair so the caller can seed its planning overlay —
+/// planning must observe post-replay disk state, not the pre-replay bytes
+/// its content cache warmed.
+pub(crate) fn replay_pending(
+    repo_root: &Path,
+    apply: bool,
+) -> Result<HashMap<PathBuf, ReplayedTarget>> {
     let Some(dot_git) = crate::index::find_dot_git(repo_root) else {
         return Ok(HashMap::new());
     };
@@ -1990,20 +2035,32 @@ pub(crate) fn replay_pending(repo_root: &Path) -> Result<HashMap<PathBuf, String
     let now = unix_ms();
 
     let mut discarded = 0usize;
-    let mut applied: HashMap<PathBuf, String> = HashMap::new();
+    let mut targets: HashMap<PathBuf, ReplayedTarget> = HashMap::new();
 
     for dir in dirs {
         match classify_journal(&dir, &identity, now) {
             Disposition::Stale => {
-                std::fs::remove_dir_all(&dir)
-                    .map_err(|e| miette::miette!("stale fix journal removal failed: {e}"))?;
-                discarded += 1;
+                if apply {
+                    std::fs::remove_dir_all(&dir)
+                        .map_err(|e| miette::miette!("stale fix journal removal failed: {e}"))?;
+                    discarded += 1;
+                }
             }
             Disposition::Apply(loaded, manifest) => {
                 let LoadedJournal { stages } = *loaded;
-                replay_apply_journal(&dir, repo_root, &stages, *manifest)?;
+                let written_rels = if apply {
+                    replay_apply_journal(&dir, repo_root, &stages, *manifest)?
+                } else {
+                    Vec::new()
+                };
                 for (path_rel, content) in &stages {
-                    applied.insert(repo_root.join(path_rel), content.clone());
+                    targets.insert(
+                        repo_root.join(path_rel),
+                        ReplayedTarget {
+                            content: content.clone(),
+                            written_this_run: written_rels.iter().any(|w| w == path_rel),
+                        },
+                    );
                 }
             }
         }
@@ -2014,7 +2071,7 @@ pub(crate) fn replay_pending(repo_root: &Path) -> Result<HashMap<PathBuf, String
             "warning: {discarded} stale fix journal(s) discarded; recomputing cleanly"
         );
     }
-    Ok(applied)
+    Ok(targets)
 }
 
 /// Materialize `patches` through a crash-recovery journal: stage every
