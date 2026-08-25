@@ -2,7 +2,7 @@
 title: Search Commands And Output Shapes
 summary: Search, list, and summary — ranking, output shapes, title/alias/path resolution, and verb-dispatch vs search fallback.
 tags: [wiki, reference]
-links-reviewed: 2
+links-reviewed: 3
 ---
 
 `wiki [query]` is the default subcommand — no verb needed.
@@ -18,7 +18,7 @@ echo wiki/page.md | wiki summary   # stdin when argument omitted
 
 ## Ranking
 
-Four stages in priority order: exact title match → exact alias-token match → path fragment (only when the query contains `/`) → BM25 full-text over weighted fields — title 5, aliases 4, tags 3, keywords 3, summary 2, body 1 ([weights](/packages/cli/src/index/search.rs#L216-L217)). Query tokens are prefix-matched; snippets come from body text. Zero matches prints nothing (human) or `[]` (JSON) and exits 0.
+Four stages in priority order: exact title match → exact alias-token match → path fragment (only when the query contains `/`) → BM25 full-text over weighted fields — title 5, aliases 4, tags 3, keywords 3, summary 2, body 1 ([weights](/packages/cli/src/index/search.rs#L214-L218)). Query tokens are prefix-matched; snippets come from body text. Zero matches prints nothing (human) or `[]` (JSON) and exits 0.
 
 ## Verb dispatch vs search fallback
 
