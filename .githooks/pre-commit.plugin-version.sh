@@ -46,6 +46,33 @@ stage_version_hunk() {
     git update-index --cacheinfo "100644,$blob,$path"
 }
 
+# First-occurrence "version" field bump shared by the worktree side and the
+# index-replay side of the marketplace update. One mechanism for this class
+# of replacement, and it lives in node rather than sed: the first-match
+# address form a streaming sed would need here is GNU-only — BSD sed rejects
+# it as a compile error, which under set -e aborted macOS commits mid-staging
+# after the manifests were already index-swapped. node is already a hard
+# requirement of this hook. Exits non-zero when the file's first version is
+# not $old, unless ALLOW_MISSING=1 (used by the tolerant index-base replay).
+bump_first_marketplace_version() {
+    local file="$1" old="$2" new="$3"
+    P="$file" OLD="$old" NEW="$new" ALLOW_MISSING="${ALLOW_MISSING:-0}" node -e '
+      const fs = require("fs");
+      const p = process.env.P;
+      const raw = fs.readFileSync(p, "utf8");
+      const match = /"version"\s*:\s*"([^"]*)"/.exec(raw);
+      if (!match || match[1] !== process.env.OLD) {
+        if (process.env.ALLOW_MISSING === "1") process.exit(0);
+        console.error(`ERROR: ${p}: first version is ${match ? match[1] : "absent"}, expected ${process.env.OLD}`);
+        process.exit(1);
+      }
+      fs.writeFileSync(
+        p,
+        raw.slice(0, match.index) + `"version": "${process.env.NEW}"` + raw.slice(match.index + match[0].length)
+      );
+    '
+}
+
 # Collect unique plugin names touched by this commit.
 declare -A TOUCHED_PLUGINS
 while IFS= read -r file; do
@@ -156,11 +183,7 @@ NEW_MARKETPLACE_VERSION=""
 if [ -n "$M_MARKETPLACE_VERSION" ]; then
     IFS='.' read -r M_MAJOR M_MINOR M_PATCH <<< "$M_MARKETPLACE_VERSION"
     NEW_MARKETPLACE_VERSION="${M_MAJOR}.${M_MINOR}.$((M_PATCH + 1))"
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        sed -i '' "0,/\"version\"[[:space:]]*:[[:space:]]*\"${M_MARKETPLACE_VERSION}\"/s//\"version\": \"${NEW_MARKETPLACE_VERSION}\"/" "$MARKETPLACE_JSON"
-    else
-        sed -i "0,/\"version\"[[:space:]]*:[[:space:]]*\"${M_MARKETPLACE_VERSION}\"/s//\"version\": \"${NEW_MARKETPLACE_VERSION}\"/" "$MARKETPLACE_JSON"
-    fi
+    bump_first_marketplace_version "$MARKETPLACE_JSON" "$M_MARKETPLACE_VERSION" "$NEW_MARKETPLACE_VERSION"
     echo "Bumped marketplace.json version: ${M_MARKETPLACE_VERSION} -> ${NEW_MARKETPLACE_VERSION}"
 fi
 
@@ -185,8 +208,10 @@ for i in "${!BUMPED_PLUGIN_NAMES[@]}"; do
     '
 done
 if [ -n "$M_MARKETPLACE_VERSION" ] && [ -n "$NEW_MARKETPLACE_VERSION" ]; then
-    sed "0,/\"version\"[[:space:]]*:[[:space:]]*\"${M_MARKETPLACE_VERSION}\"/s//\"version\": \"${NEW_MARKETPLACE_VERSION}\"/" \
-        "$STAGED_MARKET" > "${STAGED_MARKET}.bumped" && mv "${STAGED_MARKET}.bumped" "$STAGED_MARKET"
+    # Tolerant on the index base: an unrelated staged metadata.version edit
+    # makes its first version differ from ours — keep our hunk out rather
+    # than aborting the commit mid-staging.
+    ALLOW_MISSING=1 bump_first_marketplace_version "$STAGED_MARKET" "$M_MARKETPLACE_VERSION" "$NEW_MARKETPLACE_VERSION"
 fi
 MARKET_BLOB=$(git hash-object -w "$STAGED_MARKET")
 rm -f "$STAGED_MARKET"
