@@ -2,8 +2,24 @@
 /**
  * Wraps the unified `@goodfoot/agent-hooks` CLI so every invocation -- via
  * `yarn build:hooks`/`yarn build:hooks:codex` or directly via `yarn
- * agent-hooks-cli` -- gets its generated `.mjs` output normalized afterward
- * by `scripts/normalize-hook-module-comments.js`.
+ * agent-hooks-cli` -- gets its generated manifest canonicalized afterward
+ * (stable hook ordering, no stamped timestamp) via `canonicalizeHookManifest`
+ * below.
+ *
+ * An earlier version of this wrapper also post-processed the generated
+ * `.mjs` output's esbuild module-boundary comments, to correct for the
+ * legacy `@goodfoot/claude-code-hooks`/`@goodfoot/codex-hooks` CLI computing
+ * those comments against a fully-dereferenced realpath -- producing a long,
+ * worktree-depth-dependent `../` chain whenever `node_modules` was reached
+ * through a symlink (as it always is in a Cards worktree), instead of the
+ * short, portable form a non-symlinked layout would emit.
+ * `test/layout/symlink-byte-stability.test.ts` proved the unified
+ * `@goodfoot/agent-hooks` CLI no longer has this problem -- its own path
+ * computation is already symlink-portable, producing a byte-identical
+ * bundle whether built through this worktree's symlinked `node_modules` or
+ * a real, non-symlinked `npm install` -- so that normalization step and its
+ * `scripts/normalize-hook-module-comments.js` module were removed; the test
+ * stands as the permanent guard against regression.
  *
  * It also converts each manifest's hook registration `timeout` from
  * milliseconds to seconds -- but only for `--agent claude-code`, which emits
@@ -31,8 +47,8 @@
  * The wrapper forwards all CLI args unchanged to the real, installed CLI
  * (resolved by realpath through node_modules -- symlinked or not -- so the
  * actual compiled output is byte-for-byte what the CLI itself produces),
- * then post-processes only the `//` module-boundary comments in the
- * directory the `-o`/`--output` argument points at.
+ * then canonicalizes the emitted manifest at the `-o`/`--output` argument's
+ * path.
  *
  * Usage: node scripts/hooks-cli-wrapper.js --agent <claude-code|codex> [...cli-args]
  */
@@ -41,7 +57,6 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeModuleComments } from './normalize-hook-module-comments.js';
 
 function findOutputPath(cliArgs) {
   for (let i = 0; i < cliArgs.length; i += 1) {
@@ -205,17 +220,15 @@ async function main() {
   const outputArg = findOutputPath(cliArgs);
   if (outputArg === undefined) {
     // Nothing was compiled to a hooks.json (e.g. --scaffold, --help); no
-    // generated .mjs output to normalize.
+    // generated manifest to canonicalize.
     return;
   }
-  const outputDir = dirname(resolve(process.cwd(), outputArg));
   const agentValue = cliArgs.findLast((_, i) => cliArgs[i - 1] === '--agent');
   if (agentValue === 'claude-code') {
     // Only --agent claude-code needs the division -- --agent codex already
     // emits seconds, and converting its manifest again would corrupt it.
     convertHookTimeoutsToSeconds(resolve(process.cwd(), outputArg));
   }
-  normalizeModuleComments([outputDir]);
   canonicalizeHookManifest(resolve(process.cwd(), outputArg), findInputPath(cliArgs));
 }
 
