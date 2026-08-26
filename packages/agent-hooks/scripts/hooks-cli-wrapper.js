@@ -8,8 +8,9 @@
  *
  * An earlier version of this wrapper also post-processed the generated
  * `.mjs` output's esbuild module-boundary comments, to correct for the
- * legacy `@goodfoot/claude-code-hooks`/`@goodfoot/codex-hooks` CLI computing
- * those comments against a fully-dereferenced realpath -- producing a long,
+ * legacy split-package CLI (the two per-host packages this migrated away
+ * from) computing those comments against a fully-dereferenced realpath --
+ * producing a long,
  * worktree-depth-dependent `../` chain whenever `node_modules` was reached
  * through a symlink (as it always is in a Cards worktree), instead of the
  * short, portable form a non-symlinked layout would emit.
