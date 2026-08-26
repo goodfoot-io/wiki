@@ -16,7 +16,7 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rusqlite::{Connection, OpenFlags};

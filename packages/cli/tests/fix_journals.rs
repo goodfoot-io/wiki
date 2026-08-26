@@ -778,18 +778,6 @@ fn dry_run_preview_matches_subsequent_real_run() {
 
 // ── F-C: dry-run diagnostic layer + exit gate converge with pending replay ───
 
-/// Extract every output line mentioning `rel`, sorted — the comparable
-/// diagnostic surface across runs.
-fn diagnostic_lines(out: &Output, rel: &str) -> Vec<String> {
-    let mut lines: Vec<String> = combined(out)
-        .lines()
-        .filter(|l| l.contains(rel))
-        .map(str::to_owned)
-        .collect();
-    lines.sort();
-    lines
-}
-
 /// F-C control (a): a prepared journal holding the fixed pages must make the
 /// dry run's diagnostics AND exit gate describe the execution it previews —
 /// no stale broken-link lines, exit 0, "no fixes to apply" — while touching
