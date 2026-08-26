@@ -180,9 +180,21 @@ jobs:
             exit 1
           fi
 
+      # npm pack silently drops symlink entries, and plugins-opencode/wiki/skills
+      # is a symlink into the central skills tree — publishing straight from the
+      # source tree would ship a package whose installer cannot find skills/wiki
+      # (the failure that shipped as 0.5.129). Pack through pack-opencode.mjs,
+      # which stages a dereferenced copy, and fail closed unless the skill tree
+      # verifiably made it into the tarball.
       - name: Publish OpenCode plugin package
-        working-directory: plugins-opencode/wiki
-        run: npm publish --access public --provenance
+        run: |
+          TARBALL="$(node packages/agent-hooks/scripts/pack-opencode.mjs)"
+          echo "Packed tarball: $TARBALL"
+          if ! tar -tf "$TARBALL" | grep -q '^package/skills/wiki/SKILL.md$'; then
+            echo "ERROR: packed @goodfoot/opencode-wiki is missing package/skills/wiki/SKILL.md — refusing to publish" >&2
+            exit 1
+          fi
+          npm publish "$TARBALL" --access public --provenance
 
   github-release:
     needs: build
