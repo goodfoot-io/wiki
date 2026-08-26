@@ -1,7 +1,7 @@
 /**
  * OpenCode plugin entry — wires the shared wiki-check core into the host's
  * `Hooks` shape. OpenCode loads this module in-process via file:// and calls
- * the default export once at startup; the returned `tool.execute.after`
+ * the default export's `server` once at startup; the returned `tool.execute.after`
  * appends `<wiki>` context blocks to the tool result text: residual
  * diagnostics, or the loud SKIPPED notice when the binary cannot be launched
  * (surfacing parity with the claude/codex adapters).
@@ -136,8 +136,24 @@ export function assemblePlugin(deps: PluginDeps = {}): WikiOpencodeHooks {
  * The plugin OpenCode loads: an async init receiving `{ directory }` and
  * returning the hooks object. Never rejects into the fail-closed host loader.
  */
-export default async function wikiOpencode(input?: OpencodePluginInput): Promise<WikiOpencodeHooks> {
+export async function wikiOpencode(input?: OpencodePluginInput): Promise<WikiOpencodeHooks> {
   return assemblePlugin({
     directory: typeof input?.directory === 'string' && input.directory.length > 0 ? input.directory : undefined
   });
 }
+
+/**
+ * The module shape OpenCode's loader detects: a default-exported
+ * `{ id?, server }` object whose `server` builds the hooks. Detection on the
+ * `server` key short-circuits before the host inspects named exports that are
+ * helpers rather than plugin initializer functions.
+ *
+ * The id matches the npm package name so path and registry installations have
+ * identical attribution in host logs.
+ */
+const pluginModule: { id: string; server: typeof wikiOpencode } = {
+  id: '@goodfoot/opencode-wiki',
+  server: wikiOpencode
+};
+
+export default pluginModule;

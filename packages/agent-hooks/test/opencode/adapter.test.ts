@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { WikiCheckResult } from '../../src/common/wiki-check.js';
-import { assemblePlugin, default as wikiOpencode } from '../../src/opencode/index.js';
+import { assemblePlugin, wikiOpencode } from '../../src/opencode/index.js';
 import type { OpencodeAfterOutput, OpencodeToolInput } from '../../src/opencode/types.js';
 
 let fixtureDir: string | undefined;
@@ -40,7 +40,7 @@ function afterOutput(text = 'tool ran'): OpencodeAfterOutput {
 
 describe('opencode adapter', () => {
   describe('plugin shape', () => {
-    it('default export resolves to tool.execute.after plus a no-op-safe dispose', async () => {
+    it('server initializer resolves to tool.execute.after plus a no-op-safe dispose', async () => {
       const hooks = await wikiOpencode();
       expect(typeof hooks['tool.execute.after']).toBe('function');
       expect(() => hooks.dispose()).not.toThrow();

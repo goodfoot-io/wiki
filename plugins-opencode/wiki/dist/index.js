@@ -234,7 +234,13 @@ async function wikiOpencode(input) {
     directory: typeof input?.directory === "string" && input.directory.length > 0 ? input.directory : void 0
   });
 }
+var pluginModule = {
+  id: "@goodfoot/opencode-wiki",
+  server: wikiOpencode
+};
+var index_default = pluginModule;
 export {
   assemblePlugin,
-  wikiOpencode as default
+  index_default as default,
+  wikiOpencode
 };
