@@ -1,8 +1,9 @@
 import { spawnSync } from 'node:child_process';
-import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
-import { dirname, relative, resolve } from 'node:path';
+import { lstatSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
 // This scanner's own source necessarily spells out both legacy package names
@@ -18,15 +19,18 @@ interface Exception {
   occurrences: number;
 }
 
-function listTrackedPaths(): string[] {
-  const result = spawnSync('git', ['-C', repoRoot, 'ls-files'], { encoding: 'utf8' });
+function listTrackedPaths(cwd: string = repoRoot): string[] {
+  // -z terminates entries with NUL and disables git's default core.quotepath
+  // octal-escaping of non-ASCII bytes, so paths come back raw regardless of
+  // repo config.
+  const result = spawnSync('git', ['-C', cwd, 'ls-files', '-z'], { encoding: 'utf8' });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`git ls-files failed: ${result.stderr}`);
-  return result.stdout.split('\n').filter(Boolean);
+  return result.stdout.split('\0').filter(Boolean);
 }
 
-function readTrackedContent(relativePath: string): string {
-  const absPath = resolve(repoRoot, relativePath);
+function readTrackedContent(relativePath: string, cwd: string = repoRoot): string {
+  const absPath = resolve(cwd, relativePath);
   const stats = lstatSync(absPath);
   if (stats.isSymbolicLink()) return readlinkSync(absPath);
   if (stats.isFile()) return readFileSync(absPath, 'utf8');
@@ -58,6 +62,31 @@ function findOffenders(entries: Array<{ path: string; content: string }>, except
 }
 
 describe('no tracked file references either superseded hooks package', () => {
+  let scratchRepo: string | undefined;
+
+  afterEach(() => {
+    if (scratchRepo) rmSync(scratchRepo, { recursive: true, force: true });
+    scratchRepo = undefined;
+  });
+
+  it('listTrackedPaths/readTrackedContent handle a non-ASCII tracked filename', () => {
+    // Regression for git's default core.quotepath=true octal-escaping
+    // non-ASCII tracked paths (e.g. "café.md" -> "caf\303\251.md"), which
+    // used to make readTrackedContent resolve a bogus path and throw ENOENT.
+    scratchRepo = mkdtempSync(join(tmpdir(), 'agent-hooks-quotepath-'));
+    spawnSync('git', ['init', '-q', scratchRepo]);
+    spawnSync('git', ['-C', scratchRepo, 'config', 'user.email', 'test@example.com']);
+    spawnSync('git', ['-C', scratchRepo, 'config', 'user.name', 'test']);
+    const nonAsciiName = 'café.md';
+    writeFileSync(join(scratchRepo, nonAsciiName), 'hello');
+    spawnSync('git', ['-C', scratchRepo, 'add', '.']);
+    spawnSync('git', ['-C', scratchRepo, 'commit', '-q', '-m', 'init']);
+
+    const tracked = listTrackedPaths(scratchRepo);
+    expect(tracked).toEqual([nonAsciiName]);
+    expect(readTrackedContent(nonAsciiName, scratchRepo)).toBe('hello');
+  });
+
   it('finds zero un-excepted references to @goodfoot/claude-code-hooks or @goodfoot/codex-hooks', () => {
     // Nothing legitimate references either legacy package today -- start empty.
     const exceptions: Exception[] = [];

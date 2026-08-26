@@ -69,9 +69,9 @@ export function createHandler() {
   };
 }
 
-// The codex-hooks CLI extracts manifest metadata via AST and reads only
-// inline string literals for `matcher`; referencing WIKI_POST_MATCHER here
-// would silently drop the field. hooks-shape.test.ts pins the emitted form.
+// The unified agent-hooks CLI extracts manifest metadata via AST and reads
+// only inline string literals for `matcher`; referencing WIKI_POST_MATCHER
+// here would silently drop the field. hooks-shape.test.ts pins the emitted form.
 export default postToolUseHook(
   { matcher: 'apply_patch|exec_command|exec|shell|local_shell', timeout: 60000 },
   createHandler()
