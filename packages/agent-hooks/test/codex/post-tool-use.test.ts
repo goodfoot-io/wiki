@@ -1,7 +1,7 @@
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { type HookContext, Logger, type PostToolUseInput } from '@goodfoot/codex-hooks';
+import { type HookContext, Logger, type PostToolUseInput } from '@goodfoot/agent-hooks/codex';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHandler, default as hook, narrowPatchText, WIKI_POST_MATCHER } from '../../src/codex/post-tool-use.js';
 

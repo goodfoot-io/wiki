@@ -1,4 +1,4 @@
-import { getFilePath, postToolUseHook, postToolUseOutput } from '@goodfoot/claude-code-hooks';
+import { getFilePath, postToolUseHook, postToolUseOutput } from '@goodfoot/agent-hooks/claude-code';
 import {
   isWikiFile,
   resolveWikiBinary,

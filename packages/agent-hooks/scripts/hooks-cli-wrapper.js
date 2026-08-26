@@ -1,27 +1,32 @@
 #!/usr/bin/env node
 /**
- * Wraps the `@goodfoot/claude-code-hooks`/`@goodfoot/codex-hooks` CLIs so
- * every invocation -- whether reached via `yarn build:hooks`/`yarn
- * build:hooks:codex` or directly via `yarn claude-code-hooks`/`yarn
- * codex-hooks` -- gets its generated `.mjs` output normalized afterward by
- * `scripts/normalize-hook-module-comments.js`.
+ * Wraps the unified `@goodfoot/agent-hooks` CLI so every invocation -- via
+ * `yarn build:hooks`/`yarn build:hooks:codex` or directly via `yarn
+ * agent-hooks-cli` -- gets its generated `.mjs` output normalized afterward
+ * by `scripts/normalize-hook-module-comments.js`.
  *
  * It also converts each manifest's hook registration `timeout` from
- * milliseconds to seconds -- but only for the Claude CLI, which emits the
- * source value verbatim even though Claude Code reads the field as seconds
- * ("Seconds before canceling"). The Codex CLI performs the same division
- * itself (`timeoutMsToSeconds`) before writing its manifest, so its output
- * must pass through untouched; re-dividing it would shrink every ceiling a
- * thousandfold. Source authoring stays milliseconds across both adapters,
- * matching the codex pipeline.
+ * milliseconds to seconds -- but only for `--agent claude-code`, which emits
+ * the source value verbatim even though Claude Code reads the field as
+ * seconds ("Seconds before canceling"). `--agent codex` performs the same
+ * division itself (`timeoutMsToSeconds`) before writing its manifest, so its
+ * output must pass through untouched; re-dividing it would shrink every
+ * ceiling a thousandfold. Source authoring stays milliseconds across both
+ * adapters, matching the codex pipeline.
  *
- * This package's package.json defines "claude-code-hooks" and "codex-hooks"
- * scripts that point here. Because Yarn resolves a bare `yarn <name>`
- * invocation against package.json scripts *before* falling back to a
- * same-named binary contributed by a dependency, `yarn claude-code-hooks
- * ...`/`yarn codex-hooks ...` run this wrapper instead of the raw CLI --
- * so the fix applies uniformly no matter which of those spellings invokes
- * the build.
+ * This package's package.json defines an "agent-hooks-cli" script that
+ * points here. Because Yarn resolves a bare `yarn <name>` invocation against
+ * package.json scripts *before* falling back to a same-named binary
+ * contributed by a dependency, `yarn agent-hooks-cli ...` runs this wrapper
+ * instead of the raw CLI.
+ *
+ * The upstream CLI already fails closed (stderr message, exit 1, no file
+ * written) for a missing or unknown `--agent` value, and for the unparsed
+ * `--agent=value` equals form (which it silently ignores, leaving `--agent`
+ * effectively missing). The one gap it leaves open is a *repeated* `--agent`
+ * flag with conflicting values -- it keeps only the last occurrence rather
+ * than rejecting the ambiguity -- so this wrapper validates only that case
+ * before spawning anything.
  *
  * The wrapper forwards all CLI args unchanged to the real, installed CLI
  * (resolved by realpath through node_modules -- symlinked or not -- so the
@@ -29,8 +34,7 @@
  * then post-processes only the `//` module-boundary comments in the
  * directory the `-o`/`--output` argument points at.
  *
- * Usage: node scripts/hooks-cli-wrapper.js <package-name> [...cli-args]
- *   package-name: "@goodfoot/claude-code-hooks" or "@goodfoot/codex-hooks"
+ * Usage: node scripts/hooks-cli-wrapper.js --agent <claude-code|codex> [...cli-args]
  */
 
 import { spawnSync } from 'node:child_process';
@@ -53,6 +57,23 @@ function findOutputPath(cliArgs) {
     }
   }
   return undefined;
+}
+
+// Only rejects a repeated `--agent` flag with conflicting values -- the one
+// selector-ambiguity case the upstream CLI's own validateArgs() does not
+// catch (it keeps only the last occurrence). A single occurrence, a missing
+// one, repeated occurrences of the same value, and the unparsed `--agent=`
+// equals form are all left to upstream, which already fails closed on each
+// before writing any file.
+function findConflictingAgentValues(cliArgs) {
+  const values = [];
+  for (let i = 0; i < cliArgs.length; i += 1) {
+    if (cliArgs[i] === '--agent') {
+      values.push(cliArgs[i + 1]);
+    }
+  }
+  const distinct = new Set(values);
+  return distinct.size > 1 ? [...distinct] : undefined;
 }
 
 function findInputPath(cliArgs) {
@@ -116,7 +137,7 @@ function canonicalizeHookManifest(outputPath, inputArg) {
   });
   manifest.hooks = Object.fromEntries(hookEntries);
 
-  // The claude-code-hooks CLI stamps build wall-clock time here. It tries to
+  // The CLI stamps build wall-clock time here. It tries to
   // preserve a prior value when the generated file set is unchanged, but any
   // rebuild without an existing manifest emits a fresh one -- churning the
   // committed artifact and tripping the freshness gate. Strip it so emitted
@@ -157,14 +178,18 @@ function convertHookTimeoutsToSeconds(outputPath) {
 }
 
 async function main() {
-  const [packageName, ...cliArgs] = process.argv.slice(2);
-  if (!packageName) {
-    process.stderr.write('Usage: hooks-cli-wrapper.js <package-name> [...cli-args]\n');
+  const cliArgs = process.argv.slice(2);
+
+  const conflicting = findConflictingAgentValues(cliArgs);
+  if (conflicting !== undefined) {
+    process.stderr.write(
+      `hooks-cli-wrapper: conflicting --agent values: ${conflicting.join(', ')}. Pass --agent exactly once.\n`
+    );
     process.exit(1);
   }
 
-  const cliEntryUrl = import.meta.resolve(`${packageName}/cli`);
-  const cliEntryPath = fileURLToPath(cliEntryUrl);
+  const cliEntryUrl = import.meta.resolve('@goodfoot/agent-hooks');
+  const cliEntryPath = resolve(dirname(fileURLToPath(cliEntryUrl)), 'cli.js');
 
   const result = spawnSync(process.execPath, [cliEntryPath, ...cliArgs], {
     stdio: 'inherit'
@@ -184,9 +209,10 @@ async function main() {
     return;
   }
   const outputDir = dirname(resolve(process.cwd(), outputArg));
-  if (packageName === '@goodfoot/claude-code-hooks') {
-    // Only the Claude CLI needs the division -- the Codex CLI already emits
-    // seconds, and converting its manifest again would corrupt it.
+  const agentValue = cliArgs.findLast((_, i) => cliArgs[i - 1] === '--agent');
+  if (agentValue === 'claude-code') {
+    // Only --agent claude-code needs the division -- --agent codex already
+    // emits seconds, and converting its manifest again would corrupt it.
     convertHookTimeoutsToSeconds(resolve(process.cwd(), outputArg));
   }
   normalizeModuleComments([outputDir]);

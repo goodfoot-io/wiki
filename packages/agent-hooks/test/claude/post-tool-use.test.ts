@@ -1,7 +1,7 @@
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Logger, type PostToolUseInput } from '@goodfoot/claude-code-hooks';
+import { Logger, type PostToolUseInput } from '@goodfoot/agent-hooks/claude-code';
 import { afterEach, describe, expect, it } from 'vitest';
 import hook from '../../src/claude/post-tool-use.js';
 import { resolveWikiBinary, type WikiCheckLogger } from '../../src/common/wiki-check.js';
@@ -53,7 +53,7 @@ describe('post-tool-use', () => {
     });
 
     it('has PostToolUse hook event name', () => {
-      expect(hook.hookEventName).toBe('PostToolUse');
+      expect(hook.eventName).toBe('PostToolUse');
     });
 
     it('matches file-modifying tools', () => {

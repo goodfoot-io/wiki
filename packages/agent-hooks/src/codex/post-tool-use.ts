@@ -1,4 +1,9 @@
-import { type HookContext, type PostToolUseInput, postToolUseHook, postToolUseOutput } from '@goodfoot/codex-hooks';
+import {
+  type HookContext,
+  type PostToolUseInput,
+  postToolUseHook,
+  postToolUseOutput
+} from '@goodfoot/agent-hooks/codex';
 import {
   extractPatchedFilePaths,
   isWikiFile,
