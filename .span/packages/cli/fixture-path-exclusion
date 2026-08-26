@@ -1,4 +1,4 @@
-.wiki/.wikiignore rk64:58b08b7c3d6753d3
+.wikiignore rk64:58b08b7c3d6753d3
 packages/cli/src/commands/mod.rs#L474-L481 rk64:d183be074387c442
 
 is_fixture_path in commands/mod.rs defines the canonical /tests/fixtures/ exclusion rule (forward- and back-slash) that default wiki discovery applies, and .wiki/.wikiignore independently restates the same convention as the packages/cli/tests/fixtures/ pattern; the two mechanisms share no helper or test tying them together, so changing the fixture-directory convention in one silently leaves the other excluding or surfacing the wrong paths.

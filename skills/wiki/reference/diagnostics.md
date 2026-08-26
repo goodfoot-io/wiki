@@ -7,7 +7,7 @@ links-reviewed: 2
 
 ## Diagnostic kinds
 
-One pass emits frontmatter/link diagnostics plus per-link anchor classification ([kind construction](/packages/cli/src/commands/check.rs#L923-L988) routes every hard failure):
+One pass emits frontmatter/link diagnostics plus per-link anchor classification ([kind construction](/packages/cli/src/commands/check.rs#L960-L1025) routes every hard failure):
 
 | Kind | Trigger |
 |---|---|

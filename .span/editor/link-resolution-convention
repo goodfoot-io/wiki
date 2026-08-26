@@ -1,4 +1,4 @@
 packages/cli/src/commands/mod.rs#L77-L113 rk64:e1adb803e55848c1
-packages/extension/src/providers/WikiLanguageFeatures.ts#L57-L70 rk64:2e4fc2dd94195afd
+packages/extension/src/providers/WikiLanguageFeatures.ts#L67-L80 rk64:2e4fc2dd94195afd
 
 Link resolution convention shared by the extension language-feature providers and the CLI diagnostics resolver. Both must agree on workspace-root-relative (/ -prefix), filesystem-absolute, page-relative, and external-path semantics. The TypeScript and Rust implementations are independent — no shared schema, type, or cross-language test enforces agreement.

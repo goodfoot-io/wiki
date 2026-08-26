@@ -32,7 +32,7 @@ wiki check --fix
 
 `--fix` only rewrites what it can resolve unambiguously: links whose certified content moved are re-pointed, and pages with line-range links but no `links-reviewed:` field get the field initialized. In-place drift, ambiguous moves, and unverifiable links are skipped with a named reason — see the `resolving-skipped-fixes` skill section.
 
-`wiki check` memoizes its history walks in a disposable cache under the repository's git common directory; [the `--clear-cache` flag](/packages/cli/src/main.rs#L326-L327) deletes it and exits 0:
+`wiki check` memoizes its history walks in a disposable cache under the repository's git common directory; [the `--clear-cache` flag](/packages/cli/src/main.rs#L352-L353) deletes it and exits 0:
 
 ```bash
 # Best-effort delete of the anchor cache directory; prints the path
@@ -67,7 +67,7 @@ When multiple inputs are provided via stdin, the exit code reflects the worst re
 
 ## Targeting Specific Files
 
-All commands accept explicit glob patterns instead of scanning [the current working directory](/packages/cli/src/main.rs#L290-L293):
+All commands accept explicit glob patterns instead of scanning [the current working directory](/packages/cli/src/main.rs#L294-L297):
 
 ```bash
 wiki check wiki/some-section/**/*.md
@@ -88,7 +88,7 @@ With that entry in place, `wiki check CLAUDE.md` (or a glob that happens to matc
 
 ## JSON Output
 
-Every command accepts [`--format json`](/packages/cli/src/main.rs#L50-L52) for scripting:
+Every command accepts [`--format json`](/packages/cli/src/main.rs#L51-L53) for scripting:
 
 ```bash
 wiki check --format json

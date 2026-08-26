@@ -1,6 +1,6 @@
 {
   "name": "@goodfoot/wiki",
-  "version": "0.5.131",
+  "version": "0.5.132",
   "bin": "bin/wiki.exe",
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
@@ -17,11 +17,11 @@
     "scripts/postinstall.js"
   ],
   "optionalDependencies": {
-    "@goodfoot/wiki-darwin-arm64": "0.5.131",
-    "@goodfoot/wiki-darwin-x64": "0.5.131",
-    "@goodfoot/wiki-linux-arm64": "0.5.131",
-    "@goodfoot/wiki-linux-x64": "0.5.131",
-    "@goodfoot/wiki-win32-x64": "0.5.131"
+    "@goodfoot/wiki-darwin-arm64": "0.5.132",
+    "@goodfoot/wiki-darwin-x64": "0.5.132",
+    "@goodfoot/wiki-linux-arm64": "0.5.132",
+    "@goodfoot/wiki-linux-x64": "0.5.132",
+    "@goodfoot/wiki-win32-x64": "0.5.132"
   },
   "repository": {
     "type": "git",

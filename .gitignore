@@ -37,6 +37,7 @@ node_modules
 # IDE specific
 .cursor/
 *.code-workspace
+.claude/settings.local.json
 
 # TypeScript
 *.tsbuildinfo
