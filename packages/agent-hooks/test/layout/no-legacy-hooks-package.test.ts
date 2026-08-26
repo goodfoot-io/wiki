@@ -1,10 +1,15 @@
 import { spawnSync } from 'node:child_process';
 import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
+// This scanner's own source necessarily spells out both legacy package names
+// literally (to define what it looks for), so it is excluded from the scan
+// by construction rather than via the exception list -- that list is for
+// legitimate references in *other* tracked files, not the detector itself.
+const selfPath = relative(repoRoot, fileURLToPath(import.meta.url));
 
 const LEGACY_PACKAGES = ['@goodfoot/claude-code-hooks', '@goodfoot/codex-hooks'];
 
@@ -56,7 +61,9 @@ describe('no tracked file references either superseded hooks package', () => {
   it('finds zero un-excepted references to @goodfoot/claude-code-hooks or @goodfoot/codex-hooks', () => {
     // Nothing legitimate references either legacy package today -- start empty.
     const exceptions: Exception[] = [];
-    const entries = listTrackedPaths().map((path) => ({ path, content: readTrackedContent(path) }));
+    const entries = listTrackedPaths()
+      .filter((path) => path !== selfPath)
+      .map((path) => ({ path, content: readTrackedContent(path) }));
     const offenders = findOffenders(entries, exceptions);
     expect(offenders, `un-excepted legacy package references found:\n${offenders.join('\n')}`).toEqual([]);
   });
