@@ -16,10 +16,11 @@ function readVersion(relativePath: string): string {
 }
 
 describe('version consistency across the four version-bearing surfaces', () => {
-  it('claude manifest, codex manifest, opencode package, and marketplace entry agree', () => {
+  it('claude, codex, opencode, and antigravity manifests and the marketplace entry agree', () => {
     const claudeManifest = readVersion('plugins-claude/wiki/.claude-plugin/plugin.json');
     const codexManifest = readVersion('plugins-codex/wiki/.codex-plugin/plugin.json');
     const opencodePackage = readVersion('plugins-opencode/wiki/package.json');
+    const antigravityManifest = readVersion('plugins-antigravity/wiki/plugin.json');
 
     const marketplacePath = '.claude-plugin/marketplace.json';
     const marketplace = JSON.parse(readFileSync(resolve(repoRoot, marketplacePath), 'utf8')) as {
@@ -32,6 +33,7 @@ describe('version consistency across the four version-bearing surfaces', () => {
       'plugins-claude manifest': claudeManifest,
       'plugins-codex manifest': codexManifest,
       'plugins-opencode package': opencodePackage,
+      'plugins-antigravity manifest': antigravityManifest,
       'claude marketplace entry': marketplaceEntry as string
     };
     expect(new Set(Object.values(surfaces)).size, `version drift across surfaces: ${JSON.stringify(surfaces)}`).toBe(1);

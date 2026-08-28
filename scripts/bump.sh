@@ -15,7 +15,7 @@ esac
 
 # Base the bump on the MAXIMUM product version across every manifest, not just
 # packages/cli. The pre-commit.plugin-version.sh hook auto-bumps each changed
-# plugin's plugins-{claude,codex,opencode}/<name>/ manifests (and its
+# plugin's plugins-{claude,codex,opencode,antigravity}/<name>/ manifests (and its
 # marketplace.json plugins[] entry) on every commit that touches plugin files,
 # so the plugin version routinely runs ahead of the CLI source-of-truth.
 # Bumping only from
@@ -58,14 +58,16 @@ NEW_VERSION=$(REPO_ROOT="$REPO_ROOT" BUMP_LEVEL="$LEVEL" node -e '
   }
 
   // Plugin manifests — the surface the auto-bump hook moves ahead of the CLI.
-  // One plugin spans three platform trees with a per-platform manifest:
+  // One plugin spans four platform trees with a per-platform manifest:
   //   plugins-claude/<name>/.claude-plugin/plugin.json
   //   plugins-codex/<name>/.codex-plugin/plugin.json
   //   plugins-opencode/<name>/package.json
+  //   plugins-antigravity/<name>/plugin.json
   const platformTrees = [
     ["plugins-claude", ".claude-plugin/plugin.json"],
     ["plugins-codex", ".codex-plugin/plugin.json"],
     ["plugins-opencode", "package.json"],
+    ["plugins-antigravity", "plugin.json"],
   ];
   for (const [dir, manifestRel] of platformTrees) {
     const treeDir = path.join(root, dir);

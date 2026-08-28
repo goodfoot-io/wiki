@@ -148,14 +148,16 @@ if [ -f "$cargo_lock" ] && [ -f "$cargo_toml" ]; then
   fi
 fi
 
-# Update plugin manifests across the three platform plugin trees:
+# Update plugin manifests across the four platform plugin trees:
 #   plugins-claude/<name>/.claude-plugin/plugin.json
 #   plugins-codex/<name>/.codex-plugin/plugin.json
 #   plugins-opencode/<name>/package.json
+#   plugins-antigravity/<name>/plugin.json
 for platform_manifest in \
   "claude .claude-plugin/plugin.json" \
   "codex .codex-plugin/plugin.json" \
-  "opencode package.json"
+  "opencode package.json" \
+  "antigravity plugin.json"
 do
   platform="${platform_manifest%% *}"
   manifest_rel="${platform_manifest#* }"
