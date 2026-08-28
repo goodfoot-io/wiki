@@ -26,12 +26,12 @@ Perf scope events measure execution time and record success/error status. They a
 
 ### Index Refresh
 
-These scopes cover the cold-cache path: when the stat-only freshness gate misses, [`WikiIndex::prepare_for_source`](./src/index/mod.rs#L292-L479) resolves the digest gate and drives the three-pass refresh onto the generations store.
+These scopes cover the cold-cache path: when the stat-only freshness gate misses, [`WikiIndex::prepare_for_source`](./src/index/mod.rs#L295-L482) resolves the digest gate and drives the three-pass refresh onto the generations store.
 
 | Location | Scope Name | Measures | Metadata |
 |----------|-----------|----------|----------|
-| [index/mod.rs](./src/index/mod.rs#L399-L401) | `index.gix_open` | Time to open the gix repository for a refresh | Empty object |
-| [index/mod.rs](./src/index/mod.rs#L403-L412) | `index.refresh` | Total three-pass refresh (candidate building against the base generation) | Empty object |
+| [index/mod.rs](./src/index/mod.rs#L402-L404) | `index.gix_open` | Time to open the gix repository for a refresh | Empty object |
+| [index/mod.rs](./src/index/mod.rs#L406-L415) | `index.refresh` | Total three-pass refresh (candidate building against the base generation) | Empty object |
 | [index/passes/mod.rs](./src/index/passes/mod.rs#L215-L269) | `index.pass_tree` | Pass 1: diff `HEAD^{tree}` against the previously indexed tree | Empty object |
 | [index/passes/mod.rs](./src/index/passes/mod.rs#L271-L283) | `index.pass_index` | Pass 2: git index entry scan | Empty object |
 | [index/passes/mod.rs](./src/index/passes/mod.rs#L285-L304) | `index.pass_worktree` | Pass 3: worktree walk, read + hash of candidate markdown | Empty object |

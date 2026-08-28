@@ -198,7 +198,10 @@ impl DocSource {
     /// Return repo-relative paths that this source considers present.
     pub fn list_paths(&self, repo_root: &Path) -> Result<Vec<String>> {
         match self {
-            DocSource::WorkingTree => crate::git::repo_inventory(repo_root),
+            // The index builder needs the whole-repo view, not a scan-root
+            // scoped one — pass `repo_root` as both `repo` and `walk_root`
+            // with no prefix so behaviour matches the pre-scoping walk.
+            DocSource::WorkingTree => crate::git::repo_inventory(repo_root, repo_root, None),
             DocSource::Index => crate::git::index_tracked_paths(repo_root),
             DocSource::Head => crate::git::head_tracked_paths(repo_root),
         }

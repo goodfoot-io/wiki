@@ -412,7 +412,7 @@ fn discover_default_files(
         DocSource::WorkingTree => {}
     }
 
-    let inventory = match repo_inventory(repo_root) {
+    let inventory = match repo_inventory(repo_root, walk_root, prefix) {
         Ok(inventory) => inventory,
         Err(_) => return discover_files_by_walk(&[], walk_root, repo_root, Arc::clone(wiki_ignore)),
     };
@@ -434,27 +434,41 @@ fn discover_default_files(
         return Ok(Vec::new());
     }
 
-    // Second pass: read+check the candidates in parallel. On a hostile
-    // (fuseblk) filesystem each `read_to_string` blocks in userspace, so the
+    // Second pass: probe the candidates in parallel for a frontmatter fence.
+    // On a hostile (fuseblk) filesystem each read blocks in userspace, so the
     // serial version dominated latency. This mirrors the worker pattern in
-    // `ContentCache::warm_working_tree`.
+    // `ContentCache::warm_working_tree`. Each candidate is probed with a
+    // bounded read (`probe_has_wiki_frontmatter`) rather than
+    // `read_to_string`, so a repo full of large non-wiki `.md` files no
+    // longer pays for reading their entire contents just to decide they
+    // aren't wiki pages.
     let parallelism = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let worker_count = parallelism.min(8).min(candidates.len()).max(1);
 
+    let frontmatter_start = std::time::Instant::now();
+    let full_reads = std::sync::atomic::AtomicU64::new(0);
+    let bytes_read_total = std::sync::atomic::AtomicU64::new(0);
     let chunk_size = candidates.len().div_ceil(worker_count);
     let mut files: Vec<PathBuf> = Vec::with_capacity(candidates.len());
     std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(worker_count);
         for chunk in candidates.chunks(chunk_size) {
+            let full_reads = &full_reads;
+            let bytes_read_total = &bytes_read_total;
             handles.push(scope.spawn(move || {
                 let mut out: Vec<PathBuf> = Vec::with_capacity(chunk.len());
                 for path in chunk {
-                    if path.is_file()
-                        && let Ok(content) = std::fs::read_to_string(path)
-                        && crate::frontmatter::has_wiki_frontmatter(&content)
-                    {
+                    if !path.is_file() {
+                        continue;
+                    }
+                    let (matched, bytes_read) = probe_has_wiki_frontmatter(path);
+                    bytes_read_total.fetch_add(bytes_read as u64, std::sync::atomic::Ordering::Relaxed);
+                    if bytes_read as usize > FRONTMATTER_PROBE_BYTES {
+                        full_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    if matched {
                         out.push(path.clone());
                     }
                 }
@@ -468,7 +482,46 @@ fn discover_default_files(
         }
     });
 
+    perf::log_event(
+        "discover_files_frontmatter_scan",
+        frontmatter_start.elapsed().as_secs_f64() * 1000.0,
+        "ok",
+        json!({
+            "candidates": candidates.len(),
+            "matched": files.len(),
+            "full_reads": full_reads.load(std::sync::atomic::Ordering::Relaxed),
+            "bytes_read": bytes_read_total.load(std::sync::atomic::Ordering::Relaxed),
+        }),
+    );
+
     Ok(files)
+}
+
+/// Bytes read when probing a candidate `.md` file for a frontmatter fence
+/// before falling back to a full read — comfortably larger than any
+/// realistic frontmatter block while remaining far smaller than typical page
+/// bodies, so most non-wiki and wiki files alike are decided from one small
+/// read.
+const FRONTMATTER_PROBE_BYTES: usize = 8192;
+
+/// Detect whether `path` has wiki frontmatter, reading only as much of the
+/// file as [`crate::frontmatter::has_wiki_frontmatter_prefix`] needs to
+/// decide, falling back to a full read only when the bounded probe can't
+/// determine the answer (a fence whose YAML block exceeds
+/// `FRONTMATTER_PROBE_BYTES`, or a genuine I/O error path). Returns the
+/// verdict alongside the number of bytes actually read from disk — a
+/// concrete, work-performed signal that a caller can use to verify the probe
+/// stayed bounded instead of reading the whole file.
+fn probe_has_wiki_frontmatter(path: &Path) -> (bool, u64) {
+    // TODO(main-19): still reads the whole file unconditionally — this is
+    // the bug under reproduction.
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            let len = content.len() as u64;
+            (crate::frontmatter::has_wiki_frontmatter(&content), len)
+        }
+        Err(_) => (false, 0),
+    }
 }
 
 /// Test-fixture wiki files (under any `tests/fixtures/` directory) are part of
@@ -668,6 +721,60 @@ mod tests {
             summary: "A summary.".into(),
             links_reviewed: None,
         }
+    }
+
+    // ── probe_has_wiki_frontmatter bounded-read behaviour ────────────────────
+
+    /// Reproduces the second cost `discover_files` paid regardless of file
+    /// size (card main-19): every surviving `.md` candidate was read in full
+    /// with `std::fs::read_to_string` just to test for a frontmatter fence,
+    /// even when the fence closed in the first few lines of a much larger
+    /// file.
+    ///
+    /// This asserts a concrete work-performed signal — bytes actually read
+    /// from disk — rather than wall-clock time (flaky, environment-bound) or
+    /// which function was called (tautological). A file with a closing fence
+    /// within the first `FRONTMATTER_PROBE_BYTES` bytes, followed by a
+    /// multi-megabyte body, must be decided from a bounded read: bytes read
+    /// stays close to the probe size regardless of how large the body grows.
+    #[test]
+    fn probe_has_wiki_frontmatter_bounded_read_ignores_large_body() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("big-page.md");
+        let mut content =
+            String::from("---\ntitle: Big Page\nsummary: A page with a huge body.\n---\n");
+        content.push_str(&"filler line of body text\n".repeat(200_000)); // ~5 MB body
+        fs::write(&path, &content).expect("write big page");
+
+        let (matched, bytes_read) = probe_has_wiki_frontmatter(&path);
+
+        assert!(matched, "page with valid frontmatter must be detected");
+        assert!(
+            bytes_read <= FRONTMATTER_PROBE_BYTES as u64,
+            "expected a bounded read (<= {FRONTMATTER_PROBE_BYTES} bytes), got {bytes_read} \
+             bytes read out of a {}-byte file",
+            content.len()
+        );
+    }
+
+    #[test]
+    fn probe_has_wiki_frontmatter_falls_back_to_full_read_when_fence_exceeds_probe() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("wide-frontmatter.md");
+        // The closing fence sits well past FRONTMATTER_PROBE_BYTES, so the
+        // bounded probe cannot decide and must fall back to a full read.
+        let mut content = String::from("---\ntitle: Wide\n");
+        content.push_str(&"# padding\n".repeat(2_000));
+        content.push_str("summary: Still valid.\n---\nbody\n");
+        fs::write(&path, &content).expect("write wide-frontmatter page");
+
+        let (matched, bytes_read) = probe_has_wiki_frontmatter(&path);
+
+        assert!(matched, "page with valid (if wide) frontmatter must be detected");
+        assert!(
+            bytes_read as usize > FRONTMATTER_PROBE_BYTES,
+            "expected a full-file fallback read, got only {bytes_read} bytes"
+        );
     }
 
     #[test]

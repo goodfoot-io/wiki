@@ -319,6 +319,28 @@ pub(crate) fn yaml_block_bounds(content: &str) -> Option<(usize, usize, usize)> 
     Some((yaml_start, yaml_start + close, yaml_start + close))
 }
 
+/// Decide the [`has_wiki_frontmatter`] verdict from only a bounded prefix of
+/// a file's content, so callers scanning many candidate files for wiki
+/// markers don't have to read each one in full.
+///
+/// `prefix` is the first bytes of the file, or the whole file when
+/// `is_whole_file` is true. Returns `Some(verdict)` when `prefix` alone
+/// suffices to decide: the file doesn't open with a `---` fence at all, the
+/// closing fence already appears within `prefix`, or `prefix` is the whole
+/// file. Returns `None` when the file opens with a fence but no closing line
+/// was found within `prefix` and more of the file remains unread — the
+/// caller must fall back to a full read.
+pub fn has_wiki_frontmatter_prefix(prefix: &str, is_whole_file: bool) -> Option<bool> {
+    let trimmed = prefix.trim_start_matches('\n');
+    if !trimmed.starts_with("---") {
+        return Some(false);
+    }
+    if is_whole_file || yaml_block_bounds(prefix).is_some() {
+        return Some(has_wiki_frontmatter(prefix));
+    }
+    None
+}
+
 /// Extract the raw YAML string from the leading `---` block.
 fn extract_yaml_block(content: &str) -> Option<&str> {
     let (start, end, _) = yaml_block_bounds(content)?;
@@ -421,6 +443,49 @@ mod tests {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    // ── has_wiki_frontmatter_prefix tests ────────────────────────────────────
+
+    #[test]
+    fn prefix_no_opening_fence_decides_false_without_whole_file() {
+        assert_eq!(
+            has_wiki_frontmatter_prefix("# Just a heading\n", false),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn prefix_with_closing_fence_matches_full_read_verdict() {
+        let content = "---\ntitle: Simple\nsummary: A simple page.\n---\nbody\n";
+        assert_eq!(
+            has_wiki_frontmatter_prefix(content, false),
+            Some(has_wiki_frontmatter(content))
+        );
+        assert_eq!(has_wiki_frontmatter_prefix(content, false), Some(true));
+    }
+
+    #[test]
+    fn prefix_without_closing_fence_defers_to_full_read() {
+        // Only the opening fence and part of the YAML are in `prefix` — no
+        // closing `---` line, and more file remains, so the bounded probe
+        // cannot decide.
+        assert_eq!(
+            has_wiki_frontmatter_prefix("---\ntitle: Simple\nsumm", false),
+            None
+        );
+    }
+
+    #[test]
+    fn prefix_without_closing_fence_but_whole_file_treats_as_candidate() {
+        // Mirrors `has_wiki_frontmatter`'s "unparseable YAML is still a
+        // candidate" rule when the whole (short) file lacks a closing fence.
+        let content = "---\ntitle: Simple\n";
+        assert_eq!(
+            has_wiki_frontmatter_prefix(content, true),
+            Some(has_wiki_frontmatter(content))
+        );
+        assert_eq!(has_wiki_frontmatter_prefix(content, true), Some(true));
     }
 
     // ── Parsing tests ─────────────────────────────────────────────────────────

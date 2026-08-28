@@ -8,9 +8,12 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use gix::bstr::{BStr, ByteSlice};
 use miette::{IntoDiagnostic, Result, WrapErr, miette};
+use serde_json::json;
 
 use crate::index::DocSource;
 
@@ -175,28 +178,89 @@ pub fn git_acceleration_state(repo: &Path) -> Result<GitAccelerationState> {
     })
 }
 
+/// Whether a repo-relative path lies under `prefix`. A `None` prefix means
+/// the whole repo is in scope. Mirrors
+/// `crate::commands::path_under_prefix` — duplicated rather than shared
+/// because this file compiles into both the `wiki` binary (which has a
+/// `commands` module) and the library target (which does not).
+fn path_in_scope(path_rel: &str, prefix: Option<&Path>) -> bool {
+    match prefix {
+        None => true,
+        Some(pre) => Path::new(path_rel).starts_with(pre),
+    }
+}
+
 /// Return the tracked and untracked, non-ignored repository file inventory as
-/// repo-relative UTF-8 paths.
+/// repo-relative UTF-8 paths, restricted to `prefix` when given.
 ///
 /// Tracked paths are sourced from the git index; untracked-but-not-ignored
 /// paths are sourced from a `ignore::WalkBuilder` walk that honours
 /// `.gitignore`, `.git/info/exclude`, and `core.excludesFile` (the same set
-/// of sources `git status --short` consults).
-pub fn repo_inventory(repo: &Path) -> Result<Vec<String>> {
+/// of sources `git status --short` consults). The filesystem walk is rooted
+/// at `walk_root` — a repo-relative subtree — rather than always at `repo`,
+/// so a scoped caller (default wiki discovery) pays for work proportional to
+/// its scan root instead of the whole repository; callers that need a whole-
+/// repo view (e.g. the wiki index builder) pass `walk_root == repo` and
+/// `prefix == None`, which reproduces the previous unscoped behaviour
+/// exactly. Emits `repo_inventory_tracked_paths` and
+/// `repo_inventory_untracked_walk` perf events so a regression in either
+/// phase is visible independently of the other.
+pub fn repo_inventory(repo: &Path, walk_root: &Path, prefix: Option<&Path>) -> Result<Vec<String>> {
     let gix_repo = open_repo(repo)?;
     let mut paths: HashSet<String> = HashSet::new();
 
+    let tracked_start = Instant::now();
+    let mut tracked_count: u64 = 0;
     for_each_tracked_path(&gix_repo, |path| {
-        paths.insert(utf8_repo_path(
-            path,
-            "git inventory path is not valid UTF-8",
-        )?);
+        let path_rel = utf8_repo_path(path, "git inventory path is not valid UTF-8")?;
+        if path_in_scope(&path_rel, prefix) {
+            tracked_count += 1;
+            paths.insert(path_rel);
+        }
         Ok(())
     })?;
+    crate::perf::log_event(
+        "repo_inventory_tracked_paths",
+        tracked_start.elapsed().as_secs_f64() * 1000.0,
+        "ok",
+        json!({ "count": tracked_count }),
+    );
 
-    // Parallelize the worktree walk so blocked filesystem stats overlap on a
-    // hostile (fuseblk) filesystem. Every builder setting matches the serial
-    // walk; the parallel visitor replicates the exact filter logic.
+    let walk_start = Instant::now();
+    let (matched, visited) = untracked_walk(repo, walk_root);
+    crate::perf::log_event(
+        "repo_inventory_untracked_walk",
+        walk_start.elapsed().as_secs_f64() * 1000.0,
+        "ok",
+        json!({
+            "visited": visited,
+            "matched": matched.len(),
+        }),
+    );
+    for p in matched {
+        paths.insert(p);
+    }
+
+    let mut paths: Vec<String> = paths.into_iter().collect();
+    paths.sort();
+    Ok(paths)
+}
+
+/// Walk `walk_root` (a subtree of `repo`, or `repo` itself) for untracked,
+/// non-ignored files, honouring the same gitignore sources `git status
+/// --short` consults. Returns the matched repo-relative file paths alongside
+/// the total number of filesystem entries the walk actually visited — a
+/// concrete signal of work performed, independent of wall-clock time, that a
+/// caller scoped to a narrow `walk_root` should see stay proportional to
+/// that subtree rather than to the whole repository.
+///
+/// Parallelized so blocked filesystem stats overlap on a hostile (fuseblk)
+/// filesystem.
+pub(crate) fn untracked_walk(repo: &Path, walk_root: &Path) -> (Vec<String>, u64) {
+    // TODO(main-19): still walks `repo` unconditionally regardless of
+    // `walk_root` — this is the bug under reproduction.
+    let _ = walk_root;
+    let visited = AtomicU64::new(0);
     let collected: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
     ignore::WalkBuilder::new(repo)
         .hidden(false)
@@ -216,6 +280,7 @@ pub fn repo_inventory(repo: &Path) -> Result<Vec<String>> {
                 if entry_path == repo {
                     return ignore::WalkState::Continue;
                 }
+                visited.fetch_add(1, Ordering::Relaxed);
                 // Skip directories: we want files only. The walker yields both.
                 if entry.file_type().is_some_and(|t| t.is_dir()) {
                     return ignore::WalkState::Continue;
@@ -235,13 +300,10 @@ pub fn repo_inventory(repo: &Path) -> Result<Vec<String>> {
                 ignore::WalkState::Continue
             })
         });
-    for p in collected.into_inner().expect("repo_inventory walk mutex poisoned") {
-        paths.insert(p);
-    }
-
-    let mut paths: Vec<String> = paths.into_iter().collect();
-    paths.sort();
-    Ok(paths)
+    let matched = collected
+        .into_inner()
+        .expect("repo_inventory walk mutex poisoned");
+    (matched, visited.load(Ordering::Relaxed))
 }
 
 /// Return the subset of `candidates` (repo-relative paths) that git treats as
@@ -1052,10 +1114,76 @@ mod tests {
         repo.create_file("notes/untracked.md", "untracked\n");
         repo.git(&["add", "tracked.md"]);
 
-        let inventory = repo_inventory(repo.path()).expect("repo inventory");
+        let inventory =
+            repo_inventory(repo.path(), repo.path(), None).expect("repo inventory");
         assert_eq!(
             inventory,
             vec!["notes/untracked.md".to_owned(), "tracked.md".to_owned()]
+        );
+    }
+
+    /// Reproduces the whole-repo scan cost `discover_files` paid regardless
+    /// of the caller's actual scan root (card main-19): the untracked
+    /// filesystem walk always started at the repo root, so a caller scoped
+    /// to a small subtree still paid for a walk over everything outside it.
+    ///
+    /// This asserts a concrete signal of work performed — the number of
+    /// filesystem entries `untracked_walk` actually visits — rather than the
+    /// returned file list (which a string-filter pass already narrowed
+    /// correctly both before and after the fix) or wall-clock time (flaky,
+    /// environment-bound). Before the fix, scoping the walk to the `wiki/`
+    /// subtree visits the same number of entries as walking the whole repo,
+    /// because `untracked_walk` ignored its `walk_root` argument and always
+    /// walked from `repo`. After the fix, the scoped walk visits only the
+    /// entries under `wiki/`, so its count no longer scales with the
+    /// sibling `bulk/` tree's size.
+    #[test]
+    fn untracked_walk_visited_count_is_bounded_by_walk_root_not_whole_repo() {
+        let repo = TestRepo::new();
+        repo.create_file("wiki/a.md", "a\n");
+        repo.create_file("wiki/b.md", "b\n");
+        for i in 0..200 {
+            repo.create_file(&format!("bulk/file-{i}.txt"), "filler\n");
+        }
+
+        let (scoped_matches, scoped_visited) =
+            untracked_walk(repo.path(), &repo.path().join("wiki"));
+        let (_, whole_repo_visited) = untracked_walk(repo.path(), repo.path());
+
+        assert_eq!(
+            scoped_matches.len(),
+            2,
+            "scoped walk should still find both wiki pages, got {scoped_matches:?}"
+        );
+        assert!(
+            scoped_visited < whole_repo_visited,
+            "walk scoped to wiki/ (visited {scoped_visited}) should visit far fewer \
+             entries than a whole-repo walk (visited {whole_repo_visited}) once the \
+             sibling bulk/ tree exists"
+        );
+        assert!(
+            scoped_visited <= 10,
+            "walk scoped to wiki/ should visit only entries under wiki/ (2 files, \
+             plus the wiki/ dir and repo root at most), got {scoped_visited}"
+        );
+    }
+
+    #[test]
+    fn repo_inventory_scopes_both_walks_to_the_given_prefix() {
+        let repo = TestRepo::new();
+        repo.create_file("wiki/tracked.md", "tracked\n");
+        repo.create_file("wiki/untracked.md", "untracked\n");
+        repo.create_file("outside/tracked.md", "tracked\n");
+        repo.create_file("outside/untracked.md", "untracked\n");
+        repo.git(&["add", "wiki/tracked.md", "outside/tracked.md"]);
+
+        let prefix = Path::new("wiki");
+        let walk_root = repo.path().join(prefix);
+        let inventory = repo_inventory(repo.path(), &walk_root, Some(prefix))
+            .expect("repo inventory");
+        assert_eq!(
+            inventory,
+            vec!["wiki/tracked.md".to_owned(), "wiki/untracked.md".to_owned()]
         );
     }
 
