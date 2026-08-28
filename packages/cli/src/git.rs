@@ -257,12 +257,9 @@ pub fn repo_inventory(repo: &Path, walk_root: &Path, prefix: Option<&Path>) -> R
 /// Parallelized so blocked filesystem stats overlap on a hostile (fuseblk)
 /// filesystem.
 pub(crate) fn untracked_walk(repo: &Path, walk_root: &Path) -> (Vec<String>, u64) {
-    // TODO(main-19): still walks `repo` unconditionally regardless of
-    // `walk_root` — this is the bug under reproduction.
-    let _ = walk_root;
     let visited = AtomicU64::new(0);
     let collected: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-    ignore::WalkBuilder::new(repo)
+    ignore::WalkBuilder::new(walk_root)
         .hidden(false)
         .git_ignore(true)
         .git_global(true)
@@ -277,7 +274,7 @@ pub(crate) fn untracked_walk(repo: &Path, walk_root: &Path) -> (Vec<String>, u64
                     return ignore::WalkState::Continue;
                 };
                 let entry_path = entry.path();
-                if entry_path == repo {
+                if entry_path == walk_root {
                     return ignore::WalkState::Continue;
                 }
                 visited.fetch_add(1, Ordering::Relaxed);

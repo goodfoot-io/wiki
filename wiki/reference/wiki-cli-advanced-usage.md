@@ -75,7 +75,7 @@ wiki check wiki/some-section/**/*.md
 
 ## Excluding Non-Wiki Files
 
-[`./.wikiignore`](/packages/cli/src/wikiignore.rs) excludes paths from `wiki check` entirely — before frontmatter parsing, link validation, or line-range drift classification ever runs. It lives at the repository root, uses gitignore syntax, and patterns are matched relative to the repository root. Every discovery path — [`discover_files`](/packages/cli/src/commands/mod.rs#L231-L305), [`discover_files_by_parallel_walk`](/packages/cli/src/commands/mod.rs#L623-L695), and [`discover_files_by_glob_in_source`](/packages/cli/src/commands/mod.rs#L540-L575) — consults it before any file is treated as a wiki page, for `--source=worktree`, `index`, and `head` alike, and regardless of whether an explicit glob is passed.
+[`./.wikiignore`](/packages/cli/src/wikiignore.rs) excludes paths from `wiki check` entirely — before frontmatter parsing, link validation, or line-range drift classification ever runs. It lives at the repository root, uses gitignore syntax, and patterns are matched relative to the repository root. Every discovery path — [`discover_files`](/packages/cli/src/commands/mod.rs#L231-L305), [`discover_files_by_parallel_walk`](/packages/cli/src/commands/mod.rs#L655-L727), and [`discover_files_by_glob_in_source`](/packages/cli/src/commands/mod.rs#L572-L607) — consults it before any file is treated as a wiki page, for `--source=worktree`, `index`, and `head` alike, and regardless of whether an explicit glob is passed.
 
 This is the escape hatch for Markdown that lives in the repo but isn't a wiki page — agent instructions, changelogs, vendored docs — so it never needs frontmatter and never counts against link or drift validation.
 

@@ -464,7 +464,7 @@ fn discover_default_files(
                         continue;
                     }
                     let (matched, bytes_read) = probe_has_wiki_frontmatter(path);
-                    bytes_read_total.fetch_add(bytes_read as u64, std::sync::atomic::Ordering::Relaxed);
+                    bytes_read_total.fetch_add(bytes_read, std::sync::atomic::Ordering::Relaxed);
                     if bytes_read as usize > FRONTMATTER_PROBE_BYTES {
                         full_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
@@ -513,14 +513,46 @@ const FRONTMATTER_PROBE_BYTES: usize = 8192;
 /// concrete, work-performed signal that a caller can use to verify the probe
 /// stayed bounded instead of reading the whole file.
 fn probe_has_wiki_frontmatter(path: &Path) -> (bool, u64) {
-    // TODO(main-19): still reads the whole file unconditionally — this is
-    // the bug under reproduction.
-    match std::fs::read_to_string(path) {
-        Ok(content) => {
-            let len = content.len() as u64;
-            (crate::frontmatter::has_wiki_frontmatter(&content), len)
+    use std::io::Read;
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return (false, 0);
+    };
+    let mut buf = vec![0u8; FRONTMATTER_PROBE_BYTES];
+    let read = match file.read(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return (false, 0),
+    };
+    buf.truncate(read);
+    let is_whole_file = read < FRONTMATTER_PROBE_BYTES;
+
+    // A truncated read may cut a multi-byte UTF-8 character at the boundary;
+    // trim back to the last valid boundary in that case. A whole-file read
+    // that isn't valid UTF-8 is a genuine encoding problem, matching
+    // `read_to_string`'s behaviour of failing rather than lossily decoding.
+    let prefix = if is_whole_file {
+        std::str::from_utf8(&buf).ok()
+    } else {
+        let valid_len = match std::str::from_utf8(&buf) {
+            Ok(_) => buf.len(),
+            Err(e) => e.valid_up_to(),
+        };
+        std::str::from_utf8(&buf[..valid_len]).ok()
+    };
+    let Some(prefix) = prefix else {
+        return (false, read as u64);
+    };
+
+    match crate::frontmatter::has_wiki_frontmatter_prefix(prefix, is_whole_file) {
+        Some(verdict) => (verdict, read as u64),
+        None => {
+            let verdict = match std::fs::read_to_string(path) {
+                Ok(content) => crate::frontmatter::has_wiki_frontmatter(&content),
+                Err(_) => false,
+            };
+            let full_len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(read as u64);
+            (verdict, full_len)
         }
-        Err(_) => (false, 0),
     }
 }
 
