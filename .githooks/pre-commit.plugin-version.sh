@@ -15,12 +15,14 @@ STAGED_FILES=$(git diff --cached --name-only --diff-filter=d)
 #   plugins-claude/<name>/.claude-plugin/plugin.json
 #   plugins-codex/<name>/.codex-plugin/plugin.json
 #   plugins-opencode/<name>/package.json
+#   plugins-antigravity/<name>/plugin.json
 manifest_paths_for() {
     local PLUGIN_NAME="$1"
     printf '%s\n' \
         "plugins-claude/${PLUGIN_NAME}/.claude-plugin/plugin.json" \
         "plugins-codex/${PLUGIN_NAME}/.codex-plugin/plugin.json" \
-        "plugins-opencode/${PLUGIN_NAME}/package.json"
+        "plugins-opencode/${PLUGIN_NAME}/package.json" \
+        "plugins-antigravity/${PLUGIN_NAME}/plugin.json"
 }
 
 # Stage ONLY the version hunk of $1: rebuild the staged blob from the file's
@@ -76,7 +78,7 @@ bump_first_marketplace_version() {
 # Collect unique plugin names touched by this commit.
 declare -A TOUCHED_PLUGINS
 while IFS= read -r file; do
-    if [[ "$file" =~ ^plugins-(claude|codex|opencode)/([^/]+)/ ]]; then
+    if [[ "$file" =~ ^plugins-(claude|codex|opencode|antigravity)/([^/]+)/ ]]; then
         TOUCHED_PLUGINS["${BASH_REMATCH[2]}"]=1
     fi
 done <<< "$STAGED_FILES"
@@ -88,7 +90,7 @@ PLUGINS_BUMPED=0
 for PLUGIN_NAME in "${!TOUCHED_PLUGINS[@]}"; do
     # Skip if the only staged changes for this plugin are its own manifests
     # (avoid re-bumping when only versions change).
-    PLUGIN_STAGED_FILES=$(echo "$STAGED_FILES" | grep -E "^plugins-(claude|codex|opencode)/${PLUGIN_NAME}/" || true)
+    PLUGIN_STAGED_FILES=$(echo "$STAGED_FILES" | grep -E "^plugins-(claude|codex|opencode|antigravity)/${PLUGIN_NAME}/" || true)
     NON_MANIFEST_FILES=""
     while IFS= read -r f; do
         [ -n "$f" ] || continue

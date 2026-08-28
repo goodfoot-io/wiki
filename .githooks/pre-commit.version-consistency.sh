@@ -3,6 +3,7 @@
 #   plugins-claude/<name>/.claude-plugin/plugin.json
 #   plugins-codex/<name>/.codex-plugin/plugin.json
 #   plugins-opencode/<name>/package.json
+#   plugins-antigravity/<name>/plugin.json
 #   .claude-plugin/marketplace.json (plugins[] entry for <name>)
 # A MISSING expected surface is a hard failure, not a skip. .agents/plugins/
 # marketplace.json is checked for the correct source path only — its entries
@@ -57,6 +58,7 @@ if MARKETPLACE_JSON="$MARKETPLACE_JSON" AGENTS_MARKETPLACE_JSON="$AGENTS_MARKETP
       [`plugins-claude/${entry.name}/.claude-plugin/plugin.json`, "json"],
       [`plugins-codex/${entry.name}/.codex-plugin/plugin.json`, "json"],
       [`plugins-opencode/${entry.name}/package.json`, "json"],
+      [`plugins-antigravity/${entry.name}/plugin.json`, "json"],
     ];
     for (const [p] of surfaces) {
       if (!fs.existsSync(p)) {
