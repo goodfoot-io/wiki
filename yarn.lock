@@ -648,9 +648,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@goodfoot/agent-hooks@npm:1.0.5":
-  version: 1.0.5
-  resolution: "@goodfoot/agent-hooks@npm:1.0.5"
+"@goodfoot/agent-hooks@npm:1.0.8":
+  version: 1.0.8
+  resolution: "@goodfoot/agent-hooks@npm:1.0.8"
   dependencies:
     esbuild: "npm:^0.24.0"
     glob: "npm:^11.0.0"
@@ -662,13 +662,13 @@ __metadata:
       optional: true
   bin:
     agent-hooks: dist/cli.js
-  checksum: 10c0/c3cc0afe06c480913df22fe37ed6463ad69550aaf843c6d85a523003e18a73659363f06cdc0ae236543b087dd6ed5b04d1fe904e51300316ca34960881e9c44d
+  checksum: 10c0/34a199b5ac8db8f11bacfe0bdbd22bae5b907a2554e957fc4282f081a13f0d9ffa3abe66564d70aa8473fd5c1551a7ac9f36f84e923cf3ff2c0a8909813e37ca
   languageName: node
   linkType: hard
 
-"@goodfoot/agent-skills@npm:1.0.20":
-  version: 1.0.20
-  resolution: "@goodfoot/agent-skills@npm:1.0.20"
+"@goodfoot/agent-skills@npm:1.0.24":
+  version: 1.0.24
+  resolution: "@goodfoot/agent-skills@npm:1.0.24"
   dependencies:
     eta: "npm:^4.6.0"
     glob: "npm:^13.0.6"
@@ -676,7 +676,7 @@ __metadata:
     zod: "npm:^4.4.3"
   bin:
     agent-skills: dist/cli.js
-  checksum: 10c0/ac0d73a0948ce1c8da9d0067248c1195a3c5ccbfa130afecd35dc8763b069b3df11ba62c5020861029906c1697c3b21c20d00e09c460e9eaa129d54ec9a3ee52
+  checksum: 10c0/a4ba6c7c6e6edb9cb46711ffde3ca216bb8096edff1cf96c7c26f53301ed35a42d272710d87cce67f408b280cdefde8c4ba2820a0d291df0d719db364949e542
   languageName: node
   linkType: hard
 
@@ -697,7 +697,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@goodfoot/wiki-agent-hooks@workspace:packages/agent-hooks"
   dependencies:
-    "@goodfoot/agent-hooks": "npm:1.0.5"
+    "@goodfoot/agent-hooks": "npm:1.0.8"
     "@typescript/native-preview": "npm:^7.0.0-dev"
     typescript: "npm:^5.9.3"
     vitest: "npm:^3.0.0"
@@ -733,7 +733,7 @@ __metadata:
   resolution: "@goodfoot/wiki-monorepo@workspace:."
   dependencies:
     "@biomejs/biome": "npm:^2.3.13"
-    "@goodfoot/agent-skills": "npm:1.0.20"
+    "@goodfoot/agent-skills": "npm:1.0.24"
     "@types/node": "npm:24.x"
     knip: "npm:^5.82.1"
     puppeteer-core: "npm:^24.42.0"

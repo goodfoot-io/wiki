@@ -5,8 +5,10 @@
   "license": "MIT",
   "private": false,
   "type": "module",
+  "main": "./dist/index.mjs",
   "exports": {
-    ".": "./dist/index.mjs"
+    ".": "./dist/index.mjs",
+    "./server": "./dist/index.mjs"
   },
   "bin": {
     "opencode-wiki": "bin/opencode-wiki.mjs"
