@@ -1,6 +1,6 @@
 packages/cli/src/commands/mod.rs#L231-L311 rk64:33b4ac2a313a7810
-packages/cli/src/commands/mod.rs#L540-L578 rk64:8bbde7feedeb7061
-packages/cli/src/commands/mod.rs#L623-L703 rk64:f1209c70c8f35c93
+packages/cli/src/commands/mod.rs#L572-L610 rk64:8bbde7feedeb7061
+packages/cli/src/commands/mod.rs#L655-L735 rk64:f1209c70c8f35c93
 packages/cli/src/wikiignore.rs rk64:4dec2386ea55815e
 wiki/reference/wiki-cli-advanced-usage.md#L76-L88 rk64:86b7edb04ff26d86
 
