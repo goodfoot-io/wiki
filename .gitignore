@@ -81,3 +81,11 @@ scripts/ssh
 .devcontainer/utilities/deepseek*
 
 reports
+
+# Platform binaries staged into the npm distribution packages. The release
+# workflow builds each target in its own matrix job and copies the result into
+# npm/<pkg>/bin/ before publishing (.github/workflows/release-cli.yml), so a
+# committed copy is never read — one was tracked by accident, at 31.7 MB.
+# The bin/ directories themselves are kept in git by their .gitkeep files.
+npm/*/bin/wiki
+npm/*/bin/wiki.exe

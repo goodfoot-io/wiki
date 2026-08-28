@@ -1,6 +1,6 @@
 ---
 name: wiki
-description: Operating manual for the wiki CLI (wiki 0.5.x). Load when searching or reading wiki pages, writing or editing one, citing source with fragment links, running or interpreting `wiki check`, resolving drift or skipped fixes, certifying pages with `links-reviewed:`, excluding files via `.wiki/.wikiignore`, wiring the pre-commit hook, or locating the wiki binary.
+description: Operating manual for the wiki CLI (wiki 0.5.x). Load when searching or reading wiki pages, writing or editing one, citing source with fragment links, running or interpreting `wiki check`, resolving drift or skipped fixes, certifying pages with `links-reviewed:`, excluding files via `./.wikiignore`, wiring the pre-commit hook, or locating the wiki binary.
 title: Wiki Skill
 summary: Hub for the wiki CLI — validate-and-fix loop first, page authoring, certified fragment links, binary resolution, and mechanical drift detection.
 ---
@@ -34,7 +34,7 @@ Key distinctions:
 | A check times out on a large corpus | Scope it: `wiki check path/to/page.md` or a narrower glob |
 | About to type `wiki mesh`, `wiki pin`, or `wiki extract` | Stop — not in 0.5.x. Mesh lives in git-span as `git mesh`; the others never shipped |
 | A query returned nothing | Unknown words are searches (exit 0, silent). Reserved verbs `check`/`list`/`summary` dispatch instead — quoting does **not** bypass dispatch (`wiki "check"` still runs check); rephrase so the first token differs, e.g. `wiki "check command"` |
-| A hook emitted a `<wiki>…</wiki>` block | See [PostToolUse hook output](#posttooluse-hook-output) below |
+| A hook emitted a `<wiki>…</wiki>` block | See [post-edit hook output](#post-edit-hook-output) below |
 
 ## Browse by mode
 
@@ -46,7 +46,7 @@ Key distinctions:
 
 Handoff requires `wiki check` clean and every inter-page link resolving. Wiki-only changes don't require full codebase validation.
 
-## PostToolUse hook output
+## Post-edit hook output
 
-Editing a wiki page fires this plugin's hook (`wiki check --fix` on that file). A `<wiki>…</wiki>` block means residual diagnostics `--fix` couldn't resolve (act per [resolve skipped fixes](./how-to/validate-and-fix.md#when---fix-skips)) — or the binary couldn't launch: install it / set `WIKI_BIN`, re-save. Note the check runs under a ~25 s cap; on a large corpus a timeout is reported as *could not be launched* too — treat that as slowness and scope the check ([trigger table](#start-from-a-trigger)), not as a missing binary. No block = clean or fully auto-fixed.
+Editing a wiki page fires this plugin's `tool.execute.after` hook (`wiki check --fix` on that file). A `<wiki>…</wiki>` block means residual diagnostics `--fix` couldn't resolve (act per [resolve skipped fixes](./how-to/validate-and-fix.md#when---fix-skips)) — or the binary couldn't launch: install it / set `WIKI_BIN`, re-save. Note the check runs under a ~25 s cap; on a large corpus a timeout is reported as *could not be launched* too — treat that as slowness and scope the check ([trigger table](#start-from-a-trigger)), not as a missing binary. No block = clean or fully auto-fixed.
 </instructions>

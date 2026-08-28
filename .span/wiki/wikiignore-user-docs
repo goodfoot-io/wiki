@@ -2,6 +2,6 @@ packages/cli/src/commands/mod.rs#L231-L311 rk64:33b4ac2a313a7810
 packages/cli/src/commands/mod.rs#L572-L610 rk64:8bbde7feedeb7061
 packages/cli/src/commands/mod.rs#L655-L735 rk64:f1209c70c8f35c93
 packages/cli/src/wikiignore.rs rk64:4dec2386ea55815e
-wiki/reference/wiki-cli-advanced-usage.md#L76-L88 rk64:86b7edb04ff26d86
+wiki/reference/wiki-cli-advanced-usage.md#L76-L88 rk64:88a40c378d31c47f
 
 The repo-root ./.wikiignore matcher and the three discover_files* filtering call sites in commands/mod.rs are the ground truth for what wiki check excludes and when; the 'Excluding Non-Wiki Files' section in wiki-cli-advanced-usage.md restates their behavior (gitignore syntax, root-relative matching, applies before frontmatter/link/drift classification) in prose with a worked example, so a change to matcher semantics or which discovery paths consult it must be re-verified against this doc section.

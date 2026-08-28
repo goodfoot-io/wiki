@@ -38,8 +38,8 @@
     "jsdoczoom@goodfoot": true,
     "frontend-design@claude-plugins-official": false,
     "plugin-dev@claude-plugins-official": false,
-    "claude-code-hooks@goodfoot": false,
-    "codex-hooks@goodfoot": false,
+    "agent-hooks@goodfoot": true,
+    "agent-skills@goodfoot": true,
     "git-span@git-span": true,
     "wiki@goodfoot-wiki": true,
     "cards-sdk@cards.management": true

@@ -1,5 +1,5 @@
 {
-  "name": "@goodfoot/agent-hooks",
+  "name": "@goodfoot/wiki-agent-hooks",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -7,14 +7,14 @@
     "build": "yarn build:hooks && yarn build:hooks:codex && yarn build:opencode",
     "build:hooks": "yarn agent-hooks-cli --agent claude-code -i \"src/claude/post-tool-use.ts\" -o \"../../plugins-claude/wiki/hooks/hooks.json\" --no-sourcemap",
     "build:hooks:codex": "yarn agent-hooks-cli --agent codex -i \"src/codex/post-tool-use.ts\" -o \"../../plugins-codex/wiki/hooks/hooks.json\" --plugin-root --no-sourcemap",
-    "build:opencode": "node -e \"require('esbuild').buildSync({ entryPoints: ['src/opencode/index.ts'], absWorkingDir: process.cwd(), bundle: true, platform: 'node', format: 'esm', minify: false, sourcemap: false, outfile: '../../plugins-opencode/wiki/dist/index.js' })\"",
+    "build:opencode": "yarn agent-hooks-cli --agent opencode -i \"src/opencode/index.ts\" -o \"../../plugins-opencode/wiki/dist\" --no-sourcemap",
     "agent-hooks-cli": "node scripts/hooks-cli-wrapper.js",
     "lint": "npx biome check src test scripts",
     "typecheck": "tsgo --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
-    "@goodfoot/agent-hooks": "1.0.0"
+    "@goodfoot/agent-hooks": "1.0.5"
   },
   "devDependencies": {
     "@typescript/native-preview": "^7.0.0-dev",

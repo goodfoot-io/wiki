@@ -1,5 +1,5 @@
 #!/usr/bin/env -S node --enable-source-maps
-// node_modules/@goodfoot/agent-hooks/dist/core/logger.js
+// ../../node_modules/@goodfoot/agent-hooks/dist/core/logger.js
 import { closeSync, existsSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 var LOG_LEVELS = ["debug", "info", "warn", "error"];
@@ -377,10 +377,10 @@ var logger = new Logger({
   logEnvVar: process.env.AGENT_HOOKS_LOG_ENV_VAR ?? "AGENT_HOOKS_LOG_FILE"
 });
 
-// node_modules/@goodfoot/agent-hooks/dist/agents/codex/constants.js
+// ../../node_modules/@goodfoot/agent-hooks/dist/agents/codex/constants.js
 var EVENTS_WITH_TEXT_OUTPUT = /* @__PURE__ */ new Set(["SessionStart", "UserPromptSubmit", "SubagentStart"]);
 
-// node_modules/@goodfoot/agent-hooks/dist/agents/codex/events.js
+// ../../node_modules/@goodfoot/agent-hooks/dist/agents/codex/events.js
 var HOOK_EVENT_NAMES = [
   "PreToolUse",
   "PostToolUse",
@@ -404,7 +404,7 @@ var EXCLUDED_FROM_ADVISORY = [
 ];
 var ADVISORY_EVENTS = HOOK_EVENT_NAMES.filter((eventName) => !EXCLUDED_FROM_ADVISORY.includes(eventName));
 
-// node_modules/@goodfoot/agent-hooks/dist/core/define-hook.js
+// ../../node_modules/@goodfoot/agent-hooks/dist/core/define-hook.js
 function defineHook(eventName, config, handler, policyGate) {
   if (policyGate !== void 0) {
     let accepted;
@@ -429,7 +429,7 @@ function defineHook(eventName, config, handler, policyGate) {
   return hookFn;
 }
 
-// node_modules/@goodfoot/agent-hooks/dist/agents/codex/hooks.js
+// ../../node_modules/@goodfoot/agent-hooks/dist/agents/codex/hooks.js
 var advisoryPolicyGate = (eventName, policy) => policy !== "continue" || ADVISORY_EVENTS.includes(eventName);
 function createHookFunction(hookEventName, config, handler) {
   const coreConfig = {
@@ -448,7 +448,7 @@ function postToolUseHook(config, handler) {
   return createHookFunction("PostToolUse", config, handler);
 }
 
-// node_modules/@goodfoot/agent-hooks/dist/core/stdin.js
+// ../../node_modules/@goodfoot/agent-hooks/dist/core/stdin.js
 async function readStdin() {
   return new Promise((resolve2, reject) => {
     const chunks = [];
@@ -468,7 +468,7 @@ function parseStdinJson(stdinContent) {
   return JSON.parse(stdinContent);
 }
 
-// node_modules/@goodfoot/agent-hooks/dist/core/transport.js
+// ../../node_modules/@goodfoot/agent-hooks/dist/core/transport.js
 var HookBlockError = class extends Error {
   /**
    * Optional structured fields carried alongside the block reason (e.g.
@@ -604,7 +604,7 @@ async function drive(transport, hookFn) {
   process.exit(finalized.exitCode);
 }
 
-// node_modules/@goodfoot/agent-hooks/dist/agents/codex/outputs.js
+// ../../node_modules/@goodfoot/agent-hooks/dist/agents/codex/outputs.js
 var EXIT_CODES = {
   SUCCESS: 0,
   ERROR: 1,
@@ -687,7 +687,7 @@ function subagentStartOutput(options = {}) {
   });
 }
 
-// node_modules/@goodfoot/agent-hooks/dist/agents/codex/transport.js
+// ../../node_modules/@goodfoot/agent-hooks/dist/agents/codex/transport.js
 function convertToHookOutput(output) {
   return output.stderr !== void 0 ? { stdout: output.stdout, stderr: output.stderr } : { stdout: output.stdout };
 }

@@ -34,8 +34,8 @@ if (!existsSync(join(packageDir, 'package.json'))) {
   process.stderr.write(`pack-opencode: missing ${join(packageDir, 'package.json')} — plugin tree not present\n`);
   process.exit(1);
 }
-if (!existsSync(join(packageDir, 'dist', 'index.js'))) {
-  process.stderr.write('pack-opencode: dist/index.js missing — run `yarn build:opencode` first\n');
+if (!existsSync(join(packageDir, 'dist', 'index.mjs'))) {
+  process.stderr.write('pack-opencode: dist/index.mjs missing — run `yarn build:opencode` first\n');
   process.exit(1);
 }
 

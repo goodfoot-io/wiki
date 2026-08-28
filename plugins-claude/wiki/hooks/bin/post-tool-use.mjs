@@ -6,7 +6,7 @@ const require = __createRequire(import.meta.url);
 const __filename = __fileURLToPath(import.meta.url);
 const __dirname = __pathDirname(__filename);
 
-// node_modules/@goodfoot/agent-hooks/dist/core/logger.js
+// ../../node_modules/@goodfoot/agent-hooks/dist/core/logger.js
 import { closeSync, existsSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 var LOG_LEVELS = ["debug", "info", "warn", "error"];
@@ -384,7 +384,7 @@ var logger = new Logger({
   logEnvVar: process.env.AGENT_HOOKS_LOG_ENV_VAR ?? "AGENT_HOOKS_LOG_FILE"
 });
 
-// node_modules/@goodfoot/agent-hooks/dist/core/env.js
+// ../../node_modules/@goodfoot/agent-hooks/dist/core/env.js
 import * as fs from "node:fs";
 var CLAUDE_ENV_VARS = {
   /**
@@ -427,7 +427,7 @@ function escapeShellValue(value) {
   return `'${escaped}'`;
 }
 
-// node_modules/@goodfoot/agent-hooks/dist/agents/claude-code/events.js
+// ../../node_modules/@goodfoot/agent-hooks/dist/agents/claude-code/events.js
 var HOOK_EVENT_NAMES = [
   "PreToolUse",
   "PostToolUse",
@@ -470,7 +470,7 @@ var EXCLUDED_FROM_ADVISORY = [
 ];
 var ADVISORY_EVENTS = HOOK_EVENT_NAMES.filter((eventName) => !EXCLUDED_FROM_ADVISORY.includes(eventName));
 
-// node_modules/@goodfoot/agent-hooks/dist/core/define-hook.js
+// ../../node_modules/@goodfoot/agent-hooks/dist/core/define-hook.js
 function defineHook(eventName, config, handler, policyGate) {
   if (policyGate !== void 0) {
     let accepted;
@@ -495,7 +495,7 @@ function defineHook(eventName, config, handler, policyGate) {
   return hookFn;
 }
 
-// node_modules/@goodfoot/agent-hooks/dist/agents/claude-code/hooks.js
+// ../../node_modules/@goodfoot/agent-hooks/dist/agents/claude-code/hooks.js
 var advisoryPolicyGate = (eventName, policy) => policy !== "continue" || ADVISORY_EVENTS.includes(eventName);
 function createSessionStartContext() {
   return { logger, persistEnvVar, persistEnvVars };
@@ -508,7 +508,7 @@ function postToolUseHook(config, handler) {
   return createHookFunction("PostToolUse", config, handler);
 }
 
-// node_modules/@goodfoot/agent-hooks/dist/agents/claude-code/outputs.js
+// ../../node_modules/@goodfoot/agent-hooks/dist/agents/claude-code/outputs.js
 var EXIT_CODES = {
   /** Handler completed successfully. Claude Code parses stdout as JSON. */
   SUCCESS: 0,
@@ -526,7 +526,7 @@ function createHookSpecificOutputBuilder(hookType) {
 }
 var postToolUseOutput = /* @__PURE__ */ createHookSpecificOutputBuilder("PostToolUse");
 
-// node_modules/@goodfoot/agent-hooks/dist/agents/claude-code/tool-helpers.js
+// ../../node_modules/@goodfoot/agent-hooks/dist/agents/claude-code/tool-helpers.js
 function getFilePath(input) {
   const toolInput = input.tool_input;
   if (toolInput && typeof toolInput === "object" && "file_path" in toolInput) {
@@ -536,7 +536,7 @@ function getFilePath(input) {
   return null;
 }
 
-// node_modules/@goodfoot/agent-hooks/dist/core/stdin.js
+// ../../node_modules/@goodfoot/agent-hooks/dist/core/stdin.js
 async function readStdin() {
   return new Promise((resolve2, reject) => {
     const chunks = [];
@@ -556,7 +556,7 @@ function parseStdinJson(stdinContent) {
   return JSON.parse(stdinContent);
 }
 
-// node_modules/@goodfoot/agent-hooks/dist/core/transport.js
+// ../../node_modules/@goodfoot/agent-hooks/dist/core/transport.js
 var HookBlockError = class extends Error {
   /**
    * Optional structured fields carried alongside the block reason (e.g.
@@ -692,7 +692,7 @@ async function drive(transport, hookFn) {
   process.exit(finalized.exitCode);
 }
 
-// node_modules/@goodfoot/agent-hooks/dist/agents/claude-code/transport.js
+// ../../node_modules/@goodfoot/agent-hooks/dist/agents/claude-code/transport.js
 var BLOCK_SHAPE_BY_EVENT = {
   PermissionRequest: (reason) => ({
     hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "deny", message: reason } }

@@ -1,4 +1,4 @@
 packages/agent-hooks/src/claude/post-tool-use.ts rk64:a1b9bfc8a0a72316
-plugins-claude/wiki/hooks/bin/post-tool-use.mjs rk64:fb580fcdb6f1e5cf
+plugins-claude/wiki/hooks/bin/post-tool-use.mjs rk64:196303f52c3217cf
 
 post-tool-use.mjs is the generated bundle of post-tool-use.ts, rebuilt by `yarn agent-hooks-cli --agent claude-code` (the `@goodfoot/agent-hooks` build CLI, invoked via the package's `build:hooks` script), which also regenerates the bundle. The TypeScript source is the only hand-edited side, so a source edit without a rebuild silently ships the stale bundle to every wiki check run, and a hand-edit of the bundle is overwritten by the next build.

@@ -1,12 +1,12 @@
 {
   "name": "@goodfoot/opencode-wiki",
-  "version": "0.5.133",
+  "version": "0.5.134",
   "description": "In-session wiki validation for OpenCode: checks and fixes fragment-linked documentation after edit/write calls, plus an installer for the wiki skill.",
   "license": "MIT",
   "private": false,
   "type": "module",
   "exports": {
-    ".": "./dist/index.js"
+    ".": "./dist/index.mjs"
   },
   "bin": {
     "opencode-wiki": "bin/opencode-wiki.mjs"

@@ -1,4 +1,5 @@
-packages/cli/src/index/freshness.rs#L22-L75 rk64:807558d1400729d1
-packages/cli/src/index/passes/mod.rs#L287-L306 rk64:46b6d91d39f3f102
+packages/cli/src/index/freshness.rs#L22-L62 rk64:68101364643bc718
+packages/cli/src/index/freshness.rs#L64-L96 rk64:598396de42414232
+packages/cli/src/index/passes/mod.rs#L345-L352 rk64:0d6ebf6c6eab32d6
 
-Fast triple gate orchestrator that compares HEAD OID, index checksum, and worktree generation read from the state row against on-disk sources; its decision logic must stay coordinated with the writer's CAS update that stores the same triple.
+current_fingerprint (read side, raw file reads that may degrade to a gate miss) and published_fingerprint (publish side, every leg falling back to a sentinel) must derive the same five canonical inputs — HEAD oid, head tree oid, .git/index checksum, wikiignore hash, worktree signature — in byte-identical form, because a generation is keyed by their digest: any divergence makes the gate miss forever and republish on every invocation, with no type or test tying the two derivations together. The sentinel values are the load-bearing difference, not an inconsistency: an unborn HEAD, a missing .git/index, and an absent .wikiignore must still publish a generation.

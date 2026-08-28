@@ -1,4 +1,4 @@
-plugins/wiki/skills/wiki/sections/running-wiki-check.md#L6-L8 rk64:71893dce48534993
-skills/wiki/SKILL.md#L10-L10 rk64:0000000000000000
+skills-src/wiki/wiki/SKILL.md.eta#L22-L22 rk64:b8ea868f56abb067
+skills-src/wiki/wiki/how-to/validate-and-fix.md.eta#L8-L12 rk64:c3d9b4c693289a1a
 
-Handbook stance that presents `wiki check --fix` as the reflexive first-line-of-defense invocation: the SKILL.md router bullet and the running-wiki-check.md invocation block must agree on which `wiki check` form is the recommended default.
+Presents `wiki check --fix` as the reflexive first-line-of-defense invocation: the SKILL.md loop line and the how-to page's invocation block must agree on which `wiki check` form is the recommended default, and the block's comment on the `--fix` line is what states that default. Both sides are Eta templates because the rendered per-platform trees are generated output.

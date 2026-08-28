@@ -1,7 +1,7 @@
-packages/cli/src/commands/drift.rs rk64:b8340e8191711302
+packages/cli/src/commands/drift.rs rk64:3306d62e2ce43081
 packages/cli/tests/drift_relocation.rs rk64:c0fc1e5410474185
-plugins/wiki/skills/wiki/sections/fragment-links-and-coverage.md rk64:a4839307dd078892
-plugins/wiki/skills/wiki/sections/resolving-skipped-fixes.md rk64:58b1c192d59ba48c
-plugins/wiki/skills/wiki/sections/running-wiki-check.md rk64:167edd8d30936ec6
+skills-src/wiki/wiki/explanation/anchor-contract.md.eta rk64:c640508e1dbf426c
+skills-src/wiki/wiki/how-to/validate-and-fix.md.eta rk64:595180c4c1006a0b
+skills-src/wiki/wiki/reference/diagnostics.md.eta rk64:0c797a4d8b44770f
 
-drift.rs is the ground truth for the drift engine's behavior — how the `links-reviewed:` epoch selects its certification commit, what classifies a link healthy/uncertified/broken/drifted/moved/unverifiable, and which outcomes `--fix` relocates versus skips. drift_relocation.rs pins that contract's relocation tiers and remedy texts as in-suite witness controls, so a change to the classification or skip semantics must keep them green; the fragment-links-and-coverage, resolving-skipped-fixes, and running-wiki-check sections describe that behavior for operators, so a change must also be re-verified against all three descriptions, and a doc that re-describes the contract must stay true of the implementation and of what the pins exercise.
+drift.rs is the ground truth for the drift engine's behavior — how the `links-reviewed:` epoch selects its certification commit, what classifies a link healthy/uncertified/broken/drifted/moved/unverifiable, and which outcomes `--fix` relocates versus skips. drift_relocation.rs pins that contract's relocation tiers and remedy texts as in-suite witness controls, so a change to the classification or skip semantics must keep them green; the anchor-contract explanation, the validate-and-fix skip procedure, and the diagnostics kind-and-exit-code tables describe that behavior for operators, so a change must also be re-verified against all three, and a doc that re-describes the contract must stay true of the implementation and of what the pins exercise. The doc side is authored as Eta templates because the rendered per-platform skill trees are generated output.

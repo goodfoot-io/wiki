@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /**
- * Wraps the unified `@goodfoot/agent-hooks` CLI so every invocation -- via
- * `yarn build:hooks`/`yarn build:hooks:codex` or directly via `yarn
- * agent-hooks-cli` -- gets its generated manifest canonicalized afterward
- * (stable hook ordering, no stamped timestamp) via `canonicalizeHookManifest`
- * below.
+ * Wraps the unified `@goodfoot/agent-hooks` CLI so every manifest-emitting
+ * invocation -- via `yarn build:hooks`/`yarn build:hooks:codex` or directly
+ * via `yarn agent-hooks-cli` -- gets its generated manifest canonicalized
+ * afterward (stable hook ordering, no stamped timestamp) via
+ * `canonicalizeHookManifest` below. `--agent opencode` emits no manifest and
+ * is passed straight through; see main().
  *
  * An earlier version of this wrapper also post-processed the generated
  * `.mjs` output's esbuild module-boundary comments, to correct for the
@@ -51,7 +52,7 @@
  * then canonicalizes the emitted manifest at the `-o`/`--output` argument's
  * path.
  *
- * Usage: node scripts/hooks-cli-wrapper.js --agent <claude-code|codex> [...cli-args]
+ * Usage: node scripts/hooks-cli-wrapper.js --agent <claude-code|codex|opencode> [...cli-args]
  */
 
 import { spawnSync } from 'node:child_process';
@@ -172,7 +173,7 @@ function canonicalizeHookManifest(outputPath, inputArg) {
   writeFileSync(outputPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
-// Mirrors the codex-hooks CLI's own emit-time conversion exactly, including
+// Mirrors the CLI's own codex emit-time conversion exactly, including
 // the 1-second floor: a sub-second ms budget would otherwise round down to a
 // zero-second (never-cancelling) registration.
 function timeoutMsToSeconds(timeoutMs) {
@@ -225,6 +226,15 @@ async function main() {
     return;
   }
   const agentValue = cliArgs.findLast((_, i) => cliArgs[i - 1] === '--agent');
+  if (agentValue === 'opencode') {
+    // OpenCode has no manifest to post-process: `-o` names an artifact
+    // *directory*, and the CLI writes one self-contained `<entry>.mjs` per
+    // plugin entry into it with no hooks.json alongside. Both steps below
+    // read `-o` as a JSON file, so letting them run would fail on EISDIR --
+    // and there is nothing they could canonicalize anyway, since the emitted
+    // bundle carries no hook ordering and no build timestamp.
+    return;
+  }
   if (agentValue === 'claude-code') {
     // Only --agent claude-code needs the division -- --agent codex already
     // emits seconds, and converting its manifest again would corrupt it.

@@ -48,12 +48,26 @@ agent_hooks_bundles_fresh() {
   fi
 }
 
+# Same contract for the generated skill trees: `agent-skills build` republishes
+# every target from skills-src/, so a committed tree that no longer matches its
+# template is a tree nobody authored. Lint alone cannot catch this -- it
+# diagnoses sources, not whether committed output is fresh.
+agent_skills_trees_fresh() {
+  if [ -n "$(git status --porcelain -- plugins-claude/wiki/skills plugins-codex/wiki/skills plugins-opencode/wiki/skills plugins-antigravity/wiki/skills skills)" ]; then
+    echo "ERROR: rebuild produced uncommitted skill-tree changes — commit the rebuilt skill trees" >&2
+    return 1
+  fi
+}
+
 {
   yarn typecheck &&
   yarn lint &&
   "$LOCAL_WIKI" check &&
-  yarn workspace @goodfoot/agent-hooks build &&
+  yarn workspace @goodfoot/wiki-agent-hooks build &&
   agent_hooks_bundles_fresh &&
+  yarn lint:agent-skills &&
+  yarn build:agent-skills &&
+  agent_skills_trees_fresh &&
   yarn test &&
   eval "$BUILD_CMD"
 } 2>&1 | tee yarn-validate-output.log

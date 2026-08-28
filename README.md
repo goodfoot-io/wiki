@@ -89,23 +89,29 @@ Install **Wiki Viewer** from the [VS Code Marketplace](https://marketplace.visua
 ├── packages/
 │   ├── cli/            # @goodfoot/wiki — Rust CLI (Cargo workspace root)
 │   ├── extension/      # Wiki Viewer VS Code extension (TypeScript)
-│   └── agent-hooks/    # @goodfoot/agent-hooks — single hook source for all three plugins
+│   └── agent-hooks/    # @goodfoot/wiki-agent-hooks — single hook source for every plugin
 ├── npm/
 │   └── wiki-*/         # Platform-specific binary distribution packages
 ├── plugins-claude/
-│   └── wiki/           # Claude Code plugin: generated hooks + symlinked skills
+│   └── wiki/           # Claude Code plugin: generated hooks + generated skills
 ├── plugins-codex/
-│   └── wiki/           # Codex plugin: generated hooks + symlinked skills
+│   └── wiki/           # Codex plugin: generated hooks + generated skills
 ├── plugins-opencode/
 │   └── wiki/           # @goodfoot/opencode-wiki — OpenCode plugin and npm package
+├── plugins-antigravity/
+│   └── wiki/           # Antigravity plugin: generated skills (no hook surface yet)
+├── skills-src/
+│   └── wiki/           # Authored .md.eta skill templates — the only hand-edited copy
 ├── skills/
-│   └── wiki/           # Single-source wiki skill, shared by every plugin tree
+│   └── wiki/           # Generated shared skill tree (.agents/skills/wiki points here)
 ├── examples/
 │   └── githooks/       # Sample post-commit / post-merge hooks for Claude, Gemini
 ├── docs/
 │   └── cross-compilation.md
 └── scripts/
     ├── sync-versions.sh
+    ├── build-agent-skills.mjs
+    ├── lint-agent-skills.mjs
     ├── validate.sh
     └── release.sh
 ```
@@ -114,14 +120,27 @@ The Rust CLI lives in `packages/cli/`; `packages/cli/package.json` is the single
 
 ## Agent plugins
 
-One hook source builds three platform plugins. `packages/agent-hooks/` owns the
-PostToolUse implementation, and `yarn workspace @goodfoot/agent-hooks build`
-emits the generated bundles committed under `plugins-claude/wiki/hooks/`,
-`plugins-codex/wiki/hooks/`, and `plugins-opencode/wiki/dist/` — validation
-fails closed if a rebuild ever leaves one of them stale. Each tree provides:
+One source tree builds every platform plugin, through two Goodfoot bundlers.
 
-- **Hooks** — a `PostToolUse` hook that runs `wiki check --fix` after an agent writes or edits a Markdown file, keeping links and frontmatter valid
-- **Skills** — the wiki skill authored once at [skills/wiki/](./skills/wiki/) and shared through relative symlinks, teaching agents how to query and author wiki articles using the CLI
+`packages/agent-hooks/` owns the hook implementation and compiles it with
+[`@goodfoot/agent-hooks`](https://www.npmjs.com/package/@goodfoot/agent-hooks):
+`yarn workspace @goodfoot/wiki-agent-hooks build` emits the bundles committed
+under `plugins-claude/wiki/hooks/`, `plugins-codex/wiki/hooks/`, and
+`plugins-opencode/wiki/dist/`.
+
+`skills-src/wiki/` holds the authored `.md.eta` skill templates, rendered by
+[`@goodfoot/agent-skills`](https://www.npmjs.com/package/@goodfoot/agent-skills)
+via `yarn build:agent-skills` into every `skills/` tree below, with
+`yarn lint:agent-skills` gating template portability. Validation fails closed if
+a rebuild of either bundler ever leaves a committed artifact stale. Each tree
+provides:
+
+- **Hooks** — a post-edit hook that runs `wiki check --fix` after an agent writes or edits a Markdown file, keeping links and frontmatter valid. Registered as `PostToolUse` on Claude Code and Codex, and as `tool.execute.after` on OpenCode; Antigravity has no hook surface yet, so it ships skill-only
+- **Skills** — the wiki skill authored once under [skills-src/wiki/](./skills-src/wiki/) and rendered per platform, teaching agents how to query and author wiki articles using the CLI
+
+The generated skill trees are listed in `.wikiignore`: the authored `.md.eta`
+templates are the only copy `wiki check` should ever see, since a fix applied to
+a rendered tree would be discarded by the next build.
 
 Install per platform:
 

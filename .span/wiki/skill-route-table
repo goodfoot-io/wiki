@@ -1,8 +1,12 @@
-plugins/wiki/skills/wiki/sections/command-reference.md rk64:10d0e7d73f160c13
-plugins/wiki/skills/wiki/sections/fragment-links-and-coverage.md rk64:a4839307dd078892
-plugins/wiki/skills/wiki/sections/resolving-skipped-fixes.md rk64:58b1c192d59ba48c
-plugins/wiki/skills/wiki/sections/searching-and-reading.md rk64:b26891f2ae4f1f4b
-plugins/wiki/skills/wiki/sections/writing-a-page.md rk64:ca82a9d010b68fc3
-skills/wiki/SKILL.md#L13-L22 rk64:6c39a77f71170a0a
+skills-src/wiki/wiki/SKILL.md.eta#L25-L51 rk64:0dbf14f665853362
+skills-src/wiki/wiki/explanation/anchor-contract.md.eta rk64:c640508e1dbf426c
+skills-src/wiki/wiki/how-to/cite-source.md.eta rk64:955956b126e55ce9
+skills-src/wiki/wiki/how-to/organize-a-wiki.md.eta rk64:0f8f91a76e56030f
+skills-src/wiki/wiki/how-to/validate-and-fix.md.eta rk64:595180c4c1006a0b
+skills-src/wiki/wiki/how-to/wire-the-pre-commit-hook.md.eta rk64:ce6acaa3c19c4dd2
+skills-src/wiki/wiki/how-to/write-a-page.md.eta rk64:e9d0c769bfec17c0
+skills-src/wiki/wiki/reference/commands.md.eta rk64:f38c5c8a3b85c570
+skills-src/wiki/wiki/reference/diagnostics.md.eta rk64:0c797a4d8b44770f
+skills-src/wiki/wiki/reference/search-and-output-shapes.md.eta rk64:b12c2ba356308a86
 
-The SKILL.md route table and the section files it routes to are the skill's routing contract: each bullet names a section path and the subject it covers, so a section that changes focus silently falsifies its bullet unless the bullet is updated in the same edit, and a bullet must keep pointing at a section that exists and covers the routed subject.
+The SKILL.md template's three route surfaces — the job bullets, the trigger table, and the browse-by-mode list — name section paths and heading anchors in the sibling templates they route to, so a section that is renamed, moved, or refocused, or a heading whose text changes, silently falsifies its route entry unless the entry moves in the same edit. The rendered per-platform trees are generated output and sit under .wikiignore, so the templates are the only editable side and wiki check no longer validates these fragment links.

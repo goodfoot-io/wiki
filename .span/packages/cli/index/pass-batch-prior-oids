@@ -1,4 +1,5 @@
-packages/cli/src/index/passes/index_file.rs#L4-L98 rk64:c213c1a03b006252
-packages/cli/src/index/passes/worktree.rs#L52-L206 rk64:bdf87b58f3842090
+packages/cli/src/index/passes/index_file.rs#L4-L98 rk64:09bd65bb7055982a
+packages/cli/src/index/passes/mod.rs#L197-L207 rk64:893ecc881a10018d
+packages/cli/src/index/passes/worktree.rs#L26-L166 rk64:db8124f1b090429d
 
-Pass 2 (index_file) and Pass 3 (worktree) batch-load prior path-to-OID mappings from the paths SQLite table before iterating their respective sources, using in-memory HashMap lookups instead of per-file SQL point queries in the hot loop.
+The orchestrator builds the prior path-to-OID map and the base worktree rows once from the base generation's members and hands them to Pass 2 (index_file) and Pass 3 (worktree), which resolve every path through in-memory HashMap lookups instead of per-file SQL point queries in the hot loop. Both passes therefore depend on the maps being complete for their own source before they are entered — a pass that starts consulting the store directly, or an orchestrator that narrows what it seeds, reintroduces the per-file query cost with no signature or test change to reveal it.

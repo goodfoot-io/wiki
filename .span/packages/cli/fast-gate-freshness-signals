@@ -1,4 +1,4 @@
+packages/cli/src/index/freshness.rs#L74-L85 rk64:b165c8f611442f0f
 packages/cli/src/index/freshness.rs#L102-L156 rk64:d6673c2b4d44a019
-packages/cli/src/index/passes/mod.rs#L269-L306 rk64:0007b9d0a9c98d94
 
-Stat-only freshness fast gate whose signals — the HEAD OID (40-zero sentinel for unborn HEAD) and the 20-byte SHA-1 trailer of .git/index — are stored by the refresh writer via gix and re-derived by raw no-gix file reads on every invocation, compared byte-for-byte to skip the refresh.
+read_head_oid and read_index_trailer re-derive two of the fingerprint's canonical signals — the HEAD oid, following one symref hop through the loose ref then packed-refs and yielding the 40-zero sentinel for an unborn HEAD, and the 20-byte SHA-1 trailer of .git/index — from small raw file reads with no gix open, because the gate runs on every invocation and must stay stat-cheap. The publish side derives the same two through gix, so each raw reader must reproduce gix's byte form exactly, sentinel included, or the gate can never hit.

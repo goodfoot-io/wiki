@@ -1,8 +1,8 @@
-packages/cli/logging.wiki.md rk64:a03de0481ab9a402
-packages/cli/src/index/passes/mod.rs#L8-L470 rk64:fe5d484ab86fb4e9
-packages/cli/src/index/schema.rs#L8-L165 rk64:c76057ac01c76347
+packages/cli/logging.wiki.md rk64:648d6d398ba0b4d9
+packages/cli/src/cache/schema.rs rk64:f5578fed645335f4
+packages/cli/src/index/passes/mod.rs#L8-L470 rk64:8fea93634e40ebe2
 packages/cli/tests/index_blob_readd.rs rk64:3651c9f8c47bdf33
-packages/cli/tests/index_rename_edit.rs rk64:b9feacf0e4b329f0
-packages/cli/tests/index_schema_rebuild.rs rk64:90c8689df8b82ab0
+packages/cli/tests/index_rename_edit.rs rk64:28d181a51f9d11bf
+packages/cli/tests/index_schema_rebuild.rs rk64:87bd4dd7182c1ef7
 
 Index cache DB schema contract enforced by the three-pass refresh implementation and validated by integration tests that prove blob refcount and FTS sync correctness.

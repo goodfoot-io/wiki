@@ -40,7 +40,7 @@ function requireEntry(name: string): void {
 
 describe('opencode plugin tarball layout', () => {
   it('contains the built bundle, the installer bin, and the skill entrypoint', () => {
-    requireEntry('package/dist/index.js');
+    requireEntry('package/dist/index.mjs');
     requireEntry('package/bin/opencode-wiki.mjs');
     requireEntry('package/skills/wiki/SKILL.md');
   });

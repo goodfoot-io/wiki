@@ -1,7 +1,7 @@
 ---
 title: Wiki Logging and Perf Instrumentation
 summary: Documents all logging and performance tracing points in the wiki CLI. 
-links-reviewed: 6
+links-reviewed: 7
 ---
 
 ## Overview
@@ -178,8 +178,8 @@ Events written to `wiki.log` follow this JSON schema:
 
 Two special events mark command execution boundaries:
 
-- **command_start**: Logged at [initialization](./src/perf.rs#L152-L196) with command name, json_output flag, and repo_root
-- **command_finish**: Logged at [completion](./src/perf.rs#L98-L108) with exit code and total runtime
+- **command_start**: Logged at [initialization](./src/perf.rs#L152-L180) with command name and json_output flag
+- **command_finish**: Logged at [completion](./src/perf.rs#L182-L192) with exit code and total runtime
 
 ### Log Rotation
 

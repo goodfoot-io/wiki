@@ -1,4 +1,4 @@
 packages/cli/src/index/ingest.rs#L32-L39 rk64:1593688d6e618709
-packages/cli/src/index/search.rs#L330-L338 rk64:e0c4999df0b4636d
+packages/cli/src/index/search.rs#L341-L355 rk64:a728cf6a6b7d7042
 
-Alias text encoding convention that joins alias tokens with a single space on ingest (WikiBlobFields construction) and tokenizes them back on lookup (resolve_page alias fallback split on whitespace/comma). Changing the join separator or the split rules on one side silently breaks the other with no type or test enforcement.
+Alias text encoding convention that joins alias tokens with a single space on ingest (WikiBlobFields construction) and tokenizes them back on lookup (collect_exact_alias_hits splits aliases_text on whitespace or comma, trims, and compares case-insensitively). Changing the join separator or the split rules on one side silently breaks the other with no type or test enforcement.

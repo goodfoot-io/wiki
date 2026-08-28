@@ -171,7 +171,7 @@ jobs:
         run: yarn install --immutable
 
       - name: Rebuild OpenCode plugin bundle
-        run: yarn workspace @goodfoot/agent-hooks build:opencode
+        run: yarn workspace @goodfoot/wiki-agent-hooks build:opencode
 
       - name: Guard committed OpenCode plugin bundle freshness
         run: |
@@ -180,12 +180,13 @@ jobs:
             exit 1
           fi
 
-      # npm pack silently drops symlink entries, and plugins-opencode/wiki/skills
-      # is a symlink into the central skills tree — publishing straight from the
-      # source tree would ship a package whose installer cannot find skills/wiki
-      # (the failure that shipped as 0.5.129). Pack through pack-opencode.mjs,
-      # which stages a dereferenced copy, and fail closed unless the skill tree
-      # verifiably made it into the tarball.
+      # plugins-opencode/wiki/skills is now a real tree rendered by
+      # `agent-skills build`, not the symlink into the central skills tree whose
+      # silent removal by `npm pack` shipped a skill-less package as 0.5.129.
+      # Packing still goes through pack-opencode.mjs — it stages a dereferenced
+      # copy, which keeps that failure mode closed if any part of the tree
+      # becomes a link again — and the tarball is still verified to carry the
+      # skill before anything is published.
       - name: Publish OpenCode plugin package
         run: |
           TARBALL="$(node packages/agent-hooks/scripts/pack-opencode.mjs)"

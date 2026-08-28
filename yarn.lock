@@ -648,29 +648,37 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@goodfoot/agent-hooks@npm:1.0.0":
-  version: 1.0.0
-  resolution: "@goodfoot/agent-hooks@npm:1.0.0"
+"@goodfoot/agent-hooks@npm:1.0.5":
+  version: 1.0.5
+  resolution: "@goodfoot/agent-hooks@npm:1.0.5"
   dependencies:
     esbuild: "npm:^0.24.0"
     glob: "npm:^11.0.0"
     typescript: "npm:^5.9.3"
+  peerDependencies:
+    "@opencode-ai/plugin": ^1.18.23
+  peerDependenciesMeta:
+    "@opencode-ai/plugin":
+      optional: true
   bin:
     agent-hooks: dist/cli.js
-  checksum: 10c0/95e391682a5ed25e05f057f94caf8dc3188fdd3a37a49d3b79c26d952f3ccff6af4b4ec2546dee4e27550f96efb6e2a7f2943957f699ca8bd455b90a085a3acd
+  checksum: 10c0/c3cc0afe06c480913df22fe37ed6463ad69550aaf843c6d85a523003e18a73659363f06cdc0ae236543b087dd6ed5b04d1fe904e51300316ca34960881e9c44d
   languageName: node
   linkType: hard
 
-"@goodfoot/agent-hooks@workspace:packages/agent-hooks":
-  version: 0.0.0-use.local
-  resolution: "@goodfoot/agent-hooks@workspace:packages/agent-hooks"
+"@goodfoot/agent-skills@npm:1.0.20":
+  version: 1.0.20
+  resolution: "@goodfoot/agent-skills@npm:1.0.20"
   dependencies:
-    "@goodfoot/agent-hooks": "npm:1.0.0"
-    "@typescript/native-preview": "npm:^7.0.0-dev"
-    typescript: "npm:^5.9.3"
-    vitest: "npm:^3.0.0"
-  languageName: unknown
-  linkType: soft
+    eta: "npm:^4.6.0"
+    glob: "npm:^13.0.6"
+    yaml: "npm:^2.9.0"
+    zod: "npm:^4.4.3"
+  bin:
+    agent-skills: dist/cli.js
+  checksum: 10c0/ac0d73a0948ce1c8da9d0067248c1195a3c5ccbfa130afecd35dc8763b069b3df11ba62c5020861029906c1697c3b21c20d00e09c460e9eaa129d54ec9a3ee52
+  languageName: node
+  linkType: hard
 
 "@goodfoot/vscode-logging@workspace:*, @goodfoot/vscode-logging@workspace:packages/vscode-logging":
   version: 0.0.0-use.local
@@ -679,6 +687,17 @@ __metadata:
     "@biomejs/biome": "npm:^2.3.13"
     "@types/node": "npm:24.x"
     "@types/vscode": "npm:^1.100.0"
+    "@typescript/native-preview": "npm:^7.0.0-dev"
+    typescript: "npm:^5.9.3"
+    vitest: "npm:^3.0.0"
+  languageName: unknown
+  linkType: soft
+
+"@goodfoot/wiki-agent-hooks@workspace:packages/agent-hooks":
+  version: 0.0.0-use.local
+  resolution: "@goodfoot/wiki-agent-hooks@workspace:packages/agent-hooks"
+  dependencies:
+    "@goodfoot/agent-hooks": "npm:1.0.5"
     "@typescript/native-preview": "npm:^7.0.0-dev"
     typescript: "npm:^5.9.3"
     vitest: "npm:^3.0.0"
@@ -714,6 +733,7 @@ __metadata:
   resolution: "@goodfoot/wiki-monorepo@workspace:."
   dependencies:
     "@biomejs/biome": "npm:^2.3.13"
+    "@goodfoot/agent-skills": "npm:1.0.20"
     "@types/node": "npm:24.x"
     knip: "npm:^5.82.1"
     puppeteer-core: "npm:^24.42.0"
@@ -2972,6 +2992,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"eta@npm:^4.6.0":
+  version: 4.6.0
+  resolution: "eta@npm:4.6.0"
+  checksum: 10c0/98c8081f756884bbc22f2bf4a6a38c2322ee97575fb6f0c02dcb1c3040353971c91a96bfba2d6f7cba39bb0ebece5708803a765447d9a81ca1172ccd5e31becf
+  languageName: node
+  linkType: hard
+
 "events-universal@npm:^1.0.0":
   version: 1.0.1
   resolution: "events-universal@npm:1.0.1"
@@ -3336,7 +3363,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"glob@npm:^13.0.0":
+"glob@npm:^13.0.0, glob@npm:^13.0.6":
   version: 13.0.6
   resolution: "glob@npm:13.0.6"
   dependencies:
@@ -6236,6 +6263,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"yaml@npm:^2.9.0":
+  version: 2.9.0
+  resolution: "yaml@npm:2.9.0"
+  bin:
+    yaml: bin.mjs
+  checksum: 10c0/f340718df45e97a9551b9bf9dac61c80050bc464513b710debfb5067c380c8472e3b67809cffacb4ab5ffb5e66ef9310816c88b05f371cec60abfedd8c88e0a2
+  languageName: node
+  linkType: hard
+
 "yargs-parser@npm:^21.1.1":
   version: 21.1.1
   resolution: "yargs-parser@npm:21.1.1"
@@ -6307,5 +6343,12 @@ __metadata:
   version: 4.3.6
   resolution: "zod@npm:4.3.6"
   checksum: 10c0/860d25a81ab41d33aa25f8d0d07b091a04acb426e605f396227a796e9e800c44723ed96d0f53a512b57be3d1520f45bf69c0cb3b378a232a00787a2609625307
+  languageName: node
+  linkType: hard
+
+"zod@npm:^4.4.3":
+  version: 4.4.3
+  resolution: "zod@npm:4.4.3"
+  checksum: 10c0/7ea31b558e88f9faf44f31dd185e2e1cbf51fed3081787fb96cc2534749b50c0acfc6da7f0922a7353ed092dd358c7d50c28ea96c94d04af64191bd33152eca3
   languageName: node
   linkType: hard

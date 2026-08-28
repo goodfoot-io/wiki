@@ -78,7 +78,7 @@ jobs:
         run: yarn install
 
       - name: Build agent-hooks bundles
-        run: yarn workspace @goodfoot/agent-hooks build
+        run: yarn workspace @goodfoot/wiki-agent-hooks build
 
       - name: Check generated bundles fresh
         run: |
@@ -87,8 +87,21 @@ jobs:
             exit 1
           fi
 
+      - name: Lint agent-skills templates
+        run: yarn lint:agent-skills
+
+      - name: Build agent-skills trees
+        run: yarn build:agent-skills
+
+      - name: Check generated skill trees fresh
+        run: |
+          if [ -n "$(git status --porcelain -- plugins-claude/wiki/skills plugins-codex/wiki/skills plugins-opencode/wiki/skills plugins-antigravity/wiki/skills skills)" ]; then
+            echo "ERROR: rebuild produced uncommitted skill-tree changes — commit the rebuilt skill trees"
+            exit 1
+          fi
+
       - name: Test agent-hooks
-        run: yarn workspace @goodfoot/agent-hooks test
+        run: yarn workspace @goodfoot/wiki-agent-hooks test
 
       - name: Download CLI binary
         uses: actions/download-artifact@v4

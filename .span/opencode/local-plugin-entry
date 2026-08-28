@@ -1,4 +1,4 @@
-opencode.json#L2-L5 rk64:8531a17186e1eddc
-packages/agent-hooks/package.json#L9-L11 rk64:6a5001f3bc048079
+opencode.json#L2-L5 rk64:ddee478811e6510a
+packages/agent-hooks/package.json#L9-L11 rk64:8d20062a123e347f
 
 The repository OpenCode configuration loads the exact bundle path emitted by the agent-hooks OpenCode build; changing either path without the other makes local plugin smoke tests load a missing or stale entry.

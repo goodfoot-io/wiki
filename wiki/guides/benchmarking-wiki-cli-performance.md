@@ -1,7 +1,7 @@
 ---
 title: Benchmarking Wiki CLI Performance
 summary: How to run repeatable, source-pinned latency benchmarks of the everyday wiki commands and decompose where the time goes.
-links-reviewed: 4
+links-reviewed: 5
 ---
 
 This guide describes how to measure the per-operation latency of the everyday `wiki` commands — the default search (`wiki "query"`), `list`, `summary`, and `check` — in a way whose numbers are trustworthy. The goal is a repeatable measurement, not a single eyeballed sample: build the binary from the source under test, run each command enough times to report a distribution, and attribute the cost to the right term (process startup, index preparation, or the command body).
@@ -75,10 +75,10 @@ Collect the 25 wall-clock samples per command and report `min / p10 / median / p
 
 ## Decompose the time into three terms
 
-A median is not actionable until you know *which* term it lives in. Every subcommand dispatched from [`main.rs`](/packages/cli/src/main.rs#L280-L297) shares one prefix — resolve the repo root, then [`WikiIndex::prepare_for_source`](/packages/cli/src/index/mod.rs#L291-L293), then run the command body — so a win or regression must be attributed to the right term:
+A median is not actionable until you know *which* term it lives in. Every subcommand dispatched from [`main.rs`](/packages/cli/src/main.rs#L285-L297) shares one prefix — resolve the repo root, then [`WikiIndex::prepare_for_source`](/packages/cli/src/index/mod.rs#L325-L327), then run the command body — so a win or regression must be attributed to the right term:
 
-1. **Startup.** Process spawn plus the in-process repo-root discovery at [`main.rs`](/packages/cli/src/main.rs#L293), which runs *before* the command span starts. This is captured directly by the `startup` event, emitted in [`run`](/packages/cli/src/main.rs#L300-L305) from an `Instant` taken at process entry — so it no longer has to be recovered as `wall − command-span`. A bare `wiki --version` (which skips `prepare`) gives the floor.
-2. **Index preparation.** [`prepare_for_source`](/packages/cli/src/index/mod.rs#L329-L481) computes the stat-only canonical fingerprint ([`current_fingerprint`](/packages/cli/src/index/freshness.rs#L23-L66)) at [its gate site](/packages/cli/src/index/mod.rs#L332-L350); on a digest miss it falls through to a full `index.refresh`. Both the gate walk and the refresh are wrapped in perf spans — `index.fast_gate` and `index.refresh` — so the gate's worktree leg ([`collect_worktree_pairs`](/packages/cli/src/index/freshness.rs#L168-L254)) is visible rather than hiding in an unspanned gap. That walk **must** be cheap and correct because it runs on *every* invocation: it is gitignore-aware (it skips `target/`, `node_modules/`, and `.git`) and parallel, so it stats only content the index ingests and overlaps the per-stat round-trips that dominate a hostile filesystem.
+1. **Startup.** Process spawn plus the in-process repo-root discovery at [`main.rs`](/packages/cli/src/main.rs#L294), which runs *before* the command span starts. This is captured directly by the `startup` event, emitted in [`run`](/packages/cli/src/main.rs#L300-L305) from an `Instant` taken at process entry — so it no longer has to be recovered as `wall − command-span`. A bare `wiki --version` (which skips `prepare`) gives the floor.
+2. **Index preparation.** [`prepare_for_source`](/packages/cli/src/index/mod.rs#L329-L481) computes the stat-only canonical fingerprint ([`current_fingerprint`](/packages/cli/src/index/freshness.rs#L23-L66)) at [its gate site](/packages/cli/src/index/mod.rs#L371-L374); on a digest miss it falls through to a full `index.refresh`. Both the gate walk and the refresh are wrapped in perf spans — `index.fast_gate` and `index.refresh` — so the gate's worktree leg ([`collect_worktree_pairs`](/packages/cli/src/index/freshness.rs#L168-L254)) is visible rather than hiding in an unspanned gap. That walk **must** be cheap and correct because it runs on *every* invocation: it is gitignore-aware (it skips `target/`, `node_modules/`, and `.git`) and parallel, so it stats only content the index ingests and overlaps the per-stat round-trips that dominate a hostile filesystem.
 3. **Command body.** The work inside the command span itself (the actual search, list, summary, or check), recovered as `command_finish − (fast_gate + gix_open + refresh)`.
 
 Read the spans back out of the perf log to separate the terms:

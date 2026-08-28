@@ -1,0 +1,106 @@
+{
+  "$comment": "Bundler-managed plugin registry consumed by scripts/agent-skills-registry.mjs. Every path is repo-root-relative.",
+  "sharedOpencodeRoot": "skills",
+  "plugins": [
+    {
+      "name": "wiki",
+      "skillsSrc": "skills-src/wiki",
+      "skills": [
+        "wiki"
+      ],
+      "claudePluginRoot": "plugins-claude/wiki",
+      "codexPluginRoot": "plugins-codex/wiki",
+      "opencodePluginRoot": "plugins-opencode/wiki",
+      "antigravityPluginRoot": "plugins-antigravity/wiki",
+      "targets": [
+        {
+          "platform": "claude-code",
+          "path": "plugins-claude/wiki/skills"
+        },
+        {
+          "platform": "codex",
+          "path": "plugins-codex/wiki/skills"
+        },
+        {
+          "platform": "opencode",
+          "path": "plugins-opencode/wiki/skills"
+        },
+        {
+          "platform": "antigravity",
+          "path": "plugins-antigravity/wiki/skills"
+        },
+        {
+          "platform": "opencode",
+          "path": "skills",
+          "note": "The shared AGENTS.md-convention root that .agents/skills/wiki symlinks into. Rendered in the OpenCode dialect because that dialect is what AGENTS.md-based hosts read; wiki is the only plugin here, so nothing else can collide on a skill name."
+        }
+      ],
+      "platformDirs": [
+        "claude-code:skills=plugins-claude/wiki/skills",
+        "claude-code:hooks=plugins-claude/wiki/hooks",
+        "claude-code:plugin=plugins-claude/wiki",
+        "claude-code:conventions=CLAUDE.md",
+        "codex:skills=plugins-codex/wiki/skills",
+        "codex:hooks=plugins-codex/wiki/hooks",
+        "codex:plugin=plugins-codex/wiki",
+        "codex:conventions=AGENTS.md",
+        "opencode:skills=plugins-opencode/wiki/skills",
+        "opencode:hooks=plugins-opencode/wiki/dist",
+        "opencode:plugin=plugins-opencode/wiki",
+        "opencode:conventions=AGENTS.md",
+        "antigravity:skills=plugins-antigravity/wiki/skills",
+        "antigravity:plugin=plugins-antigravity/wiki",
+        "antigravity:conventions=AGENTS.md"
+      ],
+      "lintBaseline": {
+        "diagnostics": [
+          "wiki/SKILL.md:4:frontmatter-key",
+          "wiki/SKILL.md:5:frontmatter-key",
+          "wiki/explanation/anchor-contract.md:29:opencode-name",
+          "wiki/explanation/anchor-contract.md:2:frontmatter-key",
+          "wiki/explanation/anchor-contract.md:3:frontmatter-key",
+          "wiki/explanation/anchor-contract.md:4:frontmatter-key",
+          "wiki/how-to/cite-source.md:2:frontmatter-key",
+          "wiki/how-to/cite-source.md:3:frontmatter-key",
+          "wiki/how-to/cite-source.md:4:frontmatter-key",
+          "wiki/how-to/cite-source.md:52:opencode-name",
+          "wiki/how-to/cite-source.md:5:frontmatter-key",
+          "wiki/how-to/organize-a-wiki.md:2:frontmatter-key",
+          "wiki/how-to/organize-a-wiki.md:3:frontmatter-key",
+          "wiki/how-to/organize-a-wiki.md:46:opencode-name",
+          "wiki/how-to/organize-a-wiki.md:4:frontmatter-key",
+          "wiki/how-to/validate-and-fix.md:2:frontmatter-key",
+          "wiki/how-to/validate-and-fix.md:3:frontmatter-key",
+          "wiki/how-to/validate-and-fix.md:4:frontmatter-key",
+          "wiki/how-to/validate-and-fix.md:5:frontmatter-key",
+          "wiki/how-to/validate-and-fix.md:75:opencode-name",
+          "wiki/how-to/wire-the-pre-commit-hook.md:2:frontmatter-key",
+          "wiki/how-to/wire-the-pre-commit-hook.md:31:opencode-name",
+          "wiki/how-to/wire-the-pre-commit-hook.md:3:frontmatter-key",
+          "wiki/how-to/wire-the-pre-commit-hook.md:4:frontmatter-key",
+          "wiki/how-to/write-a-page.md:2:frontmatter-key",
+          "wiki/how-to/write-a-page.md:3:frontmatter-key",
+          "wiki/how-to/write-a-page.md:4:frontmatter-key",
+          "wiki/how-to/write-a-page.md:51:opencode-name",
+          "wiki/how-to/write-a-page.md:5:frontmatter-key",
+          "wiki/reference/commands.md:2:frontmatter-key",
+          "wiki/reference/commands.md:3:frontmatter-key",
+          "wiki/reference/commands.md:4:frontmatter-key",
+          "wiki/reference/commands.md:5:frontmatter-key",
+          "wiki/reference/commands.md:60:opencode-name",
+          "wiki/reference/diagnostics.md:2:frontmatter-key",
+          "wiki/reference/diagnostics.md:33:opencode-name",
+          "wiki/reference/diagnostics.md:3:frontmatter-key",
+          "wiki/reference/diagnostics.md:4:frontmatter-key",
+          "wiki/reference/diagnostics.md:5:frontmatter-key",
+          "wiki/reference/search-and-output-shapes.md:2:frontmatter-key",
+          "wiki/reference/search-and-output-shapes.md:3:frontmatter-key",
+          "wiki/reference/search-and-output-shapes.md:44:opencode-name",
+          "wiki/reference/search-and-output-shapes.md:4:frontmatter-key",
+          "wiki/reference/search-and-output-shapes.md:5:frontmatter-key"
+        ],
+        "reason": "Every file in this skill is also a live wiki page. `title`/`summary` define page-hood, `tags` and `links-reviewed` carry certification, and the linter's frontmatter allowlist models none of them; the same frontmatter-without-`name` is why each non-SKILL page also trips opencode-name. Rewriting the frontmatter would drop 10 pages out of the wiki corpus, which is a separate decision from turning this check on."
+      }
+    }
+  ]
+}

@@ -5,3 +5,15 @@
 # used by the CLI's integration tests. They are not real documentation and must
 # not surface in `wiki check`/`search`/`list`.
 packages/cli/tests/fixtures/
+
+# Generated skill trees. `agent-skills build` renders skills-src/ into every
+# platform target below, so each page here exists five times over; indexing them
+# would report a title collision per page and, worse, invite `wiki check --fix`
+# to rewrite output that the next build discards. The authored source lives in
+# skills-src/ as .md.eta, which is not a .md and so is never indexed.
+plugins-claude/wiki/skills/
+plugins-codex/wiki/skills/
+plugins-opencode/wiki/skills/
+plugins-antigravity/wiki/skills/
+skills/
+.agents/skills/

@@ -1,4 +1,4 @@
-.github/workflows/ci.yml rk64:d855cad2735f3474
+.github/workflows/ci.yml rk64:0cb25a374ad9388e
 packages/cli/src/commands/check.rs#L539-L540 rk64:ada7a7e0c5c73264
 packages/cli/src/commands/check.rs#L620-L621 rk64:4d1d8ed49f326354
 packages/cli/src/commands/check_fix.rs#L89-L98 rk64:ea0f10ffb264c17e
