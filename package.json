@@ -30,7 +30,7 @@
   "packageManager": "yarn@4.16.0",
   "devDependencies": {
     "@biomejs/biome": "^2.3.13",
-    "@goodfoot/agent-skills": "1.0.24",
+    "@goodfoot/agent-skills": "1.0.25",
     "@types/node": "24.x",
     "knip": "^5.82.1",
     "typescript": "^5.9.3"

@@ -14,7 +14,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@goodfoot/agent-hooks": "1.0.8"
+    "@goodfoot/agent-hooks": "1.0.9"
   },
   "devDependencies": {
     "@typescript/native-preview": "^7.0.0-dev",
