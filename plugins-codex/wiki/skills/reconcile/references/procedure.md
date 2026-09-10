@@ -23,8 +23,7 @@ wiki check --fix
 This relocates moved links, routes broken targets through renames, and
 initializes `links-reviewed:` on any page that lacks it. It never resolves a
 link it cannot relocate with confidence, and a page that already carries
-`links-reviewed:` is never bumped for you — see
-[When --fix skips](../../wiki/how-to/validate-and-fix.md#when---fix-skips).
+`links-reviewed:` is never bumped for you.
 
 Remaining findings are `link_drift`, `link_broken`, `link_uncertified`,
 `link_unverified`, and any "moved but not byte-identical" link `--fix`
@@ -69,13 +68,21 @@ or subsystem instead.
 Per page, in each component. Resolve every flagged link on the page before
 touching `links-reviewed:` — a partial bump certifies links nobody reviewed.
 
-Follow [When --fix skips](../../wiki/how-to/validate-and-fix.md#when---fix-skips)
-for each flagged link: read the cited range's history, read the page's prose
-around the link, decide whether the change is behavioral or cosmetic, and act
-— update the prose, accept the relocation, hand-edit the fragment, or drop the
-link. Within a component, read a shared target's history once and apply the
-same behavioral-vs-cosmetic call to every page citing it; only the
-prose-accuracy judgment stays per page.
+For each flagged link: read the cited range's history (`git log -L
+<start>,<end>:<file>`, or blame), read the page's prose around the link, and
+decide what changed:
+
+| What changed | Action |
+|---|---|
+| Behavior: params, logic, return values, a deleted feature | Update the prose, then bump |
+| Cosmetic: rename, reformat | Prose still accurate — bump |
+| Range shifted and `--fix` didn't relocate it | Hand-edit the link's fragment range, then bump |
+| Relocated but not byte-identical | Review the new range, then bump |
+| Content deleted | Drop the link from the page; bump if other range links remain |
+
+Within a component, read a shared target's history once and apply the same
+row of this table to every page citing it; only the prose-accuracy judgment
+stays per page.
 
 Never batch-bump `links-reviewed:` to clear an exit code, and never bump
 before every flagged link on that page is resolved. Once every flagged link on
