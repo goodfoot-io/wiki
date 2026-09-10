@@ -6,7 +6,8 @@
       "name": "wiki",
       "skillsSrc": "skills-src/wiki",
       "skills": [
-        "wiki"
+        "wiki",
+        "reconcile"
       ],
       "claudePluginRoot": "plugins-claude/wiki",
       "codexPluginRoot": "plugins-codex/wiki",
