@@ -129,22 +129,15 @@ fn source_aware_is_dir(
     repo_root: &Path,
     source: DocSource,
     rel_path: &Path,
-    git_reader: Option<&GitReader>,
+    git_reader: &GitReader,
 ) -> bool {
     match source {
         DocSource::WorkingTree => repo_root.join(rel_path).is_dir(),
         DocSource::Index | DocSource::Head => {
             let prefix = format!("{}/", rel_path.to_string_lossy().trim_end_matches('/'));
-            let paths = if let Some(gr) = git_reader {
-                match gr.list_paths(source) {
-                    Ok(p) => p,
-                    Err(_) => return false,
-                }
-            } else {
-                match source.list_paths(repo_root) {
-                    Ok(p) => p,
-                    Err(_) => return false,
-                }
+            let paths = match git_reader.list_paths(source) {
+                Ok(p) => p,
+                Err(_) => return false,
             };
             paths.iter().any(|p| p.starts_with(&prefix))
         }
@@ -159,24 +152,12 @@ fn source_aware_exists(
     repo_root: &Path,
     source: DocSource,
     rel_path: &str,
-    git_reader: Option<&GitReader>,
+    git_reader: &GitReader,
 ) -> bool {
     match source {
         DocSource::WorkingTree => repo_root.join(rel_path).exists(),
         DocSource::Index | DocSource::Head => {
-            if let Some(gr) = git_reader {
-                gr.has_entry(source, rel_path).unwrap_or(false)
-            } else {
-                match source {
-                    DocSource::Index => {
-                        crate::git::has_index_entry(repo_root, rel_path).unwrap_or(false)
-                    }
-                    DocSource::Head => {
-                        crate::git::has_head_entry(repo_root, rel_path).unwrap_or(false)
-                    }
-                    _ => false,
-                }
-            }
+            git_reader.has_entry(source, rel_path).unwrap_or(false)
         }
     }
 }
@@ -186,7 +167,7 @@ fn read_via_source(
     path: &Path,
     repo_root: &Path,
     source: DocSource,
-    git_reader: Option<&GitReader>,
+    git_reader: &GitReader,
 ) -> std::io::Result<String> {
     match source {
         DocSource::WorkingTree => std::fs::read_to_string(path),
@@ -195,11 +176,7 @@ fn read_via_source(
                 .strip_prefix(repo_root)
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| path.to_string_lossy().into_owned());
-            let result = if let Some(gr) = git_reader {
-                gr.read_blob(source, &path_rel)
-            } else {
-                source.read(repo_root, &path_rel)
-            };
+            let result = git_reader.read_blob(source, &path_rel);
             match result {
                 Ok(Some(s)) => Ok(s),
                 Ok(None) => Err(std::io::Error::new(
@@ -217,16 +194,13 @@ fn filter_files_for_source(
     files: Vec<PathBuf>,
     repo_root: &Path,
     source: DocSource,
-    git_reader: Option<&GitReader>,
+    git_reader: &GitReader,
 ) -> Result<Vec<PathBuf>> {
     if matches!(source, DocSource::WorkingTree) {
         return Ok(files);
     }
-    let listed: std::collections::HashSet<String> = if let Some(gr) = git_reader {
-        gr.list_paths(source)?.into_iter().collect()
-    } else {
-        source.list_paths(repo_root)?.into_iter().collect()
-    };
+    let listed: std::collections::HashSet<String> =
+        git_reader.list_paths(source)?.into_iter().collect();
     Ok(files
         .into_iter()
         .filter(|p| {
@@ -370,21 +344,21 @@ fn run_inner(
     // both modes; real infrastructure failures propagate as Err and fail
     // closed.
 
-    // Open the git repository once when reading from Index or Head so that
-    // the same `gix::Repository` handle is reused for all blob reads, path
-    // listings, and existence checks in a single run.
-    let git_reader = match source {
-        DocSource::Index | DocSource::Head => {
-            match GitReader::open(repo_root) {
-                Ok(gr) => Some(gr),
-                Err(e) => return Ok(hard_exit(&e)),
-            }
-        }
-        DocSource::WorkingTree => None,
+    // Open the git repository exactly once for the whole run: the same
+    // `gix::Repository` handle backs every blob read, path listing, existence
+    // check, and drift-machinery history read. Re-opening it is the dominant
+    // per-page cost on a large repo (every open re-reads every pack index),
+    // and the drift pass reads history for every page that carries range
+    // links — so the handle is opened here, unconditionally, and threaded
+    // down. An open failure is a hard error: every downstream git read would
+    // fail the same way, only later and less legibly.
+    let git_reader = match GitReader::open(repo_root) {
+        Ok(gr) => gr,
+        Err(e) => return Ok(hard_exit(&e)),
     };
 
-    let index_files = match discover_files(&[], repo_root, repo_root, source, git_reader.as_ref()) {
-        Ok(f) => match filter_files_for_source(f, repo_root, source, git_reader.as_ref()) {
+    let index_files = match discover_files(&[], repo_root, repo_root, source, Some(&git_reader)) {
+        Ok(f) => match filter_files_for_source(f, repo_root, source, &git_reader) {
             Ok(f) => f,
             Err(e) => return Ok(hard_exit(&e)),
         },
@@ -417,11 +391,11 @@ fn run_inner(
             .cloned()
             .collect::<Vec<_>>()
     } else {
-        let raw = match discover_files(globs, scan_root, repo_root, source, git_reader.as_ref()) {
+        let raw = match discover_files(globs, scan_root, repo_root, source, Some(&git_reader)) {
             Ok(f) => f,
             Err(e) => return Ok(hard_exit(&e)),
         };
-        match filter_files_for_source(raw, repo_root, source, git_reader.as_ref()) {
+        match filter_files_for_source(raw, repo_root, source, &git_reader) {
             Ok(f) => f,
             Err(e) => return Ok(hard_exit(&e)),
         }
@@ -453,6 +427,11 @@ fn run_inner(
     // post-fix re-check each construct their own cache handle.
     let cache_reporter = crate::cache::CacheReporter::for_invocation();
 
+    // Per-run drift context: the repository facts both drift passes need and
+    // neither can change (the shallow gate, the per-page history capture), so
+    // the fix phase's captures serve the post-fix re-check's walk too.
+    let mut drift_run = drift::DriftRunCtx::new();
+
     // Fix-arm journal coordination (evaluation F-C): ONE read-only journal
     // classification per run, taken before the pre-check and handed to
     // `run_fix_pass` so nothing ever classifies twice. In dry-run mode the
@@ -480,31 +459,38 @@ fn run_inner(
         }
     }
 
-    let diagnostics = match collect_for_files(
-        &files,
-        &index_files,
-        repo_root,
-        source,
-        git_reader.as_ref(),
-        &mut content_cache,
-        !fix,
-        &cache_reporter,
-    ) {
+    let diagnostics = match timed("check.precheck", || {
+        collect_for_files(
+            &files,
+            &index_files,
+            repo_root,
+            source,
+            &git_reader,
+            &mut drift_run,
+            &mut content_cache,
+            !fix,
+            &cache_reporter,
+        )
+    }) {
         Ok(d) => d,
         Err(e) => return Ok(hard_exit(&e)),
     };
 
     // ── Fix pass (only in --fix mode) ────────────────────────────────────────
     if fix {
-        let plan = match check_fix::run_fix_pass(
-            &files,
-            repo_root,
-            source,
-            fix_dry_run,
-            &mut content_cache,
-            &cache_reporter,
-            scanned_journals.unwrap_or_else(check_fix::ScannedJournals::none),
-        ) {
+        let plan = match timed("check.fixpass", || {
+            check_fix::run_fix_pass(
+                &files,
+                repo_root,
+                source,
+                &git_reader,
+                &mut drift_run,
+                fix_dry_run,
+                &mut content_cache,
+                &cache_reporter,
+                scanned_journals.unwrap_or_else(check_fix::ScannedJournals::none),
+            )
+        }) {
             Ok(p) => p,
             Err(e) => return Ok(hard_exit(&e)),
         };
@@ -577,19 +563,22 @@ fn run_inner(
         }
 
         content_cache = ContentCache::new();
-        let post_diagnostics = match collect_for_files(
-            &files,
-            &index_files,
-            repo_root,
-            source,
-            git_reader.as_ref(),
-            &mut content_cache,
-            // Include the drift pass: the pending-bump rule (current field
-            // value differs from the newest committed value) keeps the
-            // just-applied relocations and field initializations green.
-            true,
-            &cache_reporter,
-        ) {
+        let post_diagnostics = match timed("check.recheck", || {
+            collect_for_files(
+                &files,
+                &index_files,
+                repo_root,
+                source,
+                &git_reader,
+                &mut drift_run,
+                &mut content_cache,
+                // Include the drift pass: the pending-bump rule (current field
+                // value differs from the newest committed value) keeps the
+                // just-applied relocations and field initializations green.
+                true,
+                &cache_reporter,
+            )
+        }) {
             Ok(d) => d,
             Err(e) => return Ok(hard_exit(&e)),
         };
@@ -659,33 +648,32 @@ pub fn collect_with_source(
     // empty corpus; propagate that as an error so the caller sees "no wiki
     // pages found" rather than an empty diagnostic list with exit 0.
 
-    // Open the git repository once when reading from Index or Head.
-    let git_reader = match source {
-        DocSource::Index | DocSource::Head => Some(GitReader::open(repo_root)?),
-        DocSource::WorkingTree => None,
-    };
+    // Open the git repository exactly once for the run (see `run_inner`).
+    let git_reader = GitReader::open(repo_root)?;
 
-    let files = discover_files(globs, repo_root, repo_root, source, git_reader.as_ref())?;
+    let files = discover_files(globs, repo_root, repo_root, source, Some(&git_reader))?;
     if files.is_empty() {
         return Err(miette::miette!(
             "no wiki pages found (no .md files matched)"
         ));
     }
-    let files = filter_files_for_source(files, repo_root, source, git_reader.as_ref())?;
+    let files = filter_files_for_source(files, repo_root, source, &git_reader)?;
     let index_files = if globs.is_empty() {
         files.clone()
     } else {
-        let raw = discover_files(&[], repo_root, repo_root, source, git_reader.as_ref())?;
-        filter_files_for_source(raw, repo_root, source, git_reader.as_ref())?
+        let raw = discover_files(&[], repo_root, repo_root, source, Some(&git_reader))?;
+        filter_files_for_source(raw, repo_root, source, &git_reader)?
     };
     let mut content_cache = ContentCache::new();
     let cache_reporter = crate::cache::CacheReporter::for_invocation();
+    let mut drift_run = drift::DriftRunCtx::new();
     collect_for_files(
         &files,
         &index_files,
         repo_root,
         source,
-        git_reader.as_ref(),
+        &git_reader,
+        &mut drift_run,
         &mut content_cache,
         true,
         &cache_reporter,
@@ -902,11 +890,24 @@ pub fn clear_cache() -> Result<i32> {
 /// A page with range links but no epoch anywhere is `anchor_epoch_missing`
 /// (fail-closed); epoch-resolution failures (shallow clone, git errors)
 /// propagate as hard errors (exit 2).
+fn timed<T>(name: &str, f: impl FnOnce() -> T) -> T {
+    let start = std::time::Instant::now();
+    let out = f();
+    crate::perf::log_event(
+        name,
+        start.elapsed().as_secs_f64() * 1000.0,
+        "ok",
+        serde_json::json!({}),
+    );
+    out
+}
+
 fn collect_drift_diagnostics(
     files: &[PathBuf],
     repo_root: &Path,
     source: DocSource,
-    git_reader: Option<&GitReader>,
+    reader: &GitReader,
+    run: &mut drift::DriftRunCtx,
     content_cache: &mut ContentCache,
     reporter: &crate::cache::CacheReporter,
 ) -> Result<Vec<CheckDiagnostic>> {
@@ -918,11 +919,28 @@ fn collect_drift_diagnostics(
     // fault line, shared across the run's construction sites.
     let anchor_cache = anchor_cache_for_run(reporter);
     // Shared across pages: the move scan's candidate inventory is loaded once
-    // per run, on the first link that needs it.
-    let mut ctx = drift::MoveScanCtx::new();
+    // per pass, on the first link that needs it. Its repository facts — the
+    // per-destination rename histories the evidence loop consults — come from
+    // the run context, so the fix phase's walks serve the re-check.
+    let mut ctx = drift::MoveScanCtx::new(run);
+
+    // ── Prepare ──────────────────────────────────────────────────────────────
+    // Read each in-scope page once, resolve the two field values the epoch
+    // needs, and keep only the pages that carry line-range links — the pages
+    // the walk below can possibly serve. Splitting this out is what lets the
+    // history captures run in parallel: they are one `git log --follow` per
+    // page, and the classification loop that consumes them is serial.
+    struct Pending {
+        page_path: String,
+        content: String,
+        current_value: drift::LinksReviewedRead,
+        committed_value: drift::LinksReviewedRead,
+    }
+    let mut pending: Vec<Pending> = Vec::new();
+    let prepare_started = std::time::Instant::now();
     for path in files {
         let content = match content_cache
-            .get_or_try_read(path, || read_via_source(path, repo_root, source, git_reader))
+            .get_or_try_read(path, || read_via_source(path, repo_root, source, reader))
         {
             Ok(c) => c,
             Err(_) => continue, // already reported by the main pass
@@ -941,19 +959,50 @@ fn collect_drift_diagnostics(
         // The newest committed value is the page blob at HEAD; a page absent
         // at HEAD (new file) has none. A HEAD read failure is treated as an
         // absent field, matching the pre-tri-state behavior.
-        let committed_value = match read_via_source(path, repo_root, DocSource::Head, git_reader) {
+        let committed_value = match read_via_source(path, repo_root, DocSource::Head, reader) {
             Ok(head_content) => drift::read_links_reviewed(&head_content),
             Err(_) => drift::LinksReviewedRead::Readable(None),
         };
+        pending.push(Pending {
+            page_path,
+            content: content.to_string(),
+            current_value,
+            committed_value,
+        });
+    }
+    let captures: Vec<String> = pending.iter().map(|p| p.page_path.clone()).collect();
+    crate::perf::log_event(
+        "drift.prepare",
+        prepare_started.elapsed().as_secs_f64() * 1000.0,
+        "ok",
+        serde_json::json!({"pages": pending.len()}),
+    );
+    timed("drift.precapture", || run.precapture(repo_root, &captures));
+
+    let walk_started = std::time::Instant::now();
+    let mut epoch_ms = 0.0f64;
+    let mut classify_ms = 0.0f64;
+    for page in pending {
+        let Pending {
+            page_path,
+            content,
+            current_value,
+            committed_value,
+        } = page;
+        let content = content.as_str();
         anchor_cache.cache().begin_page();
+        let epoch_started = std::time::Instant::now();
         let epoch = drift::find_anchor_commit(
             repo_root,
+            reader,
             anchor_cache.cache(),
+            run,
             &page_path,
             &current_value,
             &committed_value,
         )
         .map_err(|e| miette::miette!("{e}"))?;
+        epoch_ms += epoch_started.elapsed().as_secs_f64() * 1000.0;
         if matches!(&epoch, drift::LinkEpoch::Missing) {
             let _ = anchor_cache.cache().flush_page();
             out.push(CheckDiagnostic {
@@ -967,8 +1016,10 @@ fn collect_drift_diagnostics(
             });
             continue;
         }
+        let classify_started = std::time::Instant::now();
         let classes = drift::classify_page(
             repo_root,
+            reader,
             anchor_cache.cache(),
             source,
             &page_path,
@@ -977,6 +1028,7 @@ fn collect_drift_diagnostics(
             &mut ctx,
         )
         .map_err(|e| miette::miette!("{e}"))?;
+        classify_ms += classify_started.elapsed().as_secs_f64() * 1000.0;
         let _ = anchor_cache.cache().flush_page();
         for c in classes {
             let (kind, message) = match &c.outcome {
@@ -1040,6 +1092,12 @@ fn collect_drift_diagnostics(
             });
         }
     }
+    crate::perf::log_event(
+        "drift.classify",
+        walk_started.elapsed().as_secs_f64() * 1000.0,
+        "ok",
+        serde_json::json!({"epoch_ms": epoch_ms, "page_ms": classify_ms}),
+    );
     Ok(out)
 }
 
@@ -1049,7 +1107,8 @@ fn collect_for_files(
     index_files: &[PathBuf],
     repo_root: &Path,
     source: DocSource,
-    git_reader: Option<&GitReader>,
+    git_reader: &GitReader,
+    drift_run: &mut drift::DriftRunCtx,
     content_cache: &mut ContentCache,
     drift_pass: bool,
     reporter: &crate::cache::CacheReporter,
@@ -1278,6 +1337,7 @@ fn collect_for_files(
             repo_root,
             source,
             git_reader,
+            drift_run,
             content_cache,
             reporter,
         )?;

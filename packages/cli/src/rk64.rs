@@ -224,33 +224,197 @@ pub struct LineIndex<'a> {
     starts: Vec<u32>,
     /// Content end (exclusive of the `\n`/`\r\n` terminator) of each line.
     ends: Vec<u32>,
-    /// Lazily-computed prefix-hash and power tables for the rolling
-    /// fingerprint scan. Populated on first scan of an LF-clean file within
-    /// the size threshold. Shared across clones via `Arc` — at most one set
-    /// of tables per file per `LineIndex` lifetime.
+    /// Per-line canonical prefix hashes — the window-fingerprint tables
+    /// ([`CanonicalLines`]). Populated lazily on the first windowed scan and
+    /// shared across clones via `Arc`.
     ///
-    /// Files exceeding [`PREFILTER_TABLES_MAX_BYTES`] never allocate these
-    /// tables; the scan falls back to per-window `horner`.
-    fp_tables: Arc<OnceLock<PrefixTables>>,
-    /// `true` when the buffer contains no `\r` bytes and is valid UTF-8.
-    /// Computed once at build time so the scan inner loop avoids re-scanning
-    /// the whole buffer per call.
-    lf_clean: bool,
+    /// The tables are cut on line boundaries rather than on bytes: at 24 bytes
+    /// per *line* they cost a fraction of a per-byte table, and — because
+    /// [`CanonicalLines::window_fp`] needs no bytes at all — the same
+    /// structure is what [`ScanIndex`] caches to serve many windows of one
+    /// buffer without rescanning it.
+    canonical: Arc<OnceLock<CanonicalLines>>,
 }
 
-/// Cached rolling-fingerprint prefix hashes and powers for the file bytes.
-/// These are a pure function of the bytes and are computed at most once per
-/// `LineIndex` lifetime.
-struct PrefixTables {
-    ph: Vec<u64>,
-    pow: Vec<u64>,
+/// Canonical per-line prefix hashes for a buffer that is **not** LF-clean.
+///
+/// Such a buffer's canonical content is the lossy UTF-8 text with `\r\n` (and
+/// any lone `\r`) normalized away, so a window's canonical content is
+/// `lines[a..b].join("\n")` — not a byte slice of the buffer, and therefore
+/// out of reach of any prefix sum over the buffer's own bytes. Rebuilding that
+/// string per window instead costs O(span) per window, i.e. O(lines × span)
+/// per file: a tracked binary of a few megabytes with thousands of newline
+/// bytes took seconds on its own.
+///
+/// Three per-line arrays make every window O(1) instead, by the same
+/// substring identity the per-byte tables use — `horner(canon[u..v]) =
+/// P(v) − P(u)·BASE^(v−u)` for `P` the Horner hash of the canonical prefix —
+/// with the prefix hashes sampled at the line boundaries that windows are cut
+/// on, and the exponent supplied by [`pow_base`].
+///
+/// For `n` lines the canonical text is
+/// `line[0] + "\n" + … + "\n" + line[n-1]`; `offsets[i]` is the byte offset of
+/// line `i` in it, with the virtual terminating newline that makes
+/// `offsets[i+1] = offsets[i] + line[i].len() + 1` hold for every `i`.
+#[derive(Clone)]
+pub(crate) struct CanonicalLines {
+    /// `starts[i]`: the canonical prefix hash at the start of line `i`.
+    starts: Vec<u64>,
+    /// `ends[i]`: the canonical prefix hash at the end of line `i`'s content,
+    /// before the newline the join inserts.
+    ends: Vec<u64>,
+    /// `offsets[i]`: the byte offset of line `i` in the canonical text, with
+    /// one past-the-end entry for `i == n`.
+    offsets: Vec<u64>,
 }
 
-/// Files larger than this threshold skip precomputed prefix-hash tables
-/// and fall back to per-window `horner` (O(N·S) time, O(1) extra memory).
-/// Bounds peak table memory to ~512 MiB (2 × 8 B × 32M). Source-code
-/// files (the common anchor target) are virtually always under this limit.
-pub const PREFILTER_TABLES_MAX_BYTES: usize = 32 * 1024 * 1024; // 32 MiB
+impl CanonicalLines {
+    /// Build the per-line prefix hashes of `bytes`' canonical text — the
+    /// lossy UTF-8 reading with `\r\n` (and any lone `\r`) normalized away —
+    /// in one pass, one multiplication per byte.
+    ///
+    /// Every buffer goes through here, LF-clean or not: for a buffer whose
+    /// canonical content *is* a byte slice of itself the arrays describe that
+    /// same slice, so the one structure serves both and the window
+    /// fingerprint has a single definition.
+    fn build(bytes: &[u8]) -> CanonicalLines {
+        let text = String::from_utf8_lossy(bytes);
+        let lines: Vec<&str> = text.lines().collect();
+        let mut starts = Vec::with_capacity(lines.len());
+        let mut ends = Vec::with_capacity(lines.len());
+        let mut offsets = Vec::with_capacity(lines.len() + 1);
+        let mut h = 0u64;
+        let mut off = 0u64;
+        for line in &lines {
+            starts.push(h);
+            offsets.push(off);
+            for &b in line.as_bytes() {
+                h = h.wrapping_mul(FP_BASE).wrapping_add(fp_byte(b));
+            }
+            ends.push(h);
+            // The newline the join inserts between lines — present in the
+            // canonical offsets even after the last line, where it only
+            // makes the offsets a uniform coordinate.
+            h = h.wrapping_mul(FP_BASE).wrapping_add(fp_byte(b'\n'));
+            off += line.len() as u64 + 1;
+        }
+        offsets.push(off);
+        CanonicalLines {
+            starts,
+            ends,
+            offsets,
+        }
+    }
+
+    /// Number of lines, per `str::lines` counting.
+    fn line_count(&self) -> usize {
+        self.starts.len()
+    }
+
+    /// The fingerprint of the `span`-high window starting at line `win`
+    /// (0-based) — the canonical content `lines[win..win+span].join("\n")`,
+    /// which is `canon[offsets[win] .. offsets[win+span] - 1]`.
+    fn window_fp(&self, win: usize, span: usize) -> u64 {
+        let lo = self.offsets[win];
+        let hi = self.offsets[win + span] - 1;
+        self.ends[win + span - 1].wrapping_sub(self.starts[win].wrapping_mul(pow_base(hi - lo)))
+    }
+}
+
+/// The per-file facts a windowed scan needs, and the seam that lets one index
+/// be built once and scanned many times ([`ScanIndex`]) or built on the spot
+/// for a single query ([`LineIndex`]) without the kernel knowing which it has.
+pub(crate) trait Scannable {
+    /// Number of lines, per `str::lines` counting.
+    fn line_count(&self) -> usize;
+    /// The window-fingerprint tables.
+    fn canon(&self) -> &CanonicalLines;
+    /// `horner` of the buffer itself, for whole-file extents (which
+    /// fingerprint the raw bytes, not the canonical text).
+    fn whole_fp(&self) -> u64;
+}
+
+impl Scannable for LineIndex<'_> {
+    fn line_count(&self) -> usize {
+        LineIndex::line_count(self)
+    }
+
+    fn canon(&self) -> &CanonicalLines {
+        self.canonical_lines()
+    }
+
+    fn whole_fp(&self) -> u64 {
+        horner(self.bytes)
+    }
+}
+
+/// An owned scan index over one buffer: its canonical window fingerprints,
+/// built once and reused by every query against the same bytes.
+///
+/// A pure function of the buffer — it borrows nothing, so it outlives the
+/// bytes it was built from and may cross the worker pool. That is the whole
+/// point: an inventory-wide move scan asks the same question of the same
+/// several thousand files once per link, and the per-query cost of indexing
+/// them (one newline scan and one canonical pass **per file**) is what made
+/// those scans cost seconds. Indexed once per pass, each query is window
+/// arithmetic over tables already in cache.
+#[derive(Clone)]
+pub struct ScanIndex {
+    canon: CanonicalLines,
+    whole_fp: u64,
+}
+
+impl ScanIndex {
+    /// Build the index for `bytes`: the canonical tables, plus the buffer's
+    /// own hash for whole-file extents.
+    pub fn build(bytes: &[u8]) -> ScanIndex {
+        ScanIndex {
+            canon: CanonicalLines::build(bytes),
+            whole_fp: horner(bytes),
+        }
+    }
+}
+
+impl Scannable for ScanIndex {
+    fn line_count(&self) -> usize {
+        self.canon.line_count()
+    }
+
+    fn canon(&self) -> &CanonicalLines {
+        &self.canon
+    }
+
+    fn whole_fp(&self) -> u64 {
+        self.whole_fp
+    }
+}
+
+/// `BASE^e` over wrapping `u64` by square-and-multiply, from a cached table of
+/// the 64 power-of-two powers — the arbitrary-exponent counterpart of a
+/// per-byte power table. An exponent of zero is `1`, the empty-content hash's
+/// multiplier.
+fn pow_base(e: u64) -> u64 {
+    static POW2: OnceLock<[u64; 64]> = OnceLock::new();
+    let pow2 = POW2.get_or_init(|| {
+        let mut pow2 = [1u64; 64];
+        pow2[0] = FP_BASE;
+        for k in 1..64 {
+            pow2[k] = pow2[k - 1].wrapping_mul(pow2[k - 1]);
+        }
+        pow2
+    });
+    let mut out = 1u64;
+    let mut rest = e;
+    let mut k = 0usize;
+    while rest != 0 {
+        if rest & 1 == 1 {
+            out = out.wrapping_mul(pow2[k]);
+        }
+        rest >>= 1;
+        k += 1;
+    }
+    out
+}
 
 impl<'a> LineIndex<'a> {
     /// Build the line index for `bytes` with one forward newline scan.
@@ -285,13 +449,11 @@ impl<'a> LineIndex<'a> {
             starts.push(seg as u32);
             ends.push(bytes.len() as u32);
         }
-        let lf_clean = !bytes.contains(&b'\r') && std::str::from_utf8(bytes).is_ok();
         LineIndex {
             bytes,
             starts,
             ends,
-            fp_tables: Arc::new(OnceLock::new()),
-            lf_clean,
+            canonical: Arc::new(OnceLock::new()),
         }
     }
 
@@ -322,36 +484,24 @@ impl<'a> LineIndex<'a> {
         Some((self.starts[lo] as usize, self.ends[hi - 1] as usize))
     }
 
-    /// Returns cached fingerprint tables if the file is within the size
-    /// threshold, computing them lazily on first call. Returns `None`
-    /// for files exceeding [`PREFILTER_TABLES_MAX_BYTES`], so the caller
-    /// falls back to per-window `horner` (O(N·S) time, O(1) memory).
-    fn prefilter_tables(&self) -> Option<&PrefixTables> {
-        if self.bytes.len() > PREFILTER_TABLES_MAX_BYTES {
-            return None;
-        }
-        Some(self.fp_tables.get_or_init(|| {
-            let (ph, pow) = prefix_hashes_and_powers(self.bytes);
-            PrefixTables { ph, pow }
-        }))
+    /// The canonical per-line prefix hashes, computed lazily on the first
+    /// windowed scan that needs them. One pass over the lossy text, one
+    /// multiplication per byte.
+    fn canonical_lines(&self) -> &CanonicalLines {
+        self.canonical.get_or_init(|| {
+            let canon = CanonicalLines::build(self.bytes);
+            // `str::lines` and the newline scan that built `starts`/`ends`
+            // count lines identically (a `\n` ends a line, a trailing
+            // terminator yields no final empty line), so the window bounds
+            // derived from `line_count` index these arrays exactly.
+            assert_eq!(
+                canon.line_count(),
+                self.starts.len(),
+                "rk64: canonical line count disagrees with the newline scan",
+            );
+            canon
+        })
     }
-}
-
-/// Build the prefix-hash and power tables for `bytes` in one pass. `ph` has
-/// length `bytes.len() + 1` with `ph[0] = 0` and `ph[k+1] = ph[k]·BASE +
-/// fp_byte(bytes[k])`; `pow[i] = BASE^i` for `i in 0..=bytes.len()`. Then
-/// `horner(bytes[a..b]) == ph[b] - ph[a]·pow[b-a]` over wrapping `u64`.
-fn prefix_hashes_and_powers(bytes: &[u8]) -> (Vec<u64>, Vec<u64>) {
-    let n = bytes.len();
-    let mut ph = Vec::with_capacity(n + 1);
-    let mut pow = Vec::with_capacity(n + 1);
-    ph.push(0u64);
-    pow.push(1u64);
-    for (i, &b) in bytes.iter().enumerate() {
-        ph.push(ph[i].wrapping_mul(FP_BASE).wrapping_add(fp_byte(b)));
-        pow.push(pow[i].wrapping_mul(FP_BASE));
-    }
-    (ph, pow)
 }
 
 /// Cheap fingerprint of an extent's canonical content (whole-file extents
@@ -388,43 +538,25 @@ pub fn cheap_fingerprint_indexed(idx: &LineIndex<'_>, extent: &Extent) -> u64 {
 /// `near` line, ties toward the lower start line), so ≥2 matches means
 /// ambiguous and the caller refuses to act. A whole-file extent matches whole
 /// files by their fingerprint.
-pub fn scan_indexed_rk64(
-    files: &[(String, LineIndex<'_>)],
+pub fn scan_indexed_rk64<T: Scannable>(
+    files: &[(String, T)],
     cheap_fp: u64,
     extent: Extent,
     near: Option<u32>,
 ) -> Vec<Location> {
-    match extent {
-        Extent::WholeFile => {
-            whole_file_matches(files, |idx| idx.bytes, |b| horner(b) == cheap_fp)
-        }
-        Extent::LineRange { start, end } => {
-            let span = line_range_span(start, end);
-            if span == 0 {
-                return Vec::new();
-            }
-            let mut out: Vec<Location> = Vec::new();
-            scan_files(
-                files,
-                span,
-                |n| Some((0, n - span)),
-                |path, idx, w, out| {
-                    // No content-hash verify: a matching fingerprint is the match.
-                    scan_one_file_fp_filtered(path, idx, span, w, cheap_fp, out);
-                },
-                &mut out,
-            );
-            if let Some(near) = near {
-                sort_near(&mut out, near);
-            }
-            out
-        }
+    let mut out: Vec<Location> = Vec::new();
+    for (path, idx) in files {
+        scan_one_indexed(path, idx, cheap_fp, extent, &mut out);
     }
+    if let Some(near) = near {
+        sort_near(&mut out, near);
+    }
+    out
 }
 
-/// [`scan_indexed_rk64`] over borrowed path/bytes pairs, building each
-/// [`LineIndex`] internally. Generic over the borrowed forms so callers with
-/// `Vec`-backed inventories need no per-call clones.
+/// [`scan_indexed_rk64`] over borrowed path/bytes pairs, indexing each buffer
+/// with the on-the-spot [`LineIndex`]. Generic over the borrowed forms so
+/// callers with `Vec`-backed inventories need no per-call clones.
 pub fn scan_for_content_hash_rk64<P: AsRef<str>, B: AsRef<[u8]>>(
     files: &[(P, B)],
     cheap_fp: u64,
@@ -438,6 +570,47 @@ pub fn scan_for_content_hash_rk64<P: AsRef<str>, B: AsRef<[u8]>>(
     scan_indexed_rk64(&indexed, cheap_fp, extent, near)
 }
 
+/// One file's contribution to a scan, for any indexed file: whole-file
+/// extents match the buffer's own hash, line ranges scan every window of the
+/// requested span. No content-hash verify: a matching fingerprint is the
+/// match.
+///
+/// This is the unit a caller drives across workers when it holds an indexed
+/// inventory: the semantics are identical to [`scan_indexed_rk64`]'s per-file
+/// step, so a worker's output concatenated in inventory order is
+/// byte-identical to the whole-inventory scan's.
+pub fn scan_one_indexed<T: Scannable>(
+    path: &str,
+    idx: &T,
+    cheap_fp: u64,
+    extent: Extent,
+    out: &mut Vec<Location>,
+) {
+    match extent {
+        Extent::WholeFile => {
+            if idx.whole_fp() == cheap_fp {
+                out.push(Location {
+                    path: path.to_string(),
+                    start_line: 0,
+                    end_line: 0,
+                });
+            }
+        }
+        Extent::LineRange { start, end } => {
+            let span = line_range_span(start, end);
+            if span == 0 {
+                return;
+            }
+            let n = idx.line_count();
+            if n < span {
+                return;
+            }
+            // No content-hash verify: a matching fingerprint is the match.
+            scan_windows(path, idx.canon(), span, (0, n - span), cheap_fp, out);
+        }
+    }
+}
+
 /// Nearest-window ordering: stable sort by distance from the 1-based `near`
 /// line, ties toward the lower start line. `start_line` and `near` are both
 /// 1-based, so the window that starts on the `near` line is distance 0.
@@ -445,97 +618,30 @@ fn sort_near(out: &mut [Location], near: u32) {
     out.sort_by_key(|l| (l.start_line.abs_diff(near), l.start_line));
 }
 
-/// Emit a whole-file `Location { 0, 0 }` for every file whose bytes satisfy
-/// `keep`. `bytes_of` projects each file element to its buffer.
-fn whole_file_matches<T>(
-    files: &[(String, T)],
-    bytes_of: impl Fn(&T) -> &[u8],
-    keep: impl Fn(&[u8]) -> bool,
-) -> Vec<Location> {
-    files
-        .iter()
-        .filter(|(_, t)| keep(bytes_of(t)))
-        .map(|(path, _)| Location {
-            path: path.clone(),
-            start_line: 0,
-            end_line: 0,
-        })
-        .collect()
-}
-
-/// Drive a per-file windowed scan: for each file with enough lines, compute its
-/// window bounds and run `scan_one`, accumulating into `out`. `wins` maps a
-/// file's line count to its `(win_lo, win_hi)` window range, returning `None`
-/// to skip the file.
-fn scan_files(
-    files: &[(String, LineIndex)],
-    span: usize,
-    wins: impl Fn(usize) -> Option<(usize, usize)>,
-    mut scan_one: impl FnMut(&str, &LineIndex, (usize, usize), &mut Vec<Location>),
-    out: &mut Vec<Location>,
-) {
-    for (path, idx) in files {
-        let n = idx.line_count();
-        if n < span {
-            continue;
-        }
-        let Some(w) = wins(n) else { continue };
-        scan_one(path, idx, w, out);
-    }
-}
-
-/// Scan one file's `span`-high windows, emitting a [`Location`] for every
-/// window whose rolling polynomial fingerprint equals `cheap_fp`. On the
-/// LF-and-UTF-8 fast path a single prefix-hash pass over the buffer makes each
-/// window's fingerprint an O(1) subtraction; `\r`/non-UTF-8 files fingerprint
-/// the canonical lossy join per window so results stay byte-identical to the
-/// reference matcher.
-fn scan_one_file_fp_filtered(
+/// Scan one buffer's `span`-high windows, emitting a [`Location`] for every
+/// window whose rolling polynomial fingerprint equals `cheap_fp`.
+///
+/// One kernel for every buffer shape: the window's fingerprint is
+/// `ends[win+span-1] − starts[win]·BASE^len` over the canonical per-line
+/// prefix hashes, which is O(1) per window and byte-identical to the
+/// reference matcher's `lines[a..b].join("\n")` for both LF-clean buffers and
+/// the `\r`/non-UTF-8 shapes [`CanonicalLines`] normalizes.
+fn scan_windows(
     path: &str,
-    idx: &LineIndex,
+    canon: &CanonicalLines,
     span: usize,
     wins: (usize, usize),
     cheap_fp: u64,
     out: &mut Vec<Location>,
 ) {
     let (win_lo, win_hi) = wins;
-    let bytes = idx.bytes;
-    let simple = idx.lf_clean;
-
-    if simple {
-        // Prefix hashes `ph[k] = horner(bytes[0..k])` and powers `pow[i] =
-        // BASE^i` give every window's fingerprint as `ph[re] - ph[rs]·pow[re-rs]`
-        // in O(1) — the rolling reduction of recomputing `horner` per window.
-        // For files under the size threshold the tables are cached on the
-        // `LineIndex`; larger files fall back to per-window `horner`.
-        let tables = idx.prefilter_tables();
-        for win in win_lo..=win_hi {
-            let rs = idx.starts[win] as usize;
-            let re = idx.ends[win + span - 1] as usize;
-            let fp = match tables {
-                Some(t) => t.ph[re].wrapping_sub(t.ph[rs].wrapping_mul(t.pow[re - rs])),
-                None => horner(&bytes[rs..re]),
-            };
-            if fp == cheap_fp {
-                out.push(Location {
-                    path: path.to_string(),
-                    start_line: (win as u32) + 1,
-                    end_line: (win as u32) + span as u32,
-                });
-            }
-        }
-    } else {
-        let text = String::from_utf8_lossy(bytes);
-        let lines: Vec<&str> = text.lines().collect();
-        for win in win_lo..=win_hi {
-            let joined = lines[win..win + span].join("\n");
-            if horner(joined.as_bytes()) == cheap_fp {
-                out.push(Location {
-                    path: path.to_string(),
-                    start_line: (win as u32) + 1,
-                    end_line: (win as u32) + span as u32,
-                });
-            }
+    for win in win_lo..=win_hi {
+        if canon.window_fp(win, span) == cheap_fp {
+            out.push(Location {
+                path: path.to_string(),
+                start_line: (win as u32) + 1,
+                end_line: (win as u32) + span as u32,
+            });
         }
     }
 }
@@ -841,7 +947,7 @@ mod tests {
     }
 
     #[test]
-    
+
     fn scan_handles_crlf_windows_canonically() {
         let files = vec![("crlf.txt".to_string(), b"a\r\nb\r\nc\r\nd\r\n".to_vec())];
         let extent = Extent::LineRange { start: 1, end: 2 };
@@ -851,5 +957,248 @@ mod tests {
             hits,
             vec![Location { path: "crlf.txt".into(), start_line: 2, end_line: 3 }]
         );
+    }
+
+    /// The brute-force reference for the non-LF-clean scan: for every window
+    /// of every file, fingerprint the canonical content the way the canonical
+    /// form defines it — `lines[a..b].join("\n")` — and keep the windows whose
+    /// fingerprint matches. This is the per-window `join` the scan performs
+    /// no longer, kept as the oracle [`scan_for_content_hash_rk64`] must
+    /// agree with byte-for-byte on every buffer shape.
+    fn join_oracle_hits(files: &[(String, Vec<u8>)], cheap_fp: u64, span: usize) -> Vec<Location> {
+        let mut out = Vec::new();
+        for (path, bytes) in files {
+            let text = String::from_utf8_lossy(bytes);
+            let lines: Vec<&str> = text.lines().collect();
+            if lines.len() < span {
+                continue;
+            }
+            for win in 0..=lines.len() - span {
+                let joined = lines[win..win + span].join("\n");
+                if horner(joined.as_bytes()) == cheap_fp {
+                    out.push(Location {
+                        path: path.clone(),
+                        start_line: (win as u32) + 1,
+                        end_line: (win as u32) + span as u32,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Buffer shapes the canonical path must handle: CRLF, lone `\r`, CRLF
+    /// with no trailing newline, invalid UTF-8 (lossy replacement), a lone
+    /// newline, an empty buffer, and a buffer with no newline at all.
+    fn non_lf_clean_fixtures() -> Vec<Vec<u8>> {
+        vec![
+            b"a\r\nb\r\nc\r\nd\r\n".to_vec(),
+            b"a\r\nb\r\nc".to_vec(),
+            b"\r\n".to_vec(),
+            b"a\rb\rc\r".to_vec(),
+            b"\xff\xfe alpha\n\xc3 beta\n gamma \xf0\x9f".to_vec(),
+            b"\n".to_vec(),
+            b"".to_vec(),
+            b"no newline here".to_vec(),
+            b"\xff\n\xfe\n\xfd\n".to_vec(),
+        ]
+    }
+
+    #[test]
+    fn canonical_scan_agrees_with_the_join_oracle_on_every_buffer_shape() {
+        for bytes in non_lf_clean_fixtures() {
+            // Every span the buffer can hold, and a few it cannot.
+            for span in 1..=5 {
+                let files = vec![("f".to_string(), bytes.clone())];
+                // Every window's own canonical fingerprint, plus one that
+                // matches nothing: the scan must return exactly the windows
+                // the oracle finds, in the same order.
+                let text = String::from_utf8_lossy(&bytes);
+                let lines: Vec<&str> = text.lines().collect();
+                let mut probes: Vec<u64> = Vec::new();
+                if lines.len() >= span {
+                    probes.extend(
+                        (0..=lines.len() - span)
+                            .map(|win| horner(lines[win..win + span].join("\n").as_bytes())),
+                    );
+                    probes.push(0xdead_beef_dead_beef);
+                }
+                for fp in probes {
+                    let extent = Extent::LineRange {
+                        start: 1,
+                        end: span as u32,
+                    };
+                    assert_eq!(
+                        scan_for_content_hash_rk64(&files, fp, extent, None),
+                        join_oracle_hits(&files, fp, span),
+                        "buffer {bytes:?} span {span} fp {fp:#x}",
+                    );
+                }
+            }
+        }
+    }
+
+    /// The per-file unit must compose: driving [`scan_one_indexed`] over an
+    /// indexed inventory one file at a time, concatenated in inventory order,
+    /// has to equal the whole-inventory scan — the contract callers that
+    /// spread the scan across workers rely on.
+    #[test]
+    fn per_file_scan_concatenates_to_the_whole_inventory_scan() {
+        let files: Vec<(String, Vec<u8>)> = vec![
+            ("a.txt".to_string(), b"alpha\nbeta\ngamma\ndelta\n".to_vec()),
+            (
+                "b.txt".to_string(),
+                b"alpha\r\nbeta\r\ngamma\r\n".to_vec(),
+            ),
+            ("c.txt".to_string(), b"alpha\nbeta\n".to_vec()),
+            ("d.txt".to_string(), b"\xff\n\xfe\nalpha\nbeta\n".to_vec()),
+            ("e.txt".to_string(), b"".to_vec()),
+            ("f.txt".to_string(), b"only one line\n".to_vec()),
+        ];
+        let indexed: Vec<(String, ScanIndex)> = files
+            .iter()
+            .map(|(path, bytes)| (path.clone(), ScanIndex::build(bytes)))
+            .collect();
+        for span in 1..=4u32 {
+            let extent = Extent::LineRange { start: 1, end: span };
+            for fp in [
+                cheap_fingerprint_with_extent(b"alpha\nbeta", &Extent::WholeFile),
+                cheap_fingerprint_with_extent(b"alpha", &Extent::WholeFile),
+                cheap_fingerprint_with_extent(b"gamma", &Extent::WholeFile),
+                0xdead_beef_dead_beef,
+            ] {
+                let whole = scan_indexed_rk64(&indexed, fp, extent, None);
+                let mut per_file: Vec<Location> = Vec::new();
+                for (path, idx) in &indexed {
+                    scan_one_indexed(path, idx, fp, extent, &mut per_file);
+                }
+                assert_eq!(
+                    per_file, whole,
+                    "span {span} fp {fp:#x}: per-file scan must concatenate to \
+                     the whole-inventory scan",
+                );
+            }
+        }
+        // Whole-file extents take the same contract.
+        let fp = cheap_fingerprint_with_extent(b"alpha\nbeta\n", &Extent::WholeFile);
+        let whole = scan_indexed_rk64(&indexed, fp, Extent::WholeFile, None);
+        let mut per_file: Vec<Location> = Vec::new();
+        for (path, idx) in &indexed {
+            scan_one_indexed(path, idx, fp, Extent::WholeFile, &mut per_file);
+        }
+        assert_eq!(per_file, whole);
+    }
+
+    /// The owned [`ScanIndex`] and the on-the-spot [`LineIndex`] must be
+    /// interchangeable: a scan over an inventory indexed once has to return
+    /// exactly what the same scan returns when every query indexes the buffer
+    /// again. Every buffer shape, every span, every probe — a real match and a
+    /// miss — and both extents.
+    #[test]
+    fn owned_index_scans_identically_to_the_on_the_spot_index() {
+        let mut fixtures = non_lf_clean_fixtures();
+        fixtures.push(b"a\nb\nc\nd\n".to_vec()); // LF-clean
+        for bytes in fixtures {
+            let indexed = vec![("f.txt".to_string(), ScanIndex::build(&bytes))];
+            let on_the_spot = vec![("f.txt".to_string(), bytes.clone())];
+            let text = String::from_utf8_lossy(&bytes);
+            let lines: Vec<&str> = text.lines().collect();
+            for span in 1..=5usize {
+                let mut probes = vec![0xdead_beef_dead_beef, horner(&bytes)];
+                if lines.len() >= span {
+                    probes.extend(
+                        (0..=lines.len() - span)
+                            .map(|win| horner(lines[win..win + span].join("\n").as_bytes())),
+                    );
+                }
+                for fp in probes {
+                    for extent in [
+                        Extent::LineRange {
+                            start: 1,
+                            end: span as u32,
+                        },
+                        Extent::WholeFile,
+                    ] {
+                        assert_eq!(
+                            scan_indexed_rk64(&indexed, fp, extent, None),
+                            scan_for_content_hash_rk64(&on_the_spot, fp, extent, None),
+                            "buffer {bytes:?} span {span} fp {fp:#x} extent {extent:?}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A [`ScanIndex`] borrows nothing, so the move scan's workers share one
+    /// indexed inventory between them: the index must be `Send + Sync`, and
+    /// scanning it concurrently must yield exactly the serial scan's hits, in
+    /// inventory order.
+    #[test]
+    fn scan_index_crosses_the_worker_pool() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ScanIndex>();
+
+        let indexed: Vec<(String, ScanIndex)> = non_lf_clean_fixtures()
+            .into_iter()
+            .enumerate()
+            .map(|(i, bytes)| (format!("f{i}.txt"), ScanIndex::build(&bytes)))
+            .collect();
+        let extent = Extent::LineRange { start: 1, end: 1 };
+        // Several fixtures canonicalize to a line `c` (with and without a
+        // trailing newline, CRLF and LF alike), so the probe hits more than
+        // one file and the comparison is not trivially empty on both sides.
+        let fp = horner(b"c");
+        let serial = scan_indexed_rk64(&indexed, fp, extent, None);
+        assert!(serial.len() >= 2, "the probe must hit several files");
+
+        let concurrent: Vec<Location> = std::thread::scope(|scope| {
+            let workers: Vec<_> = indexed
+                .iter()
+                .map(|(path, idx)| {
+                    scope.spawn(|| {
+                        let mut out = Vec::new();
+                        scan_one_indexed(path, idx, fp, extent, &mut out);
+                        out
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().expect("scan worker panicked"))
+                .collect()
+        });
+        assert_eq!(concurrent, serial);
+    }
+
+    /// The line-window hash the per-line prefix arrays compute must equal the
+    /// Horner hash of the joined window for arbitrary line mixes — including
+    /// windows whose lines have very different lengths, where an exponent or
+    /// offset error would show up.
+    #[test]
+    fn canonical_window_hashes_match_joined_content_across_line_lengths() {
+        let bytes = b"x\nyy\n\r\nzzz\r\nlong line with several tokens\n \nq\r\n".to_vec();
+        let idx = LineIndex::build(&bytes);
+        assert!(
+            bytes.windows(2).any(|w| w == b"\r\n"),
+            "fixture must exercise the canonical path: a window's content is \
+             the lines joined by `\\n`, not a byte slice of the buffer",
+        );
+        let canon = idx.canonical_lines();
+        let text = String::from_utf8_lossy(&bytes);
+        let lines: Vec<&str> = text.lines().collect();
+        let mut checked = 0usize;
+        for span in 1..=lines.len() {
+            for win in 0..=lines.len() - span {
+                assert_eq!(
+                    canon.window_fp(win, span),
+                    horner(lines[win..win + span].join("\n").as_bytes()),
+                    "window {win}..{}",
+                    win + span,
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "the fixture must yield at least one window");
     }
 }

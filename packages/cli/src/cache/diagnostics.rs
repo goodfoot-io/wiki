@@ -106,7 +106,7 @@ mod tests {
             .query_row("SELECT count(*) FROM store_events", [], |r| r.get(0))
             .expect("count");
         assert!(
-            total >= KEEP_NEWEST && total < KEEP_NEWEST + PRUNE_INTERVAL,
+            (KEEP_NEWEST..KEEP_NEWEST + PRUNE_INTERVAL).contains(&total),
             "ledger must stay within [KEEP_NEWEST, KEEP_NEWEST + PRUNE_INTERVAL), got {total}"
         );
     }

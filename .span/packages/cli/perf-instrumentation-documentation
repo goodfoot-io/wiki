@@ -1,4 +1,4 @@
-packages/cli/logging.wiki.md rk64:648d6d398ba0b4d9
+packages/cli/logging.wiki.md rk64:31b4548167d23943
 packages/cli/src/perf.rs#L194-L201 rk64:f656d68283828c67
 
 Wiki documentation of all perf instrumentation points in the CLI, including scope names, measurements, and log file format.

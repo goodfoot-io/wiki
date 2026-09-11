@@ -18,9 +18,11 @@
 //! `Moved` / `Unknown`) → range-different (content equal → `Healthy`,
 //! different → `Uncertified`).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use thiserror::Error;
@@ -28,7 +30,8 @@ use thiserror::Error;
 use crate::frontmatter::{self, scalar_to_string};
 use crate::index::DocSource;
 use crate::rk64::{
-    Extent, LineIndex, cheap_fingerprint_with_extent, scan_for_content_hash_rk64, scan_indexed_rk64,
+    Extent, LineIndex, ScanIndex, cheap_fingerprint_with_extent, scan_indexed_rk64,
+    scan_one_indexed,
 };
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -206,7 +209,9 @@ pub fn read_links_reviewed(content: &str) -> LinksReviewedRead {
 /// no walk events.
 pub fn find_anchor_commit(
     repo_root: &Path,
+    reader: &crate::git::GitReader,
     cache: &dyn crate::cache::AnchorCache,
+    run: &DriftRunCtx,
     page_path: &str,
     current_value: &LinksReviewedRead,
     committed_value: &LinksReviewedRead,
@@ -233,12 +238,14 @@ pub fn find_anchor_commit(
                 // Both sides absent — the page has no anchor epoch.
                 return Ok(LinkEpoch::Missing);
             };
-            walk_anchor_epoch(repo_root, cache, page_path)
+            walk_anchor_epoch(repo_root, reader, cache, run, page_path)
         }
         // An unparseable HEAD blob is not a value: the pending rule cannot
         // compare it, and the field is not "missing" — the walk resolves
         // the epoch from the readable history, skipping the broken commit.
-        LinksReviewedRead::Unparseable => walk_anchor_epoch(repo_root, cache, page_path),
+        LinksReviewedRead::Unparseable => {
+            walk_anchor_epoch(repo_root, reader, cache, run, page_path)
+        }
     }
 }
 
@@ -256,9 +263,14 @@ pub fn find_anchor_commit(
 ///
 /// The Phase 3 anchor-tier seam (plan decision 5): the disk tier wraps the
 /// memoized leg — the per-commit blob-read + YAML-parse loop — and the
-/// `git log` capture always runs, deliberately outside any span, so the
-/// span's presence on the miss path is exactly the economy the cache
-/// buys. The shallow gate runs first, before any cache consult: a shallow
+/// `git log` capture always runs for a page the run has not captured yet,
+/// deliberately outside any span, so the span's presence on the miss path is
+/// exactly the economy the cache buys. (`DriftRunCtx` memoizes the capture
+/// per run — it is a pure function of HEAD and the page path — so the
+/// capture a `--fix` run's second drift pass would repeat is not paid
+/// again; the span accounting is unchanged either way, since both the
+/// capture and the memoized leg sit outside it.) The shallow gate runs
+/// first, before any cache consult: a shallow
 /// repo emits `cache.walk.bypass` and fails closed unchanged, so warm rows
 /// from a full-history past are never served. Read: derive the key from
 /// the page path and the exact untrimmed `git log` output (the walk's
@@ -276,30 +288,25 @@ pub fn find_anchor_commit(
 /// branch; a cache error is never a serve and never a failure.
 fn walk_anchor_epoch(
     repo_root: &Path,
+    reader: &crate::git::GitReader,
     cache: &dyn crate::cache::AnchorCache,
+    run: &DriftRunCtx,
     page_path: &str,
 ) -> Result<LinkEpoch, EpochError> {
     // The repository state is the authority: a local-path `--depth 1` clone
     // can silently copy full history, so clone flags must not be trusted.
     // The gate runs FIRST, before any cache consult — the bypassed tier is
     // tallied for the run's aggregated `anchor_cache` event and the run
-    // fails closed unchanged.
-    if git_output(repo_root, &["rev-parse", "--is-shallow-repository"])?.trim() == "true" {
+    // fails closed unchanged. The answer is a property of the object store,
+    // so the run evaluates it once and every page reads the same verdict.
+    if run.is_shallow(repo_root)? {
         crate::perf::anchor_cache_bypass();
         return Err(EpochError::ShallowClone);
     }
 
-    let log = git_output(
-        repo_root,
-        &[
-            "log",
-            "--follow",
-            "--name-status",
-            "--format=%H",
-            "--",
-            page_path,
-        ],
-    )?;
+    // One capture per page per run: the fix phase and the post-fix re-check
+    // walk the same history, and nothing in a run moves HEAD.
+    let log = run.walk_log(repo_root, page_path)?;
 
     // Tier-A read. The key is the page path plus the exact untrimmed output
     // the walk parses below (`git_output` returns the lossy stdout verbatim
@@ -331,15 +338,14 @@ fn walk_anchor_epoch(
             // parsed value). Every pushed value is readable by construction;
             // absence at a commit is compared as the field-less state.
             //
-            // The repository is opened once for the whole loop (P3): every
-            // history commit's blob read goes through one gix handle instead
-            // of spawning a `git show` subprocess per commit.
-            let reader = crate::git::GitReader::open(repo_root)
-                .map_err(|e| EpochError::GitFailed(format!("{e:?}")))?;
+            // Every history commit's blob read goes through the caller's gix
+            // handle (P3) instead of spawning a `git show` subprocess per
+            // commit — and instead of opening the repository here, which
+            // re-reads every pack index on a run that walks many pages.
             let mut name = page_path.to_string();
             let mut walked: Vec<(String, String, LinksReviewedRead)> = Vec::new();
             for (sha, rows) in parse_name_status_log(&log) {
-                match blob_links_reviewed(&reader, &sha, &name)? {
+                match blob_links_reviewed(reader, &sha, &name)? {
                     Some(LinksReviewedRead::Unparseable) => {} // skipped entirely
                     Some(LinksReviewedRead::Readable(v)) => {
                         walked.push((sha.clone(), name.clone(), LinksReviewedRead::Readable(v)));
@@ -514,16 +520,20 @@ fn git_failed(e: miette::Report) -> EpochError {
 
 /// Read a blob at `<commit>:<path>` — `git show <commit>:<path>` semantics.
 ///
-/// A full 40-hex commit SHA is served in-process by
-/// [`crate::git::read_blob_at_commit`] (one repository open per call; the
-/// history walk instead threads a shared [`crate::git::GitReader`] through
-/// [`blob_links_reviewed`]). Any other rev spec keeps the subprocess:
+/// A full 40-hex commit SHA is served in-process through the caller's
+/// [`crate::git::GitReader`], so a run that reads many anchor blobs pays the
+/// repository open once. Any other rev spec keeps the subprocess:
 /// `HEAD:path`, and the index form `:path` when `commit` is empty.
 /// `Ok(None)` when the path is absent there; any other git failure fails
 /// closed.
-fn read_blob_at(repo_root: &Path, commit: &str, path: &str) -> Result<Option<Vec<u8>>, EpochError> {
+pub(crate) fn read_blob_at(
+    reader: &crate::git::GitReader,
+    repo_root: &Path,
+    commit: &str,
+    path: &str,
+) -> Result<Option<Vec<u8>>, EpochError> {
     if commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return crate::git::read_blob_at_commit(repo_root, commit, path).map_err(git_failed);
+        return reader.read_blob_at_commit(commit, path).map_err(git_failed);
     }
     let spec = if commit.is_empty() {
         format!(":{path}")
@@ -616,50 +626,343 @@ fn git_output(repo_root: &Path, args: &[&str]) -> Result<String, EpochError> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Classify every line-range fragment link on `page_content` against
-/// `epoch` — the full per-link flowchart of plan Decision 5.
+/// Repository facts one `wiki check` invocation needs from the drift
+/// machinery but that cannot change while it runs — so they are established
+/// once per run instead of once per page or per pass.
 ///
-/// Reads target content at the current side through the source-aware reader
-/// (`DocSource::WorkingTree` → fs, `Head` → `git show HEAD:path`, `Index` →
-/// `git show :path`) and, for a [`LinkEpoch::Commit`] epoch, the anchor-side
-/// page and target blobs via git history. Only links with an explicit line
-/// range (`path#Lstart-Lend`) are classified; plain paths and heading-slug
-/// fragments are outside this system's scope. The pending-bump override
-/// ([`LinkEpoch::Current`]) suppresses certification outcomes but still flags
-/// `Broken` structural failures.
+/// The three facts:
 ///
-/// `cache` is the anchor-cache seam (plan Phase 2): threaded into the
-/// per-link classification and its move scans; Phase 1 accepts it without
-/// consulting it.
-/// Per-run move-scan context. The candidate inventory — `git ls-files` plus a
-/// full read of every tracked candidate file — is expensive, and every link's
-/// cross-file move scan needs it. Build it lazily on the first scan that
-/// needs it and reuse it for the rest of the run; runs with no move scans
-/// pay nothing.
+/// * **The shallow gate.** `git rev-parse --is-shallow-repository` guards
+///   every walk entry and is what makes a shallow clone fail closed. `--fix`
+///   runs the drift pass twice (the fix phase and the post-fix re-check), so
+///   the per-page gate cost the run one `git` spawn per page per pass.
+/// * **The per-page history capture** — `git log --follow --name-status
+///   --format=%H -- <page>`, the walk's entire non-blob input and its
+///   dominant cost: a full rename-following history walk per page (~200 ms
+///   on a large repo, where the anchor cache's own legs are milliseconds).
+///   It is a pure function of HEAD and the page path, and `wiki check`
+///   never commits, so one capture per page serves both passes.
+/// * **The per-destination rename history** — `git log --follow
+///   --name-status --format=%H -- <destination>`, the committed name chain a
+///   cross-file relocation consults for identity evidence. One walk costs as
+///   much as a page capture, a move scan asks it of every file whose content
+///   matches, and the same destination answers the same question in both
+///   passes: keyed by path on committed history, which the run never moves,
+///   so the fix phase's walks serve the post-fix re-check too. (The
+///   uncommitted rename rows stay per pass — they read the worktree, which
+///   the fix phase rewrites — but they are two `git diff` spawns per pass,
+///   not one walk per matching file.)
+///
+/// Memoizing any of them changes no decision, only the number of
+/// subprocesses spent reaching it: the same gate result, the same log bytes
+/// and the same name chain feed the same walk. A lookup that fails is never
+/// memoized, so the walk's error semantics are exactly those of the
+/// per-page capture or per-destination walk it replaces.
 #[derive(Default)]
-pub struct MoveScanCtx {
-    candidates: Option<Vec<(String, Vec<u8>)>>,
-    /// Rename rows from the uncommitted diff layers (worktree↔index and
-    /// index↔HEAD) — cross-file relocation evidence (amendment Change 2).
-    uncommitted_renames: Option<Vec<(String, String)>>,
-    /// Per-destination committed name history — the paths this destination
-    /// has been renamed from, most recent first. Lazily walked and cached;
-    /// only cross-file matches pay for a walk.
-    dest_history: HashMap<String, Vec<String>>,
+pub struct DriftRunCtx {
+    shallow: Mutex<Option<bool>>,
+    walk_logs: Mutex<HashMap<String, String>>,
+    dest_histories: Mutex<HashMap<String, Vec<String>>>,
 }
 
-impl MoveScanCtx {
+impl DriftRunCtx {
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// `true` when the repository is a shallow clone. Evaluated once: the
+    /// answer is a property of the repository's object store, which the run
+    /// never mutates. A git failure is returned to the caller and never
+    /// memoized, so every page sees the failure the uncached gate would
+    /// have produced.
+    fn is_shallow(&self, repo_root: &Path) -> Result<bool, EpochError> {
+        if let Some(shallow) = *lock(&self.shallow) {
+            return Ok(shallow);
+        }
+        let shallow =
+            git_output(repo_root, &["rev-parse", "--is-shallow-repository"])?.trim() == "true";
+        *lock(&self.shallow) = Some(shallow);
+        Ok(shallow)
+    }
+
+    /// The page's history capture, memoized for the run.
+    fn walk_log(&self, repo_root: &Path, page_path: &str) -> Result<String, EpochError> {
+        if let Some(log) = lock(&self.walk_logs).get(page_path) {
+            return Ok(log.clone());
+        }
+        let log = capture_walk_log(repo_root, page_path)?;
+        lock(&self.walk_logs).insert(page_path.to_string(), log.clone());
+        Ok(log)
+    }
+
+    /// Whether `dest`'s committed rename history contains `name` — the
+    /// identity-evidence question, memoized for the run. A walk that fails is
+    /// returned to the caller and never memoized, so every match sees the
+    /// failure its own walk would have produced.
+    fn dest_history_contains(
+        &self,
+        repo_root: &Path,
+        dest: &str,
+        name: &str,
+    ) -> Result<bool, EpochError> {
+        {
+            let histories = lock(&self.dest_histories);
+            if let Some(names) = histories.get(dest) {
+                return Ok(names.iter().any(|n| n == name));
+            }
+        }
+        let names = renamed_from_history(repo_root, dest)?;
+        let contains = names.iter().any(|n| n == name);
+        lock(&self.dest_histories).insert(dest.to_string(), names);
+        Ok(contains)
+    }
+
+    /// Warm the per-destination committed-name histories a scan is about to
+    /// ask for, on the worker pool. The walk is a pure function of the
+    /// repository's immutable history — the same question of the same bytes
+    /// no matter which link asks — so the answers may be computed in any
+    /// order and any concurrency, and each one spares the evidence loop a
+    /// serial `git log --follow` spawn.
+    fn prewarm_dest_histories<'a>(
+        &self,
+        repo_root: &Path,
+        dests: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), EpochError> {
+        let pending: Vec<&str> = {
+            let histories = lock(&self.dest_histories);
+            dests
+                .into_iter()
+                .filter(|dest| !histories.contains_key(*dest))
+                .collect()
+        };
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let walked = parallel_map(&pending, |dest| {
+            renamed_from_history(repo_root, dest).map(|names| ((*dest).to_string(), names))
+        });
+        for result in walked {
+            let (dest, names) = result?;
+            lock(&self.dest_histories).entry(dest).or_insert(names);
+        }
+        Ok(())
+    }
+
+    /// Capture the history logs of `page_paths` in parallel, so the serial
+    /// classification loop that follows does not pay one `git log` spawn per
+    /// page. Purely a schedule change: each worker runs the same command the
+    /// lazy [`Self::walk_log`] would, a page whose capture fails stays
+    /// uncached for the serial path to retry and report, and an already
+    /// memoized page is skipped — so a second drift pass re-pays nothing.
+    ///
+    /// The scheduling itself is [`parallel_map`]'s; this adds only the
+    /// memoizing insert, and the failure policy the cache requires — a capture
+    /// that fails is left for the serial path rather than failing the run.
+    pub fn precapture(&self, repo_root: &Path, page_paths: &[String]) {
+        let pending: Vec<&String> = {
+            let logs = lock(&self.walk_logs);
+            page_paths
+                .iter()
+                .filter(|p| !logs.contains_key(*p))
+                .collect()
+        };
+        if pending.is_empty() {
+            return;
+        }
+
+        let captured = parallel_map(&pending, |page| {
+            capture_walk_log(repo_root, page.as_str()).map(|log| ((*page).clone(), log))
+        });
+        let mut logs = lock(&self.walk_logs);
+        for (page, log) in captured.into_iter().flatten() {
+            logs.entry(page).or_insert(log);
+        }
+    }
+}
+
+/// Lock a run-context mutex, recovering the data if a worker panicked while
+/// holding it: the guarded values are plain caches of read-only repository
+/// facts, so a poisoned lock leaves them consistent — and a cache may never
+/// be the reason a run fails.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// Apply `map` to every item across the run's bounded worker count (the
+/// [`MoveScanCtx::precapture`] idiom), collecting the results in item order so
+/// a parallel pass is indistinguishable from the serial loop it replaces.
+///
+/// A worker that panics is re-raised here rather than dropped. Every caller
+/// treats its result as exhaustive — the complete match set, the complete
+/// history table — and a silently missing chunk is silently missing work.
+fn parallel_map<T, R, F>(items: &[T], map: F) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(&T) -> R + Sync,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+    // Bounded worker count, matching the content cache's warm-up: at most one
+    // thread per item, capped at 8, never more than the machine's parallelism.
+    let parallelism = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let worker_count = parallelism.min(8).min(items.len()).max(1);
+    let chunk_size = items.len().div_ceil(worker_count);
+
+    let mut collected: Vec<Vec<R>> = Vec::with_capacity(worker_count);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(worker_count);
+        for chunk in items.chunks(chunk_size) {
+            let map = &map;
+            handles.push(scope.spawn(move || {
+                chunk.iter().map(map).collect::<Vec<R>>()
+            }));
+        }
+        for handle in handles {
+            match handle.join() {
+                Ok(out) => collected.push(out),
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        }
+    });
+    collected.into_iter().flatten().collect()
+}
+
+/// [`parallel_map`] for scans that accumulate into a hit list: each worker
+/// keeps one buffer for the whole chunk.
+fn parallel_scan<T, F>(items: &[T], scan: F) -> Vec<crate::rk64::Location>
+where
+    T: Sync,
+    F: Fn(&T, &mut Vec<crate::rk64::Location>) + Sync,
+{
+    parallel_map(items, |item| {
+        let mut hits = Vec::new();
+        scan(item, &mut hits);
+        hits
+    })
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// The walk's non-blob input for one page: the full rename-following history
+/// of the page, newest first, as `git log --follow --name-status
+/// --format=%H -- <page>` prints it (the walk parses and hashes exactly
+/// these bytes).
+fn capture_walk_log(repo_root: &Path, page_path: &str) -> Result<String, EpochError> {
+    git_output(
+        repo_root,
+        &[
+            "log",
+            "--follow",
+            "--name-status",
+            "--format=%H",
+            "--",
+            page_path,
+        ],
+    )
+}
+
+/// Per-pass move-scan context. The candidate inventory — `git ls-files`, a
+/// full read of every tracked candidate file, and each file's exact-tier
+/// [`ScanIndex`] (see [`CandidateFile`]) — is expensive, and every link's
+/// cross-file move scan needs it. Build it lazily on the first scan that
+/// needs it and reuse it for the rest of the pass; runs with no move scans
+/// pay nothing.
+///
+/// The inventory and the decisions taken against it are per pass, not per
+/// run: the fix phase rewrites the pages whose bytes those decisions were
+/// computed against, so the post-fix re-check must read the rewritten tree
+/// and judge it afresh. What the run's own repository facts hold — the
+/// per-destination rename histories the evidence loop consults — is borrowed
+/// from [`DriftRunCtx`], which is what lets the second pass ask the same
+/// question without paying for the walk twice.
+pub struct MoveScanCtx<'a> {
+    run: &'a DriftRunCtx,
+    candidates: Option<Vec<CandidateFile>>,
+    /// Rename rows from the uncommitted diff layers (worktree↔index and
+    /// index↔HEAD) — cross-file relocation evidence (amendment Change 2).
+    uncommitted_renames: Option<Vec<(String, String)>>,
+    /// Move-scan decisions for the pass, keyed by the certified block that
+    /// was scanned for. A page routinely cites the same (target, range) more
+    /// than once — the auth protocol page repeats one link fourteen times —
+    /// and every citation of a block asks the identical question of the
+    /// identical corpus: whether the certified content occurs somewhere it
+    /// may be relocated to. Answering it twice is pure waste, so the verdict
+    /// of the whole scan is memoized here and replayed.
+    decisions: HashMap<MoveScanKey, MoveScanDecision>,
+}
+
+/// The identity of one move-scan question: everything the verdict is a
+/// function of, and nothing else. The anchor epoch selects the certified
+/// content; the target path and range select the block within it; the page is
+/// part of the question because the candidate inventory excludes the page
+/// itself (a page quoting the range must not relocate the link into itself),
+/// so two pages citing the same block are two different questions.
+#[derive(PartialEq, Eq, Hash)]
+struct MoveScanKey {
+    anchor_sha: String,
+    page_path: String,
+    target_path: String,
+    start: u32,
+    end: u32,
+}
+
+/// A move scan's verdict — both tiers' whole decision, before the caller's
+/// own `zero_matches` outcome is substituted for "the content is nowhere at
+/// all". `Ambiguous` is the ≥2-qualifying-match rule in both tiers, which
+/// reports `Unknown` regardless of how many further matches exist.
+#[derive(Clone)]
+enum MoveScanDecision {
+    Moved {
+        location: crate::rk64::Location,
+        content_identical: bool,
+    },
+    Ambiguous,
+    Unmatched,
+}
+
+impl MoveScanDecision {
+    /// The verdict as the caller's outcome, substituting `zero_matches` — the
+    /// link's own terminal outcome when the certified content is nowhere.
+    fn into_outcome(self, zero_matches: DriftOutcome) -> DriftOutcome {
+        match self {
+            Self::Moved {
+                location,
+                content_identical,
+            } => DriftOutcome::Moved {
+                new_path: location.path,
+                new_start: location.start_line,
+                new_end: location.end_line,
+                content_identical,
+            },
+            Self::Ambiguous => DriftOutcome::Unknown,
+            Self::Unmatched => zero_matches,
+        }
+    }
+}
+
+impl<'a> MoveScanCtx<'a> {
+    pub fn new(run: &'a DriftRunCtx) -> Self {
+        Self {
+            run,
+            candidates: None,
+            uncommitted_renames: None,
+            decisions: HashMap::new(),
+        }
+    }
+
     fn candidates(
         &mut self,
+        reader: &crate::git::GitReader,
         repo_root: &Path,
         source: DocSource,
-    ) -> Result<&[(String, Vec<u8>)], EpochError> {
+    ) -> Result<&[CandidateFile], EpochError> {
         if self.candidates.is_none() {
-            self.candidates = Some(candidate_files(repo_root, source)?);
+            self.candidates = Some(candidate_files(reader, repo_root, source)?);
         }
         Ok(self.candidates.as_deref().expect("just populated"))
     }
@@ -672,14 +975,6 @@ impl MoveScanCtx {
             self.uncommitted_renames = Some(uncommitted_rename_rows(repo_root)?);
         }
         Ok(self.uncommitted_renames.as_deref().expect("just populated"))
-    }
-
-    fn dest_history(&mut self, repo_root: &Path, dest: &str) -> Result<&[String], EpochError> {
-        if !self.dest_history.contains_key(dest) {
-            let names = renamed_from_history(repo_root, dest)?;
-            self.dest_history.insert(dest.to_string(), names);
-        }
-        Ok(self.dest_history.get(dest).expect("just inserted"))
     }
 }
 
@@ -760,7 +1055,7 @@ fn renamed_from_history(repo_root: &Path, dest_path: &str) -> Result<Vec<String>
 /// source's committed successor. A content-only match in an unrelated file
 /// (a quote, a copy) is never a move.
 fn has_identity_evidence(
-    ctx: &mut MoveScanCtx,
+    ctx: &mut MoveScanCtx<'_>,
     repo_root: &Path,
     cert_path: &str,
     dest_path: &str,
@@ -775,17 +1070,34 @@ fn has_identity_evidence(
     {
         return Ok(true);
     }
-    Ok(ctx.dest_history(repo_root, dest_path)?.contains(&cert_path.to_string()))
+    ctx.run.dest_history_contains(repo_root, dest_path, cert_path)
 }
 
+/// Classify every line-range fragment link on `page_content` against
+/// `epoch` — the full per-link flowchart of plan Decision 5.
+///
+/// Reads target content at the current side through the source-aware reader
+/// (`DocSource::WorkingTree` → fs, `Head` → `git show HEAD:path`, `Index` →
+/// `git show :path`) and, for a [`LinkEpoch::Commit`] epoch, the anchor-side
+/// page and target blobs via git history. Only links with an explicit line
+/// range (`path#Lstart-Lend`) are classified; plain paths and heading-slug
+/// fragments are outside this system's scope. The pending-bump override
+/// ([`LinkEpoch::Current`]) suppresses certification outcomes but still flags
+/// `Broken` structural failures.
+///
+/// `cache` is the anchor-cache seam: threaded into the per-link
+/// classification and its move scans so a page's committed history is walked
+/// once and reused across passes.
+#[allow(clippy::too_many_arguments)]
 pub fn classify_page(
     repo_root: &Path,
+    reader: &crate::git::GitReader,
     cache: &dyn crate::cache::AnchorCache,
     source: DocSource,
     page_path: &str,
     page_content: &str,
     epoch: &LinkEpoch,
-    ctx: &mut MoveScanCtx,
+    ctx: &mut MoveScanCtx<'_>,
 ) -> Result<Vec<LinkClass>, EpochError> {
     let anchor = match epoch {
         LinkEpoch::Missing => return Err(EpochError::MissingEpoch),
@@ -802,7 +1114,7 @@ pub fn classify_page(
     // was at that commit.
     let mut certified: Vec<CertifiedLink> = Vec::new();
     if let Some((sha, path_at_commit)) = anchor {
-        let Some(anchor_page) = read_blob_at(repo_root, sha, path_at_commit)? else {
+        let Some(anchor_page) = read_blob_at(reader, repo_root, sha, path_at_commit)? else {
             // The page must exist at its own anchor commit.
             return Err(EpochError::UnreadableBlob {
                 page: path_at_commit.to_string(),
@@ -829,6 +1141,7 @@ pub fn classify_page(
         // `target_path` reports where the link was actually judged against.
         let (outcome, target_path) = classify_link(
             repo_root,
+            reader,
             cache,
             source,
             page_path,
@@ -1058,18 +1371,19 @@ fn resolve_target_path(repo_root: &Path, page_path: &str, path_part: &str) -> St
 #[allow(clippy::too_many_arguments)]
 fn classify_link(
     repo_root: &Path,
+    reader: &crate::git::GitReader,
     cache: &dyn crate::cache::AnchorCache,
     source: DocSource,
     page_path: &str,
     link: &ParsedLink,
     certified: &[CertifiedLink],
     anchor_sha: Option<&str>,
-    ctx: &mut MoveScanCtx,
+    ctx: &mut MoveScanCtx<'_>,
 ) -> Result<(DriftOutcome, String), EpochError> {
     // Decision 5 target resolution: resolve the href path part, then salvage
     // the longest existing repo-relative suffix when the direct read misses.
     let (target_path, target_bytes) =
-        read_target(repo_root, source, page_path, &link.target_path_raw)?;
+        read_target(reader, repo_root, source, page_path, &link.target_path_raw)?;
 
     let Some(anchor_sha) = anchor_sha else {
         // Pending-bump override (Decision 2): the anchor epoch IS the current
@@ -1146,7 +1460,7 @@ fn classify_link(
                     return Ok((DriftOutcome::Broken, target_path));
                 }
                 for cand in certified.iter().filter(|c| c.label == link.label) {
-                    if certified_content_fp(repo_root, cache, page_path, anchor_sha, cand, &mut memo)?
+                    if certified_content_fp(reader, repo_root, cache, page_path, anchor_sha, cand, &mut memo)?
                         == current_fp
                     {
                         return Ok((DriftOutcome::Healthy, target_path));
@@ -1161,7 +1475,7 @@ fn classify_link(
         // equals the certified content.
         if let Some(bytes) = target_bytes.as_deref()
             && extent_fits(bytes, link.start, link.end)
-            && certified_content_fp(repo_root, cache, page_path, anchor_sha, cert, &mut memo)?
+            && certified_content_fp(reader, repo_root, cache, page_path, anchor_sha, cert, &mut memo)?
                 == current_fp
         {
             return Ok((DriftOutcome::Healthy, target_path));
@@ -1177,6 +1491,7 @@ fn classify_link(
         };
         let outcome = move_scan_outcome(
             repo_root,
+            reader,
             cache,
             source,
             page_path,
@@ -1197,6 +1512,7 @@ fn classify_link(
     let Some(bytes) = target_bytes.as_deref() else {
         let outcome = move_scan_outcome(
             repo_root,
+            reader,
             cache,
             source,
             page_path,
@@ -1222,7 +1538,7 @@ fn classify_link(
         .iter()
         .any(|c| c.start == link.start && c.end == link.end)
     {
-        let cert_fp = certified_content_fp(repo_root, cache, page_path, anchor_sha, cert, &mut memo)?;
+        let cert_fp = certified_content_fp(reader, repo_root, cache, page_path, anchor_sha, cert, &mut memo)?;
         let cur_fp = cheap_fingerprint_with_extent(
             bytes,
             &Extent::LineRange {
@@ -1235,6 +1551,7 @@ fn classify_link(
         }
         let outcome = move_scan_outcome(
             repo_root,
+            reader,
             cache,
             source,
             page_path,
@@ -1263,12 +1580,13 @@ fn classify_link(
         },
     );
     for c in &matched {
-        if certified_content_fp(repo_root, cache, page_path, anchor_sha, c, &mut memo)? == cur_fp {
+        if certified_content_fp(reader, repo_root, cache, page_path, anchor_sha, c, &mut memo)? == cur_fp {
             return Ok((DriftOutcome::Healthy, target_path));
         }
     }
     let outcome = move_scan_outcome(
         repo_root,
+        reader,
         cache,
         source,
         page_path,
@@ -1320,6 +1638,7 @@ fn primary_cert<'a>(
 /// propagation are byte-identical to the uncached computation in every
 /// branch; a cache error is never a serve and never a failure.
 fn certified_content_fp(
+    reader: &crate::git::GitReader,
     repo_root: &Path,
     cache: &dyn crate::cache::AnchorCache,
     page_path: &str,
@@ -1359,7 +1678,7 @@ fn certified_content_fp(
     // duration is tallied into the run's aggregated `anchor_cache` event, so
     // a warm run reports zero fingerprint milliseconds.
     let fp_start = Instant::now();
-    let fp = match read_blob_at(repo_root, anchor_sha, &cert.target_path)? {
+    let fp = match read_blob_at(reader, repo_root, anchor_sha, &cert.target_path)? {
         None => {
             // The read failed; the probe decides the write.
             if availability_probe(repo_root, anchor_sha, &cert.target_path) == Availability::Absent {
@@ -1420,6 +1739,7 @@ fn current_content_fp(bytes: Option<&[u8]>, start: u32, end: u32) -> u64 {
 #[allow(clippy::too_many_arguments)]
 fn move_scan_outcome(
     repo_root: &Path,
+    reader: &crate::git::GitReader,
     cache: &dyn crate::cache::AnchorCache,
     source: DocSource,
     page_path: &str,
@@ -1429,14 +1749,58 @@ fn move_scan_outcome(
     anchor_sha: &str,
     memo: &mut HashMap<(String, u32, u32), u64>,
     zero_matches: DriftOutcome,
-    ctx: &mut MoveScanCtx,
+    ctx: &mut MoveScanCtx<'_>,
 ) -> Result<DriftOutcome, EpochError> {
+    let key = MoveScanKey {
+        anchor_sha: anchor_sha.to_string(),
+        page_path: page_path.to_string(),
+        target_path: cert.target_path.clone(),
+        start: cert.start,
+        end: cert.end,
+    };
+    if let Some(decision) = ctx.decisions.get(&key) {
+        return Ok(decision.clone().into_outcome(zero_matches));
+    }
+    let decision = compute_move_scan(
+        repo_root,
+        reader,
+        cache,
+        source,
+        page_path,
+        target_path,
+        target_bytes,
+        cert,
+        anchor_sha,
+        memo,
+        ctx,
+    )?;
+    ctx.decisions.insert(key, decision.clone());
+    Ok(decision.into_outcome(zero_matches))
+}
+
+/// The uncached move scan behind [`move_scan_outcome`]: run both tiers and
+/// return the verdict the caller replays for every citation of this block.
+#[allow(clippy::too_many_arguments)]
+fn compute_move_scan(
+    repo_root: &Path,
+    reader: &crate::git::GitReader,
+    cache: &dyn crate::cache::AnchorCache,
+    source: DocSource,
+    page_path: &str,
+    target_path: &str,
+    target_bytes: Option<&[u8]>,
+    cert: &CertifiedLink,
+    anchor_sha: &str,
+    memo: &mut HashMap<(String, u32, u32), u64>,
+    ctx: &mut MoveScanCtx<'_>,
+) -> Result<MoveScanDecision, EpochError> {
     let span = line_range_span(cert.start, cert.end);
     if span == 0 {
         // Degenerate certified content never matches a window.
-        return Ok(zero_matches);
+        return Ok(MoveScanDecision::Unmatched);
     }
-    let cert_fp = certified_content_fp(repo_root, cache, page_path, anchor_sha, cert, memo)?;
+    let cert_fp =
+        certified_content_fp(reader, repo_root, cache, page_path, anchor_sha, cert, memo)?;
     let extent = Extent::LineRange {
         start: 1,
         end: span as u32,
@@ -1456,20 +1820,24 @@ fn move_scan_outcome(
     };
 
     // Same-file tier: the link's own target.
-    if let Some(bytes) = target_bytes {
-        let idx = LineIndex::build(bytes);
-        let matches: Vec<crate::rk64::Location> =
-            scan_indexed_rk64(&[(target_path.to_string(), idx)], cert_fp, extent, None)
-                .into_iter()
-                .filter(not_certified_window)
-                .collect();
-        match matches.len() {
-            1 => {
-                return moved_to(&matches[0], true);
+    let same_file = match target_bytes {
+        Some(bytes) => {
+            let idx = LineIndex::build(bytes);
+            let matches: Vec<crate::rk64::Location> =
+                scan_indexed_rk64(&[(target_path.to_string(), idx)], cert_fp, extent, None)
+                    .into_iter()
+                    .filter(not_certified_window)
+                    .collect();
+            match matches.len() {
+                1 => Some(moved_to(&matches[0], true)),
+                n if n >= 2 => Some(MoveScanDecision::Ambiguous),
+                _ => None,
             }
-            n if n >= 2 => return Ok(DriftOutcome::Unknown),
-            _ => {}
         }
+        None => None,
+    };
+    if let Some(decision) = same_file {
+        return Ok(decision);
     }
 
     // Cross-file tier: every other candidate file in the repo. The page
@@ -1478,24 +1846,32 @@ fn move_scan_outcome(
     // identity-evidenced destinations count (amendment Change 2): a
     // content-only match in an unrelated file is a quote or a copy, never a
     // move, and is dropped rather than counted toward Unknown.
-    let others: Vec<(&str, &[u8])> = ctx
-        .candidates(repo_root, source)?
+    let others: Vec<&CandidateFile> = ctx
+        .candidates(reader, repo_root, source)?
         .iter()
-        .filter(|(path, _)| path != target_path && path != page_path)
-        .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+        .filter(|c| c.path != target_path && c.path != page_path)
         .collect();
+    // The exact tier: the certified fingerprint, byte for byte, in every
+    // candidate file.
+    let scanned: Vec<crate::rk64::Location> = parallel_scan(&others, |candidate, out| {
+        scan_one_indexed(&candidate.path, &candidate.index, cert_fp, extent, out);
+    })
+    .into_iter()
+    .filter(not_certified_window)
+    .collect();
+    // The identity-evidence pass (dest-history walks) over the exact tier's
+    // raw matches, warmed on the pool before the serial loop consumes it.
+    ctx.run
+        .prewarm_dest_histories(repo_root, scanned.iter().map(|l| l.path.as_str()))?;
     let mut matches: Vec<crate::rk64::Location> = Vec::new();
-    for l in scan_for_content_hash_rk64(&others, cert_fp, extent, None) {
-        if !not_certified_window(&l) {
-            continue;
-        }
+    for l in scanned {
         if has_identity_evidence(ctx, repo_root, &cert.target_path, &l.path)? {
             matches.push(l);
         }
     }
     match matches.len() {
-        1 => return moved_to(&matches[0], true),
-        n if n >= 2 => return Ok(DriftOutcome::Unknown),
+        1 => return Ok(moved_to(&matches[0], true)),
+        n if n >= 2 => return Ok(MoveScanDecision::Ambiguous),
         _ => {}
     }
 
@@ -1504,8 +1880,9 @@ fn move_scan_outcome(
     // at-threshold window → Moved; ≥2 → Unknown; none → `zero_matches`.
     // Same-file windows need no identity evidence; cross-file windows do.
     let mut fuzzy: Vec<crate::rk64::Location> = Vec::new();
-    for l in fuzzy_locations(
+    let fuzzy_scanned = fuzzy_locations(
         repo_root,
+        reader,
         source,
         page_path,
         target_path,
@@ -1513,10 +1890,21 @@ fn move_scan_outcome(
         cert,
         anchor_sha,
         ctx,
-    )? {
-        if !not_certified_window(&l) {
-            continue;
-        }
+    )?;
+    let fuzzy_scanned: Vec<crate::rk64::Location> = fuzzy_scanned
+        .into_iter()
+        .filter(not_certified_window)
+        .collect();
+    // Same-file windows are evidence-free, so only the cross-file ones ask
+    // about a destination's history.
+    ctx.run.prewarm_dest_histories(
+        repo_root,
+        fuzzy_scanned
+            .iter()
+            .filter(|l| l.path != target_path)
+            .map(|l| l.path.as_str()),
+    )?;
+    for l in fuzzy_scanned {
         if l.path != target_path
             && !has_identity_evidence(ctx, repo_root, &cert.target_path, &l.path)?
         {
@@ -1525,9 +1913,9 @@ fn move_scan_outcome(
         fuzzy.push(l);
     }
     match fuzzy.len() {
-        1 => moved_to(&fuzzy[0], false),
-        n if n >= 2 => Ok(DriftOutcome::Unknown),
-        _ => Ok(zero_matches),
+        1 => Ok(moved_to(&fuzzy[0], false)),
+        n if n >= 2 => Ok(MoveScanDecision::Ambiguous),
+        _ => Ok(MoveScanDecision::Unmatched),
     }
 }
 
@@ -1549,6 +1937,11 @@ const FUZZY_LINE_MATCH_THRESHOLD: f64 = 0.5;
 /// Multiset Jaccard similarity between two line groups: tokenize every line
 /// on whitespace, count duplicate tokens on both sides, and divide the
 /// intersection size by the union size. `0.0` for two empty groups.
+///
+/// The decoded reference form of what the collector computes over byte keys
+/// and index facts ([`CertBlock::window_token_jaccard`]), kept as the oracle
+/// the collector's differential tests are written against.
+#[cfg(test)]
 fn window_jaccard(a_lines: &[&str], b_lines: &[&str]) -> f64 {
     let a = token_counts(a_lines);
     let b = token_counts(b_lines);
@@ -1627,13 +2020,14 @@ fn fuzzy_window_score(a_lines: &[&str], b_lines: &[&str]) -> f64 {
 #[allow(clippy::too_many_arguments)]
 fn fuzzy_locations(
     repo_root: &Path,
+    reader: &crate::git::GitReader,
     source: DocSource,
     page_path: &str,
     target_path: &str,
     target_bytes: Option<&[u8]>,
     cert: &CertifiedLink,
     anchor_sha: &str,
-    ctx: &mut MoveScanCtx,
+    ctx: &mut MoveScanCtx<'_>,
 ) -> Result<Vec<crate::rk64::Location>, EpochError> {
     let span = line_range_span(cert.start, cert.end);
     if span == 0 {
@@ -1642,7 +2036,7 @@ fn fuzzy_locations(
     // The certified lines at the anchor commit, clamped like the kernel's
     // canonical content. The range was valid when certified, so the clamp
     // only fires on a corrupt or hand-edited anchor file.
-    let Some(blob) = read_blob_at(repo_root, anchor_sha, &cert.target_path)? else {
+    let Some(blob) = read_blob_at(reader, repo_root, anchor_sha, &cert.target_path)? else {
         return Ok(Vec::new());
     };
     let text = String::from_utf8_lossy(&blob);
@@ -1658,36 +2052,379 @@ fn fuzzy_locations(
     let cert_lines = &lines[start - 1..end];
 
     // Certified-line facts, computed once and shared by every candidate file.
-    let cert_data: Vec<CertLine> = cert_lines.iter().map(|l| CertLine::new(l)).collect();
-    let cert_index = cert_token_index(&cert_data);
+    let block = CertBlock::of(cert_lines);
 
     let mut hits = Vec::new();
     // Same-file tier: the link's own target.
     if let Some(bytes) = target_bytes {
-        collect_fuzzy_hits(bytes, target_path, cert_lines, &cert_data, &cert_index, span, &mut hits);
+        collect_fuzzy_hits(
+            bytes,
+            &FuzzyLines::build(bytes),
+            target_path,
+            &block,
+            span,
+            &mut hits,
+        );
     }
     // Cross-file tier: every candidate minus the target and the page itself.
-    for (path, bytes) in ctx.candidates(repo_root, source)? {
-        if path == target_path || path == page_path {
-            continue;
-        }
-        collect_fuzzy_hits(bytes, path, cert_lines, &cert_data, &cert_index, span, &mut hits);
-    }
+    let others: Vec<&CandidateFile> = ctx
+        .candidates(reader, repo_root, source)?
+        .iter()
+        .filter(|c| c.path != target_path && c.path != page_path)
+        .collect();
+    hits.extend(parallel_scan(&others, |candidate, out| {
+        collect_fuzzy_hits(
+            &candidate.bytes,
+            &candidate.fuzzy,
+            &candidate.path,
+            &block,
+            span,
+            out,
+        );
+    }));
     Ok(hits)
+}
+
+/// One candidate file's fuzzy-tier line index: every line's raw byte span, its
+/// tokens' byte ranges, and its token count — built once per inventory
+/// ([`CandidateFile`]) and reused by every link's scan.
+///
+/// The collector needs a candidate line's token count *before* it needs the
+/// line's text: token-Jaccard never exceeds `min(|a|,|b|)/max(|a|,|b|)`, so a
+/// line can only match a certified line whose token count lies in the window
+/// `[T·a, a/T]`, and a line outside every certified line's window is rejected
+/// without decoding it or splitting it into tokens. On a corpus whose bulk is
+/// media that is nearly every line of nearly every file, and decoding a line
+/// of binary — three bytes of replacement character per invalid byte — is what
+/// the tier cannot afford to do per link.
+///
+/// The tokens' ranges are indexed here for the same reason: tokenizing a line
+/// is a property of the file's bytes, but the tier's scans re-ask it of every
+/// line of every file for every link that drifts, and the asking is a
+/// separator test per *byte* — on a repo-sized corpus, gigabytes of byte
+/// tests per run, to re-derive what one pass over the file already knew.
+///
+/// Both facts are raw-byte facts. The lossy decode copies valid runs through
+/// unchanged and inserts replacement characters for invalid ones, and a
+/// replacement character is not whitespace; so the decoded text's whitespace
+/// characters are exactly the raw bytes' separators — the ASCII whitespace
+/// bytes plus the UTF-8 encodings of the non-ASCII `White_Space` characters —
+/// and a token's bytes are a maximal run between them. Counting those runs
+/// therefore counts the decoded line's tokens, and slicing between them
+/// yields the line the decoder would have produced.
+#[derive(Default)]
+struct FuzzyLines {
+    /// Raw `[start, end)` of each line's content, `\n` and a preceding `\r`
+    /// excluded — the ranges [`str::lines`] yields.
+    spans: Vec<(u32, u32)>,
+    /// Token count of each line, per [`str::split_whitespace`].
+    tokens: Vec<u32>,
+    /// Every line's tokens, concatenated: line `i`'s are
+    /// `runs[starts[i]..starts[i + 1]]`, as `[start, end)` ranges into the
+    /// line's own bytes ([`Self::line`]).
+    runs: Vec<(u32, u32)>,
+    /// Where each line's tokens begin in `runs`; `line_count() + 1` entries,
+    /// so the last line's slice has an end.
+    starts: Vec<u32>,
+}
+
+impl FuzzyLines {
+    /// Index `bytes` with one forward scan, recording each line's tokens as it
+    /// closes.
+    fn build(bytes: &[u8]) -> FuzzyLines {
+        // The same contract as the exact tier's index: u32 spans mean a 4 GiB
+        // buffer is refused, not silently truncated.
+        assert!(
+            bytes.len() <= u32::MAX as usize,
+            "fuzzy: buffer of {} bytes exceeds the supported size of {} bytes \
+             (line spans are stored as u32); files of 4 GiB or larger are not indexable",
+            bytes.len(),
+            u32::MAX,
+        );
+        let mut lines = FuzzyLines::default();
+        let mut start = 0usize;
+        for (i, &b) in bytes.iter().enumerate() {
+            if b == b'\n' {
+                lines.push_line(bytes, start, i);
+                start = i + 1;
+            }
+        }
+        // A trailing segment with no terminating newline is the final,
+        // unterminated line; a buffer ending in `\n` has none (matching
+        // `str::lines`).
+        if start < bytes.len() {
+            lines.push_line(bytes, start, bytes.len());
+        }
+        lines.starts.push(lines.runs.len() as u32);
+        lines
+    }
+
+    fn push_line(&mut self, bytes: &[u8], start: usize, end: usize) {
+        let end = if end > start && bytes[end - 1] == b'\r' {
+            end - 1
+        } else {
+            end
+        };
+        self.spans.push((start as u32, end as u32));
+        self.starts.push(self.runs.len() as u32);
+        for (from, to) in Runs::new(&bytes[start..end]) {
+            self.runs.push((from as u32, to as u32));
+        }
+        self.tokens.push(self.runs.len() as u32 - self.starts[self.starts.len() - 1]);
+    }
+
+    /// Number of lines, per [`str::lines`] counting.
+    fn line_count(&self) -> usize {
+        self.spans.len()
+    }
+
+    /// Line `i`'s raw content bytes.
+    fn line<'a>(&self, bytes: &'a [u8], i: usize) -> &'a [u8] {
+        let (start, end) = self.spans[i];
+        &bytes[start as usize..end as usize]
+    }
+
+    /// Line `i`'s tokens, as `[start, end)` ranges into the indexed bytes.
+    fn line_runs(&self, i: usize) -> &[(u32, u32)] {
+        &self.runs[self.starts[i] as usize..self.starts[i + 1] as usize]
+    }
+}
+
+/// The decoded line's token count, taken from the raw bytes: the number of
+/// maximal runs between separators ([`Runs`]).
+#[cfg(test)]
+fn token_count(bytes: &[u8]) -> u32 {
+    Runs::new(bytes).count() as u32
+}
+
+/// The maximal non-separator runs of a byte string, as offsets — one line's
+/// tokens, without decoding it. One tokenizer for the whole tier: the line
+/// index counts runs with it, the matcher compares them.
+struct Runs<'a> {
+    bytes: &'a [u8],
+    i: usize,
+}
+
+impl<'a> Runs<'a> {
+    fn new(bytes: &'a [u8]) -> Runs<'a> {
+        Runs { bytes, i: 0 }
+    }
+}
+
+impl Iterator for Runs<'_> {
+    type Item = (usize, usize);
+
+    fn next(&mut self) -> Option<(usize, usize)> {
+        let bytes = self.bytes;
+        while self.i < bytes.len() {
+            let separator = separator_len(bytes, self.i);
+            if separator == 0 {
+                break;
+            }
+            self.i += separator;
+        }
+        if self.i == bytes.len() {
+            return None;
+        }
+        let start = self.i;
+        while self.i < bytes.len() && separator_len(bytes, self.i) == 0 {
+            self.i += 1;
+        }
+        Some((start, self.i))
+    }
+}
+
+/// The length of the whitespace sequence at `bytes[i]`, or `0` when the byte
+/// there is not whitespace — [`str::split_whitespace`]'s definition, read at
+/// byte level.
+///
+/// Only the ASCII whitespace bytes and the UTF-8 encodings of the non-ASCII
+/// `White_Space` characters separate tokens, and the raw scan and the decoded
+/// text agree on every one of them. Error recovery never rewrites a whitespace
+/// character: a whitespace encoding always begins with `C2`, `E1`, `E2` or
+/// `E3`, and a byte above `0xBF` is never a continuation byte, so such a byte
+/// is always the start of the sequence the decoder reads there; the decoder
+/// resumes exactly at a byte the raw scan would test; and where the raw scan
+/// reads a whitespace sequence the decoder reads that same character, since
+/// the encodings are the canonical ones.
+fn separator_len(bytes: &[u8], i: usize) -> usize {
+    let b = bytes[i];
+    if b < 0x80 {
+        return usize::from(b.is_ascii_whitespace());
+    }
+    let rest = &bytes[i..];
+    if rest.starts_with("\u{85}".as_bytes()) || rest.starts_with("\u{a0}".as_bytes()) {
+        return 2;
+    }
+    if rest.starts_with("\u{1680}".as_bytes())
+        || rest.starts_with("\u{202f}".as_bytes())
+        || rest.starts_with("\u{205f}".as_bytes())
+        || rest.starts_with("\u{3000}".as_bytes())
+        || (rest.starts_with("\u{2000}".as_bytes()[..2].as_ref())
+            && rest
+                .get(2)
+                .is_some_and(|&third| matches!(third, 0x80..=0x8a | 0xa8 | 0xa9)))
+    {
+        return 3;
+    }
+    0
+}
+
+/// The replacement character's UTF-8 encoding: what the decoder writes for an
+/// invalid sequence.
+const FFFD: &[u8] = "\u{fffd}".as_bytes();
+
+/// The certified block's fuzzy-tier facts, resolved once per scan and shared
+/// by every candidate file: its lines as the anchor-commit decoder produced
+/// them, their token multisets, the token → line index, the token filter, the
+/// count bounds a candidate line must land in, and the block's whole token
+/// multiset with its total.
+///
+/// One bundle because every candidate line's judgment reads all of it: the
+/// count bounds decide whether the line is read at all, the filter and index
+/// decide which of its tokens matter, and the multisets decide the match —
+/// the per-line ones for the containment flags, the whole-block one for the
+/// window score, which would otherwise rebuild the same fixed side once per
+/// scored window.
+struct CertBlock<'a> {
+    data: Vec<CertLine<'a>>,
+    index: HashMap<&'a [u8], Vec<u32>>,
+    fps: CertFingerprints,
+    counts: CertCounts,
+    /// Every token of every line, counted — the fixed side of the window
+    /// score's token-Jaccard, keyed by bytes like the candidate side.
+    multiset: HashMap<&'a [u8], u32>,
+    /// Total tokens over the block's lines, the fixed side of the score's
+    /// union and of the token bound a window is screened against.
+    token_total: u64,
+}
+
+impl<'a> CertBlock<'a> {
+    fn of(lines: &[&'a str]) -> CertBlock<'a> {
+        let data: Vec<CertLine<'a>> = lines.iter().map(|l| CertLine::new(l)).collect();
+        let index = cert_token_index(&data);
+        let mut multiset: HashMap<&[u8], u32> = HashMap::new();
+        for cert in &data {
+            for (token, &count) in &cert.counts {
+                *multiset.entry(token).or_insert(0) += count;
+            }
+        }
+        let token_total = data.iter().map(|cert| u64::from(cert.total)).sum();
+        CertBlock {
+            counts: CertCounts::of(&data),
+            fps: CertFingerprints::of(&index),
+            index,
+            multiset,
+            token_total,
+            data,
+        }
+    }
+
+    /// The fuzzy-tier score of a window of candidate lines, given the window's
+    /// tokens as a multiset keyed by bytes and its token total: token
+    /// multiset Jaccard ([`window_jaccard`]'s formula, over the byte keys both
+    /// sides share) times the caller's line containment.
+    ///
+    /// The block's side of the Jaccard is [`Self::multiset`] and
+    /// [`Self::token_total`], computed once per scan; the candidate side is
+    /// built from the line index's token ranges, so no line is ever decoded.
+    /// The comparison never leaves integers: the intersection is a sum of
+    /// `min` counts and the totals are the index's own, so the quotient is the
+    /// same float the decoded reference formula produces.
+    fn window_token_jaccard(&self, window: &HashMap<&[u8], u32>, window_total: u64) -> f64 {
+        if self.token_total == 0 && window_total == 0 {
+            return 0.0;
+        }
+        let inter: u64 = self
+            .multiset
+            .iter()
+            .map(|(token, &a)| {
+                window
+                    .get(*token)
+                    .map_or(0, |&b| u64::from(a.min(b)))
+            })
+            .sum();
+        let union = self.token_total + window_total - inter;
+        inter as f64 / union as f64
+    }
+}
+
+/// The certified block's token counts, as the bounds a candidate line's count
+/// must reach to match one of its lines: `min` and `max` over the non-blank
+/// lines, whether the block has a blank line at all (a blank candidate line
+/// matches only a blank certified line), and whether any of its tokens carries
+/// a replacement character.
+///
+/// That last fact is what decides whether the pass may compare candidate runs
+/// to certified tokens by their bytes: a token the decoder produced out of
+/// invalid bytes has no byte-for-byte counterpart in the candidate, so a
+/// block that has one is read through a decode (see [`collect_fuzzy_hits`]).
+struct CertCounts {
+    min: u32,
+    max: u32,
+    any_blank: bool,
+    any_fffd: bool,
+}
+
+impl CertCounts {
+    fn of(cert_data: &[CertLine]) -> CertCounts {
+        let mut counts = CertCounts {
+            min: u32::MAX,
+            max: 0,
+            any_blank: false,
+            any_fffd: false,
+        };
+        for cert in cert_data {
+            counts.any_fffd |= cert
+                .counts
+                .keys()
+                .any(|token| token.windows(FFFD.len()).any(|w| w == FFFD));
+            if cert.blank {
+                counts.any_blank = true;
+                continue;
+            }
+            counts.min = counts.min.min(cert.total);
+            counts.max = counts.max.max(cert.total);
+        }
+        counts
+    }
+
+    /// Whether a candidate line of `tokens` tokens can match any non-blank
+    /// certified line. Necessary, not sufficient: token-Jaccard never exceeds
+    /// `min/max`, so a match requires the certified count and the candidate
+    /// count to lie within a factor of `1/T` of one another. One token of
+    /// slack on each side — over-admitting only costs the decode this exists
+    /// to save, while under-admitting would lose a match.
+    fn could_match(&self, tokens: u32) -> bool {
+        if self.max == 0 {
+            return false;
+        }
+        let count = f64::from(tokens);
+        let threshold = FUZZY_LINE_MATCH_THRESHOLD;
+        count * threshold <= f64::from(self.max) + 1.0
+            && count / threshold + 1.0 >= f64::from(self.min)
+    }
 }
 
 /// One certified line's fuzzy-tier facts: its token multiset, token count,
 /// and whether it is blank.
+///
+/// Tokens are keyed by their bytes, not by `&str`: the candidate side compares
+/// the bytes of a run (see [`collect_fuzzy_hits`]), and a token's bytes *are*
+/// its identity in the decoded text, so one map serves both sides.
 struct CertLine<'a> {
-    counts: HashMap<&'a str, u32>,
+    counts: HashMap<&'a [u8], u32>,
     total: u32,
     blank: bool,
 }
 
 impl<'a> CertLine<'a> {
     fn new(line: &'a str) -> Self {
-        let counts = token_counts(&[line]);
-        let total = counts.values().copied().sum();
+        let counts = token_counts(&[line])
+            .into_iter()
+            .map(|(token, count)| (token.as_bytes(), count))
+            .collect();
+        let total = line.split_whitespace().count() as u32;
         let blank = line.split_whitespace().next().is_none();
         Self { counts, total, blank }
     }
@@ -1696,8 +2433,8 @@ impl<'a> CertLine<'a> {
 /// Token → indices of the certified lines containing it, for the containment
 /// prefilter: a candidate line can only match certified lines that share a
 /// token with it.
-fn cert_token_index<'a>(cert_data: &'a [CertLine<'a>]) -> HashMap<&'a str, Vec<u32>> {
-    let mut index: HashMap<&str, Vec<u32>> = HashMap::new();
+fn cert_token_index<'a>(cert_data: &[CertLine<'a>]) -> HashMap<&'a [u8], Vec<u32>> {
+    let mut index: HashMap<&[u8], Vec<u32>> = HashMap::new();
     for (i, cert) in cert_data.iter().enumerate() {
         for token in cert.counts.keys() {
             index.entry(token).or_default().push(i as u32);
@@ -1706,47 +2443,118 @@ fn cert_token_index<'a>(cert_data: &'a [CertLine<'a>]) -> HashMap<&'a str, Vec<u
     index
 }
 
+/// A 1024-bit filter over the certified block's token fingerprints: the step
+/// that keeps the matcher's byte-keyed lookups — and the whole multiset
+/// intersection behind them — to the candidate lines that can possibly share
+/// a token with the block at all.
+///
+/// It is a filter, never an authority: a token is looked up in
+/// [`cert_token_index`] only when its fingerprint is present here, and every
+/// certified token's fingerprint is present by construction, so a line is
+/// never rejected on a token the block does contain. Fingerprint collisions
+/// only cost the lookup they fail to save, which is why the fingerprint may
+/// be sampled from a token's length and a few of its bytes rather than hashed
+/// over all of them: on a corpus whose bulk is media, a line's tokens are
+/// long binary runs, and hashing every byte of them to answer "could this
+/// line share a token with the block?" is the cost this exists to avoid.
+struct CertFingerprints {
+    bits: [u64; Self::WORDS],
+}
+
+impl CertFingerprints {
+    const BITS: u32 = 1024;
+    const WORDS: usize = (Self::BITS / 64) as usize;
+
+    fn of(index: &HashMap<&[u8], Vec<u32>>) -> Self {
+        let mut fps = CertFingerprints {
+            bits: [0; Self::WORDS],
+        };
+        for token in index.keys() {
+            let fp = token_fingerprint(token) % Self::BITS;
+            fps.bits[(fp / 64) as usize] |= 1u64 << (fp % 64);
+        }
+        fps
+    }
+
+    fn may_contain(&self, token: &[u8]) -> bool {
+        let fp = token_fingerprint(token) % Self::BITS;
+        self.bits[(fp / 64) as usize] & (1u64 << (fp % 64)) != 0
+    }
+}
+
+/// A token's fingerprint, for [`CertFingerprints`]: its length and three
+/// sampled bytes, mixed. Sampling is enough because a collision only sends
+/// the token to the authoritative lookup, which decides on its bytes.
+fn token_fingerprint(token: &[u8]) -> u32 {
+    let last = token.len() - 1;
+    let mut h = (token.len() as u32).wrapping_mul(0x9e37_79b1);
+    h ^= u32::from(token[0]).wrapping_mul(0x85eb_ca6b);
+    h ^= u32::from(token[last]).wrapping_mul(0xc2b2_ae35);
+    if last > 0 {
+        h ^= u32::from(token[last / 2]).wrapping_mul(0x27d4_eb2f);
+    }
+    h
+}
+
 /// Slide a window of the certified span's height over one candidate file and
 /// collect every at-threshold location.
 ///
 /// Naively, every window position re-tokenizes the whole window and compares
 /// every window line against every certified line — O(lines × span²) work per
 /// candidate, which hangs a real repo the moment one link drifts (the
-/// corpus's first genuine Drift link scans ~220k candidate lines). Two
-/// observations make the same judgment cheap:
+/// corpus's first genuine Drift link scans ~220k candidate lines). The
+/// observations that make the same judgment cheap are layered, each letting
+/// the next run on fewer lines:
 ///
 /// 1. Line containment (does this line match *any* certified line?) is a
 ///    per-line fact, so a window's matched count is a sliding sum over
 ///    per-file flags, not a per-window recomputation.
-/// 2. The score is token-Jaccard × containment, and containment ≥ T is a
-///    *necessary* condition for the score to reach FUZZY_JACCARD_THRESHOLD
-///    (token-Jaccard never exceeds 1). The matched-count floor is derived
-///    from the same threshold constant, so no window the old formula could
-///    admit is ever skipped — only windows below the floor, which the old
-///    formula provably scores below the threshold too.
+/// 2. A line can only match a certified line whose token count lies within a
+///    factor of `T` of its own (token-Jaccard never exceeds `min/max`), and
+///    the counts are in the index, so most lines are rejected before their
+///    bytes are read.
+/// 3. A surviving line is compared as runs of its bytes against certified
+///    tokens keyed by bytes, so it is never decoded ([`line_matches_any_cert`]),
+///    and only the runs the certified block could contain are looked up at all
+///    ([`CertFingerprints`]) — on a corpus of media and prose, none of them.
 ///
-/// Only the rare windows that clear the floor pay for full token multisets.
-#[allow(clippy::too_many_arguments)]
+/// And the score is token-Jaccard × containment, where containment ≥ T is a
+/// *necessary* condition for the score to reach FUZZY_JACCARD_THRESHOLD
+/// (token-Jaccard never exceeds 1). The matched-count floor is derived from
+/// the same threshold constant, so no window the old formula could admit is
+/// ever skipped — only windows below the floor, which the old formula
+/// provably scores below the threshold too. The same argument caps the score
+/// by `min/max` over the two token totals — the second number both sides of a
+/// Jaccard admit, and both totals are index facts — so a second screen rejects
+/// windows whose similarity *cannot* reach the threshold before any token of
+/// them is read.
+///
+/// Only the rare windows that clear both screens pay for a multiset, and none
+/// of them is decoded: the score's tokens are the line index's byte ranges,
+/// compared against the block's own byte-keyed multiset ([`CertBlock`]). The
+/// one exception is a block whose own tokens carry replacement characters,
+/// which no candidate's raw bytes can match and which is therefore compared
+/// through a decode.
 fn collect_fuzzy_hits(
     bytes: &[u8],
+    lines: &FuzzyLines,
     path: &str,
-    cert_lines: &[&str],
-    cert_data: &[CertLine],
-    cert_index: &HashMap<&str, Vec<u32>>,
+    block: &CertBlock<'_>,
     span: usize,
     hits: &mut Vec<crate::rk64::Location>,
 ) {
-    let text = String::from_utf8_lossy(bytes);
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.len() < span {
+    if lines.line_count() < span {
         return;
     }
 
-    // Per-line containment flags, computed once per file.
-    let flags: Vec<bool> = lines
-        .iter()
-        .map(|line| line_matches_any_cert(line, cert_data, cert_index))
-        .collect();
+    // Per-line containment flags, computed once per file, with one scratch
+    // that borrows nothing ([`Runs`]) so no line has to become a `String` for
+    // the comparison.
+    let mut runs: Vec<(u32, u32, u32)> = Vec::new();
+    let mut flags: Vec<bool> = Vec::with_capacity(lines.line_count());
+    for i in 0..lines.line_count() {
+        flags.push(line_flag(bytes, lines, i, block, &mut runs));
+    }
 
     // Matched-count floor: containment ≥ T requires matched ≥ 2·span·T/(1+T).
     // Windows below the floor cannot reach FUZZY_JACCARD_THRESHOLD no matter
@@ -1756,7 +2564,19 @@ fn collect_fuzzy_hits(
         .ceil() as usize;
 
     let mut matched = flags[..span].iter().filter(|&&f| f).count();
-    for start in 0..=lines.len() - span {
+    // The window's token total slides with it, from the index's per-line
+    // counts: token-Jaccard never exceeds `min/max` over the two totals, so
+    // this one number — free, already in the index — screens a window before
+    // any of its tokens are read.
+    let mut window_tokens: u64 = lines.tokens[..span].iter().map(|&t| u64::from(t)).sum();
+    // The scored window's tokens as a multiset, keyed by bytes as the block's
+    // is. Rebuilt per scored window rather than slid line by line: the windows
+    // that reach the score are few, and a slide would have to keep per-line
+    // token maps alive for every line the window passes over. Kept across
+    // windows for its capacity; only the raw path — every block but a
+    // replacement-carrying one — borrows from this one.
+    let mut window: HashMap<&[u8], u32> = HashMap::new();
+    for start in 0..=lines.line_count() - span {
         if start > 0 {
             if flags[start - 1] {
                 matched -= 1;
@@ -1764,16 +2584,63 @@ fn collect_fuzzy_hits(
             if flags[start + span - 1] {
                 matched += 1;
             }
+            window_tokens -= u64::from(lines.tokens[start - 1]);
+            window_tokens += u64::from(lines.tokens[start + span - 1]);
         }
         if matched < floor {
             continue;
         }
-        let window = &lines[start..start + span];
-        let token = window_jaccard(cert_lines, window);
-        if token == 0.0 {
+        let containment = matched as f64 / (2.0 * span as f64 - matched as f64);
+        // Token-Jaccard never exceeds `min/max` of the two totals, so the score
+        // is capped by `(min/max)·containment` — and both totals are known
+        // before a token is read. A window whose cap falls short of the
+        // threshold cannot reach it however similar its tokens are, and the
+        // two floats of the cap and the score are the same expression over the
+        // same containment, so the cap is an exact upper bound, not a
+        // heuristic one.
+        let (lo, hi) = if window_tokens < block.token_total {
+            (window_tokens, block.token_total)
+        } else {
+            (block.token_total, window_tokens)
+        };
+        if hi == 0 || (lo as f64 / hi as f64) * containment < FUZZY_JACCARD_THRESHOLD {
             continue;
         }
-        let containment = matched as f64 / (2.0 * span as f64 - matched as f64);
+        let token = if block.counts.any_fffd {
+            // The decoder rewrote the block's own tokens, so the candidate's
+            // decoded text is what has to be compared: re-tokenize it (the
+            // block that forces this is rare enough to pay for it). Scoped to
+            // the window, because the multiset borrows from it.
+            let held: Vec<Cow<'_, str>> = (start..start + span)
+                .map(|i| String::from_utf8_lossy(lines.line(bytes, i)))
+                .collect();
+            let mut decoded: HashMap<&[u8], u32> = HashMap::new();
+            for line in &held {
+                for token in line.split_whitespace() {
+                    *decoded.entry(token.as_bytes()).or_insert(0) += 1;
+                }
+            }
+            debug_assert_eq!(
+                decoded.values().map(|&count| u64::from(count)).sum::<u64>(),
+                window_tokens,
+                "the index's window total and the decoded window tokenize the same text",
+            );
+            block.window_token_jaccard(&decoded, window_tokens)
+        } else {
+            window.clear();
+            for i in start..start + span {
+                let line = lines.line(bytes, i);
+                for &(s, e) in lines.line_runs(i) {
+                    *window.entry(&line[s as usize..e as usize]).or_insert(0) += 1;
+                }
+            }
+            debug_assert_eq!(
+                window.values().map(|&count| u64::from(count)).sum::<u64>(),
+                window_tokens,
+                "the index's window total and the window's own runs are the same tokens",
+            );
+            block.window_token_jaccard(&window, window_tokens)
+        };
         if token * containment >= FUZZY_JACCARD_THRESHOLD {
             hits.push(crate::rk64::Location {
                 path: path.to_string(),
@@ -1784,6 +2651,51 @@ fn collect_fuzzy_hits(
     }
 }
 
+/// Does line `i` of a candidate file match any certified line? Three steps,
+/// each letting the next see less: a line with no tokens is a match exactly
+/// when the block has a blank line; a line whose token count is outside every
+/// certified line's Jaccard window cannot match one and is never read; the
+/// rest are compared by bytes ([`line_matches_any_cert`]).
+///
+/// The count window is load-bearing here, not just an optimization detail: on
+/// a corpus whose bulk is media, a line of a GIF has a handful of tokens —
+/// its bytes are mostly one long run between stray whitespace — so without it
+/// every such line would be scanned against the block. And the count is free:
+/// it is a fact the line index already holds ([`FuzzyLines`]).
+fn line_flag(
+    bytes: &[u8],
+    lines: &FuzzyLines,
+    i: usize,
+    block: &CertBlock<'_>,
+    runs: &mut Vec<(u32, u32, u32)>,
+) -> bool {
+    let tokens = lines.tokens[i];
+    if tokens == 0 {
+        return block.counts.any_blank;
+    }
+    if !block.counts.could_match(tokens) {
+        return false;
+    }
+    let raw = lines.line(bytes, i);
+    // A run the decoder would rewrite can only match a certified token that
+    // carries a replacement character too. A block without one — the only
+    // case in practice — is therefore compared against the raw runs, and the
+    // line is never decoded. A block with one is read through a decode: the
+    // decoded text's runs are the same tokens, and every run of it is valid,
+    // so the same comparison serves both — at the price of re-walking the
+    // decoded bytes, paid only for a block that holds a replacement
+    // character.
+    if block.counts.any_fffd {
+        let lossy = String::from_utf8_lossy(raw);
+        let ranges: Vec<(u32, u32)> = Runs::new(lossy.as_bytes())
+            .map(|(start, end)| (start as u32, end as u32))
+            .collect();
+        line_matches_any_cert(lossy.as_bytes(), tokens, &ranges, block, runs)
+    } else {
+        line_matches_any_cert(raw, tokens, lines.line_runs(i), block, runs)
+    }
+}
+
 /// The containment half of [`fuzzy_window_score`]: does this candidate line
 /// match at least one certified line — blank against blank, or a token
 /// multiset Jaccard reaching [`FUZZY_LINE_MATCH_THRESHOLD`]? The certified
@@ -1791,19 +2703,68 @@ fn collect_fuzzy_hits(
 /// token with the candidate, and the Jaccard bound
 /// `(1+T)·min ≥ T·(|a|+|b|)` (intersection never exceeds either side) skips
 /// the rest.
+///
+/// Nothing here is a `&str`: `line_bytes` is the line's bytes as the decoder
+/// would produce them — for a block without a replacement character, the
+/// line's own bytes — so a token is a byte range of it, compared by bytes
+/// against certified tokens keyed the same way. `total` and `line_runs` are
+/// the line's token count and its tokens' ranges, both from the index: the
+/// count is the line's total on both sides of the comparison, since [`Runs`]
+/// counts the decoder's tokens, and the ranges are the runs a re-walk would
+/// find in `line_bytes`, in order — the caller passes the index's own ranges
+/// for the raw bytes, and freshly walked ones for a decoded line, whose
+/// offsets differ from the raw line's.
+///
+/// `block` carries the block's token filter: a token the block cannot contain
+/// is not looked up at all, and on the corpus that dominates this pass —
+/// binary runs and prose against a block of code — that is every token of
+/// nearly every line.
+///
+/// `runs` is the caller's scratch buffer, overwritten with the line's
+/// distinct certified tokens — (start, end, multiplicity) triples in
+/// first-appearance order, which for a line's handful of them beats a hash
+/// map, and which borrows nothing, so the pass never holds a decoded line
+/// alive.
 fn line_matches_any_cert(
-    line: &str,
-    cert_data: &[CertLine],
-    cert_index: &HashMap<&str, Vec<u32>>,
+    line_bytes: &[u8],
+    total: u32,
+    line_runs: &[(u32, u32)],
+    block: &CertBlock<'_>,
+    runs: &mut Vec<(u32, u32, u32)>,
 ) -> bool {
-    let counts = token_counts(&[line]);
-    let a_total: u32 = counts.values().copied().sum();
-    if a_total == 0 {
-        return cert_data.iter().any(|c| c.blank);
+    debug_assert_eq!(
+        line_runs.len() as u32,
+        total,
+        "the line's ranges and count describe the same tokens",
+    );
+    // The line's tokens that the block could possibly contain, with their
+    // multiplicities — and nothing else. Repeats are collapsed only for those:
+    // a token the block does not have contributes `min(a, 0) = 0` to every
+    // intersection, so tracking it is bookkeeping with nothing to compute from
+    // it, and collapsing repeats is the one super-linear step in the matcher.
+    // On a corpus of media and prose the filter rejects a line after a length
+    // comparison and a handful of bit tests, where the full tokenization ran
+    // for every line of every file of every scan.
+    runs.clear();
+    for &(start, end) in line_runs {
+        let token = &line_bytes[start as usize..end as usize];
+        if !block.fps.may_contain(token) || !block.index.contains_key(token) {
+            continue;
+        }
+        match runs
+            .iter_mut()
+            .find(|(s, e, _)| line_bytes[*s as usize..*e as usize] == *token)
+        {
+            Some((_, _, count)) => *count += 1,
+            None => runs.push((start, end, 1)),
+        }
+    }
+    if runs.is_empty() {
+        return false;
     }
     let mut seen: Vec<u32> = Vec::new();
-    for token in counts.keys() {
-        let Some(idxs) = cert_index.get(token) else {
+    for &(start, end, _) in runs.iter() {
+        let Some(idxs) = block.index.get(&line_bytes[start as usize..end as usize]) else {
             continue;
         };
         for &ci in idxs {
@@ -1811,21 +2772,25 @@ fn line_matches_any_cert(
                 continue;
             }
             seen.push(ci);
-            let c = &cert_data[ci as usize];
+            let c = &block.data[ci as usize];
             if c.blank {
                 continue;
             }
             let b_total = c.total;
-            if (1.0 + FUZZY_LINE_MATCH_THRESHOLD) * (a_total.min(b_total) as f64)
-                < FUZZY_LINE_MATCH_THRESHOLD * ((a_total + b_total) as f64)
+            if (1.0 + FUZZY_LINE_MATCH_THRESHOLD) * (f64::from(total.min(b_total)))
+                < FUZZY_LINE_MATCH_THRESHOLD * f64::from(total + b_total)
             {
                 continue;
             }
-            let inter: u32 = counts
+            let inter: u32 = runs
                 .iter()
-                .map(|(t, &ca)| c.counts.get(t).map(|&cb| ca.min(cb)).unwrap_or(0))
+                .map(|&(s, e, ca)| {
+                    c.counts
+                        .get(&line_bytes[s as usize..e as usize])
+                        .map_or(0, |&cb| ca.min(cb))
+                })
                 .sum();
-            let jaccard = inter as f64 / ((a_total + b_total - inter) as f64);
+            let jaccard = f64::from(inter) / f64::from(total + b_total - inter);
             if jaccard >= FUZZY_LINE_MATCH_THRESHOLD {
                 return true;
             }
@@ -1834,17 +2799,15 @@ fn line_matches_any_cert(
     false
 }
 
-/// A move outcome. Exact-tier matches keep the certified content byte-for-
+/// A move verdict. Exact-tier matches keep the certified content byte-for-
 /// byte (`content_identical: true`); fuzzy-tier matches are lightly-edited
 /// near-copies (`content_identical: false`), which the fix phase must report
 /// honestly instead of claiming "certified content moved".
-fn moved_to(location: &crate::rk64::Location, content_identical: bool) -> Result<DriftOutcome, EpochError> {
-    Ok(DriftOutcome::Moved {
-        new_path: location.path.clone(),
-        new_start: location.start_line,
-        new_end: location.end_line,
+fn moved_to(location: &crate::rk64::Location, content_identical: bool) -> MoveScanDecision {
+    MoveScanDecision::Moved {
+        location: location.clone(),
         content_identical,
-    })
+    }
 }
 
 /// Window height of an inclusive 1-based range; `0` for a degenerate range
@@ -1867,46 +2830,107 @@ fn extent_fits(bytes: &[u8], start: u32, end: u32) -> bool {
     (end as usize) <= idx.line_count()
 }
 
+/// One candidate file of the cross-file move scan: the path the scan reports
+/// it under, the bytes both tiers read it as, and each tier's index — the
+/// exact tier's [`ScanIndex`] and the fuzzy tier's [`FuzzyLines`].
+///
+/// The indexes are built with the inventory, not per query. Every link's move
+/// scan asks the same question of the same inventory — "is this certified
+/// block somewhere in the repo?" — so indexing each candidate per query (one
+/// canonical pass and one whole-buffer hash, *per file, per link*) multiplies
+/// the corpus by the link count. On the cards corpus that was 96 scans over
+/// 5,678 files: 95.7 s, 85.8% of the whole command. Indexed once per
+/// inventory, each query is window arithmetic over tables already in cache.
+struct CandidateFile {
+    path: String,
+    bytes: Vec<u8>,
+    index: ScanIndex,
+    fuzzy: FuzzyLines,
+}
+
 /// Repo candidate files for the cross-file move scan: every tracked file
 /// readable from the current side, excluding build output. Read through the
 /// source-aware reader so `--source head`/`index` scan the same layer the
 /// targets were read from.
 fn candidate_files(
+    reader: &crate::git::GitReader,
     repo_root: &Path,
     source: DocSource,
-) -> Result<Vec<(String, Vec<u8>)>, EpochError> {
+) -> Result<Vec<CandidateFile>, EpochError> {
     let list = git_output(repo_root, &["ls-files", "-z"])?;
-    let mut out = Vec::new();
-    for path in list.split('\0') {
-        if path.is_empty() {
-            continue;
+    let paths: Vec<&str> = list
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .filter(|path| {
+            !path.starts_with("node_modules/")
+                && !path.starts_with("target/")
+                && !path.starts_with("dist/")
+        })
+        .collect();
+    // The reads are independent of one another — one open per tracked file,
+    // no ordering between them — and the batch is every tracked candidate in
+    // the repo (tens of megabytes across thousands of files on a real wiki
+    // corpus), read once per run on the first link that needs a move scan.
+    // The worktree layer is a plain filesystem open with no shared state, so
+    // it fans out across the worker pool; the blob layers read through the
+    // run's gix reader, which holds `Rc` index snapshots and is not `Sync`,
+    // so they stay serial.
+    let read: Vec<Option<Vec<u8>>> = match source {
+        DocSource::WorkingTree => parallel_map(&paths, |path| read_worktree(repo_root, path)),
+        DocSource::Head | DocSource::Index => {
+            let mut read = Vec::with_capacity(paths.len());
+            for path in &paths {
+                read.push(read_current(reader, repo_root, source, path)?);
+            }
+            read
         }
-        if path.starts_with("node_modules/")
-            || path.starts_with("target/")
-            || path.starts_with("dist/")
-        {
-            continue;
-        }
-        if let Some(bytes) = read_current(repo_root, source, path)? {
-            out.push((path.to_string(), bytes));
+    };
+    let mut present: Vec<(String, Vec<u8>)> = Vec::with_capacity(paths.len());
+    for (path, bytes) in paths.iter().zip(read) {
+        if let Some(bytes) = bytes {
+            present.push(((*path).to_string(), bytes));
         }
     }
-    Ok(out)
+    // Indexing is a pure function of the bytes that borrows nothing, so it
+    // fans out across the pool whichever layer read them — including the blob
+    // layers, whose reads hold a non-`Sync` gix reader and so stay serial.
+    let indexes = parallel_map(&present, |(_, bytes)| {
+        (ScanIndex::build(bytes), FuzzyLines::build(bytes))
+    });
+    Ok(present
+        .into_iter()
+        .zip(indexes)
+        .map(|((path, bytes), (index, fuzzy))| CandidateFile {
+            path,
+            bytes,
+            index,
+            fuzzy,
+        })
+        .collect())
 }
 
 /// The bytes of `path` from the layer selected by `source` (the
 /// `read_anchor_source` pattern): worktree fs, `HEAD` blob, or index blob.
 /// `Ok(None)` when the path is absent in that layer.
 fn read_current(
+    reader: &crate::git::GitReader,
     repo_root: &Path,
     source: DocSource,
     path: &str,
 ) -> Result<Option<Vec<u8>>, EpochError> {
     match source {
-        DocSource::WorkingTree => Ok(std::fs::read(repo_root.join(path)).ok()),
-        DocSource::Head => read_blob_at(repo_root, "HEAD", path),
-        DocSource::Index => read_blob_at(repo_root, "", path),
+        DocSource::WorkingTree => Ok(read_worktree(repo_root, path)),
+        DocSource::Head => read_blob_at(reader, repo_root, "HEAD", path),
+        DocSource::Index => read_blob_at(reader, repo_root, "", path),
     }
+}
+
+/// The worktree layer's read of `path`: a plain filesystem open, absent-file
+/// included. Split out from [`read_current`] because it needs no reader — the
+/// one layer whose candidate reads carry no shared state and so may run on
+/// the worker pool.
+fn read_worktree(repo_root: &Path, path: &str) -> Option<Vec<u8>> {
+    std::fs::read(repo_root.join(path)).ok()
 }
 
 /// Decision 5 target resolution: resolve the href's path part against the
@@ -1918,18 +2942,19 @@ fn read_current(
 /// pointed. The blob layers (`Head`/`Index`) never salvage: there is no
 /// worktree filesystem to consult, so they stay fail-closed.
 fn read_target(
+    reader: &crate::git::GitReader,
     repo_root: &Path,
     source: DocSource,
     page_path: &str,
     path_part: &str,
 ) -> Result<(String, Option<Vec<u8>>), EpochError> {
     let target_path = resolve_target_path(repo_root, page_path, path_part);
-    if let Some(bytes) = read_current(repo_root, source, &target_path)? {
+    if let Some(bytes) = read_current(reader, repo_root, source, &target_path)? {
         return Ok((target_path, Some(bytes)));
     }
     if source == DocSource::WorkingTree
         && let Some(salvaged) = super::locate_existing_suffix(&target_path, repo_root)
-        && let Some(bytes) = read_current(repo_root, source, &salvaged)?
+        && let Some(bytes) = read_current(reader, repo_root, source, &salvaged)?
     {
         return Ok((salvaged, Some(bytes)));
     }
@@ -2080,6 +3105,11 @@ pub fn collect_with_source(
         }
 
         fn create_file(&self, path: &str, content: &str) {
+            self.create_file_bytes(path, content.as_bytes());
+        }
+
+        /// [`create_file`] for content that is not valid UTF-8.
+        fn create_file_bytes(&self, path: &str, content: &[u8]) {
             let full = self.dir.path().join(path);
             if let Some(parent) = full.parent() {
                 fs::create_dir_all(parent).expect("create_dir_all");
@@ -2147,6 +3177,14 @@ pub fn collect_with_source(
         }
     }
 
+    /// A [`crate::git::GitReader`] for `root`. The drift entry points take a
+    /// shared handle (one repository open per run) rather than opening the
+    /// repository per page; the tests open one per call, which is what they
+    /// did before the handle existed.
+    fn reader(root: &Path) -> crate::git::GitReader {
+        crate::git::GitReader::open(root).expect("open reader")
+    }
+
     /// The shared fixture for classify tests: a wiki page with a certified
     /// link `[b](target.md#L2-L4)` whose range covers `BLOCK`.
     fn repo_with_certified_link() -> (TestRepo, String) {
@@ -2170,12 +3208,13 @@ pub fn collect_with_source(
     ) -> Result<Vec<LinkClass>, EpochError> {
         classify_page(
             repo.path(),
+            &reader(repo.path()),
             &NoopCache,
             DocSource::WorkingTree,
             page,
             &repo.read(page),
             epoch,
-            &mut MoveScanCtx::new(),
+            &mut MoveScanCtx::new(&DriftRunCtx::new()),
         )
     }
 
@@ -2315,7 +3354,7 @@ pub fn collect_with_source(
         repo.create_file("wiki/page.md", &make_wiki_page("P", "body\n", Some("1")));
         repo.commit("field=1");
         repo.create_file("wiki/page.md", &make_wiki_page("P", "body\n", Some("2")));
-        let epoch = find_anchor_commit(repo.path(), &NoopCache, "wiki/page.md", &read(Some("2")), &read(Some("1")))
+        let epoch = find_anchor_commit(repo.path(), &reader(repo.path()), &NoopCache, &DriftRunCtx::new(), "wiki/page.md", &read(Some("2")), &read(Some("1")))
             .expect("resolves");
         assert_eq!(
             epoch,
@@ -2332,7 +3371,7 @@ pub fn collect_with_source(
         repo.commit("no field");
         repo.create_file("wiki/page.md", &make_wiki_page("P", "body\n", Some("1")));
         let epoch =
-            find_anchor_commit(repo.path(), &NoopCache, "wiki/page.md", &read(Some("1")), &read(None)).expect("resolves");
+            find_anchor_commit(repo.path(), &reader(repo.path()), &NoopCache, &DriftRunCtx::new(), "wiki/page.md", &read(Some("1")), &read(None)).expect("resolves");
         assert_eq!(
             epoch,
             LinkEpoch::Current {
@@ -2348,7 +3387,7 @@ pub fn collect_with_source(
         repo.commit("field=1");
         repo.create_file("wiki/page.md", &make_wiki_page("P", "body\n", None));
         let epoch =
-            find_anchor_commit(repo.path(), &NoopCache, "wiki/page.md", &read(None), &read(Some("1"))).expect("resolves");
+            find_anchor_commit(repo.path(), &reader(repo.path()), &NoopCache, &DriftRunCtx::new(), "wiki/page.md", &read(None), &read(Some("1"))).expect("resolves");
         assert_eq!(epoch, LinkEpoch::Current { value: None });
     }
 
@@ -2357,7 +3396,7 @@ pub fn collect_with_source(
         let repo = TestRepo::new();
         repo.create_file("wiki/page.md", &make_wiki_page("P", "body\n", None));
         repo.commit("no field");
-        let epoch = find_anchor_commit(repo.path(), &NoopCache, "wiki/page.md", &read(None), &read(None)).expect("resolves");
+        let epoch = find_anchor_commit(repo.path(), &reader(repo.path()), &NoopCache, &DriftRunCtx::new(), "wiki/page.md", &read(None), &read(None)).expect("resolves");
         assert_eq!(epoch, LinkEpoch::Missing);
     }
 
@@ -2378,7 +3417,7 @@ pub fn collect_with_source(
         );
         repo.commit("body edit after bump");
 
-        let epoch = find_anchor_commit(repo.path(), &NoopCache, "wiki/page.md", &read(Some("2")), &read(Some("2")))
+        let epoch = find_anchor_commit(repo.path(), &reader(repo.path()), &NoopCache, &DriftRunCtx::new(), "wiki/page.md", &read(Some("2")), &read(Some("2")))
             .expect("resolves");
         assert_eq!(
             epoch,
@@ -2398,7 +3437,7 @@ pub fn collect_with_source(
         repo.create_file("wiki/page.md", &make_wiki_page("P", "edited\n", Some("1")));
         repo.commit("body edit");
 
-        let epoch = find_anchor_commit(repo.path(), &NoopCache, "wiki/page.md", &read(Some("1")), &read(Some("1")))
+        let epoch = find_anchor_commit(repo.path(), &reader(repo.path()), &NoopCache, &DriftRunCtx::new(), "wiki/page.md", &read(Some("1")), &read(Some("1")))
             .expect("resolves");
         assert_eq!(
             epoch,
@@ -2425,7 +3464,7 @@ pub fn collect_with_source(
 
         // HEAD is the merge commit; the certification exists only on the
         // feature branch — a --first-parent walk would never see it.
-        let epoch = find_anchor_commit(repo.path(), &NoopCache, "wiki/page.md", &read(Some("2")), &read(Some("2")))
+        let epoch = find_anchor_commit(repo.path(), &reader(repo.path()), &NoopCache, &DriftRunCtx::new(), "wiki/page.md", &read(Some("2")), &read(Some("2")))
             .expect("resolves");
         assert_eq!(
             epoch,
@@ -2449,7 +3488,9 @@ pub fn collect_with_source(
 
         let epoch = find_anchor_commit(
             repo.path(),
+            &reader(repo.path()),
             &NoopCache,
+            &DriftRunCtx::new(),
             "wiki/final-name.md",
             &read(Some("1")),
             &read(Some("1")),
@@ -2477,7 +3518,9 @@ pub fn collect_with_source(
         let clone = repo.shallow_clone();
         let err = find_anchor_commit(
             clone.path(),
+            &reader(clone.path()),
             &NoopCache,
+            &DriftRunCtx::new(),
             "wiki/page.md",
             &read(Some("1")),
             &read(Some("1")),
@@ -2505,7 +3548,7 @@ pub fn collect_with_source(
         repo.create_file("wiki/page.md", &make_wiki_page("P", "edited\n", Some("1")));
         repo.commit("repair, no bump");
 
-        let epoch = find_anchor_commit(repo.path(), &NoopCache, "wiki/page.md", &read(Some("1")), &read(Some("1")))
+        let epoch = find_anchor_commit(repo.path(), &reader(repo.path()), &NoopCache, &DriftRunCtx::new(), "wiki/page.md", &read(Some("1")), &read(Some("1")))
             .expect("resolves");
         assert_eq!(
             epoch,
@@ -2532,7 +3575,9 @@ pub fn collect_with_source(
         );
         let err = find_anchor_commit(
             repo.path(),
+            &reader(repo.path()),
             &NoopCache,
+            &DriftRunCtx::new(),
             "wiki/page.md",
             &field_value(&repo.read("wiki/page.md")),
             &read(Some("1")),
@@ -2556,7 +3601,9 @@ pub fn collect_with_source(
         // readable history.
         let epoch = find_anchor_commit(
             repo.path(),
+            &reader(repo.path()),
             &NoopCache,
+            &DriftRunCtx::new(),
             "wiki/page.md",
             &read(Some("1")),
             &LinksReviewedRead::Unparseable,
@@ -2582,7 +3629,9 @@ pub fn collect_with_source(
         repo.commit("broken from the start");
         let err = find_anchor_commit(
             repo.path(),
+            &reader(repo.path()),
             &NoopCache,
+            &DriftRunCtx::new(),
             "wiki/page.md",
             &read(Some("1")),
             &LinksReviewedRead::Unparseable,
@@ -2742,12 +3791,13 @@ pub fn collect_with_source(
         let page_content = repo.read("wiki/page.md");
         let classes = classify_page(
             repo.path(),
+            &reader(repo.path()),
             &NoopCache,
             DocSource::Head,
             "wiki/page.md",
             &page_content,
             &epoch,
-            &mut MoveScanCtx::new(),
+            &mut MoveScanCtx::new(&DriftRunCtx::new()),
         )
         .expect("classifies");
         assert_eq!(classes.len(), 1);
@@ -3098,6 +4148,35 @@ pub fn collect_with_source(
     }
 
     #[test]
+    fn fuzzy_move_into_a_file_that_is_not_valid_utf8() {
+        // The destination's surrounding lines are binary, and the decoder
+        // replaces them wholesale — but the block's own lines are intact, so
+        // the relocation must still be found and rewritten.
+        let (repo, c1) = repo_with_certified_fuzzy_block();
+        repo.rename_file("wiki/target.md", "wiki/other.md");
+        let mut dest = b"\x89PNG\r\n\x1a\n\xff\x00\xfe\n".to_vec();
+        dest.extend_from_slice(format!("H\n{FUZZY_BLOCK_EDITED}\nF\n").as_bytes());
+        dest.extend_from_slice(b"\x00\xff\xc3\x28");
+        repo.create_file_bytes("wiki/other.md", &dest);
+        repo.commit("block edited and moved into a file that is not valid UTF-8");
+        let epoch = LinkEpoch::Commit {
+            sha: c1,
+            path_at_commit: "wiki/page.md".into(),
+            value: Some("1".into()),
+        };
+        let classes = classify(&repo, &epoch, "wiki/page.md").expect("classifies");
+        assert_eq!(
+            classes[0].outcome,
+            DriftOutcome::Moved {
+                new_path: "wiki/other.md".into(),
+                new_start: 5,
+                new_end: 10,
+                content_identical: false
+            }
+        );
+    }
+
+    #[test]
     fn fuzzy_moved_cross_file_after_small_edit() {
         // Cross-file Moved arises when the target is gone; the edited block
         // lives in another file, and the fuzzy tier is what finds it. The
@@ -3181,49 +4260,292 @@ pub fn collect_with_source(
         assert_eq!(classes[0].outcome, DriftOutcome::Broken);
     }
 
-    /// Differential test: the optimized sliding collector must agree with the
-    /// brute-force per-window formula on *every* window of a file that mixes
-    /// the certified block, a lightly-edited near-copy, and token-sharing
-    /// filler — the containment prefilter must never skip a window the brute
-    /// force would admit, nor admit one it would not.
+    /// The raw tokenizer must count and slice exactly what
+    /// `str::split_whitespace` sees in the decoded text — the whole tier's
+    /// soundness rests on those being the same tokens. The shapes reach every
+    /// branch of the separator table, including the characters on either side
+    /// of the `White_Space` boundary and the sequences error recovery splits.
     #[test]
-    fn fuzzy_collector_agrees_with_brute_force_on_every_window() {
-        let cert_lines: Vec<&str> = FUZZY_BLOCK.lines().collect();
-        let span = cert_lines.len();
-        let cert_data: Vec<CertLine> = cert_lines.iter().map(|l| CertLine::new(l)).collect();
-        let cert_index = cert_token_index(&cert_data);
+    fn raw_tokenizer_agrees_with_the_decoded_split() {
+        let shapes: Vec<Vec<u8>> = [
+            "a b\tc\nd",
+            "a\u{85}b", // NEL
+            "a\u{a0}b", // NBSP
+            "a\u{1680}b",
+            "a\u{2000}b\u{200a}c",
+            "a\u{200b}b", // zero width space: not a separator
+            "a\u{2028}b\u{2029}c",
+            "a\u{202f}b\u{205f}c\u{3000}d",
+            "a\u{2060}b", // word joiner: not a separator
+            "\u{a0}\u{3000}", // separators only, no tokens
+            "a\u{00ad}b", // soft hyphen: not a separator
+            "a\r\nb",
+            "a\rb",
+            "\r",
+        ]
+        .map(|s| s.as_bytes().to_vec())
+        .into_iter()
+        .chain([
+            b"a\xff\xfe b".to_vec(),
+            b"\xc2\x85".to_vec(),     // a bare NEL
+            b"\xe2\x80".to_vec(),     // a truncated sequence
+            b"\xe2\x80\x0a".to_vec(), // truncated, then a newline
+            b"\xc0\x85".to_vec(),     // an overlong encoding
+            b"\xed\xa0\x80".to_vec(), // a surrogate
+            b"\xf0\x9f\x8c\x8a".to_vec(),
+            b"".to_vec(),
+            b"\n\n".to_vec(),
+            b"a".to_vec(),
+        ])
+        .collect();
+        for bytes in &shapes {
+            let decoded = String::from_utf8_lossy(bytes);
+            let expected: Vec<String> = decoded
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            let got: Vec<String> = Runs::new(bytes)
+                .map(|(start, end)| String::from_utf8_lossy(&bytes[start..end]).into_owned())
+                .collect();
+            assert_eq!(got, expected, "{bytes:?}");
+            assert_eq!(token_count(bytes), expected.len() as u32, "{bytes:?}");
 
-        let candidate = format!(
-            "// filler sharing the block's vocabulary without being it\n{}\n{}\n",
-            FUZZY_BLOCK,
-            FUZZY_BLOCK.replace("fn resolve_target_path", "fn resolve_target_path_edited"),
-        );
-        let bytes = candidate.as_bytes();
-
-        let mut optimized = Vec::new();
-        collect_fuzzy_hits(
-            bytes,
-            "candidate.rs",
-            &cert_lines,
-            &cert_data,
-            &cert_index,
-            span,
-            &mut optimized,
-        );
-
-        let lines: Vec<&str> = candidate.lines().collect();
-        let mut brute: Vec<(u32, u32)> = Vec::new();
-        for start in 0..=lines.len() - span {
-            let window = &lines[start..start + span];
-            if fuzzy_window_score(&cert_lines, window) >= FUZZY_JACCARD_THRESHOLD {
-                brute.push(((start + 1) as u32, (start + span) as u32));
+            // The index stores those ranges instead of re-walking the bytes
+            // per scan, so they must slice out exactly the decoded tokens, in
+            // order, with the same counts — the property every scan and every
+            // window's token total now rests on.
+            let lines = FuzzyLines::build(bytes);
+            let indexed: Vec<String> = (0..lines.line_count())
+                .flat_map(|i| {
+                    let raw = lines.line(bytes, i);
+                    lines
+                        .line_runs(i)
+                        .iter()
+                        .map(|&(s, e)| {
+                            String::from_utf8_lossy(&raw[s as usize..e as usize]).into_owned()
+                        })
+                        .collect::<Vec<String>>()
+                })
+                .collect();
+            assert_eq!(indexed, expected, "{bytes:?}");
+            for i in 0..lines.line_count() {
+                assert_eq!(
+                    lines.line_runs(i).len() as u32,
+                    lines.tokens[i],
+                    "line {i} of {bytes:?} counts and slices different tokens",
+                );
             }
         }
-        let optimized_ranges: Vec<(u32, u32)> = optimized
-            .iter()
-            .map(|l| (l.start_line, l.end_line))
+    }
+
+    /// Candidate shapes the tier's fast paths have to reason about: line
+    /// endings the canonical form rewrites, bytes that are not UTF-8 at all,
+    /// separators the decoder does not spell in ASCII, no trailing newline,
+    /// and a certified block whose own tokens carry replacement characters —
+    /// the one case that puts the collector back on the decoder.
+    fn fuzzy_shape_fixtures() -> Vec<(&'static str, String, Vec<u8>)> {
+        let filler = "// filler sharing the block's vocabulary without being it\n";
+        let block = format!("{filler}{FUZZY_BLOCK}\n{FUZZY_BLOCK_EDITED}\n");
+        let blank_line_block = format!("{}\n\n{}\n", FUZZY_BLOCK, FUZZY_BLOCK_EDITED);
+        // The block's bytes with a non-ASCII separator where the decoder
+        // agrees it is whitespace, and with one it does not (U+2020).
+        let wide_separators = FUZZY_BLOCK.replace(" -> ", "\u{a0}->\u{2000}");
+        // A block the decoder had to rewrite: its tokens carry replacement
+        // characters, so no raw run of a candidate can be compared to them.
+        let lossy_block = String::from_utf8_lossy(b"alpha \xff\xfe beta\ngamma \x80 delta").into_owned();
+        vec![
+            ("plain", FUZZY_BLOCK.into(), block.clone().into_bytes()),
+            (
+                "crlf line endings",
+                FUZZY_BLOCK.into(),
+                block.replace('\n', "\r\n").into_bytes(),
+            ),
+            (
+                "no trailing newline",
+                FUZZY_BLOCK.into(),
+                block.trim_end_matches('\n').as_bytes().to_vec(),
+            ),
+            (
+                "blank certified line",
+                blank_line_block.clone(),
+                blank_line_block.replace('\n', "\n\n").into_bytes(),
+            ),
+            (
+                "non-ASCII separators",
+                wide_separators.clone(),
+                format!("x\n{wide_separators}\ny\n").into_bytes(),
+            ),
+            (
+                "binary around the block",
+                FUZZY_BLOCK.into(),
+                [
+                    b"\x89PNG\r\n\x1a\n\xff\x00\xfe\n".as_slice(),
+                    block.as_bytes(),
+                    b"\x00\xff\xc3\x28".as_slice(),
+                ]
+                .concat(),
+            ),
+            (
+                "block whose tokens carry replacement characters",
+                lossy_block.clone(),
+                [b"head \xf0\x9f\n".as_slice(), lossy_block.as_bytes(), b"\nc3\n".as_slice()].concat(),
+            ),
+            (
+                "shapes with no hit at all",
+                FUZZY_BLOCK.into(),
+                b"   \n\n\t\n \n \x89PNG\x0d\x0a\xff\x00\x7f\n".to_vec(),
+            ),
+        ]
+    }
+
+    /// The byte-level line match must agree with the decoded computation, line
+    /// for line: for every line of every shape, the fast path reports a match
+    /// exactly when the decoded line's token multiset reaches the line
+    /// threshold against some certified line. The count gate is part of the
+    /// fast path under test — a line it rejects is one the oracle must reject
+    /// too — and so is the replacement-character branch.
+    #[test]
+    fn fuzzy_line_match_agrees_with_the_decoded_oracle_line_for_line() {
+        for (name, cert_block, bytes) in fuzzy_shape_fixtures() {
+            let cert_lines: Vec<&str> = cert_block.lines().collect();
+            let block = CertBlock::of(&cert_lines);
+            let lines = FuzzyLines::build(bytes.as_slice());
+            let mut runs = Vec::new();
+            for i in 0..lines.line_count() {
+                let text = String::from_utf8_lossy(lines.line(&bytes, i));
+                let blank = text.split_whitespace().next().is_none();
+                // The oracle's rule, as `fuzzy_window_score` applies it to a
+                // one-line candidate against the block.
+                let oracle = if blank {
+                    cert_lines.iter().any(|l| l.split_whitespace().next().is_none())
+                } else {
+                    cert_lines.iter().any(|cert| {
+                        !cert.split_whitespace().next().is_none()
+                            && window_jaccard(&[text.as_ref()], &[cert])
+                                >= FUZZY_LINE_MATCH_THRESHOLD
+                    })
+                };
+                let optimized = line_flag(&bytes, &lines, i, &block, &mut runs);
+                assert_eq!(optimized, oracle, "{name}: line {i} of {:?}", lines.line(&bytes, i));
+            }
+        }
+    }
+
+    /// Differential test: the optimized sliding collector must agree with the
+    /// brute-force per-window formula on *every* window of every shape — the
+    /// count gate, the byte-level line match and the matched-count floor must
+    /// never skip a window the brute force would admit, nor admit one it would
+    /// not. The oracle decodes every line it reads, so this pins the whole
+    /// pipeline to the decoded semantics the corpus's hits were computed under.
+    #[test]
+    fn fuzzy_collector_agrees_with_brute_force_on_every_window() {
+        for (name, cert_block, bytes) in fuzzy_shape_fixtures() {
+            let cert_lines: Vec<&str> = cert_block.lines().collect();
+            let span = cert_lines.len();
+            let block = CertBlock::of(&cert_lines);
+            let mut optimized = Vec::new();
+            collect_fuzzy_hits(
+                &bytes,
+                &FuzzyLines::build(&bytes),
+                "candidate.rs",
+                &block,
+                span,
+                &mut optimized,
+            );
+
+            let decoded = String::from_utf8_lossy(&bytes);
+            let lines: Vec<&str> = decoded.lines().collect();
+            let mut brute: Vec<(u32, u32)> = Vec::new();
+            if lines.len() >= span {
+                for start in 0..=lines.len() - span {
+                    let window = &lines[start..start + span];
+                    if fuzzy_window_score(&cert_lines, window) >= FUZZY_JACCARD_THRESHOLD {
+                        brute.push(((start + 1) as u32, (start + span) as u32));
+                    }
+                }
+            }
+            let optimized_ranges: Vec<(u32, u32)> = optimized
+                .iter()
+                .map(|l| (l.start_line, l.end_line))
+                .collect();
+            assert_eq!(optimized_ranges, brute, "{name}");
+        }
+    }
+
+    /// The differential fixtures must actually exercise what they claim, or
+    /// the comparison above is vacuous.
+    #[test]
+    fn fuzzy_shape_fixtures_exercise_the_fast_paths() {
+        let mut binary_lines = 0usize;
+        let mut non_ascii_separators = 0usize;
+        let mut replacement_characters = 0usize;
+        let mut hits = 0usize;
+        for (_, cert_block, bytes) in fuzzy_shape_fixtures() {
+            let cert_lines: Vec<&str> = cert_block.lines().collect();
+            let block = CertBlock::of(&cert_lines);
+            let lines = FuzzyLines::build(&bytes);
+            let mut runs = Vec::new();
+            for i in 0..lines.line_count() {
+                let raw = lines.line(&bytes, i);
+                binary_lines += usize::from(std::str::from_utf8(raw).is_err());
+                non_ascii_separators += usize::from(
+                    Runs::new(raw).any(|(s, _)| raw[s] >= 0x80),
+                );
+                replacement_characters +=
+                    usize::from(String::from_utf8_lossy(raw).contains('\u{fffd}'));
+                hits += usize::from(line_flag(&bytes, &lines, i, &block, &mut runs));
+            }
+        }
+        assert!(binary_lines > 0, "no fixture line is invalid UTF-8");
+        assert!(non_ascii_separators > 0, "no fixture separates tokens with a non-ASCII character");
+        assert!(replacement_characters > 0, "no fixture line decodes to a replacement character");
+        assert!(hits > 0, "no fixture line matches its certified block");
+    }
+
+    /// [`parallel_scan`] must be indistinguishable from the serial loop it
+    /// replaces: same hits, in the same inventory order, for every inventory
+    /// size — including sizes that straddle the worker and chunk boundaries,
+    /// where an off-by-one in the chunking would drop or duplicate a chunk.
+    #[test]
+    fn parallel_scan_matches_the_serial_scan_in_order() {
+        let items: Vec<(String, Vec<u8>)> = (0..37)
+            .map(|i| {
+                let body = if i % 3 == 0 {
+                    format!("hit {i}\n")
+                } else {
+                    format!("miss {i}\n")
+                };
+                (format!("file{i}.txt"), body.into_bytes())
+            })
             .collect();
-        assert_eq!(optimized_ranges, brute);
+        let refs: Vec<(&str, &[u8])> = items
+            .iter()
+            .map(|(p, b)| (p.as_str(), b.as_slice()))
+            .collect();
+
+        // The serial reference: the same predicate, run in inventory order.
+        let mut serial = Vec::new();
+        for item in &refs {
+            parallel_scan_probe(item, &mut serial);
+        }
+        let parallel = parallel_scan(&refs, parallel_scan_probe);
+        assert_eq!(parallel, serial);
+        assert_eq!(parallel.len(), 13, "every third file holds one hit");
+    }
+
+    /// The probe [`parallel_scan_matches_the_serial_scan_in_order`] drives
+    /// through both paths: one hit for every line that reads `hit`.
+    fn parallel_scan_probe(item: &(&str, &[u8]), out: &mut Vec<crate::rk64::Location>) {
+        let (path, bytes) = item;
+        for (i, line) in String::from_utf8_lossy(bytes).lines().enumerate() {
+            if line.starts_with("hit") {
+                out.push(crate::rk64::Location {
+                    path: (*path).to_string(),
+                    start_line: (i + 1) as u32,
+                    end_line: (i + 1) as u32,
+                });
+            }
+        }
     }
 
     /// The prefilter floor admits exactly the windows whose containment can

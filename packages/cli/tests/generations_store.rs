@@ -992,6 +992,7 @@ fn init_lock_held_degrades_without_hardening_leak_or_hard_error() {
         let lock_path = wiki_dir.join(wiki::cache::schema::INIT_LOCK_FILE_NAME);
         let lock = std::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(&lock_path)
             .expect("create init lock");
@@ -1018,6 +1019,7 @@ fn init_lock_held_degrades_without_hardening_leak_or_hard_error() {
         let lock_path = wiki_dir.join(wiki::cache::schema::INIT_LOCK_FILE_NAME);
         let lock = std::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(&lock_path)
             .expect("create init lock");
@@ -1041,9 +1043,9 @@ fn init_lock_held_degrades_without_hardening_leak_or_hard_error() {
         let store = GenerationsStore::open(tmp.path()).expect("uncontended open");
         assert!(!store.is_degraded());
         assert!(
-            wiki::index::generations::GenerationsStore::open(tmp.path())
+            !wiki::index::generations::GenerationsStore::open(tmp.path())
                 .expect("reopen")
-                .generation_is_served(0) == false,
+                .generation_is_served(0),
             "fresh quarantine leaves zero generations; reopen stays healthy"
         );
     }

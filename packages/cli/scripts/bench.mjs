@@ -3,7 +3,7 @@
 //
 // Drives a binary built from the source under test against a real corpus,
 // spawning it N times per operation and parsing the per-span timings the
-// binary writes to `wiki.log` under WIKI_PERF=1. Reports a per-operation
+// binary writes to `<common-git-dir>/wiki/wiki.log` under WIKI_PERF=1. Reports a per-operation
 // latency distribution (median + p10/p90) decomposed into the three terms
 // every command shares — startup, index preparation (fast-gate walk + any
 // refresh), and the command body — with the detected filesystem class
@@ -14,7 +14,7 @@
 // `within` / `over` markers, not enforced, until the perf fixes land.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
@@ -168,14 +168,34 @@ const SCOREBOARD_FS = "fuseblk";
 
 const LOG_EVENTS = ["startup", "index.fast_gate", "index.gix_open", "index.refresh"];
 
+// The CLI writes the perf log under the repository's *common* git dir
+// (`<common>/wiki/wiki.log` — `perf::log_path`), never the working tree, so a
+// corpus that is a subdirectory or a linked worktree shares the main store.
+// Resolve it through git the way the CLI does; `null` means the corpus is not
+// a repository, so there is no log to read.
 function logPath(corpus) {
-  return join(corpus, "wiki.log");
+  const r = spawnSync("git", ["rev-parse", "--git-common-dir"], {
+    cwd: corpus,
+    encoding: "utf8",
+  });
+  const out = r.status === 0 ? r.stdout.trim() : "";
+  return out ? join(resolve(corpus, out), "wiki", "wiki.log") : null;
 }
 
-function readRunEvents(corpus) {
+/// Byte length of the run's log, the anchor a spawn's own events are read
+/// from. The log is append-only and shared — the store keeps the history for
+/// other tools — so a run isolates itself by offset rather than truncation.
+function logSize(corpus) {
   const path = logPath(corpus);
-  if (!existsSync(path)) return [];
-  return readFileSync(path, "utf8")
+  return path && existsSync(path) ? statSync(path).size : 0;
+}
+
+function readRunEvents(corpus, from = 0) {
+  const path = logPath(corpus);
+  if (!path || !existsSync(path)) return [];
+  return readFileSync(path)
+    .subarray(from)
+    .toString("utf8")
     .split("\n")
     .filter(Boolean)
     .map((line) => {
@@ -189,8 +209,8 @@ function readRunEvents(corpus) {
 }
 
 function spawnOnce(bin, corpus, args) {
-  // Truncate the log so it contains only this invocation's events.
-  writeFileSync(logPath(corpus), "");
+  // Read only the bytes this invocation appends.
+  const from = logSize(corpus);
   const start = process.hrtime.bigint();
   const r = spawnSync(bin, args, {
     cwd: corpus,
@@ -199,7 +219,7 @@ function spawnOnce(bin, corpus, args) {
   });
   const wall = Number(process.hrtime.bigint() - start) / 1e6;
 
-  const events = readRunEvents(corpus);
+  const events = readRunEvents(corpus, from);
   const dur = (name) => {
     const e = events.find((ev) => ev.event === name);
     return e ? e.duration_ms : null;
@@ -329,7 +349,6 @@ function perceivedLatency(warm, cold) {
 // Resolve a summary target that actually exists in the corpus, so the row is
 // stable regardless of which repo the benchmark runs against.
 function firstPageTitle(bin, corpus) {
-  writeFileSync(logPath(corpus), "");
   const r = spawnSync(bin, ["list", "--format", "json"], { cwd: corpus, encoding: "utf8" });
   if (r.status !== 0) return null;
   try {
@@ -474,7 +493,7 @@ function commitCount(corpus) {
 // per link) carrying hit/miss/bypass counts and the summed
 // fingerprint/walk git-leg durations.
 function anchorCheckRun(bin, corpus) {
-  writeFileSync(logPath(corpus), "");
+  const from = logSize(corpus);
   const start = process.hrtime.bigint();
   const r = spawnSync(bin, ["check"], {
     cwd: corpus,
@@ -482,7 +501,7 @@ function anchorCheckRun(bin, corpus) {
     env: { ...process.env, WIKI_PERF: "1" },
   });
   const wall = Number(process.hrtime.bigint() - start) / 1e6;
-  const events = readRunEvents(corpus);
+  const events = readRunEvents(corpus, from);
   const agg = events.find((e) => e.event === "anchor_cache");
   const meta = agg?.meta ?? {};
   return {

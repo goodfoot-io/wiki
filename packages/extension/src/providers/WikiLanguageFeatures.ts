@@ -47,6 +47,19 @@ interface MarkdownFileScan {
 const SCAN_READ_CONCURRENCY = 6;
 
 /**
+ * Longest span, in milliseconds, a corpus traversal runs before returning to
+ * the event loop. The traversal is CPU-bound and, on a large corpus, runs for
+ * seconds; without a yield the extension host cannot service anything else for
+ * that whole span — cancellation tokens included, since a `cancel()` reaches
+ * the extension only as the loop turns.
+ *
+ * Yields happen between files, so the actual bound is this budget or one
+ * file's traversal, whichever is longer: a corpus of many small pages is
+ * sliced to this span, while a single multi-megabyte page is not sliced at all.
+ */
+const SCAN_SLICE_MS = 16;
+
+/**
  * Resolve a markdown link href to an absolute filesystem path, relative to
  * `fromFile`'s directory. Returns null for non-internal targets (http(s)/mailto/
  * fragment-only).
@@ -579,6 +592,10 @@ export class WikiLanguageFeatures {
    *
    * Performs ONE enumeration+read pass over the workspace corpus.
    *
+   * The traversal is sliced against {@link SCAN_SLICE_MS} so that a token
+   * cancelled while it runs is delivered — and observed — before the set is
+   * returned, rather than after the answer is already assembled.
+   *
    * @param targetAbsPath - Absolute path to the file being referenced.
    * @param token - Cancellation token; when cancellation is observed, no
    *                locations are returned.
@@ -601,7 +618,23 @@ export class WikiLanguageFeatures {
     // One scanner instance for the whole pass; reset between lines.
     const re = new RegExp(MARKDOWN_LINK_RE.source, 'g');
 
+    // Slice the traversal: this pass is CPU-bound, so on a corpus of any size
+    // it holds the stack for its whole duration and a cancellation delivered
+    // meanwhile (a token cancels from a timer callback) would only be observed
+    // after the answer was already assembled.
+    let sliceStart = Date.now();
+
     for (const { fileUri, lines } of scans) {
+      // Fail closed at each file boundary: a cancel observed mid-traversal
+      // must discard the work rather than hand the caller a set it will treat
+      // as the complete answer.
+      if (token?.isCancellationRequested) return [];
+
+      if (Date.now() - sliceStart >= SCAN_SLICE_MS) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        sliceStart = Date.now();
+      }
+
       for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
         const lineText = lines[lineIdx]!;
         re.lastIndex = 0;
@@ -618,6 +651,10 @@ export class WikiLanguageFeatures {
         }
       }
     }
+
+    // A cancel delivered during the final slice has no later boundary to be
+    // observed at, so check once more before handing the set back.
+    if (token?.isCancellationRequested) return [];
 
     return locations;
   }

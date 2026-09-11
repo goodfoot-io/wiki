@@ -365,9 +365,9 @@ describe('workspace link scan characterization', () => {
       const fullLocations = await accessor._findIncomingLinks(targetAbs);
       const warmMs = Date.now() - warmStart;
       assert.ok(fullLocations.length > 0, 'fixture sanity: bulk corpus produced incoming links');
-      // Corpus guard — well under the recorded ~1.4 s floor for this corpus
-      // size; if a machine ever gets near it, the corpus no longer guarantees
-      // a mid-scan cancel and must be enlarged.
+      // Corpus guard — comfortably under the ~7 s this corpus measures on the
+      // reference machine; if a machine ever gets near it, the corpus no
+      // longer guarantees a mid-scan cancel and must be enlarged.
       assert.ok(warmMs >= 500, `bulk corpus scanned too fast (${warmMs}ms) to guarantee a mid-scan cancel`);
 
       // Warm the search service and confirm enumeration sees the corpus; its
@@ -384,19 +384,46 @@ describe('workspace link scan characterization', () => {
       // the assertion below: the delay must outlast enumeration (a cancel
       // landing before the first batch would collect nothing and mask a
       // fail-open regression as a legitimate empty result) while staying a
-      // small fraction of the warm scan duration.
+      // small fraction of the warm scan duration. Enumeration is the low end
+      // at 25-30 ms and the scan the high end at multiple seconds, so the
+      // delay sits an order of magnitude inside both bounds; whether it lands
+      // in the read phase or the CPU-bound traversal, SCAN_SLICE_MS yields
+      // let the cancel be delivered and observed either way.
       const cancelDelayMs = Math.max(25, Math.min(150, Math.ceil(enumerateMs * 3)));
 
       const source = new vscode.CancellationTokenSource();
       try {
-        const pending = accessor._findIncomingLinks(targetAbs, source.token);
-        setTimeout(() => source.cancel(), cancelDelayMs);
+        // The cancel must land while the scan is still running, otherwise the
+        // assertion below proves nothing — a scan that already resolved has
+        // answered completely and looks the same as a leak. That precondition
+        // is recorded when the timer fires and asserted afterwards, so a scan
+        // too fast to cancel fails loudly here instead of passing by accident.
+        let settled = false;
+        let settledBeforeCancel = false;
+        const pending = accessor._findIncomingLinks(targetAbs, source.token).finally(() => {
+          settled = true;
+        });
+        // Both are awaited: if the scan wins the race the timer must still run
+        // (settledBeforeCancel would otherwise stay at its initial false and
+        // the precondition would pass vacuously).
+        const cancelFired = new Promise<void>((resolve) => {
+          setTimeout(() => {
+            settledBeforeCancel = settled;
+            source.cancel();
+            resolve();
+          }, cancelDelayMs);
+        });
+        const [locations] = await Promise.all([pending, cancelFired]);
 
+        assert.ok(
+          !settledBeforeCancel,
+          `scan settled before the ${cancelDelayMs}ms cancel fired (warm scan ${warmMs}ms) — ` +
+            'the corpus no longer guarantees a mid-scan cancel and must be enlarged'
+        );
         // A cancelled scan must resolve to [] — never a partial subset.
         // assert.fail first keeps the leak count readable: deepStrictEqual
         // attaches both Location arrays to the error, which overflows the
         // extension host console.
-        const locations = await pending;
         if (locations.length > 0) {
           assert.fail(`cancelled scan leaked ${locations.length} partial references`);
         }

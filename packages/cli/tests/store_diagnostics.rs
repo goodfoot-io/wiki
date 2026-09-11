@@ -74,7 +74,7 @@ fn log_records(repo_root: &Path) -> Vec<Value> {
 
 /// The last aggregated `anchor_cache` record — the one emitted by the most
 /// recent run (the log appends across runs).
-fn last_anchor_cache_record<'a>(records: &'a [Value]) -> &'a Value {
+fn last_anchor_cache_record(records: &[Value]) -> &Value {
     records
         .iter()
         .rev()
@@ -83,7 +83,7 @@ fn last_anchor_cache_record<'a>(records: &'a [Value]) -> &'a Value {
 }
 
 /// The diagnostics map of an `anchor_cache` record, if present.
-fn diagnostics_of<'a>(record: &'a Value) -> Option<&'a Value> {
+fn diagnostics_of(record: &Value) -> Option<&Value> {
     let diagnostics = &record["meta"]["diagnostics"];
     diagnostics.is_object().then_some(diagnostics)
 }

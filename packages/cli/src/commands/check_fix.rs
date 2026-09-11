@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::check::{ContentCache, anchor_cache_for_run};
 use super::drift;
 use crate::frontmatter::parse_frontmatter;
+use crate::git::GitReader;
 use crate::headings::{extract_headings, github_slug, resolve_heading, Heading};
 use crate::index::DocSource;
 use crate::parser::{LinkKind, parse_fragment_links};
@@ -567,20 +568,20 @@ fn headings_at_position(content: &str, pos: &HeadingPosition) -> Vec<String> {
         .collect()
 }
 
-/// Read the HEAD blob for `rel_path` (repo-relative). Returns `Ok(None)` when not
-/// found or on any git error.
-fn read_head_blob(repo_root: &Path, rel_path: &str) -> Result<Option<String>> {
-    let output = Command::new("git")
-        .current_dir(repo_root)
-        .args(["show", &format!("HEAD:{rel_path}")])
-        .output()
-        .map_err(|e| miette::miette!("git show failed: {e}"))?;
-    if output.status.success()
-        && let Ok(s) = String::from_utf8(output.stdout)
-    {
-        return Ok(Some(s));
+/// Read `<sha>:<path>` as UTF-8 through the shared reader. `None` when the
+/// blob is absent, is not UTF-8, or cannot be read: the Fix #5 baseline walk
+/// treats every such case as "declined here" and records an explicit skip
+/// rather than failing the run.
+fn read_blob_utf8_at(
+    reader: &GitReader,
+    repo_root: &Path,
+    sha: &str,
+    path: &str,
+) -> Option<String> {
+    match drift::read_blob_at(reader, repo_root, sha, path) {
+        Ok(Some(bytes)) => String::from_utf8(bytes).ok(),
+        _ => None,
     }
-    Ok(None)
 }
 
 /// Maximum number of historical revisions to inspect when walking `git log
@@ -599,12 +600,13 @@ const HEADING_HISTORY_DEPTH_CAP: usize = 100;
 /// Fix #5 is by definition older than the broken state, so we only walk
 /// committed history.
 fn find_baseline_with_slug(
+    reader: &GitReader,
     repo_root: &Path,
     rel_path: &str,
     anchor_slug: &str,
 ) -> Result<Option<String>> {
     // Layer: HEAD
-    if let Some(content) = read_head_blob(repo_root, rel_path)? {
+    if let Some(content) = reader.read_blob(DocSource::Head, rel_path)? {
         let headings = extract_headings(&content);
         if resolve_heading(anchor_slug, &headings) {
             return Ok(Some(content));
@@ -651,7 +653,7 @@ fn find_baseline_with_slug(
                 if seen > HEADING_HISTORY_DEPTH_CAP {
                     return Ok(None);
                 }
-                if let Some(content) = read_blob_at(repo_root, &sha, &current_path)?
+                if let Some(content) = read_blob_utf8_at(reader, repo_root, &sha, &current_path)
                     && resolve_heading(anchor_slug, &extract_headings(&content))
                 {
                     return Ok(Some(content));
@@ -682,7 +684,7 @@ fn find_baseline_with_slug(
                 if seen > HEADING_HISTORY_DEPTH_CAP {
                     return Ok(None);
                 }
-                if let Some(content) = read_blob_at(repo_root, &sha, parts[2])?
+                if let Some(content) = read_blob_utf8_at(reader, repo_root, &sha, parts[2])
                     && resolve_heading(anchor_slug, &extract_headings(&content))
                 {
                     return Ok(Some(content));
@@ -700,7 +702,7 @@ fn find_baseline_with_slug(
     if let Some(sha) = last_sha.take() {
         seen += 1;
         if seen <= HEADING_HISTORY_DEPTH_CAP
-            && let Some(content) = read_blob_at(repo_root, &sha, &current_path)?
+            && let Some(content) = read_blob_utf8_at(reader, repo_root, &sha, &current_path)
             && resolve_heading(anchor_slug, &extract_headings(&content))
         {
             return Ok(Some(content));
@@ -708,40 +710,6 @@ fn find_baseline_with_slug(
     }
 
     Ok(None)
-}
-
-/// Read `git show <sha>:<path>` as a UTF-8 string. Returns `Ok(None)` on any
-/// git error or non-UTF-8 blob.
-pub(crate) fn read_blob_at(repo_root: &Path, sha: &str, path: &str) -> Result<Option<String>> {
-    let output = Command::new("git")
-        .current_dir(repo_root)
-        .args(["show", &format!("{sha}:{path}")])
-        .output()
-        .map_err(|e| miette::miette!("git show failed: {e}"))?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    match String::from_utf8(output.stdout) {
-        Ok(s) => Ok(Some(s)),
-        Err(_) => Ok(None),
-    }
-}
-
-// First consumer is the P3 drift-phase implementation (Decision 2 committed
-// value reads); remove the allow when it lands.
-#[allow(dead_code)]
-fn read_anchor_source(repo_root: &Path, source: DocSource, path: &str) -> Option<Vec<u8>> {
-    match source {
-        DocSource::WorkingTree => std::fs::read(repo_root.join(path)).ok(),
-        DocSource::Head => read_blob_at(repo_root, "HEAD", path)
-            .ok()
-            .flatten()
-            .map(|s| s.into_bytes()),
-        DocSource::Index => read_blob_at(repo_root, "", path) // git show :path
-            .ok()
-            .flatten()
-            .map(|s| s.into_bytes()),
-    }
 }
 
 // ── Fix #1 implementation ─────────────────────────────────────────────────────
@@ -759,6 +727,8 @@ pub fn run_fix_pass(
     files: &[PathBuf],
     repo_root: &Path,
     source: DocSource,
+    reader: &GitReader,
+    drift_run: &mut drift::DriftRunCtx,
     dry_run: bool,
     content_cache: &mut ContentCache,
     reporter: &crate::cache::CacheReporter,
@@ -1213,7 +1183,7 @@ pub fn run_fix_pass(
             let anchor_slug = github_slug(anchor);
             let cache_key = format!("{target_rel}#{anchor_slug}");
             let baseline_opt = head_cache.entry(cache_key).or_insert_with(|| {
-                find_baseline_with_slug(repo_root, &target_rel, &anchor_slug).unwrap_or(None)
+                find_baseline_with_slug(reader, repo_root, &target_rel, &anchor_slug).unwrap_or(None)
             });
 
             let Some(baseline_content) = baseline_opt.as_ref() else {
@@ -1315,6 +1285,8 @@ pub fn run_fix_pass(
         files,
         repo_root,
         source,
+        reader,
+        drift_run,
         content_cache,
         reporter,
         &mut rename_map,
@@ -1403,6 +1375,8 @@ fn run_drift_fix_phase(
     files: &[PathBuf],
     repo_root: &Path,
     source: DocSource,
+    reader: &GitReader,
+    drift_run: &mut drift::DriftRunCtx,
     content_cache: &mut ContentCache,
     reporter: &crate::cache::CacheReporter,
     rename_map: &mut RenameMap,
@@ -1431,9 +1405,29 @@ fn run_drift_fix_phase(
     let mut unverified = 0;
     let mut certification_skips = 0;
     // Shared across files: the move scan's candidate inventory is loaded once
-    // per run, on the first link that needs it.
-    let mut ctx = drift::MoveScanCtx::new();
+    // per pass, on the first link that needs it.
+    let mut ctx = drift::MoveScanCtx::new(drift_run);
 
+    // ── Prepare ──────────────────────────────────────────────────────────────
+    // Resolve each page's content (patched when an earlier phase rewrote it)
+    // and the two field values the epoch needs, keeping only the pages that
+    // carry line-range links. Splitting this out is what lets the history
+    // captures run in parallel below: one `git log --follow` per page, ahead
+    // of a serial classification loop. A page the fix phase already captured
+    // (the post-fix re-check walks the same pages) is served from the run's
+    // memo and costs no subprocess at all.
+    struct Pending {
+        /// The page's absolute path — the patch map's key.
+        file: PathBuf,
+        /// The page's OS path (the fix records quote it as-is).
+        file_rel: String,
+        /// The page's repo-relative path, `/`-separated — the engine's form.
+        page_path: String,
+        content: String,
+        current_value: drift::LinksReviewedRead,
+        committed_value: drift::LinksReviewedRead,
+    }
+    let mut pending: Vec<Pending> = Vec::new();
     for file in files {
         // The drift phase runs last (see run_fix_pass), so earlier phases
         // (Fix #1, Fix #3) may already hold a rewritten whole file for this
@@ -1461,13 +1455,36 @@ fn run_drift_fix_phase(
         let page_path = file_rel.replace('\\', "/");
 
         let current_value = drift::read_links_reviewed(&content);
-        let committed_value = match DocSource::Head.read(repo_root, &page_path) {
+        let committed_value = match reader.read_blob(DocSource::Head, &page_path) {
             Ok(Some(head_content)) => drift::read_links_reviewed(&head_content),
             _ => drift::LinksReviewedRead::Readable(None),
         };
+        pending.push(Pending {
+            file: file.clone(),
+            file_rel,
+            page_path,
+            content,
+            current_value,
+            committed_value,
+        });
+    }
+    let captures: Vec<String> = pending.iter().map(|p| p.page_path.clone()).collect();
+    drift_run.precapture(repo_root, &captures);
+
+    for page in pending {
+        let Pending {
+            file,
+            file_rel,
+            page_path,
+            content,
+            current_value,
+            committed_value,
+        } = page;
         let epoch = drift::find_anchor_commit(
             repo_root,
+            reader,
             anchor_cache.cache(),
+            drift_run,
             &page_path,
             &current_value,
             &committed_value,
@@ -1491,6 +1508,7 @@ fn run_drift_fix_phase(
         };
         let classes = drift::classify_page(
             repo_root,
+            reader,
             anchor_cache.cache(),
             source,
             &page_path,
@@ -1520,7 +1538,7 @@ fn run_drift_fix_phase(
                         &c.original_href,
                         Some(&fragment),
                         Path::new(new_path),
-                        file,
+                        &file,
                         repo_root,
                     );
                     if *content_identical {
@@ -1590,7 +1608,7 @@ fn run_drift_fix_phase(
                                 &c.original_href,
                                 fragment,
                                 &new_rel,
-                                file,
+                                &file,
                                 repo_root,
                             );
                             fixes.push(Fix {
@@ -2374,10 +2392,13 @@ mod tests {
         let source = repo.path().join("wiki/source.md");
         let target = repo.path().join("wiki/target.md");
         let reporter = crate::cache::CacheReporter::default();
+        let reader = GitReader::open(repo.path()).expect("open reader");
         let plan = run_fix_pass(
             &[source.clone(), target.clone()],
             repo.path(),
             crate::index::DocSource::WorkingTree,
+            &reader,
+            &mut drift::DriftRunCtx::new(),
             /* dry_run */ true,
             &mut ContentCache::new(),
             &reporter,
@@ -2442,10 +2463,13 @@ mod tests {
         let source = repo.path().join("wiki/source.md");
         let target = repo.path().join("wiki/target.md");
         let reporter = crate::cache::CacheReporter::default();
+        let reader = GitReader::open(repo.path()).expect("open reader");
         let plan = run_fix_pass(
             &[source.clone(), target.clone()],
             repo.path(),
             crate::index::DocSource::WorkingTree,
+            &reader,
+            &mut drift::DriftRunCtx::new(),
             /* dry_run */ true,
             &mut ContentCache::new(),
             &reporter,
@@ -2656,10 +2680,13 @@ mod tests {
         let mut fixes: Vec<Fix> = Vec::new();
         let mut skipped: Vec<SkippedFix> = Vec::new();
         let reporter = crate::cache::CacheReporter::default();
+        let reader = GitReader::open(repo.path()).expect("open reader");
         let outcome = run_drift_fix_phase(
             files,
             repo.path(),
             crate::index::DocSource::WorkingTree,
+            &reader,
+            &mut drift::DriftRunCtx::new(),
             &mut ContentCache::new(),
             &reporter,
             &mut rename_map,

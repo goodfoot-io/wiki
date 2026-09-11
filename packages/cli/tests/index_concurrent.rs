@@ -297,13 +297,12 @@ fn quarantine_surfaces_through_json_lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        if let Some(counts) = value.pointer("/meta/diagnostics") {
-            if counts.get("quarantine_performed").and_then(|v| v.as_u64()) >= Some(1)
-                && counts.get("rebuild_completed").and_then(|v| v.as_u64()) >= Some(1)
-            {
-                found = true;
-                break;
-            }
+        if let Some(counts) = value.pointer("/meta/diagnostics")
+            && counts.get("quarantine_performed").and_then(|v| v.as_u64()) >= Some(1)
+            && counts.get("rebuild_completed").and_then(|v| v.as_u64()) >= Some(1)
+        {
+            found = true;
+            break;
         }
     }
     assert!(

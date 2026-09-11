@@ -1,4 +1,4 @@
-packages/cli/src/commands/drift.rs rk64:3306d62e2ce43081
+packages/cli/src/commands/drift.rs rk64:c1adf221bbf8d0d7
 packages/cli/tests/drift_relocation.rs rk64:c0fc1e5410474185
 skills-src/wiki/wiki/explanation/anchor-contract.md.eta rk64:c640508e1dbf426c
 skills-src/wiki/wiki/how-to/validate-and-fix.md.eta rk64:595180c4c1006a0b

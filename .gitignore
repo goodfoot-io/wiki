@@ -89,3 +89,5 @@ reports
 # The bin/ directories themselves are kept in git by their .gitkeep files.
 npm/*/bin/wiki
 npm/*/bin/wiki.exe
+
+.env.*
