@@ -648,9 +648,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@goodfoot/agent-hooks@npm:1.0.9":
-  version: 1.0.9
-  resolution: "@goodfoot/agent-hooks@npm:1.0.9"
+"@goodfoot/agent-hooks@npm:1.0.11":
+  version: 1.0.11
+  resolution: "@goodfoot/agent-hooks@npm:1.0.11"
   dependencies:
     esbuild: "npm:^0.24.0"
     glob: "npm:^11.0.0"
@@ -662,7 +662,7 @@ __metadata:
       optional: true
   bin:
     agent-hooks: dist/cli.js
-  checksum: 10c0/4d470ec7dc531914763d050a35f16464d51f2c4c7df8797792bd7574a49f291e6525e11cb1fdeb4cf5e37891d19df29f6400fcd90d18e0fac42f0491da7662a9
+  checksum: 10c0/7f111f9b0e887ceda2cf629af3d7af265e393a51606b55d442343a841411cc3217996ff1140b4d33d95c11630f5c77ff82bf3f8168466f65909e49890d598707
   languageName: node
   linkType: hard
 
@@ -697,32 +697,32 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@goodfoot/wiki-agent-hooks@workspace:packages/agent-hooks"
   dependencies:
-    "@goodfoot/agent-hooks": "npm:1.0.9"
+    "@goodfoot/agent-hooks": "npm:1.0.11"
     "@typescript/native-preview": "npm:^7.0.0-dev"
     typescript: "npm:^5.9.3"
     vitest: "npm:^3.0.0"
   languageName: unknown
   linkType: soft
 
-"@goodfoot/wiki-darwin-arm64@npm:0.5.142, @goodfoot/wiki-darwin-arm64@workspace:npm/wiki-darwin-arm64":
+"@goodfoot/wiki-darwin-arm64@npm:0.5.143, @goodfoot/wiki-darwin-arm64@workspace:npm/wiki-darwin-arm64":
   version: 0.0.0-use.local
   resolution: "@goodfoot/wiki-darwin-arm64@workspace:npm/wiki-darwin-arm64"
   languageName: unknown
   linkType: soft
 
-"@goodfoot/wiki-darwin-x64@npm:0.5.142, @goodfoot/wiki-darwin-x64@workspace:npm/wiki-darwin-x64":
+"@goodfoot/wiki-darwin-x64@npm:0.5.143, @goodfoot/wiki-darwin-x64@workspace:npm/wiki-darwin-x64":
   version: 0.0.0-use.local
   resolution: "@goodfoot/wiki-darwin-x64@workspace:npm/wiki-darwin-x64"
   languageName: unknown
   linkType: soft
 
-"@goodfoot/wiki-linux-arm64@npm:0.5.142, @goodfoot/wiki-linux-arm64@workspace:npm/wiki-linux-arm64":
+"@goodfoot/wiki-linux-arm64@npm:0.5.143, @goodfoot/wiki-linux-arm64@workspace:npm/wiki-linux-arm64":
   version: 0.0.0-use.local
   resolution: "@goodfoot/wiki-linux-arm64@workspace:npm/wiki-linux-arm64"
   languageName: unknown
   linkType: soft
 
-"@goodfoot/wiki-linux-x64@npm:0.5.142, @goodfoot/wiki-linux-x64@workspace:npm/wiki-linux-x64":
+"@goodfoot/wiki-linux-x64@npm:0.5.143, @goodfoot/wiki-linux-x64@workspace:npm/wiki-linux-x64":
   version: 0.0.0-use.local
   resolution: "@goodfoot/wiki-linux-x64@workspace:npm/wiki-linux-x64"
   languageName: unknown
@@ -741,7 +741,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@goodfoot/wiki-win32-x64@npm:0.5.142, @goodfoot/wiki-win32-x64@workspace:npm/wiki-win32-x64":
+"@goodfoot/wiki-win32-x64@npm:0.5.143, @goodfoot/wiki-win32-x64@workspace:npm/wiki-win32-x64":
   version: 0.0.0-use.local
   resolution: "@goodfoot/wiki-win32-x64@workspace:npm/wiki-win32-x64"
   languageName: unknown
@@ -751,11 +751,11 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@goodfoot/wiki@workspace:packages/cli"
   dependencies:
-    "@goodfoot/wiki-darwin-arm64": "npm:0.5.142"
-    "@goodfoot/wiki-darwin-x64": "npm:0.5.142"
-    "@goodfoot/wiki-linux-arm64": "npm:0.5.142"
-    "@goodfoot/wiki-linux-x64": "npm:0.5.142"
-    "@goodfoot/wiki-win32-x64": "npm:0.5.142"
+    "@goodfoot/wiki-darwin-arm64": "npm:0.5.143"
+    "@goodfoot/wiki-darwin-x64": "npm:0.5.143"
+    "@goodfoot/wiki-linux-arm64": "npm:0.5.143"
+    "@goodfoot/wiki-linux-x64": "npm:0.5.143"
+    "@goodfoot/wiki-win32-x64": "npm:0.5.143"
   dependenciesMeta:
     "@goodfoot/wiki-darwin-arm64":
       optional: true
