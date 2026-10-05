@@ -1,1 +1,10 @@
 allow-unwrap-in-tests = true
+
+# Stdout and stderr are reached only through `src/output.rs`, which makes
+# every stdout write fallible (a closed reader becomes `StdoutClosed`) and
+# owns the one stderr helper. The panic hook and the build script are the
+# only other sanctioned call sites, each with a narrow `#[expect]`.
+disallowed-methods = [
+    { path = "std::io::stdout", reason = "write stdout through `output::Stdout`, whose writes map a closed reader to `StdoutClosed`" },
+    { path = "std::io::stderr", reason = "write stderr through `output::stderr` / `output::stderr_line`" },
+]

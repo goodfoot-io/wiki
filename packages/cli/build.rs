@@ -5,6 +5,10 @@ use std::path::PathBuf;
 fn main() {
     // `print_stdout` is denied crate-wide; a failed write here panics, which
     // fails the build — the right outcome for a build script.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "cargo directives go to the build script's stdout, which is not the CLI's"
+    )]
     let mut stdout = io::stdout().lock();
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
     let package_json_path = manifest_dir.join("package.json");

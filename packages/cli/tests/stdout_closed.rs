@@ -6,32 +6,36 @@
 //! is spawned, so the child's first stdout write deterministically fails
 //! with `EPIPE` (Rust ignores `SIGPIPE`, so it surfaces as `BrokenPipe`).
 //! The control tests pin each command's normal output with an open pipe, so
-//! the fallible-write conversion is proven byte-for-byte unchanged.
+//! the fallible-write conversion is proven byte-for-byte unchanged. The
+//! mid-stream test closes the reader after the first bytes have arrived.
 
 use std::fs;
-use std::io;
+use std::io::{self, Read as _};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use tempfile::TempDir;
+
+/// Run `git <args>` in `root` with a fixed identity.
+fn git(root: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@test.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@test.com")
+        .output()
+        .expect("spawn git");
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+}
 
 /// A committed git repository holding a clean page (`Alpha`) and a page
 /// with a broken link (`Beta`), so `check` has a finding to print.
 fn repo() -> TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
-    let git = |args: &[&str]| {
-        let out = Command::new("git")
-            .current_dir(root)
-            .args(args)
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@test.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@test.com")
-            .output()
-            .expect("spawn git");
-        assert!(out.status.success(), "git {args:?}: {out:?}");
-    };
+    let git = |args: &[&str]| git(root, args);
     git(&["init", "-q"]);
     git(&["checkout", "-q", "-b", "main"]);
     fs::create_dir_all(root.join("wiki")).expect("create wiki dir");
@@ -106,6 +110,88 @@ fn closed_stdout_exits_2_silently_for_every_command() {
              no broken-pipe report: {stderr:?}"
         );
     }
+}
+
+/// Pages in the mid-stream fixture, and the summary size of each: together
+/// about 1 MiB of `list` output, sixteen times Linux's default 64 KiB pipe
+/// buffer.
+const BIG_PAGES: usize = 128;
+const BIG_SUMMARY_BYTES: usize = 8 * 1024;
+
+/// A committed repository whose `list` output far exceeds a pipe buffer,
+/// generated at test time.
+fn big_repo() -> TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    git(root, &["init", "-q"]);
+    fs::create_dir_all(root.join("wiki")).expect("create wiki dir");
+    let summary = "lorem ".repeat(BIG_SUMMARY_BYTES / "lorem ".len());
+    for n in 0..BIG_PAGES {
+        fs::write(
+            root.join(format!("wiki/page-{n:03}.md")),
+            format!("---\ntitle: Page {n:03}\nsummary: {summary}\n---\nBody.\n"),
+        )
+        .expect("write page");
+    }
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "init"]);
+    dir
+}
+
+#[test]
+fn stdout_closed_mid_stream_exits_2_silently() {
+    let dir = big_repo();
+    let cases: &[(&[&str], &[u8])] = &[
+        (&["list"], b"**Page 000**"),
+        (&["list", "--format", "json"], b"[{\"title\":\"Page 000\""),
+    ];
+    for (args, head) in cases {
+        let mut child = wiki(dir.path(), args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn wiki");
+        let mut reader = child.stdout.take().expect("piped stdout");
+        // The blocking read proves the output phase has begun; the rest of
+        // the ~1 MiB cannot fit in the pipe buffer, so once the reader is
+        // dropped a later write must fail with EPIPE. No timing involved.
+        let mut got = vec![0; head.len()];
+        reader.read_exact(&mut got).expect("read the first bytes");
+        assert_eq!(&got, head, "wiki {args:?}: first stdout bytes");
+        drop(reader);
+
+        let out = child.wait_with_output().expect("wait for wiki");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "wiki {args:?}: a stdout closed mid-stream exits 2 (stderr: {stderr:?})"
+        );
+        assert!(
+            stderr.is_empty(),
+            "wiki {args:?}: nothing on stderr after a mid-stream close: {stderr:?}"
+        );
+    }
+}
+
+/// A failed index preparation leaves stdout empty under `--format json`:
+/// the opening `[` is written only once the listing has succeeded, so the
+/// exit-time flush has nothing dangling to emit.
+#[test]
+fn list_json_writes_nothing_when_preparation_fails() {
+    let dir = repo();
+    // The store directory is a regular file, so the store cannot open.
+    fs::write(dir.path().join(".git/wiki"), "").expect("block the store dir");
+    let out = wiki(dir.path(), &["list", "--format", "json"])
+        .output()
+        .expect("run wiki");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "stderr: {stderr:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "", "stdout stays empty");
+    assert!(
+        stderr.contains("failed to open wiki store"),
+        "the preparation error is reported: {stderr:?}"
+    );
 }
 
 /// The normal run of each command, with `<ROOT>` standing in for the

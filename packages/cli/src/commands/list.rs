@@ -28,16 +28,15 @@ pub fn run(
     let offset = offset.unwrap_or(0);
     let mut first = true;
 
-    // The opening bracket is written before the index is prepared and waits
-    // in stdout's line buffer; the lock is not held across the preparation.
-    if json {
-        write!(Stdout::lock(), "[")?;
-    }
-
+    // Nothing reaches stdout until the listing has succeeded: a failed
+    // preparation must not leave a dangling `[` for the exit-time flush.
     let index = WikiIndex::prepare_for_source(repo_root, source)?;
     let rows = index.list_pages(tag, offset, limit)?;
 
     let mut out = Stdout::lock();
+    if json {
+        write!(out, "[")?;
+    }
     for row in rows {
         let page = PageEntry {
             title: row.title,

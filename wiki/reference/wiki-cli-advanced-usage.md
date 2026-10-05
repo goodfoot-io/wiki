@@ -3,14 +3,14 @@ title: Wiki CLI Advanced Usage
 summary: Advanced wiki CLI usage including glob targeting, JSON output, and stdin/path input.
 tags:
   - reference
-links-reviewed: 5
+links-reviewed: 6
 ---
 
 # Wiki CLI Advanced Usage
 
 ## Listing Pages
 
-[`wiki list`](/packages/cli/src/commands/list.rs#L19-L100) enumerates all pages with their title, summary, aliases, tags, and file path.
+[`wiki list`](/packages/cli/src/commands/list.rs#L19-L99) enumerates all pages with their title, summary, aliases, tags, and file path.
 
 ```bash
 # List every page
@@ -32,7 +32,7 @@ wiki check --fix
 
 `--fix` only rewrites what it can resolve unambiguously: links whose certified content moved are re-pointed, and pages with line-range links but no `links-reviewed:` field get the field initialized. In-place drift, ambiguous moves, and unverifiable links are skipped with a named reason — see the `resolving-skipped-fixes` skill section.
 
-`wiki check` memoizes its history walks in a disposable cache under the repository's git common directory; [the `--clear-cache` flag](/packages/cli/src/main.rs#L461-L462) deletes it and exits 0:
+`wiki check` memoizes its history walks in a disposable cache under the repository's git common directory; [the `--clear-cache` flag](/packages/cli/src/main.rs#L465-L466) deletes it and exits 0:
 
 ```bash
 # Best-effort delete of the anchor cache directory; prints the path
@@ -67,7 +67,7 @@ When multiple inputs are provided via stdin, the exit code reflects the worst re
 
 ## Targeting Specific Files
 
-All commands accept explicit glob patterns instead of scanning [the current working directory](/packages/cli/src/main.rs#L403-L406):
+All commands accept explicit glob patterns instead of scanning [the current working directory](/packages/cli/src/main.rs#L407-L410):
 
 ```bash
 wiki check wiki/some-section/**/*.md
@@ -217,4 +217,10 @@ All commands use a consistent three-value exit code convention:
 | 0 | Success (or success with non-fatal warnings) |
 | 1 | Validation / business-logic errors found for commands that use that state |
 | 2 | Runtime or system error, including an internal error (a panic on any thread), reported on stderr as `internal error: …` (`{"error": "internal error: …"}` under `--format json`) |
-| 2 | Stdout closed by the reader (`wiki … \| head -0`): no output at all, on stdout or stderr. The non-zero code keeps a truncated run from passing for a clean one — `wiki check` findings are never masked as exit 0. See [`output.rs`](/packages/cli/src/output.rs) |
+| 2 | Stdout closed by the reader before the command finished writing (`wiki … \| head -0`). Bytes written before the close still reach the reader; nothing is written to stderr. The non-zero code keeps a truncated run from passing for a clean one, so `wiki check` findings are never masked as exit 0. See [`output.rs`](/packages/cli/src/output.rs) |
+
+A closed stdout is not a validation finding, so `wiki check --no-exit-code` still exits 2 when it happens.
+
+Under `wiki … | head -N` the exit code depends on whether the output fits in the pipe buffer (64 KiB on Linux). If it does not fit, a write after `head` exits hits the closed pipe, and the command exits 2. If it fits, the writes usually finish before `head` exits, and the command keeps its normal code. That is a race, though, not a guarantee. A `set -o pipefail` pipeline can therefore see 0 or 2 for the same command.
+
+`wiki check --fix` writes its fixes to disk before printing anything. If stdout closes during a `--fix` run, the report of what changed is lost, but the fixes have already been applied. Run `git status` or `wiki check` to see what changed.

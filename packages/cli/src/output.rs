@@ -63,6 +63,10 @@ pub fn is_stdout_closed(report: &Report) -> bool {
 pub struct Stdout(io::StdoutLock<'static>);
 
 impl Stdout {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the one sanctioned stdout handle; every write maps through `on_stdout`"
+    )]
     pub fn lock() -> Self {
         Self(io::stdout().lock())
     }
@@ -94,6 +98,10 @@ impl Stdout {
 /// over it would turn a lost warning into a lost answer. The exit code still
 /// carries the verdict. This is deliberately the one place the CLI drops a
 /// write error.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the one sanctioned stderr helper for diagnostics"
+)]
 pub fn stderr(args: fmt::Arguments<'_>) {
     let _ = io::stderr().lock().write_fmt(args);
 }

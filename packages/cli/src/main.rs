@@ -268,6 +268,10 @@ fn report_panic(info: &std::panic::PanicHookInfo<'_>) {
     let thread = std::thread::current();
     let thread = thread.name().unwrap_or("<unnamed>");
     let summary = format!("internal error: thread '{thread}' panicked{location}: {message}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the panic report holds one stderr lock across all of its lines"
+    )]
     let mut stderr = io::stderr().lock();
     if JSON_ERRORS.load(Ordering::Relaxed) {
         let _ = writeln!(stderr, "{}", serde_json::json!({ "error": summary }));

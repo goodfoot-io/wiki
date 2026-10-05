@@ -24,9 +24,9 @@ Healthy and moved links are silent.
 
 | Code | Meaning |
 |---|---|
-| 0 | Clean, or `--no-exit-code`. Search/list/summary: success (search exits 0 even with zero hits). |
+| 0 | Clean, or `--no-exit-code` (except a closed stdout, which still exits 2). Search/list/summary: success (search exits 0 even with zero hits). |
 | 1 | Diagnostics present; summary target not found. Fix mode: unresolvable certification skips remain. |
-| 2 | Infrastructure failure: shallow clone, unreadable repo, malformed `.wikiignore`, empty corpus (non-fix check), `--fix` off-worktree, missing summary input. |
+| 2 | Infrastructure failure: shallow clone, unreadable repo, malformed `.wikiignore`, empty corpus (non-fix check), `--fix` off-worktree, missing summary input. Stdout closed by the reader (`\| head`): stderr stays silent, earlier output was delivered; `--fix` edits are already on disk. |
 
 ## JSON shapes
 
