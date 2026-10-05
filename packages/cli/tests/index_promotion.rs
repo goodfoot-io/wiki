@@ -16,7 +16,7 @@ fn untracked_promoted_to_index_shares_blob() {
 
     let bytes = "---\ntitle: Foo Page\nsummary: The foo summary.\n---\n\nFoo body.\n";
     repo.write_file("foo.md", bytes);
-    let oid = compute_blob_oid(bytes.as_bytes());
+    let oid = compute_blob_oid(bytes.as_bytes()).expect("ordinary content hashes");
 
     let _before = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare before add");
     repo.git_add("foo.md");

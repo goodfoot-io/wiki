@@ -168,11 +168,10 @@ fn read_index_trailer(index_path: &Path) -> Option<[u8; 20]> {
 pub(crate) fn collect_worktree_pairs(repo_root: &Path) -> Vec<(String, i64)> {
     // The parallel walker overlaps the per-entry stat round-trips across
     // threads, which dominates latency on a hostile (fuseblk) filesystem.
-    // Threads push kept pairs into a shared Mutex<Vec>; the work is
-    // stat-bound, not lock-bound, so a per-entry lock-and-push is fine.
-    // Pairs are sorted after the walk, so collection order never leaks
-    // into the signature (worktree_signature re-sorts defensively anyway).
-    let pairs = std::sync::Mutex::new(Vec::<(std::path::PathBuf, i64)>::new());
+    // Each walker thread collects its kept pairs into its own buffer (no
+    // shared lock); pairs are sorted after the walk, so collection order
+    // never leaks into the signature (worktree_signature re-sorts
+    // defensively anyway).
     let walker = ignore::WalkBuilder::new(repo_root)
         .standard_filters(true)
         .hidden(false)
@@ -186,47 +185,47 @@ pub(crate) fn collect_worktree_pairs(repo_root: &Path) -> Vec<(String, i64)> {
             name != ".git"
         })
         .build_parallel();
-    walker.run(|| {
-        let pairs = &pairs;
-        Box::new(
-            move |entry: Result<ignore::DirEntry, ignore::Error>| -> ignore::WalkState {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(_) => return ignore::WalkState::Continue,
-                };
-                let rel = match entry.path().strip_prefix(repo_root) {
-                    Ok(r) => r.to_path_buf(),
-                    Err(_) => return ignore::WalkState::Continue,
-                };
+    let mut pairs = crate::concurrency::collect_parallel_walk(
+        walker,
+        |entry: Result<ignore::DirEntry, ignore::Error>,
+         pairs: &mut Vec<(std::path::PathBuf, i64)>|
+         -> ignore::WalkState {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => return ignore::WalkState::Continue,
+            };
+            let rel = match entry.path().strip_prefix(repo_root) {
+                Ok(r) => r.to_path_buf(),
+                Err(_) => return ignore::WalkState::Continue,
+            };
 
-                // Cheap readdir-backed filter first (no stat): only
-                // directories and markdown files are kept. `file_type()`
-                // comes from readdir's d_type on Linux, so this discards
-                // `.rs`/`.ts`/`.json`/etc. without a stat.
-                let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
-                let is_file = entry.file_type().is_some_and(|ft| ft.is_file());
-                if !(is_dir || (is_file && is_markdown(&rel))) {
-                    return ignore::WalkState::Continue;
-                }
+            // Cheap readdir-backed filter first (no stat): only
+            // directories and markdown files are kept. `file_type()`
+            // comes from readdir's d_type on Linux, so this discards
+            // `.rs`/`.ts`/`.json`/etc. without a stat.
+            let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+            let is_file = entry.file_type().is_some_and(|ft| ft.is_file());
+            if !(is_dir || (is_file && is_markdown(&rel))) {
+                return ignore::WalkState::Continue;
+            }
 
-                // Stat only the entries we keep. `entry.metadata()` may
-                // reuse a stat already performed by the walker.
-                let mtime_ns = match entry
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_nanos() as i64)
-                {
-                    Some(m) => m,
-                    None => return ignore::WalkState::Continue,
-                };
+            // Stat only the entries we keep. `entry.metadata()` may
+            // reuse a stat already performed by the walker.
+            let mtime_ns = match entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as i64)
+            {
+                Some(m) => m,
+                None => return ignore::WalkState::Continue,
+            };
 
-                pairs.lock().unwrap().push((rel, mtime_ns));
-                ignore::WalkState::Continue
-            },
-        )
-    });
+            pairs.push((rel, mtime_ns));
+            ignore::WalkState::Continue
+        },
+    );
 
     // Fold the repo-root .wikiignore mtime into the signature so any edit
     // to the ignore list busts the gate. Only a stat — no WikiIgnore load
@@ -237,14 +236,13 @@ pub(crate) fn collect_worktree_pairs(repo_root: &Path) -> Vec<(String, i64)> {
             && let Ok(mtime) = meta.modified()
             && let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH)
         {
-            pairs.lock().unwrap().push((
+            pairs.push((
                 std::path::PathBuf::from(super::WIKIIGNORE_RELPATH),
                 dur.as_nanos() as i64,
             ));
         }
     }
 
-    let mut pairs = pairs.into_inner().unwrap();
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
     pairs
         .into_iter()
@@ -318,28 +316,20 @@ mod tests {
         assert_eq!(read_head_oid(dot_git), Some(oid.to_string()));
     }
 
+    /// Set `path`'s access and modification times to `mtime_ns` nanoseconds
+    /// after the Unix epoch (portable std `File::set_times`; nanosecond
+    /// precision where the platform keeps it).
     fn set_mtime_ns(path: &std::path::Path, mtime_ns: i64) {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-        let c = CString::new(path.as_os_str().as_bytes()).unwrap();
-        let times = [
-            libc::timespec {
-                tv_sec: (mtime_ns / 1_000_000_000) as libc::time_t,
-                tv_nsec: (mtime_ns % 1_000_000_000) as _,
-            },
-            libc::timespec {
-                tv_sec: (mtime_ns / 1_000_000_000) as libc::time_t,
-                tv_nsec: (mtime_ns % 1_000_000_000) as _,
-            },
-        ];
-        // SAFETY: `c` is a NUL-terminated `CString` that lives until the end of
-        // this function, so its pointer is valid for the whole call; `times`
-        // is a live `[libc::timespec; 2]` (atime, then mtime), exactly the
-        // two-element array `utimensat` reads through its `times` pointer.
-        // `AT_FDCWD` with flags `0` needs no open descriptor. `utimensat`
-        // retains neither pointer after returning.
-        let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) };
-        assert_eq!(rc, 0, "utimensat failed");
+        let nanos = u64::try_from(mtime_ns)
+            .expect("test mtimes are post-epoch, so mtime_ns is non-negative");
+        let time = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(nanos);
+        let times = fs::FileTimes::new().set_accessed(time).set_modified(time);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open file to set its times")
+            .set_times(times)
+            .expect("set file times");
     }
 
     #[test]

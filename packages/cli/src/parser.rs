@@ -7,7 +7,7 @@ fn md_link_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         // Matches [text](href) — text may contain nested brackets
-        Regex::new(r"\[([^\[\]]*)\]\(([^)]*)\)").unwrap()
+        Regex::new(r"\[([^\[\]]*)\]\(([^)]*)\)").expect("static markdown-link pattern compiles")
     })
 }
 
@@ -16,7 +16,9 @@ fn url_scheme_re() -> &'static Regex {
     // RFC 3986: scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
     // followed by ":" — this covers both hierarchical (scheme://) and
     // opaque (e.g. mailto:, tel:) URI schemes.
-    RE.get_or_init(|| Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-.]*:").unwrap())
+    RE.get_or_init(|| {
+        Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-.]*:").expect("static URL-scheme pattern compiles")
+    })
 }
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -184,7 +186,12 @@ pub(crate) fn scrub_non_content(content: &str) -> String {
         i += 1;
     }
 
-    String::from_utf8(out).expect("blanking preserves UTF-8 structure (bytes replaced with 0x20)")
+    // Every blanked region starts and ends at an ASCII delimiter byte (a
+    // fence or backtick, the byte after a newline) or at EOF, so it covers
+    // whole UTF-8 sequences only, each byte rewritten to ASCII 0x20: the
+    // buffer stays valid UTF-8 by construction.
+    String::from_utf8(out)
+        .expect("scrubbed regions span whole UTF-8 sequences between ASCII delimiters")
 }
 
 fn blank_region(buf: &mut [u8], start: usize, end: usize) {
@@ -210,14 +217,17 @@ pub fn parse_fragment_links(content: &str) -> Vec<FragmentLink> {
     let mut results = Vec::new();
 
     for cap in md_link_re().captures_iter(&scrubbed) {
-        let m = cap.get(0).unwrap();
-        let text = cap[1].to_string();
-        let href_match = cap.get(2).unwrap();
-        let href = &cap[2];
+        let m = cap.get_match();
+        // Both groups are non-optional in the pattern, so every match
+        // carries them.
+        let (Some(text_match), Some(href_match)) = (cap.get(1), cap.get(2)) else {
+            continue;
+        };
+        let text = text_match.as_str().to_string();
+        let href = href_match.as_str();
 
         // Get the original, unscrubbed text from the original content
         // capture[1] corresponds to the text part
-        let text_match = cap.get(1).unwrap();
         let original_text = content[text_match.start()..text_match.end()].to_string();
 
         // The scrubber preserves byte length, so capture group 2's byte range

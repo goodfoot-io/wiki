@@ -48,8 +48,8 @@ fn committed_rename_with_edit_rebalances_blob_refcounts() {
 
     let old_bytes = page_bytes("Line five of the migration guide.");
     let new_bytes = page_bytes("Line five was rewritten in the rename.");
-    let old_oid = compute_blob_oid(old_bytes.as_bytes());
-    let new_oid = compute_blob_oid(new_bytes.as_bytes());
+    let old_oid = compute_blob_oid(old_bytes.as_bytes()).expect("ordinary content hashes");
+    let new_oid = compute_blob_oid(new_bytes.as_bytes()).expect("ordinary content hashes");
     assert_ne!(old_oid.0, new_oid.0, "edit must change the blob OID");
 
     // Commit the original page and index it.

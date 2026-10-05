@@ -3,18 +3,18 @@ title: Wiki CLI
 summary: Fragment link parsing, validation pipeline, and command reference for the wiki CLI tool.
 tags:
   - tooling
-links-reviewed: 5
+links-reviewed: 6
 ---
 
 The wiki CLI validates and maintains fragment links between wiki pages and source code. For the maintenance map of every operator-facing doc and automation prompt that should be checked when CLI behavior changes, see [Wiki Documentation Touchpoints](../meta/wiki-documentation-touchpoints.md).
 
 ## Fragment Link Parsing
 
-The [parser](/packages/cli/src/parser.rs#L6-L12) extracts fragment links from markdown content: [fragment links](/packages/cli/src/parser.rs#L251-L257) (`[label](path#L10-L20)`) are split on `#` into a path part and a line-range fragment. The parser operates on [scrubbed content](/packages/cli/src/parser.rs#L61-L63) — code blocks, inline code, and HTML comments are blanked out before extraction to avoid false matches.
+The [parser](/packages/cli/src/parser.rs#L6-L12) extracts fragment links from markdown content: [fragment links](/packages/cli/src/parser.rs#L261-L267) (`[label](path#L10-L20)`) are split on `#` into a path part and a line-range fragment. The parser operates on [scrubbed content](/packages/cli/src/parser.rs#L63-L65) — code blocks, inline code, and HTML comments are blanked out before extraction to avoid false matches.
 
 ## Validation Pipeline
 
-The [check command](/packages/cli/src/commands/check.rs#L337-L346) runs a full validation pass: [frontmatter parsing](/packages/cli/src/frontmatter.rs#L123-L135), title/alias collision detection, wikilink resolution, and fragment link verification. Line-range links are classified against the page's git-derived anchor epoch — the cited file's content at the commit where the page's `links-reviewed:` value last changed. With `--fix`, links whose certified content moved are relocated automatically and field-less pages get the field initialized; in-place drift is reported and left for review.
+The [check command](/packages/cli/src/commands/check.rs#L338-L347) runs a full validation pass: [frontmatter parsing](/packages/cli/src/frontmatter.rs#L123-L135), title/alias collision detection, wikilink resolution, and fragment link verification. Line-range links are classified against the page's git-derived anchor epoch — the cited file's content at the commit where the page's `links-reviewed:` value last changed. With `--fix`, links whose certified content moved are relocated automatically and field-less pages get the field initialized; in-place drift is reported and left for review.
 
 ## PostToolUse Hook
 

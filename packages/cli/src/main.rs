@@ -1,5 +1,6 @@
 mod commands;
 mod cache;
+mod concurrency;
 mod frontmatter;
 mod git;
 mod headings;
@@ -11,8 +12,9 @@ mod rk64;
 mod version;
 mod wikiignore;
 
-use std::io::{self, BufRead, IsTerminal};
+use std::io::{self, BufRead, IsTerminal, Write as _};
 use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
@@ -227,17 +229,81 @@ fn run_for_each(
     Ok(exit)
 }
 
+/// Exit code for any error the run cannot answer through, a panic included.
+const ERROR_EXIT: i32 = 2;
+
+/// Set once `--format json` is parsed, so a later panic is reported in the
+/// JSON error shape.
+static JSON_ERRORS: AtomicBool = AtomicBool::new(false);
+
+/// Install the binary's panic policy: a panic on any thread is an internal
+/// error — one concise stderr report (`{"error": ...}` under
+/// `--format json`), then exit [`ERROR_EXIT`] from inside the hook, before
+/// any unwinding. No partial result can be printed after a panic, and the
+/// exit is never the runtime's 101, which callers would not recognise as an
+/// error code. Only the binary installs this: library code and test
+/// harnesses keep the default hook, so `catch_unwind` / `resume_unwind`
+/// behave normally under `cargo test`.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        report_panic(info);
+        process::exit(ERROR_EXIT);
+    }));
+}
+
+/// Write the panic report. Never panics itself: write errors are ignored
+/// (there is nowhere left to report them) and no `eprintln!` is used.
+fn report_panic(info: &std::panic::PanicHookInfo<'_>) {
+    let message = info.payload_as_str().unwrap_or("Box<dyn Any>");
+    let location = info
+        .location()
+        .map(|location| format!(" at {location}"))
+        .unwrap_or_default();
+    let thread = std::thread::current();
+    let thread = thread.name().unwrap_or("<unnamed>");
+    let summary = format!("internal error: thread '{thread}' panicked{location}: {message}");
+    let mut stderr = io::stderr().lock();
+    if JSON_ERRORS.load(Ordering::Relaxed) {
+        let _ = writeln!(stderr, "{}", serde_json::json!({ "error": summary }));
+    } else {
+        let _ = writeln!(stderr, "{summary}");
+        // Honours RUST_BACKTRACE / RUST_LIB_BACKTRACE like the default hook.
+        let backtrace = std::backtrace::Backtrace::capture();
+        if backtrace.status() == std::backtrace::BacktraceStatus::Captured {
+            let _ = writeln!(stderr, "{backtrace}");
+        }
+    }
+}
+
+/// Debug builds only: `WIKI_TEST_FAULT_PANIC=main` panics on the main thread
+/// and `=worker` on a scoped worker thread, so tests can drive the panic
+/// hook through the real binary. Release builds compile this out.
+#[cfg(debug_assertions)]
+fn inject_test_panic() {
+    match std::env::var("WIKI_TEST_FAULT_PANIC").as_deref() {
+        Ok("main") => panic!("injected test panic (main thread)"),
+        Ok("worker") => std::thread::scope(|scope| {
+            let worker = scope.spawn(|| panic!("injected test panic (worker thread)"));
+            let Err(payload) = worker.join();
+            std::panic::resume_unwind(payload)
+        }),
+        _ => {}
+    }
+}
+
 fn main() {
     // Capture process entry as early as possible so the `startup` perf event
     // measures the pre-command-span residual (process spawn + repo-root
     // resolution) that the command span itself cannot see.
     let process_start = Instant::now();
+    install_panic_hook();
     let cli = Cli::parse();
     if cli.version {
         println!("wiki {}", crate::version::VERSION);
         process::exit(0);
     }
     let json = matches!(cli.format, Some(Format::Json));
+    JSON_ERRORS.store(json, Ordering::Relaxed);
     perf::enable_stderr(cli.perf);
 
     if !json {
@@ -246,6 +312,9 @@ fn main() {
         }))
         .ok();
     }
+
+    #[cfg(debug_assertions)]
+    inject_test_panic();
 
     let source: index::DocSource = match cli.source {
         SourceArg::Worktree => index::DocSource::WorkingTree,
@@ -271,7 +340,7 @@ fn main() {
             } else {
                 eprintln!("{e:?}");
             }
-            process::exit(2);
+            process::exit(ERROR_EXIT);
         }
     }
 }

@@ -6,7 +6,7 @@ pub mod search;
 pub mod summary;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use miette::{IntoDiagnostic, Result, WrapErr, miette};
 use serde_json::json;
@@ -475,9 +475,12 @@ fn discover_default_files(
                 out
             }));
         }
+        // A panicked probe worker is re-raised, never dropped: its chunk's
+        // pages would otherwise vanish from an apparently complete list.
         for handle in handles {
-            if let Ok(out) = handle.join() {
-                files.extend(out);
+            match handle.join() {
+                Ok(out) => files.extend(out),
+                Err(panic) => std::panic::resume_unwind(panic),
             }
         }
     });
@@ -665,70 +668,52 @@ fn discover_files_by_parallel_walk(
             .wrap_err_with(|| format!("invalid glob pattern: {pattern}"))?;
         glob_builder.add(glob);
     }
-    let glob_set = Arc::new(
-        glob_builder
-            .build()
-            .into_diagnostic()
-            .wrap_err("failed to build glob set")?,
-    );
+    let glob_set = glob_builder
+        .build()
+        .into_diagnostic()
+        .wrap_err("failed to build glob set")?;
 
-    let files = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
-    let first_error = Arc::new(Mutex::new(None::<String>));
-
-    ignore::WalkBuilder::new(base_dir)
+    let walker = ignore::WalkBuilder::new(base_dir)
         .hidden(false)
         .git_global(false)
-        .build_parallel()
-        .run(|| {
-            let glob_set = Arc::clone(&glob_set);
-            let files = Arc::clone(&files);
-            let first_error = Arc::clone(&first_error);
-            let base_dir = base_dir.to_path_buf();
-            let repo_root = repo_root.to_path_buf();
-            let wiki_ignore = Arc::clone(&wiki_ignore);
-
-            Box::new(move |entry| {
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(error) => {
-                        let mut guard = first_error.lock().expect("walk error lock");
-                        if guard.is_none() {
-                            *guard = Some(error.to_string());
-                        }
-                        return ignore::WalkState::Quit;
-                    }
-                };
-
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                    return ignore::WalkState::Continue;
+        .build_parallel();
+    // Each walker thread collects into its own buffer. A walk error is
+    // collected as an item and stops the whole walk; any error then fails
+    // the discovery, so a partial file list is never returned.
+    let found = crate::concurrency::collect_parallel_walk(
+        walker,
+        |entry, found: &mut Vec<std::result::Result<PathBuf, ignore::Error>>| {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    found.push(Err(error));
+                    return ignore::WalkState::Quit;
                 }
+            };
 
-                let repo_relative = path.strip_prefix(&repo_root).unwrap_or(path);
-                if wiki_ignore.is_ignored(repo_relative) {
-                    return ignore::WalkState::Continue;
-                }
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                return ignore::WalkState::Continue;
+            }
 
-                let relative = path.strip_prefix(&base_dir).unwrap_or(path);
-                if glob_set.is_match(relative) {
-                    files
-                        .lock()
-                        .expect("walk files lock")
-                        .push(path.to_path_buf());
-                }
+            let repo_relative = path.strip_prefix(repo_root).unwrap_or(path);
+            if wiki_ignore.is_ignored(repo_relative) {
+                return ignore::WalkState::Continue;
+            }
 
-                ignore::WalkState::Continue
-            })
-        });
+            let relative = path.strip_prefix(base_dir).unwrap_or(path);
+            if glob_set.is_match(relative) {
+                found.push(Ok(path.to_path_buf()));
+            }
 
-    if let Some(error) = first_error.lock().expect("walk error lock").clone() {
-        return Err(miette!("error walking directory: {error}"));
-    }
+            ignore::WalkState::Continue
+        },
+    );
 
-    let mut files = Arc::into_inner(files)
-        .expect("parallel walk files still referenced")
-        .into_inner()
-        .expect("parallel walk files lock poisoned");
+    let mut files = found
+        .into_iter()
+        .collect::<std::result::Result<Vec<PathBuf>, ignore::Error>>()
+        .map_err(|error| miette!("error walking directory: {error}"))?;
     files.sort();
     files.dedup();
     Ok(files)

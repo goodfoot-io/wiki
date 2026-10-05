@@ -27,6 +27,7 @@ use std::time::Instant;
 
 use thiserror::Error;
 
+use crate::concurrency::lock;
 use crate::frontmatter::{self, scalar_to_string};
 use crate::git::GitSnapshot;
 use crate::index::DocSource;
@@ -344,16 +345,19 @@ fn walk_anchor_epoch(
             // commit — and instead of opening the repository here, which
             // re-reads every pack index on a run that walks many pages.
             let mut name = page_path.to_string();
-            let mut walked: Vec<(String, String, LinksReviewedRead)> = Vec::new();
+            // Each entry is `(sha, name, value)`: only readable values are
+            // representable, so an unparseable commit cannot reach the
+            // comparison below.
+            let mut walked: Vec<(String, String, Option<String>)> = Vec::new();
             for (sha, rows) in parse_name_status_log(&log) {
                 match blob_links_reviewed(reader, &sha, &name)? {
                     Some(LinksReviewedRead::Unparseable) => {} // skipped entirely
                     Some(LinksReviewedRead::Readable(v)) => {
-                        walked.push((sha.clone(), name.clone(), LinksReviewedRead::Readable(v)));
+                        walked.push((sha.clone(), name.clone(), v));
                     }
                     None => {
                         failed_reads.push((sha.clone(), name.clone()));
-                        walked.push((sha.clone(), name.clone(), LinksReviewedRead::Readable(None)));
+                        walked.push((sha.clone(), name.clone(), None));
                     }
                 }
                 // The pre-commit name for the next (older) commit comes from
@@ -367,23 +371,13 @@ fn walk_anchor_epoch(
             for pair in walked.windows(2) {
                 let (newer, older) = (&pair[0], &pair[1]);
                 if newer.2 != older.2 {
-                    // Invariant: unparseable commits were skipped, so both
-                    // sides of every pair are readable — the newer side
+                    // Both sides are readable values — the newer side
                     // anchors, whether it carries the field or the field is
                     // absent there.
-                    return Ok(LinkEpoch::Commit {
-                        sha: newer.0.clone(),
-                        path_at_commit: newer.1.clone(),
-                        value: match &newer.2 {
-                            LinksReviewedRead::Readable(v) => v.clone(),
-                            LinksReviewedRead::Unparseable => {
-                                unreachable!("unparseable commits are skipped")
-                            }
-                        },
-                    });
+                    return Ok(newer.clone());
                 }
             }
-            let Some(anchor) = walked.last() else {
+            let Some(anchor) = walked.pop() else {
                 // Every walked commit carried unparseable YAML: no readable
                 // value exists to anchor on. Fail closed rather than
                 // anchoring at a broken commit.
@@ -391,19 +385,12 @@ fn walk_anchor_epoch(
                     page: page_path.to_string(),
                 });
             };
-            Ok(LinkEpoch::Commit {
-                sha: anchor.0.clone(),
-                path_at_commit: anchor.1.clone(),
-                value: match &anchor.2 {
-                    LinksReviewedRead::Readable(v) => v.clone(),
-                    LinksReviewedRead::Unparseable => {
-                        unreachable!("unparseable commits are skipped")
-                    }
-                },
-            })
+            Ok(anchor)
     })();
     crate::perf::anchor_cache_add_leg("walk", walk_start.elapsed().as_nanos() as u64);
-    let epoch = epoch?;
+    // The walk resolves to a commit anchor `(sha, path_at_commit, value)`
+    // or fails closed.
+    let (sha, path_at_commit, value) = epoch?;
 
     // The write: the walk's epoch is cached only when no failed read probed
     // present or unknown — an unreadable blob is not a defined walk input,
@@ -419,24 +406,20 @@ fn walk_anchor_epoch(
         }
     }
     if cacheable {
-        let LinkEpoch::Commit {
-            sha,
-            path_at_commit,
-            value,
-        } = &epoch
-        else {
-            unreachable!("the walk resolves to a commit epoch or fails closed")
-        };
         let _ = cache.upsert_walk(
             &cache_key,
             page_path,
             &crate::cache::key::sha256_hex(log.as_bytes()),
-            sha,
-            path_at_commit,
+            &sha,
+            &path_at_commit,
             value.as_deref(),
         );
     }
-    Ok(epoch)
+    Ok(LinkEpoch::Commit {
+        sha,
+        path_at_commit,
+        value,
+    })
 }
 
 /// One `--name-status` row: the status token (letter plus informational
@@ -781,14 +764,6 @@ impl DriftRunCtx {
     }
 }
 
-/// Lock a run-context mutex, recovering the data if a worker panicked while
-/// holding it: the guarded values are plain caches of read-only repository
-/// facts, so a poisoned lock leaves them consistent — and a cache may never
-/// be the reason a run fails.
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
-}
-
 /// Apply `map` to every item across the run's bounded worker count (the
 /// [`MoveScanCtx::precapture`] idiom), collecting the results in item order so
 /// a parallel pass is indistinguishable from the serial loop it replaces.
@@ -1025,20 +1000,22 @@ impl<'a> MoveScanCtx<'a> {
         repo_root: &Path,
         source: DocSource,
     ) -> Result<&[CandidateFile], EpochError> {
-        if self.candidates.is_none() {
-            self.candidates = Some(candidate_files(reader, repo_root, source)?);
-        }
-        Ok(self.candidates.as_deref().expect("just populated"))
+        let candidates = match self.candidates.take() {
+            Some(candidates) => candidates,
+            None => candidate_files(reader, repo_root, source)?,
+        };
+        Ok(self.candidates.insert(candidates).as_slice())
     }
 
     fn uncommitted_renames(
         &mut self,
         repo_root: &Path,
     ) -> Result<&[(String, String)], EpochError> {
-        if self.uncommitted_renames.is_none() {
-            self.uncommitted_renames = Some(uncommitted_rename_rows(repo_root)?);
-        }
-        Ok(self.uncommitted_renames.as_deref().expect("just populated"))
+        let renames = match self.uncommitted_renames.take() {
+            Some(renames) => renames,
+            None => uncommitted_rename_rows(repo_root)?,
+        };
+        Ok(self.uncommitted_renames.insert(renames).as_slice())
     }
 }
 

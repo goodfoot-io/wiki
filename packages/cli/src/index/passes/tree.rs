@@ -11,10 +11,6 @@ use crate::wikiignore::WikiIgnore;
 
 use super::{DeltaAction, ObservedBlob, PassDelta};
 
-/// SHA-1 of the empty tree, used as the prior tree when `last_head_tree_oid`
-/// is `None`.
-const EMPTY_TREE_OID: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-
 pub fn pass_tree(
     repo: &gix::Repository,
     last_head_tree_oid: Option<gix::ObjectId>,
@@ -25,9 +21,8 @@ pub fn pass_tree(
         Err(_) => return Ok(Vec::new()),
     };
 
-    let old_tree_id = last_head_tree_oid.unwrap_or_else(|| {
-        gix::ObjectId::from_hex(EMPTY_TREE_OID.as_bytes()).expect("static empty tree oid")
-    });
+    // With no prior tree, diff against the repository's empty tree.
+    let old_tree_id = last_head_tree_oid.unwrap_or_else(|| repo.object_hash().empty_tree());
 
     if old_tree_id == new_tree_id {
         return Ok(Vec::new());

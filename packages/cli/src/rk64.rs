@@ -95,42 +95,27 @@ fn line_range_region(bytes: &[u8], start_line: u32, end_line: u32) -> Option<(us
     // one ending in `\n` does not (matching `str::lines`).
     let trailing = !bytes.is_empty() && bytes[len - 1] != b'\n';
 
-    let mut region_start: Option<usize> = if lo == 0 { Some(0) } else { None };
-    let mut region_end: Option<usize> = None;
-    let mut nl = 0usize; // count of '\n' seen so far
-    let mut last_nl: Option<usize> = None;
-    for (i, &b) in bytes.iter().enumerate() {
-        if b == b'\n' {
-            // This is the `(nl + 1)`-th newline: it ends line `nl` at `i` and
-            // starts line `nl + 1` at `i + 1`.
-            if nl + 1 == lo {
-                region_start = Some(i + 1);
-            }
-            if nl + 1 == hi {
-                region_end = Some(i);
-            }
-            nl += 1;
-            last_nl = Some(i);
-            if region_end.is_some() {
-                break; // found the `end`-terminating newline — stop early.
-            }
-        }
-    }
-
-    let line_count = nl + usize::from(trailing);
-    if lo >= line_count {
-        // `start` is past every line — an empty range.
+    // The `k`-th newline (0-based) ends line `k` and starts line `k + 1`.
+    // One forward pass: it stops at the `end`-terminating newline.
+    let mut newlines = bytes.iter().enumerate().filter_map(|(i, &b)| (b == b'\n').then_some(i));
+    // Line `lo` starts after the `lo`-th newline (`None`: fewer newlines
+    // than that, so `start` is past every line).
+    let rs = if lo == 0 { 0 } else { newlines.nth(lo - 1)? + 1 };
+    if rs >= len {
+        // Nothing follows that newline (or the buffer is empty): line `lo`
+        // does not exist — an empty range.
         return None;
     }
-    let rs = region_start.expect("region_start set for lo < line_count");
-    // `region_end == None` means the range runs to (or past) EOF: the last
-    // wanted line is the final line, whose content ends at EOF when it is
-    // unterminated, or at the last newline when the buffer ends in `\n`.
-    let re = region_end.unwrap_or(if trailing {
-        len
-    } else {
-        last_nl.expect("a terminated non-empty range has a final newline")
-    });
+    // Line `hi - 1` ends at the `hi`-th newline overall; `lo` newlines are
+    // already consumed. `None` means the range runs to (or past) EOF: the
+    // last wanted line is the final line, whose content ends at EOF when it
+    // is unterminated, or at the buffer's final byte — its last newline —
+    // when the buffer ends in `\n`.
+    let re = match newlines.nth(hi - lo - 1) {
+        Some(end_newline) => end_newline,
+        None if trailing => len,
+        None => len - 1,
+    };
     Some((rs, re))
 }
 
@@ -768,6 +753,31 @@ mod tests {
                 cheap_fingerprint_with_extent(without_nl, &range),
                 "trailing newline must not add a phantom final line"
             );
+        }
+    }
+
+    #[test]
+    fn line_range_region_matches_str_lines_exhaustively() {
+        // Every buffer over {'a', '\n'} up to 8 bytes, every extent up to
+        // L10: the region is exactly the `str::lines` slice, clamped to EOF
+        // and joined with `\n`, and `None` exactly when that slice is empty.
+        for len in 0..=8u32 {
+            for mask in 0..(1u32 << len) {
+                let bytes: Vec<u8> =
+                    (0..len).map(|i| if mask >> i & 1 == 1 { b'\n' } else { b'a' }).collect();
+                let text = std::str::from_utf8(&bytes).expect("ascii");
+                let lines: Vec<&str> = text.lines().collect();
+                for start in 0..=10u32 {
+                    for end in 0..=10u32 {
+                        let lo = start.saturating_sub(1) as usize;
+                        let hi = (end as usize).min(lines.len());
+                        let want = (start > 0 && lo < hi).then(|| lines[lo..hi].join("\n"));
+                        let got = line_range_region(&bytes, start, end)
+                            .map(|(rs, re)| String::from_utf8_lossy(&bytes[rs..re]).into_owned());
+                        assert_eq!(got, want, "{text:?} L{start}-L{end}");
+                    }
+                }
+            }
         }
     }
 

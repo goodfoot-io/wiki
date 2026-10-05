@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use miette::Result;
+use miette::{IntoDiagnostic, Result};
 use serde::Serialize;
 
 use crate::index::{DocSource, ResolvedPage, SearchResult, WikiIndex};
@@ -75,7 +75,7 @@ pub fn run(title: &str, json: bool, repo_root: &Path, source: DocSource) -> Resu
         Some(page) => {
             let output = summary_output(page);
             if json {
-                println!("{}", serde_json::to_string_pretty(&output).unwrap());
+                println!("{}", serde_json::to_string_pretty(&output).into_diagnostic()?);
             } else {
                 println!("{}", format_text_summary(&output, repo_root));
             }

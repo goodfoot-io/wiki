@@ -2,7 +2,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use miette::Result;
+use miette::{IntoDiagnostic, Result};
 use serde::Serialize;
 
 use crate::commands::discover_files;
@@ -108,8 +108,9 @@ impl ContentCache {
                 }));
             }
             for handle in handles {
-                if let Ok(out) = handle.join() {
-                    collected.extend(out);
+                match handle.join() {
+                    Ok(out) => collected.extend(out),
+                    Err(panic) => std::panic::resume_unwind(panic),
                 }
             }
         });
@@ -543,7 +544,7 @@ fn run_inner(request: &CheckRequest<'_>) -> Result<i32> {
                         "certificationSkips": plan.certification_skips,
                         "errors": diagnostics,
                     }))
-                    .unwrap()
+                    .into_diagnostic()?
                 );
             } else if plan.fixes.is_empty() && plan.skipped.is_empty() {
                 println!("no fixes to apply");
@@ -626,7 +627,7 @@ fn run_inner(request: &CheckRequest<'_>) -> Result<i32> {
                     "certificationSkips": plan.certification_skips,
                     "errors": post_diagnostics,
                 }))
-                .unwrap()
+                .into_diagnostic()?
             );
         } else {
             let rendered = render_diagnostics(&post_diagnostics);
@@ -650,7 +651,8 @@ fn run_inner(request: &CheckRequest<'_>) -> Result<i32> {
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({ "errors": diagnostics })).unwrap()
+            serde_json::to_string_pretty(&serde_json::json!({ "errors": diagnostics }))
+                .into_diagnostic()?
         );
     } else {
         print!("{}", render_diagnostics(&diagnostics));

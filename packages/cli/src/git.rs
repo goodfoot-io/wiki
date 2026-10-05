@@ -216,48 +216,42 @@ pub fn repo_inventory(repo: &Path, walk_root: &Path, prefix: Option<&Path>) -> R
 /// filesystem.
 pub(crate) fn untracked_walk(repo: &Path, walk_root: &Path) -> (Vec<String>, u64) {
     let visited = AtomicU64::new(0);
-    let collected: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-    ignore::WalkBuilder::new(walk_root)
+    let walker = ignore::WalkBuilder::new(walk_root)
         .hidden(false)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
         .require_git(false)
         .follow_links(false)
-        .build_parallel()
-        .run(|| {
-            Box::new(|result| {
-                // The old `.flatten()` silently dropped errors — skip on error.
-                let Ok(entry) = result else {
-                    return ignore::WalkState::Continue;
-                };
-                let entry_path = entry.path();
-                if entry_path == walk_root {
+        .build_parallel();
+    let matched = crate::concurrency::collect_parallel_walk(
+        walker,
+        |result, matched: &mut Vec<String>| {
+            // The old `.flatten()` silently dropped errors — skip on error.
+            let Ok(entry) = result else {
+                return ignore::WalkState::Continue;
+            };
+            let entry_path = entry.path();
+            if entry_path == walk_root {
+                return ignore::WalkState::Continue;
+            }
+            visited.fetch_add(1, Ordering::Relaxed);
+            // Skip directories: we want files only. The walker yields both.
+            if entry.file_type().is_some_and(|t| t.is_dir()) {
+                return ignore::WalkState::Continue;
+            }
+            // Skip `.git` and anything inside it.
+            if let Ok(rel) = entry_path.strip_prefix(repo) {
+                if rel.components().next().map(|c| c.as_os_str())
+                    == Some(std::ffi::OsStr::new(".git"))
+                {
                     return ignore::WalkState::Continue;
                 }
-                visited.fetch_add(1, Ordering::Relaxed);
-                // Skip directories: we want files only. The walker yields both.
-                if entry.file_type().is_some_and(|t| t.is_dir()) {
-                    return ignore::WalkState::Continue;
-                }
-                // Skip `.git` and anything inside it.
-                if let Ok(rel) = entry_path.strip_prefix(repo) {
-                    if rel.components().next().map(|c| c.as_os_str())
-                        == Some(std::ffi::OsStr::new(".git"))
-                    {
-                        return ignore::WalkState::Continue;
-                    }
-                    collected
-                        .lock()
-                        .expect("repo_inventory walk mutex poisoned")
-                        .push(rel.to_string_lossy().into_owned());
-                }
-                ignore::WalkState::Continue
-            })
-        });
-    let matched = collected
-        .into_inner()
-        .expect("repo_inventory walk mutex poisoned");
+                matched.push(rel.to_string_lossy().into_owned());
+            }
+            ignore::WalkState::Continue
+        },
+    );
     (matched, visited.load(Ordering::Relaxed))
 }
 

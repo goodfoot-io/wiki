@@ -120,17 +120,27 @@ fn read_blob_bytes(
 /// is diff-based and cannot observe a wikiignore-only commit, so a change in
 /// this hash relative to the base generation forces a full bidirectional
 /// Tree reconciliation.
-pub(crate) fn compute_wikiignore_hash(repo_root: &Path) -> [u8; 20] {
+///
+/// # Errors
+///
+/// Fails (naming the path) when `.wikiignore` exists but cannot be read, or
+/// when its contents are a detected SHA-1 collision attack.
+pub(crate) fn compute_wikiignore_hash(repo_root: &Path) -> Result<[u8; 20]> {
     let path = repo_root.join(crate::index::WIKIIGNORE_RELPATH);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ZERO_WIKIIGNORE_HASH);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("read {}", path.display()));
+        }
+    };
+    let digest = gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, &bytes)
+        .with_context(|| format!("hash {}", path.display()))?;
     let mut out = ZERO_WIKIIGNORE_HASH;
-    if let Ok(bytes) = std::fs::read(&path) {
-        let digest = gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, &bytes)
-            .expect("SHA-1 hashing is infallible")
-            .as_bytes()
-            .to_vec();
-        out.copy_from_slice(&digest);
-    }
-    out
+    out.copy_from_slice(digest.as_bytes());
+    Ok(out)
 }
 
 /// Drive Pass 1, Pass 2, Pass 3 against the newest generation's delta base,
@@ -173,7 +183,7 @@ pub fn refresh(
     // absent). A change relative to the base generation is the sole signal
     // to run the full bidirectional Tree reconciliation (un-ignore re-adds
     // as well as ignore removes).
-    let new_wikiignore_hash = compute_wikiignore_hash(repo_root);
+    let new_wikiignore_hash = compute_wikiignore_hash(repo_root)?;
     let wikiignore_changed = match &base {
         Some(generation) => new_wikiignore_hash != generation.fingerprint.wikiignore_hash,
         None => true,
@@ -519,7 +529,7 @@ mod tests {
         let content_a =
             b"---\ntitle: Original\nsummary: Original content.\n---\n\nBody original.\n";
         std::fs::write(root.join(rel), content_a).expect("write A");
-        let oid_a = compute_blob_oid(content_a);
+        let oid_a = compute_blob_oid(content_a).expect("ordinary content hashes");
 
         let mut members = HashMap::new();
         let mut builder = CandidateBuilder {

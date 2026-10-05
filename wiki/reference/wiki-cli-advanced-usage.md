@@ -3,7 +3,7 @@ title: Wiki CLI Advanced Usage
 summary: Advanced wiki CLI usage including glob targeting, JSON output, and stdin/path input.
 tags:
   - reference
-links-reviewed: 3
+links-reviewed: 4
 ---
 
 # Wiki CLI Advanced Usage
@@ -32,7 +32,7 @@ wiki check --fix
 
 `--fix` only rewrites what it can resolve unambiguously: links whose certified content moved are re-pointed, and pages with line-range links but no `links-reviewed:` field get the field initialized. In-place drift, ambiguous moves, and unverifiable links are skipped with a named reason — see the `resolving-skipped-fixes` skill section.
 
-`wiki check` memoizes its history walks in a disposable cache under the repository's git common directory; [the `--clear-cache` flag](/packages/cli/src/main.rs#L346-L347) deletes it and exits 0:
+`wiki check` memoizes its history walks in a disposable cache under the repository's git common directory; [the `--clear-cache` flag](/packages/cli/src/main.rs#L415-L416) deletes it and exits 0:
 
 ```bash
 # Best-effort delete of the anchor cache directory; prints the path
@@ -67,7 +67,7 @@ When multiple inputs are provided via stdin, the exit code reflects the worst re
 
 ## Targeting Specific Files
 
-All commands accept explicit glob patterns instead of scanning [the current working directory](/packages/cli/src/main.rs#L288-L291):
+All commands accept explicit glob patterns instead of scanning [the current working directory](/packages/cli/src/main.rs#L357-L360):
 
 ```bash
 wiki check wiki/some-section/**/*.md
@@ -75,7 +75,7 @@ wiki check wiki/some-section/**/*.md
 
 ## Excluding Non-Wiki Files
 
-[`./.wikiignore`](/packages/cli/src/wikiignore.rs) excludes paths from `wiki check` entirely — before frontmatter parsing, link validation, or line-range drift classification ever runs. It lives at the repository root, uses gitignore syntax, and patterns are matched relative to the repository root. Every discovery path — [`discover_files`](/packages/cli/src/commands/mod.rs#L231-L311), [`discover_files_by_parallel_walk`](/packages/cli/src/commands/mod.rs#L655-L727), and [`discover_files_by_glob_in_source`](/packages/cli/src/commands/mod.rs#L572-L610) — consults it before any file is treated as a wiki page, for `--source=worktree`, `index`, and `head` alike, and regardless of whether an explicit glob is passed.
+[`./.wikiignore`](/packages/cli/src/wikiignore.rs) excludes paths from `wiki check` entirely — before frontmatter parsing, link validation, or line-range drift classification ever runs. It lives at the repository root, uses gitignore syntax, and patterns are matched relative to the repository root. Every discovery path — [`discover_files`](/packages/cli/src/commands/mod.rs#L231-L311), [`discover_files_by_parallel_walk`](/packages/cli/src/commands/mod.rs#L658-L720), and [`discover_files_by_glob_in_source`](/packages/cli/src/commands/mod.rs#L575-L613) — consults it before any file is treated as a wiki page, for `--source=worktree`, `index`, and `head` alike, and regardless of whether an explicit glob is passed.
 
 This is the escape hatch for Markdown that lives in the repo but isn't a wiki page — agent instructions, changelogs, vendored docs — so it never needs frontmatter and never counts against link or drift validation.
 
@@ -88,7 +88,7 @@ With that entry in place, `wiki check CLAUDE.md` (or a glob that happens to matc
 
 ## JSON Output
 
-Every command accepts [`--format json`](/packages/cli/src/main.rs#L45-L47) for scripting:
+Every command accepts [`--format json`](/packages/cli/src/main.rs#L47-L49) for scripting:
 
 ```bash
 wiki check --format json
@@ -216,4 +216,4 @@ All commands use a consistent three-value exit code convention:
 |------|---------|
 | 0 | Success (or success with non-fatal warnings) |
 | 1 | Validation / business-logic errors found for commands that use that state |
-| 2 | Runtime or system error |
+| 2 | Runtime or system error, including an internal error (a panic on any thread), reported on stderr as `internal error: …` (`{"error": "internal error: …"}` under `--format json`) |

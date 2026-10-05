@@ -256,8 +256,9 @@ fn file_identity(file: &File) -> io::Result<(u64, u64)> {
     use windows_sys::Win32::Storage::FileSystem::{
         GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
     };
-    // SAFETY: `info` is a valid, fully initialized `BY_HANDLE_FILE_INFORMATION`
-    // for the call's duration and the retained handle is owned by `file`.
+    // SAFETY: `BY_HANDLE_FILE_INFORMATION` is a `#[repr(C)]` plain-old-data
+    // struct of integer and `FILETIME` (integer pair) fields, so the all-zero
+    // bit pattern is a valid value of the type.
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
     // SAFETY: the raw handle is live (borrowed from `file`) and `info` is a
     // correctly sized out-parameter.

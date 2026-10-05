@@ -77,7 +77,7 @@ fn fingerprint(seed: u8) -> StateFingerprint {
 fn page_blob(title: &str, body: &str) -> (BlobOid, WikiBlobFields) {
     let raw = format!("---\ntitle: {title}\nsummary: Summary of {title}.\n---\n\n{body}\n");
     (
-        compute_blob_oid(raw.as_bytes()),
+        compute_blob_oid(raw.as_bytes()).expect("ordinary content hashes"),
         WikiBlobFields {
             title: title.to_string(),
             summary: format!("Summary of {title}."),

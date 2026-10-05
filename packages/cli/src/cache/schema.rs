@@ -558,7 +558,12 @@ pub fn drop_tier_tables(conn: &Connection, tier: Tier) -> Result<(), CacheError>
 /// the file owner-only with symlink refusal. An existing file is opened,
 /// never truncated — SQLite adopts it as-is.
 pub(crate) fn prepare_db_file(db_path: &Path) -> Result<(), CacheError> {
-    let dir = db_path.parent().expect("db path has a parent");
+    let dir = db_path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("store path {} has no parent directory", db_path.display()),
+        )
+    })?;
     let dir_fd = crate::store::fd::DirFd::open(dir)?;
     dir_fd.validate_private()?;
     dir_fd.create_file(DB_FILE_NAME)?;
@@ -582,7 +587,7 @@ pub fn quarantine(db_path: &Path) -> Result<(), CacheError> {
     // Rename aside with a timestamp, preserving the suspect content.
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system clock before unix epoch")
+        .map_err(std::io::Error::other)?
         .as_nanos();
     let aside = db_path.with_file_name(format!("{DB_FILE_NAME}.{stamp}.quarantine"));
     fs::rename(db_path, &aside)?;
@@ -622,22 +627,23 @@ pub fn quarantine(db_path: &Path) -> Result<(), CacheError> {
 pub(crate) fn retry_busy<T>(
     mut run: impl FnMut() -> Result<T, CacheError>,
 ) -> Result<T, CacheError> {
-    let mut last_busy = None;
-    for attempt in 0..5 {
+    const ATTEMPTS: u64 = 5;
+    let mut attempt = 1;
+    loop {
         match run() {
-            Err(e @ CacheError::Sqlite(rusqlite::Error::SqliteFailure(f, _)))
-                if f.code == ErrorCode::DatabaseBusy =>
+            Err(CacheError::Sqlite(rusqlite::Error::SqliteFailure(f, _)))
+                if f.code == ErrorCode::DatabaseBusy && attempt < ATTEMPTS =>
             {
-                last_busy = Some(e);
-                std::thread::sleep(Duration::from_millis(10 * attempt as u64));
+                std::thread::sleep(Duration::from_millis(10 * attempt));
+                attempt += 1;
             }
+            // Success, a non-BUSY error, or the fifth consecutive BUSY: the
+            // last falls through to the fail-open contract (plan decision 6)
+            // — returned as the failure, the cache is unavailable for the
+            // run. Never a panic, never a quarantine.
             other => return other,
         }
     }
-    // Five consecutive BUSY results: fall through to the fail-open contract
-    // (plan decision 6) — the fifth BUSY is returned as the failure, the
-    // cache is unavailable for the run. Never a panic, never a quarantine.
-    Err(last_busy.expect("the loop only exits after five BUSY results"))
 }
 
 /// Open the database at `db_path` applying the binding open order (plan

@@ -310,7 +310,9 @@ impl WikiIndex {
             "index.fast_gate",
             serde_json::json!({}),
             || -> Result<Option<i64>> {
-                let wikiignore_hash = passes::compute_wikiignore_hash(repo_root);
+                let Ok(wikiignore_hash) = passes::compute_wikiignore_hash(repo_root) else {
+                    return Ok(None);
+                };
                 let fingerprint = match freshness::current_fingerprint(
                     repo_root,
                     &dot_git,
@@ -350,10 +352,13 @@ impl WikiIndex {
             // canonical digest; if none is retained, fall back to uncached
             // computation: a full refresh against an ephemeral in-memory
             // tier, answering exactly what an uncontended cold run would.
-            let wikiignore_hash = passes::compute_wikiignore_hash(repo_root);
-            let own = freshness::current_fingerprint(repo_root, &dot_git, None, &wikiignore_hash)
+            let own = passes::compute_wikiignore_hash(repo_root)
                 .ok()
-                .flatten()
+                .and_then(|wikiignore_hash| {
+                    freshness::current_fingerprint(repo_root, &dot_git, None, &wikiignore_hash)
+                        .ok()
+                        .flatten()
+                })
                 .and_then(|fingerprint| index.store.lookup_digest(&fingerprint).ok().flatten());
             if let Some(generation) = own {
                 index.served_gen = Some(generation.gen_id);
@@ -366,15 +371,13 @@ impl WikiIndex {
         // exact state while we waited for the lock. A hit skips the refresh
         // entirely; the guard drops before we return either way.
         {
-            let wikiignore_hash = passes::compute_wikiignore_hash(repo_root);
-            let double_checked = freshness::current_fingerprint(
-                repo_root,
-                &dot_git,
-                None,
-                &wikiignore_hash,
-            )
-            .ok()
-            .flatten()
+            let double_checked = passes::compute_wikiignore_hash(repo_root)
+                .ok()
+                .and_then(|wikiignore_hash| {
+                    freshness::current_fingerprint(repo_root, &dot_git, None, &wikiignore_hash)
+                        .ok()
+                        .flatten()
+                })
             .and_then(|fingerprint| index.store.lookup_digest(&fingerprint).ok().flatten());
             if let Some(generation) = double_checked {
                 index.served_gen = Some(generation.gen_id);
@@ -536,14 +539,13 @@ impl WikiIndex {
     /// or unreadable between gate pin and query) is a REBUILD, not a silent
     /// empty. One diagnostic line, then a fresh prepare — whose own
     /// gate/refresh republishes this worktree's state — answers the query.
-    fn rebuild_floor(&self, context: &str) -> Result<Option<WikiIndex>> {
+    /// Returns the rebuilt index with the generation it serves, or `None`
+    /// when the rebuild serves nothing.
+    fn rebuild_floor(&self, context: &str) -> Result<Option<(WikiIndex, i64)>> {
         warn_served_lost_once();
         let rebuilt = Self::prepare_for_source(&self.repo_root, self.source)?;
-        if rebuilt.served().is_none() {
-            let _ = context;
-            return Ok(None);
-        }
-        Ok(Some(rebuilt))
+        let _ = context;
+        Ok(rebuilt.served().map(|gen_id| (rebuilt, gen_id)))
     }
 
     /// Resolve a single page by title or alias (case-insensitive), or by a
@@ -562,10 +564,9 @@ impl WikiIndex {
         })? {
             return Ok(resolved);
         }
-        let Some(rebuilt) = self.rebuild_floor("resolve_page")? else {
+        let Some((rebuilt, gen_id)) = self.rebuild_floor("resolve_page")? else {
             return Ok(None);
         };
-        let gen_id = rebuilt.served().expect("rebuild_floor checked");
         rebuilt
             .store
             .read_txn(|conn| search::resolve_page(conn, &self.repo_root, gen_id, self.source, input))
@@ -591,10 +592,9 @@ impl WikiIndex {
         let (mut rows, total) = match served {
             Some(pair) => pair,
             None => {
-                let Some(rebuilt) = self.rebuild_floor("search_weighted")? else {
+                let Some((rebuilt, gen_id)) = self.rebuild_floor("search_weighted")? else {
                     return Ok((Vec::new(), 0));
                 };
-                let gen_id = rebuilt.served().expect("rebuild_floor checked");
                 rebuilt
                     .store
                     .read_txn(|conn| {
@@ -684,10 +684,9 @@ impl WikiIndex {
         let raw_rows = match raw_rows {
             Some(rows) => rows,
             None => {
-                let Some(rebuilt) = self.rebuild_floor("list_pages")? else {
+                let Some((rebuilt, gen_id)) = self.rebuild_floor("list_pages")? else {
                     return Ok(Vec::new());
                 };
-                let gen_id = rebuilt.served().expect("rebuild_floor checked");
                 rebuilt.serve_list_pages_raw(gen_id, src)?
             }
         };
@@ -746,10 +745,9 @@ impl WikiIndex {
         match served {
             Some((rows, _)) => Ok(rows),
             None => {
-                let Some(rebuilt) = self.rebuild_floor("suggest")? else {
+                let Some((rebuilt, gen_id)) = self.rebuild_floor("suggest")? else {
                     return Ok(Vec::new());
                 };
-                let gen_id = rebuilt.served().expect("rebuild_floor checked");
                 rebuilt
                     .store
                     .read_txn(|conn| {

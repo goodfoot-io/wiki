@@ -1933,6 +1933,9 @@ fn classify_journal(dir: &Path, identity: &str, now: u64) -> Disposition {
     if manifest.entries.is_empty() || manifest.scope_digest.len() != 64 {
         return Disposition::Stale;
     }
+    // Each stage is read once: the bytes verified here are the bytes
+    // applied, so a stage file swapped after verification is never used.
+    let mut stages = Vec::with_capacity(manifest.entries.len());
     for entry in &manifest.entries {
         if !is_safe_journal_rel(&entry.path_rel) || !is_safe_stage_name(&entry.stage_file) {
             return Disposition::Stale;
@@ -1943,6 +1946,10 @@ fn classify_journal(dir: &Path, identity: &str, now: u64) -> Disposition {
         if crate::cache::key::sha256_hex(&bytes) != entry.sha256 {
             return Disposition::Stale;
         }
+        let Ok(content) = String::from_utf8(bytes) else {
+            return Disposition::Stale;
+        };
+        stages.push((entry.path_rel.clone(), content));
     }
     // Digest mismatch fails toward recompute: the recorded digest must be
     // exactly what the manifest's own entries plus the repo identity derive.
@@ -1954,14 +1961,6 @@ fn classify_journal(dir: &Path, identity: &str, now: u64) -> Disposition {
     sorted.sort();
     if scope_digest(&sorted, identity) != manifest.scope_digest {
         return Disposition::Stale;
-    }
-    let mut stages = Vec::with_capacity(manifest.entries.len());
-    for entry in &manifest.entries {
-        let bytes = std::fs::read(dir.join(&entry.stage_file)).expect("stage read verified above");
-        let Ok(content) = String::from_utf8(bytes) else {
-            return Disposition::Stale;
-        };
-        stages.push((entry.path_rel.clone(), content));
     }
     Disposition::Apply(
         Box::new(LoadedJournal { stages }),

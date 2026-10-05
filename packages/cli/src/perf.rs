@@ -69,14 +69,11 @@ static DIAGNOSTICS: Mutex<Option<BTreeMap<String, u64>>> = Mutex::new(None);
 /// Publish one run's store_events aggregation, replacing any earlier
 /// snapshot. An empty map clears the slot so a clean run omits the field.
 pub fn set_diagnostic_counts(counts: BTreeMap<String, u64>) {
-    if let Ok(mut slot) = DIAGNOSTICS.lock() {
-        *slot = (!counts.is_empty()).then_some(counts);
-    }
+    *crate::concurrency::lock(&DIAGNOSTICS) = (!counts.is_empty()).then_some(counts);
 }
 
 fn diagnostic_snapshot() -> Option<BTreeMap<String, u64>> {
-    let guard = DIAGNOSTICS.lock().ok()?;
-    guard.clone()
+    crate::concurrency::lock(&DIAGNOSTICS).clone()
 }
 
 /// Emit the run's one aggregated `anchor_cache` event (plan decision 7).
@@ -247,9 +244,7 @@ fn write_event(logger: &Logger, name: &str, duration_ms: f64, status: &str, meta
         "meta": meta,
     });
 
-    if let Ok(mut file) = logger.file.lock() {
-        let _ = writeln!(file, "{payload}");
-    }
+    let _ = writeln!(crate::concurrency::lock(&logger.file), "{payload}");
 }
 
 fn unix_time_now_ms() -> Option<u128> {

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use miette::Result;
+use miette::{IntoDiagnostic, Result};
 
 use crate::index::{DocSource, WikiIndex};
 
@@ -25,7 +25,7 @@ pub fn run(
     }
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&matches).unwrap());
+        println!("{}", serde_json::to_string_pretty(&matches).into_diagnostic()?);
     } else {
         for (i, result) in matches.iter().enumerate() {
             if i > 0 {

@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use walkdir::WalkDir;
 
 use crate::index::blob::compute_blob_oid;
@@ -126,7 +126,8 @@ pub fn pass_worktree(
             Ok(b) => b,
             Err(_) => continue,
         };
-        let hashed = compute_blob_oid(&bytes);
+        let hashed =
+            compute_blob_oid(&bytes).with_context(|| format!("hash {}", path.display()))?;
 
         // Re-ingested from this walk — either the content changed (new oid
         // ⇒ parse + queue as a global upsert) or only the mtime moved on
@@ -197,7 +198,7 @@ mod tests {
         let bytes = b"# Page\n\nBody.\n";
         let page = dir.path().join(PAGE);
         std::fs::write(&page, bytes).expect("write page");
-        let real_oid = compute_blob_oid(bytes).0;
+        let real_oid = compute_blob_oid(bytes).expect("ordinary content hashes").0;
         assert_ne!(real_oid, STALE_OID);
 
         let base_rows = vec![GenPathRow {

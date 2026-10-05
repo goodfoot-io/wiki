@@ -26,11 +26,12 @@ fn push_field(out: &mut Vec<u8>, field: &str) {
 /// key digests below, `log_output_sha` in tier-A rows (computed by the
 /// upsert caller), and the serve-side verification of tier-A lookups.
 pub fn sha256_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let digest = Sha256::digest(bytes);
     let mut hex = String::with_capacity(digest.len() * 2);
     for byte in digest {
-        use std::fmt::Write as _;
-        write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+        hex.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        hex.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
     }
     hex
 }

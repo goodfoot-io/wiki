@@ -53,7 +53,7 @@ fn rename_onto_occupied_destination_decrements_displaced_blob_in_merged_store() 
     drop(WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare after remove"));
 
     // ── Phase 2: inject prior-state skew into the merged store ──
-    let fake_oid = compute_blob_oid(FAKE_BYTES);
+    let fake_oid = compute_blob_oid(FAKE_BYTES).expect("ordinary content hashes");
 
     {
         let conn = open_merged_store(repo.root.as_path());
@@ -87,7 +87,7 @@ fn rename_onto_occupied_destination_decrements_displaced_blob_in_merged_store() 
     // ── Phase 3: pure rename onto the occupied destination ──
     let source_bytes =
         "---\ntitle: Source\nsummary: Will be renamed.\n---\n\nSource body.\n";
-    let source_oid = compute_blob_oid(source_bytes.as_bytes());
+    let source_oid = compute_blob_oid(source_bytes.as_bytes()).expect("ordinary content hashes");
 
     repo.write_file("source.md", source_bytes);
     repo.git_add("source.md");

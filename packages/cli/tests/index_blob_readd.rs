@@ -15,7 +15,7 @@ fn refcount_zero_then_same_oid_readd_in_one_refresh() {
     let repo = common::FixtureRepo::new();
 
     let bytes = "---\ntitle: Phoenix\nsummary: Dies and returns.\n---\n\nSame bytes, new path.\n";
-    let oid = compute_blob_oid(bytes.as_bytes());
+    let oid = compute_blob_oid(bytes.as_bytes()).expect("ordinary content hashes");
 
     repo.write_file("z.md", bytes);
     repo.git_add("z.md");

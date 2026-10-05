@@ -8,11 +8,11 @@ links-reviewed: 10
 
 The wiki CLI uses two complementary logging systems:
 
-1. **Perf Instrumentation** ([`perf::scope_result`](./src/perf.rs#L203-L213) and [`perf::log_event`](./src/perf.rs#L194-L201)): Measures performance and records operational metrics to `wiki.log`. Outputs structured JSON events with timing, status, and metadata.
+1. **Perf Instrumentation** ([`perf::scope_result`](./src/perf.rs#L200-L210) and [`perf::log_event`](./src/perf.rs#L191-L198)): Measures performance and records operational metrics to `wiki.log`. Outputs structured JSON events with timing, status, and metadata.
 
 2. **Direct Output** (`println!` and `eprintln!`): Writes user-facing messages to stdout/stderr for command results, errors, and status messages.
 
-The perf module writes to `<common-git-dir>/wiki/wiki.log` — the store directory beside the repository's git dir, never the working tree ([perf.rs](./src/perf.rs#L215-L236)). Each event is a JSON object on a single line containing timestamp, invocation ID, PID, event name, duration, status, and metadata.
+The perf module writes to `<common-git-dir>/wiki/wiki.log` — the store directory beside the repository's git dir, never the working tree ([perf.rs](./src/perf.rs#L212-L233)). Each event is a JSON object on a single line containing timestamp, invocation ID, PID, event name, duration, status, and metadata.
 
 ## Perf Instrumentation Points
 
@@ -22,7 +22,7 @@ Perf scope events measure execution time and record success/error status. They a
 
 | Location | Scope Name | Measures | Metadata |
 |----------|-----------|----------|----------|
-| [main.rs](./src/main.rs#L304) | `command.<name>` | Total wall time of the command (stderr span only; not written to `wiki.log`) | — |
+| [main.rs](./src/main.rs#L373) | `command.<name>` | Total wall time of the command (stderr span only; not written to `wiki.log`) | — |
 
 ### Index Refresh
 
@@ -30,13 +30,13 @@ These scopes cover the cold-cache path: when the stat-only freshness gate misses
 
 | Location | Scope Name | Measures | Metadata |
 |----------|-----------|----------|----------|
-| [index/mod.rs](./src/index/mod.rs#L386-L391) | `index.gix_open` | Time to open the gix repository for a refresh | Empty object |
-| [index/mod.rs](./src/index/mod.rs#L390-L399) | `index.refresh` | Total three-pass refresh (candidate building against the base generation) | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L217-L269) | `index.pass_tree` | Pass 1: diff `HEAD^{tree}` against the previously indexed tree | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L272-L281) | `index.pass_index` | Pass 2: git index entry scan | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L284-L293) | `index.pass_worktree` | Pass 3: worktree walk, read + hash of candidate markdown | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L303-L334) | `index.apply_deltas` | Building the publish candidate from merged deltas (blob parse, gen_paths membership, refcount reconciliation) | `deltas` (count) |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L363-L368) | `index.publish` | Publishing the generation: fts materialization + transactional store write | Empty object |
+| [index/mod.rs](./src/index/mod.rs#L389-L394) | `index.gix_open` | Time to open the gix repository for a refresh | Empty object |
+| [index/mod.rs](./src/index/mod.rs#L393-L402) | `index.refresh` | Total three-pass refresh (candidate building against the base generation) | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L227-L279) | `index.pass_tree` | Pass 1: diff `HEAD^{tree}` against the previously indexed tree | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L282-L291) | `index.pass_index` | Pass 2: git index entry scan | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L294-L303) | `index.pass_worktree` | Pass 3: worktree walk, read + hash of candidate markdown | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L313-L344) | `index.apply_deltas` | Building the publish candidate from merged deltas (blob parse, gen_paths membership, refcount reconciliation) | `deltas` (count) |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L373-L378) | `index.publish` | Publishing the generation: fts materialization + transactional store write | Empty object |
 
 ### File Discovery
 
@@ -51,9 +51,9 @@ The disposable anchor-cache tiers inside [`wiki check`](./src/commands/check.rs)
 
 | Location | Event Name | Meaning |
 |----------|-----------|----------|
-| [check.rs](./src/commands/check.rs#L342-L346) | `anchor_cache` | Emitted once per check invocation after the run body, on every path — early exits included. `meta.hits`, `meta.misses`, `meta.bypasses` tally the row-level outcomes across both tiers; `meta.fingerprint_ms` and `meta.walk_ms` sum each tier's git-leg durations ([drift.rs](./src/commands/drift.rs#L1749) and [drift.rs](./src/commands/drift.rs#L405)), recorded on the miss path only — a served hit runs no git leg — so a fully warm run reports zeros. |
+| [check.rs](./src/commands/check.rs#L343-L347) | `anchor_cache` | Emitted once per check invocation after the run body, on every path — early exits included. `meta.hits`, `meta.misses`, `meta.bypasses` tally the row-level outcomes across both tiers; `meta.fingerprint_ms` and `meta.walk_ms` sum each tier's git-leg durations ([drift.rs](./src/commands/drift.rs#L1726) and [drift.rs](./src/commands/drift.rs#L390)), recorded on the miss path only — a served hit runs no git leg — so a fully warm run reports zeros. |
 
-The tally sites live at the tier seams: the shallow gate ([drift.rs](./src/commands/drift.rs#L303-L304)), the verified-hit serves ([drift.rs](./src/commands/drift.rs#L318-L319), [drift.rs](./src/commands/drift.rs#L1715-L1717)), and the misses that precede computing ([drift.rs](./src/commands/drift.rs#L324-L326), [drift.rs](./src/commands/drift.rs#L1718-L1720)).
+The tally sites live at the tier seams: the shallow gate ([drift.rs](./src/commands/drift.rs#L304-L305)), the verified-hit serves ([drift.rs](./src/commands/drift.rs#L319-L320), [drift.rs](./src/commands/drift.rs#L1692-L1694)), and the misses that precede computing ([drift.rs](./src/commands/drift.rs#L325-L327), [drift.rs](./src/commands/drift.rs#L1695-L1697)).
 
 ## Direct Output Points (println! and eprintln!)
 
@@ -144,8 +144,8 @@ Events written to `wiki.log` follow this JSON schema:
 
 Two special events mark command execution boundaries:
 
-- **command_start**: Logged at [initialization](./src/perf.rs#L152-L180) with command name and json_output flag
-- **command_finish**: Logged at [completion](./src/perf.rs#L182-L192) with exit code and total runtime
+- **command_start**: Logged at [initialization](./src/perf.rs#L149-L177) with command name and json_output flag
+- **command_finish**: Logged at [completion](./src/perf.rs#L179-L189) with exit code and total runtime
 
 ### Log Rotation
 

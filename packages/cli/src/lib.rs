@@ -8,6 +8,7 @@
 //! here. Do not leak internal helpers beyond what tests need.
 
 pub mod cache;
+mod concurrency;
 pub mod frontmatter;
 pub mod git;
 pub mod index;

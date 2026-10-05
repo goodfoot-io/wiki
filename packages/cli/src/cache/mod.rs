@@ -130,6 +130,7 @@ impl CacheReporter {
 
     pub fn for_invocation() -> Self {
         let reporter = Self::default();
+        // Debug-only fault injection; see also `WIKI_TEST_FAULT_PANIC` in `main.rs`.
         #[cfg(debug_assertions)]
         if let Ok(script) = std::env::var("WIKI_ANCHOR_CACHE_TEST_FAULT_SEQUENCE") {
             reporter
@@ -755,11 +756,10 @@ impl AnchorCache for CacheStore {
         match fs::read_dir(&dir) {
             Ok(entries) => {
                 for entry in entries {
-                    let path = entry.map_err(CacheError::from)?.path();
-                    let name = path
-                        .file_name()
-                        .expect("dir entry has a name")
-                        .to_string_lossy();
+                    let entry = entry.map_err(CacheError::from)?;
+                    let path = entry.path();
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
                     if name.starts_with(&aside_prefix) && name.ends_with(".quarantine") {
                         match fs::remove_file(&path) {
                             Ok(()) => {}
