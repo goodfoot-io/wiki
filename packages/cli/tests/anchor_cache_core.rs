@@ -26,7 +26,7 @@ use wiki::cache::schema::{
     INIT_LOCK_FILE_NAME, META_DDL, ProbeOutcome, SCHEMA_VERSION, SuspectKind, Tier, db_path,
     open_connection, probe, quarantine,
 };
-use wiki::cache::{AnchorCache, CacheReporter, CacheStore, WalkRow};
+use wiki::cache::{AnchorCache, CacheReporter, CacheStore, FingerprintTuple, WalkRow};
 
 /// A 40-hex commit SHA for fixtures.
 const SHA: &str = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6a7b8c9d0";
@@ -113,6 +113,24 @@ fn open_store(common_dir: &Path) -> CacheStore {
     CacheStore::open_with_reporter(common_dir, CacheReporter::default())
         .expect("open store")
         .expect("init lock is not held in a test fixture")
+}
+
+/// The fingerprint tuple the store verifies on serve, built positionally so
+/// each call site reads like the `fingerprint_key` call that derives its key.
+fn tuple<'a>(
+    page_path: &'a str,
+    anchor_sha: &'a str,
+    target_path: &'a str,
+    range_start: u32,
+    range_end: u32,
+) -> FingerprintTuple<'a> {
+    FingerprintTuple {
+        page_path,
+        anchor_sha,
+        target_path,
+        range_start,
+        range_end,
+    }
 }
 
 #[test]
@@ -218,7 +236,7 @@ fn page_writes_remain_queued_until_one_explicit_flush() {
     for line in 1..=8 {
         let key = fingerprint_key("page.md", SHA, "target.md", line, line);
         store
-            .upsert_fingerprint(&key, "page.md", SHA, "target.md", line, line, FP)
+            .upsert_fingerprint(&key, &tuple("page.md", SHA, "target.md", line, line), FP)
             .unwrap();
     }
     let db = wiki::cache::schema::db_path(dir.path());
@@ -600,10 +618,10 @@ fn store_fingerprint_upsert_then_lookup_serves() {
     let store = open_store(dir.path());
     let key = fingerprint_key("pages/guide.md", SHA, "pages/other.md", 10, 20);
     store
-        .upsert_fingerprint(&key, "pages/guide.md", SHA, "pages/other.md", 10, 20, FP)
+        .upsert_fingerprint(&key, &tuple("pages/guide.md", SHA, "pages/other.md", 10, 20), FP)
         .expect("upsert");
     let served = store
-        .lookup_fingerprint(&key, "pages/guide.md", SHA, "pages/other.md", 10, 20)
+        .lookup_fingerprint(&key, &tuple("pages/guide.md", SHA, "pages/other.md", 10, 20))
         .expect("lookup");
     assert_eq!(served.as_deref(), Some(FP));
 }
@@ -617,11 +635,11 @@ fn store_fingerprint_misses_on_a_different_queried_tuple() {
     let store = open_store(dir.path());
     let key = fingerprint_key("pages/guide.md", SHA, "pages/other.md", 10, 20);
     store
-        .upsert_fingerprint(&key, "pages/guide.md", SHA, "pages/other.md", 10, 20, FP)
+        .upsert_fingerprint(&key, &tuple("pages/guide.md", SHA, "pages/other.md", 10, 20), FP)
         .expect("upsert");
     assert_eq!(
         store
-            .lookup_fingerprint(&key, "pages/guide.md", SHA, "pages/other.md", 10, 21)
+            .lookup_fingerprint(&key, &tuple("pages/guide.md", SHA, "pages/other.md", 10, 21))
             .expect("lookup"),
         None,
         "same key, different queried range: serve verification must miss"
@@ -629,7 +647,10 @@ fn store_fingerprint_misses_on_a_different_queried_tuple() {
     let other_key = fingerprint_key("pages/guide.md", SHA, "pages/other.md", 10, 21);
     assert_eq!(
         store
-            .lookup_fingerprint(&other_key, "pages/guide.md", SHA, "pages/other.md", 10, 21)
+            .lookup_fingerprint(
+                &other_key,
+                &tuple("pages/guide.md", SHA, "pages/other.md", 10, 21),
+            )
             .expect("lookup"),
         None
     );
@@ -644,19 +665,15 @@ fn store_fingerprint_overwrite_is_last_write_wins() {
     store
         .upsert_fingerprint(
             &key,
-            "pages/guide.md",
-            SHA,
-            "pages/other.md",
-            10,
-            20,
+            &tuple("pages/guide.md", SHA, "pages/other.md", 10, 20),
             "0000000000000000",
         )
         .expect("upsert first");
     store
-        .upsert_fingerprint(&key, "pages/guide.md", SHA, "pages/other.md", 10, 20, FP)
+        .upsert_fingerprint(&key, &tuple("pages/guide.md", SHA, "pages/other.md", 10, 20), FP)
         .expect("upsert second");
     let served = store
-        .lookup_fingerprint(&key, "pages/guide.md", SHA, "pages/other.md", 10, 20)
+        .lookup_fingerprint(&key, &tuple("pages/guide.md", SHA, "pages/other.md", 10, 20))
         .expect("lookup");
     assert_eq!(served.as_deref(), Some(FP), "the later write wins");
 }
@@ -668,7 +685,7 @@ fn store_fingerprint_tampered_fp_is_a_miss() {
     let store = open_store(dir.path());
     let key = fingerprint_key("pages/guide.md", SHA, "pages/other.md", 10, 20);
     store
-        .upsert_fingerprint(&key, "pages/guide.md", SHA, "pages/other.md", 10, 20, FP)
+        .upsert_fingerprint(&key, &tuple("pages/guide.md", SHA, "pages/other.md", 10, 20), FP)
         .expect("upsert");
     exec_on_db(
         &db_path(dir.path()),
@@ -676,7 +693,7 @@ fn store_fingerprint_tampered_fp_is_a_miss() {
     );
     assert_eq!(
         store
-            .lookup_fingerprint(&key, "pages/guide.md", SHA, "pages/other.md", 10, 20)
+            .lookup_fingerprint(&key, &tuple("pages/guide.md", SHA, "pages/other.md", 10, 20))
             .expect("lookup"),
         None,
         "a tampered fp must never be served"
@@ -692,7 +709,7 @@ fn store_fingerprint_tampered_tuple_is_a_miss() {
     let store = open_store(dir.path());
     let key = fingerprint_key("pages/guide.md", SHA, "pages/other.md", 10, 20);
     store
-        .upsert_fingerprint(&key, "pages/guide.md", SHA, "pages/other.md", 10, 20, FP)
+        .upsert_fingerprint(&key, &tuple("pages/guide.md", SHA, "pages/other.md", 10, 20), FP)
         .expect("upsert");
     exec_on_db(
         &db_path(dir.path()),
@@ -700,14 +717,14 @@ fn store_fingerprint_tampered_tuple_is_a_miss() {
     );
     assert_eq!(
         store
-            .lookup_fingerprint(&key, "pages/guide.md", SHA, "pages/other.md", 10, 20)
+            .lookup_fingerprint(&key, &tuple("pages/guide.md", SHA, "pages/other.md", 10, 20))
             .expect("lookup"),
         None,
         "stored tuple mismatch is a miss"
     );
     assert_eq!(
         store
-            .lookup_fingerprint(&key, "pages/guide.md", SHA, "pages/other.md", 999, 20)
+            .lookup_fingerprint(&key, &tuple("pages/guide.md", SHA, "pages/other.md", 999, 20))
             .expect("lookup"),
         None,
         "row_digest covers the tuple — a tampered tuple never serves its own lie"
@@ -721,7 +738,7 @@ fn store_fingerprint_tampered_row_digest_is_a_miss() {
     let store = open_store(dir.path());
     let key = fingerprint_key("pages/guide.md", SHA, "pages/other.md", 10, 20);
     store
-        .upsert_fingerprint(&key, "pages/guide.md", SHA, "pages/other.md", 10, 20, FP)
+        .upsert_fingerprint(&key, &tuple("pages/guide.md", SHA, "pages/other.md", 10, 20), FP)
         .expect("upsert");
     exec_on_db(
         &db_path(dir.path()),
@@ -729,7 +746,7 @@ fn store_fingerprint_tampered_row_digest_is_a_miss() {
     );
     assert_eq!(
         store
-            .lookup_fingerprint(&key, "pages/guide.md", SHA, "pages/other.md", 10, 20)
+            .lookup_fingerprint(&key, &tuple("pages/guide.md", SHA, "pages/other.md", 10, 20))
             .expect("lookup"),
         None,
         "a tampered row_digest must never be served"
@@ -944,7 +961,7 @@ fn clear_empties_both_tiers_and_preserves_the_directory() {
     // Anchor-tier data.
     let key = fingerprint_key("pages/guide.md", SHA, "pages/other.md", 10, 20);
     store
-        .upsert_fingerprint(&key, "pages/guide.md", SHA, "pages/other.md", 10, 20, FP)
+        .upsert_fingerprint(&key, &tuple("pages/guide.md", SHA, "pages/other.md", 10, 20), FP)
         .expect("upsert");
     // Index-tier data: an FK-linked family exactly as generations.rs
     // produces it — parent generation, referenced blob, membership row —

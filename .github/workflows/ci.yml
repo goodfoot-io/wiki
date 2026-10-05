@@ -33,10 +33,10 @@ jobs:
           tool: cargo-nextest
 
       - name: Cargo check
-        run: cd packages/cli && cargo check --quiet
+        run: cd packages/cli && cargo check --quiet --all-targets
 
       - name: Cargo clippy
-        run: cd packages/cli && cargo clippy --quiet -- -D warnings
+        run: cd packages/cli && cargo clippy --quiet --all-targets -- -D warnings
 
       - name: Cargo nextest
         run: cd packages/cli && cargo nextest run

@@ -83,7 +83,7 @@ fn warning_line_count(out: &Output) -> usize {
 }
 
 fn init_repo() -> tempfile::TempDir {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().expect("create temp dir");
     git(tmp.path(), &["init", "-q", "-b", "main"]);
     tmp
 }
@@ -101,12 +101,13 @@ const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
 fn write_page(root: &Path, rel: &str, title: &str, body: &str) {
     let abs = root.join(rel);
-    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(abs.parent().expect("page path has a parent"))
+        .expect("create page dir");
     std::fs::write(
         &abs,
         format!("---\ntitle: {title}\nsummary: A page about {title}.\n---\n\n{body}\n"),
     )
-    .unwrap();
+    .expect("write wiki page");
 }
 
 /// Commit two wiki pages linking `../docs/old.md`, then commit the rename
@@ -213,14 +214,15 @@ fn stage_prepared_journal(
     // can only ever leave private directories behind, so the fixture does
     // too (the recompute pass refuses non-private journal ground).
     for path in [journal_root(root), dir.clone()] {
-        std::fs::create_dir_all(&path).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::create_dir_all(&path).expect("create journal dir");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("make journal dir private");
     }
 
     let mut json_entries = Vec::new();
     for (i, (path_rel, sha256, content)) in sorted.iter().enumerate() {
         let stage_file = format!("blob-{i}");
-        std::fs::write(dir.join(&stage_file), content.as_bytes()).unwrap();
+        std::fs::write(dir.join(&stage_file), content.as_bytes()).expect("write stage file");
         json_entries.push(serde_json::json!({
             "path_rel": path_rel,
             "stage_file": stage_file,
@@ -236,7 +238,11 @@ fn stage_prepared_journal(
         "entries": json_entries,
     });
     // Manifest written last, like production.
-    std::fs::write(dir.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    std::fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_vec(&manifest).expect("serialize manifest"),
+    )
+    .expect("write manifest");
     StagedJournal { dir }
 }
 

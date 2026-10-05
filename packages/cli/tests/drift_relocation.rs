@@ -49,17 +49,17 @@ fn wiki_check(cwd: &Path, extra: &[&str]) -> Output {
 }
 
 fn init_repo() -> tempfile::TempDir {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().expect("create temp dir");
     git(tmp.path(), &["init", "-q", "-b", "main"]);
     tmp
 }
 
 fn write_certified_page(root: &Path, name: &str, value: &str, body: &str) {
-    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::create_dir_all(root.join("wiki")).expect("create wiki dir");
     let content = format!(
         "---\ntitle: {name}\nsummary: A page about {name}.\nlinks-reviewed: {value}\n---\n\n{body}\n"
     );
-    std::fs::write(root.join("wiki").join(name), content).unwrap();
+    std::fs::write(root.join("wiki").join(name), content).expect("write wiki page");
 }
 
 /// The exact-tier certified block used by the drift-fix fixtures.
@@ -105,8 +105,9 @@ fn resolve_target_path(root: &Path, page: &str, href: &str) -> String {
 /// Commit the certified fixture: `[code](../src/target.rs#L2-L4)` covering
 /// the block at `src/target.rs` lines 2-4, page field `1`.
 fn seed_certified(root: &Path) {
-    std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::write(root.join("src/target.rs"), format!("// preamble\n{BLOCK}")).unwrap();
+    std::fs::create_dir_all(root.join("src")).expect("create src dir");
+    std::fs::write(root.join("src/target.rs"), format!("// preamble\n{BLOCK}"))
+        .expect("write certified target");
     write_certified_page(root, "page.md", "1", "See [code](../src/target.rs#L2-L4).");
     git(root, &["add", "-A"]);
     git(root, &["commit", "-q", "-m", "certify"]);

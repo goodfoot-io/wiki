@@ -50,6 +50,24 @@ pub struct WalkRow {
     pub value: Option<String>,
 }
 
+/// The tier-F queried tuple: a certified target range at an anchor commit,
+/// as cited from one page. Every fingerprint row stores it, and a row is
+/// served only when its stored tuple equals the queried one field by field
+/// (plan decision 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FingerprintTuple<'a> {
+    /// Repo-relative path of the citing page.
+    pub page_path: &'a str,
+    /// The page's anchor commit SHA.
+    pub anchor_sha: &'a str,
+    /// Repo-relative path of the certified target at the anchor commit.
+    pub target_path: &'a str,
+    /// First line of the certified range (1-based, inclusive).
+    pub range_start: u32,
+    /// Last line of the certified range (1-based, inclusive).
+    pub range_end: u32,
+}
+
 /// A store fault, raised by machinery both tiers share (probe/quarantine/
 /// skew repair/DDL, fd hardening, locks) or by either tier's connection.
 /// The Display labels name the shared store layer — never one tier —
@@ -154,26 +172,17 @@ pub trait AnchorCache {
     fn lookup_fingerprint(
         &self,
         key: &str,
-        page_path: &str,
-        anchor_sha: &str,
-        target_path: &str,
-        range_start: u32,
-        range_end: u32,
+        tuple: &FingerprintTuple<'_>,
     ) -> Result<Option<String>, CacheError>;
 
     /// Store (or overwrite) one fingerprint row. `key` must be
     /// [`key::fingerprint_key`] over the same tuple; `fp` is the 16-hex
     /// `rk64_to_hex` form, including `"0000000000000000"` for a zero
     /// fingerprint.
-    #[allow(clippy::too_many_arguments)]
     fn upsert_fingerprint(
         &self,
         key: &str,
-        page_path: &str,
-        anchor_sha: &str,
-        target_path: &str,
-        range_start: u32,
-        range_end: u32,
+        tuple: &FingerprintTuple<'_>,
         fp: &str,
     ) -> Result<(), CacheError>;
 
@@ -468,12 +477,15 @@ impl AnchorCache for CacheStore {
     fn lookup_fingerprint(
         &self,
         key: &str,
-        page_path: &str,
-        anchor_sha: &str,
-        target_path: &str,
-        range_start: u32,
-        range_end: u32,
+        tuple: &FingerprintTuple<'_>,
     ) -> Result<Option<String>, CacheError> {
+        let FingerprintTuple {
+            page_path,
+            anchor_sha,
+            target_path,
+            range_start,
+            range_end,
+        } = *tuple;
         if self.inject_operational_fault() {
             return Ok(None);
         }
@@ -539,17 +551,19 @@ impl AnchorCache for CacheStore {
         Ok(Some(fp))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn upsert_fingerprint(
         &self,
         key: &str,
-        page_path: &str,
-        anchor_sha: &str,
-        target_path: &str,
-        range_start: u32,
-        range_end: u32,
+        tuple: &FingerprintTuple<'_>,
         fp: &str,
     ) -> Result<(), CacheError> {
+        let FingerprintTuple {
+            page_path,
+            anchor_sha,
+            target_path,
+            range_start,
+            range_end,
+        } = *tuple;
         if self.disabled.get() {
             return Ok(());
         }
@@ -782,24 +796,15 @@ impl AnchorCache for NoopCache {
     fn lookup_fingerprint(
         &self,
         _key: &str,
-        _page_path: &str,
-        _anchor_sha: &str,
-        _target_path: &str,
-        _range_start: u32,
-        _range_end: u32,
+        _tuple: &FingerprintTuple<'_>,
     ) -> Result<Option<String>, CacheError> {
         Ok(None)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn upsert_fingerprint(
         &self,
         _key: &str,
-        _page_path: &str,
-        _anchor_sha: &str,
-        _target_path: &str,
-        _range_start: u32,
-        _range_end: u32,
+        _tuple: &FingerprintTuple<'_>,
         _fp: &str,
     ) -> Result<(), CacheError> {
         Ok(())

@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use miette::Result;
 use serde::{Deserialize, Serialize};
 
-use super::check::{ContentCache, anchor_cache_for_run};
+use super::check::{CheckRun, anchor_cache_for_run};
 use super::drift;
 use crate::frontmatter::parse_frontmatter;
 use crate::git::{GitReader, GitSnapshot};
@@ -720,18 +720,18 @@ fn find_baseline_with_slug(
 ///
 /// The pass reads git history directly (the drift phase never shells out to
 /// a `git span` binary), so fix mode is worktree-only by construction.
-#[allow(clippy::too_many_arguments)]
-pub fn run_fix_pass(
+pub(crate) fn run_fix_pass(
+    check_run: &mut CheckRun<'_>,
     files: &[PathBuf],
-    repo_root: &Path,
-    source: DocSource,
-    reader: &GitReader,
-    drift_run: &mut drift::DriftRunCtx,
     dry_run: bool,
-    content_cache: &mut ContentCache,
-    reporter: &crate::cache::CacheReporter,
     scanned_journals: ScannedJournals,
 ) -> Result<FixPlan> {
+    let CheckRun {
+        repo_root,
+        reader,
+        content: ref mut content_cache,
+        ..
+    } = *check_run;
     // Replay pending journals first (plan Decision 8): a previous run killed
     // mid-materialization is completed from its journal before any fresh
     // planning, so planning observes post-replay disk state. The scan was
@@ -1280,13 +1280,8 @@ pub fn run_fix_pass(
     // `Drift`/`Uncertified`/`Unknown` with fail-closed counts, and initialize
     // the `links-reviewed` field on pages that lack one.
     let drift = run_drift_fix_phase(
+        check_run,
         files,
-        repo_root,
-        source,
-        reader,
-        drift_run,
-        content_cache,
-        reporter,
         &mut rename_map,
         &mut patches,
         &mut fixes,
@@ -1368,20 +1363,22 @@ pub(crate) struct DriftFixPhaseOutcome {
 /// sole materializer. Href patches carry byte offsets against the page's
 /// original content, so they are applied first; the field insertion lands
 /// last because it shifts every offset after the YAML block.
-#[allow(clippy::too_many_arguments)]
 fn run_drift_fix_phase(
+    check_run: &mut CheckRun<'_>,
     files: &[PathBuf],
-    repo_root: &Path,
-    source: DocSource,
-    reader: &GitReader,
-    drift_run: &mut drift::DriftRunCtx,
-    content_cache: &mut ContentCache,
-    reporter: &crate::cache::CacheReporter,
     rename_map: &mut RenameMap,
     patches: &mut HashMap<PathBuf, String>,
     fixes: &mut Vec<Fix>,
     skipped: &mut Vec<SkippedFix>,
 ) -> Result<DriftFixPhaseOutcome> {
+    let CheckRun {
+        repo_root,
+        source,
+        reader,
+        content: ref mut content_cache,
+        drift: ref drift_run,
+        ref reporter,
+    } = *check_run;
     // Fix mode is worktree-only by construction: the CLI guard rejects it
     // under a non-worktree source, and `run()` must not mutate files either
     // (pinned by `wiki_check_fix_rejects_non_worktree_source`).
@@ -1505,10 +1502,12 @@ fn run_drift_fix_phase(
             other => (other.clone(), None),
         };
         let classes = drift::classify_page(
-            repo_root,
-            reader,
-            anchor_cache.cache(),
-            source,
+            &drift::DriftRepo {
+                repo_root,
+                reader,
+                cache: anchor_cache.cache(),
+                source,
+            },
             &page_path,
             &content,
             &classify_epoch,
@@ -2389,17 +2388,16 @@ mod tests {
 
         let source = repo.path().join("wiki/source.md");
         let target = repo.path().join("wiki/target.md");
-        let reporter = crate::cache::CacheReporter::default();
         let reader = GitReader::open(repo.path()).expect("open reader");
         let plan = run_fix_pass(
+            &mut CheckRun::new(
+                repo.path(),
+                crate::index::DocSource::WorkingTree,
+                &reader,
+                crate::cache::CacheReporter::default(),
+            ),
             &[source.clone(), target.clone()],
-            repo.path(),
-            crate::index::DocSource::WorkingTree,
-            &reader,
-            &mut drift::DriftRunCtx::new(),
             /* dry_run */ true,
-            &mut ContentCache::new(),
-            &reporter,
             ScannedJournals::none(),
         )
         .expect("fix pass");
@@ -2460,17 +2458,16 @@ mod tests {
 
         let source = repo.path().join("wiki/source.md");
         let target = repo.path().join("wiki/target.md");
-        let reporter = crate::cache::CacheReporter::default();
         let reader = GitReader::open(repo.path()).expect("open reader");
         let plan = run_fix_pass(
+            &mut CheckRun::new(
+                repo.path(),
+                crate::index::DocSource::WorkingTree,
+                &reader,
+                crate::cache::CacheReporter::default(),
+            ),
             &[source.clone(), target.clone()],
-            repo.path(),
-            crate::index::DocSource::WorkingTree,
-            &reader,
-            &mut drift::DriftRunCtx::new(),
             /* dry_run */ true,
-            &mut ContentCache::new(),
-            &reporter,
             ScannedJournals::none(),
         )
         .expect("fix pass");
@@ -2677,16 +2674,15 @@ mod tests {
         let mut patches: HashMap<PathBuf, String> = HashMap::new();
         let mut fixes: Vec<Fix> = Vec::new();
         let mut skipped: Vec<SkippedFix> = Vec::new();
-        let reporter = crate::cache::CacheReporter::default();
         let reader = GitReader::open(repo.path()).expect("open reader");
         let outcome = run_drift_fix_phase(
+            &mut CheckRun::new(
+                repo.path(),
+                crate::index::DocSource::WorkingTree,
+                &reader,
+                crate::cache::CacheReporter::default(),
+            ),
             files,
-            repo.path(),
-            crate::index::DocSource::WorkingTree,
-            &reader,
-            &mut drift::DriftRunCtx::new(),
-            &mut ContentCache::new(),
-            &reporter,
             &mut rename_map,
             &mut patches,
             &mut fixes,

@@ -1,7 +1,7 @@
 ---
 title: Benchmarking Wiki CLI Performance
 summary: How to run repeatable, source-pinned latency benchmarks of the everyday wiki commands and decompose where the time goes.
-links-reviewed: 6
+links-reviewed: 7
 ---
 
 This guide describes how to measure the per-operation latency of the everyday `wiki` commands — the default search (`wiki "query"`), `list`, `summary`, and `check` — in a way whose numbers are trustworthy. The goal is a repeatable measurement, not a single eyeballed sample: build the binary from the source under test, run each command enough times to report a distribution, and attribute the cost to the right term (process startup, index preparation, or the command body).
@@ -29,7 +29,7 @@ Two methodology mistakes invalidate a benchmark before it starts. Both are easy 
 
 1. **Always build from the source under test — never measure a prebuilt binary.** A prebuilt `wiki` on `PATH` or in an extension's `bin/` directory may lag the working tree by many performance-relevant commits. Measuring it tells you nothing about your change. Build a release binary from `packages/cli` and confirm its reported version matches [`Cargo.toml`](/packages/cli/Cargo.toml#L1-L1) before trusting a single number.
 
-2. **Measure on the realistic filesystem, and report a distribution — not a single sample.** The tool's hot path is dominated by filesystem `stat` latency, which the index classifies as hostile or not at [`fs_class.rs`](/packages/cli/src/index/fs_class.rs#L34-L37) (`overlayfs`, `nfs`, `cifs`, and `fuse` are `HostileFs::Yes`). On a hostile mount (e.g. a `fuseblk` devcontainer) every stat is a userspace round-trip, so latencies are bursty and a single `--perf` sample is a draw from a high-variance distribution. Run **N ≥ 20**, report the **median plus a p10/p90 band**, and keep cold and warm runs as distinct, labelled measurements. A cache-dropped or `tmpfs` run is allowed only as an explicitly labelled lower-bound sanity check — never as the headline.
+2. **Measure on the realistic filesystem, and report a distribution — not a single sample.** The tool's hot path is dominated by filesystem `stat` latency, which the index classifies as hostile or not at [`fs_class.rs`](/packages/cli/src/index/fs_class.rs#L39-L42) (`overlayfs`, `nfs`, `cifs`, and `fuse` are `HostileFs::Yes`). On a hostile mount (e.g. a `fuseblk` devcontainer) every stat is a userspace round-trip, so latencies are bursty and a single `--perf` sample is a draw from a high-variance distribution. Run **N ≥ 20**, report the **median plus a p10/p90 band**, and keep cold and warm runs as distinct, labelled measurements. A cache-dropped or `tmpfs` run is allowed only as an explicitly labelled lower-bound sanity check — never as the headline.
 
 ## Build the binary under test
 

@@ -897,6 +897,69 @@ pub struct MoveScanCtx<'a> {
     decisions: HashMap<MoveScanKey, MoveScanDecision>,
 }
 
+/// The repository a drift classification reads: its root, the run's
+/// source-aware reader, which layer is the "current" side, and the anchor
+/// cache every fingerprint read goes through. Fixed for a whole pass, so it
+/// is threaded by reference through the per-page and per-link seams.
+#[derive(Clone, Copy)]
+pub struct DriftRepo<'a> {
+    pub repo_root: &'a Path,
+    pub reader: &'a crate::git::GitReader,
+    pub cache: &'a dyn crate::cache::AnchorCache,
+    pub source: DocSource,
+}
+
+/// One certified block as cited from one page: the anchor epoch's record of
+/// a link (its target path and range at the anchor commit), the anchor
+/// commit itself, and the citing page. This is the subject of the
+/// fingerprint tier ([`crate::cache::FingerprintTuple`]) and of the move
+/// scan ([`MoveScanKey`]).
+#[derive(Clone, Copy)]
+struct CertifiedBlock<'a> {
+    page_path: &'a str,
+    anchor_sha: &'a str,
+    cert: &'a CertifiedLink,
+}
+
+impl<'a> CertifiedBlock<'a> {
+    fn new(page_path: &'a str, anchor_sha: &'a str, cert: &'a CertifiedLink) -> Self {
+        Self {
+            page_path,
+            anchor_sha,
+            cert,
+        }
+    }
+
+    fn fingerprint_tuple(&self) -> crate::cache::FingerprintTuple<'a> {
+        crate::cache::FingerprintTuple {
+            page_path: self.page_path,
+            anchor_sha: self.anchor_sha,
+            target_path: &self.cert.target_path,
+            range_start: self.cert.start,
+            range_end: self.cert.end,
+        }
+    }
+
+    fn move_scan_key(&self) -> MoveScanKey {
+        MoveScanKey {
+            anchor_sha: self.anchor_sha.to_string(),
+            page_path: self.page_path.to_string(),
+            target_path: self.cert.target_path.clone(),
+            start: self.cert.start,
+            end: self.cert.end,
+        }
+    }
+}
+
+/// The link's target as resolved and read at the current side: the
+/// effective path (after suffix salvage) and its bytes, `None` when the
+/// target is absent there.
+#[derive(Clone, Copy)]
+struct CurrentTarget<'a> {
+    path: &'a str,
+    bytes: Option<&'a [u8]>,
+}
+
 /// The identity of one move-scan question: everything the verdict is a
 /// function of, and nothing else. The anchor epoch selects the certified
 /// content; the target path and range select the block within it; the page is
@@ -1086,20 +1149,19 @@ fn has_identity_evidence(
 /// ([`LinkEpoch::Current`]) suppresses certification outcomes but still flags
 /// `Broken` structural failures.
 ///
-/// `cache` is the anchor-cache seam: threaded into the per-link
+/// `repo.cache` is the anchor-cache seam: threaded into the per-link
 /// classification and its move scans so a page's committed history is walked
 /// once and reused across passes.
-#[allow(clippy::too_many_arguments)]
 pub fn classify_page(
-    repo_root: &Path,
-    reader: &crate::git::GitReader,
-    cache: &dyn crate::cache::AnchorCache,
-    source: DocSource,
+    repo: &DriftRepo<'_>,
     page_path: &str,
     page_content: &str,
     epoch: &LinkEpoch,
     ctx: &mut MoveScanCtx<'_>,
 ) -> Result<Vec<LinkClass>, EpochError> {
+    let DriftRepo {
+        repo_root, reader, ..
+    } = *repo;
     let anchor = match epoch {
         LinkEpoch::Missing => return Err(EpochError::MissingEpoch),
         LinkEpoch::Current { .. } => None,
@@ -1141,10 +1203,7 @@ pub fn classify_page(
         // The effective path is the resolved path after suffix salvage, so
         // `target_path` reports where the link was actually judged against.
         let (outcome, target_path) = classify_link(
-            repo_root,
-            reader,
-            cache,
-            source,
+            repo,
             page_path,
             &link,
             &certified,
@@ -1369,12 +1428,8 @@ fn resolve_target_path(repo_root: &Path, page_path: &str, path_part: &str) -> St
 /// together with the effective target path — the resolved path after suffix
 /// salvage — so the caller reports where the link was actually judged
 /// against, not where the stale href happened to point.
-#[allow(clippy::too_many_arguments)]
 fn classify_link(
-    repo_root: &Path,
-    reader: &crate::git::GitReader,
-    cache: &dyn crate::cache::AnchorCache,
-    source: DocSource,
+    repo: &DriftRepo<'_>,
     page_path: &str,
     link: &ParsedLink,
     certified: &[CertifiedLink],
@@ -1383,8 +1438,13 @@ fn classify_link(
 ) -> Result<(DriftOutcome, String), EpochError> {
     // Decision 5 target resolution: resolve the href path part, then salvage
     // the longest existing repo-relative suffix when the direct read misses.
-    let (target_path, target_bytes) =
-        read_target(reader, repo_root, source, page_path, &link.target_path_raw)?;
+    let (target_path, target_bytes) = read_target(
+        repo.reader,
+        repo.repo_root,
+        repo.source,
+        page_path,
+        &link.target_path_raw,
+    )?;
 
     let Some(anchor_sha) = anchor_sha else {
         // Pending-bump override (Decision 2): the anchor epoch IS the current
@@ -1461,7 +1521,7 @@ fn classify_link(
                     return Ok((DriftOutcome::Broken, target_path));
                 }
                 for cand in certified.iter().filter(|c| c.label == link.label) {
-                    if certified_content_fp(reader, repo_root, cache, page_path, anchor_sha, cand, &mut memo)?
+                    if certified_content_fp(repo, &CertifiedBlock::new(page_path, anchor_sha, cand), &mut memo)?
                         == current_fp
                     {
                         return Ok((DriftOutcome::Healthy, target_path));
@@ -1476,7 +1536,7 @@ fn classify_link(
         // equals the certified content.
         if let Some(bytes) = target_bytes.as_deref()
             && extent_fits(bytes, link.start, link.end)
-            && certified_content_fp(reader, repo_root, cache, page_path, anchor_sha, cert, &mut memo)?
+            && certified_content_fp(repo, &CertifiedBlock::new(page_path, anchor_sha, cert), &mut memo)?
                 == current_fp
         {
             return Ok((DriftOutcome::Healthy, target_path));
@@ -1491,15 +1551,12 @@ fn classify_link(
             Some(_) => DriftOutcome::RangeDiffered,
         };
         let outcome = move_scan_outcome(
-            repo_root,
-            reader,
-            cache,
-            source,
-            page_path,
-            &target_path,
-            target_bytes.as_deref(),
-            cert,
-            anchor_sha,
+            repo,
+            &CertifiedBlock::new(page_path, anchor_sha, cert),
+            CurrentTarget {
+                path: &target_path,
+                bytes: target_bytes.as_deref(),
+            },
             &mut memo,
             zero,
             ctx,
@@ -1512,15 +1569,12 @@ fn classify_link(
     // Step 3: target present at the current side, extent still fitting.
     let Some(bytes) = target_bytes.as_deref() else {
         let outcome = move_scan_outcome(
-            repo_root,
-            reader,
-            cache,
-            source,
-            page_path,
-            &target_path,
-            None,
-            cert,
-            anchor_sha,
+            repo,
+            &CertifiedBlock::new(page_path, anchor_sha, cert),
+            CurrentTarget {
+                path: &target_path,
+                bytes: None,
+            },
             &mut memo,
             DriftOutcome::Broken,
             ctx,
@@ -1539,7 +1593,7 @@ fn classify_link(
         .iter()
         .any(|c| c.start == link.start && c.end == link.end)
     {
-        let cert_fp = certified_content_fp(reader, repo_root, cache, page_path, anchor_sha, cert, &mut memo)?;
+        let cert_fp = certified_content_fp(repo, &CertifiedBlock::new(page_path, anchor_sha, cert), &mut memo)?;
         let cur_fp = cheap_fingerprint_with_extent(
             bytes,
             &Extent {
@@ -1551,15 +1605,12 @@ fn classify_link(
             return Ok((DriftOutcome::Healthy, target_path));
         }
         let outcome = move_scan_outcome(
-            repo_root,
-            reader,
-            cache,
-            source,
-            page_path,
-            &target_path,
-            Some(bytes),
-            cert,
-            anchor_sha,
+            repo,
+            &CertifiedBlock::new(page_path, anchor_sha, cert),
+            CurrentTarget {
+                path: &target_path,
+                bytes: Some(bytes),
+            },
             &mut memo,
             DriftOutcome::Drift,
             ctx,
@@ -1581,20 +1632,17 @@ fn classify_link(
         },
     );
     for c in &matched {
-        if certified_content_fp(reader, repo_root, cache, page_path, anchor_sha, c, &mut memo)? == cur_fp {
+        if certified_content_fp(repo, &CertifiedBlock::new(page_path, anchor_sha, c), &mut memo)? == cur_fp {
             return Ok((DriftOutcome::Healthy, target_path));
         }
     }
     let outcome = move_scan_outcome(
-        repo_root,
-        reader,
-        cache,
-        source,
-        page_path,
-        &target_path,
-        Some(bytes),
-        cert,
-        anchor_sha,
+        repo,
+        &CertifiedBlock::new(page_path, anchor_sha, cert),
+        CurrentTarget {
+            path: &target_path,
+            bytes: Some(bytes),
+        },
         &mut memo,
         DriftOutcome::RangeDiffered,
         ctx,
@@ -1639,31 +1687,30 @@ fn primary_cert<'a>(
 /// propagation are byte-identical to the uncached computation in every
 /// branch; a cache error is never a serve and never a failure.
 fn certified_content_fp(
-    reader: &crate::git::GitReader,
-    repo_root: &Path,
-    cache: &dyn crate::cache::AnchorCache,
-    page_path: &str,
-    anchor_sha: &str,
-    cert: &CertifiedLink,
+    repo: &DriftRepo<'_>,
+    block: &CertifiedBlock<'_>,
     memo: &mut HashMap<(String, u32, u32), u64>,
 ) -> Result<u64, EpochError> {
+    let DriftRepo {
+        repo_root,
+        reader,
+        cache,
+        ..
+    } = *repo;
+    let CertifiedBlock {
+        anchor_sha, cert, ..
+    } = *block;
+    let tuple = block.fingerprint_tuple();
     let key = (cert.target_path.clone(), cert.start, cert.end);
     let cache_key = crate::cache::key::fingerprint_key(
-        page_path,
-        anchor_sha,
-        &cert.target_path,
-        cert.start,
-        cert.end,
+        tuple.page_path,
+        tuple.anchor_sha,
+        tuple.target_path,
+        tuple.range_start,
+        tuple.range_end,
     );
     if let Some(fp_hex) = cache
-        .lookup_fingerprint(
-            &cache_key,
-            page_path,
-            anchor_sha,
-            &cert.target_path,
-            cert.start,
-            cert.end,
-        )
+        .lookup_fingerprint(&cache_key, &tuple)
         .unwrap_or(None)
         && let Some(fp) = crate::rk64::rk64_from_hex(&fp_hex)
     {
@@ -1683,15 +1730,7 @@ fn certified_content_fp(
         None => {
             // The read failed; the probe decides the write.
             if availability_probe(repo_root, anchor_sha, &cert.target_path) == Availability::Absent {
-                let _ = cache.upsert_fingerprint(
-                    &cache_key,
-                    page_path,
-                    anchor_sha,
-                    &cert.target_path,
-                    cert.start,
-                    cert.end,
-                    "0000000000000000",
-                );
+                let _ = cache.upsert_fingerprint(&cache_key, &tuple, "0000000000000000");
             }
             0 // no content at all
         }
@@ -1703,15 +1742,7 @@ fn certified_content_fp(
                     end: cert.end,
                 },
             );
-            let _ = cache.upsert_fingerprint(
-                &cache_key,
-                page_path,
-                anchor_sha,
-                &cert.target_path,
-                cert.start,
-                cert.end,
-                &crate::rk64::rk64_to_hex(fp),
-            );
+            let _ = cache.upsert_fingerprint(&cache_key, &tuple, &crate::rk64::rk64_to_hex(fp));
             fp
         }
     };
@@ -1737,71 +1768,51 @@ fn current_content_fp(bytes: Option<&[u8]>, start: u32, end: u32) -> u64 {
 /// fuzzy Jaccard tier (Decision 5 step 4): one at-threshold window → `Moved`,
 /// ≥2 → `Unknown`, none → `zero_matches` (the caller's own terminal outcome,
 /// `Broken` for a missing target, `Drift` for range-equal content drift).
-#[allow(clippy::too_many_arguments)]
 fn move_scan_outcome(
-    repo_root: &Path,
-    reader: &crate::git::GitReader,
-    cache: &dyn crate::cache::AnchorCache,
-    source: DocSource,
-    page_path: &str,
-    target_path: &str,
-    target_bytes: Option<&[u8]>,
-    cert: &CertifiedLink,
-    anchor_sha: &str,
+    repo: &DriftRepo<'_>,
+    block: &CertifiedBlock<'_>,
+    target: CurrentTarget<'_>,
     memo: &mut HashMap<(String, u32, u32), u64>,
     zero_matches: DriftOutcome,
     ctx: &mut MoveScanCtx<'_>,
 ) -> Result<DriftOutcome, EpochError> {
-    let key = MoveScanKey {
-        anchor_sha: anchor_sha.to_string(),
-        page_path: page_path.to_string(),
-        target_path: cert.target_path.clone(),
-        start: cert.start,
-        end: cert.end,
-    };
+    let key = block.move_scan_key();
     if let Some(decision) = ctx.decisions.get(&key) {
         return Ok(decision.clone().into_outcome(zero_matches));
     }
-    let decision = compute_move_scan(
-        repo_root,
-        reader,
-        cache,
-        source,
-        page_path,
-        target_path,
-        target_bytes,
-        cert,
-        anchor_sha,
-        memo,
-        ctx,
-    )?;
+    let decision = compute_move_scan(repo, block, target, memo, ctx)?;
     ctx.decisions.insert(key, decision.clone());
     Ok(decision.into_outcome(zero_matches))
 }
 
 /// The uncached move scan behind [`move_scan_outcome`]: run both tiers and
 /// return the verdict the caller replays for every citation of this block.
-#[allow(clippy::too_many_arguments)]
 fn compute_move_scan(
-    repo_root: &Path,
-    reader: &crate::git::GitReader,
-    cache: &dyn crate::cache::AnchorCache,
-    source: DocSource,
-    page_path: &str,
-    target_path: &str,
-    target_bytes: Option<&[u8]>,
-    cert: &CertifiedLink,
-    anchor_sha: &str,
+    repo: &DriftRepo<'_>,
+    block: &CertifiedBlock<'_>,
+    target: CurrentTarget<'_>,
     memo: &mut HashMap<(String, u32, u32), u64>,
     ctx: &mut MoveScanCtx<'_>,
 ) -> Result<MoveScanDecision, EpochError> {
+    let DriftRepo {
+        repo_root,
+        reader,
+        source,
+        ..
+    } = *repo;
+    let CertifiedBlock {
+        page_path, cert, ..
+    } = *block;
+    let CurrentTarget {
+        path: target_path,
+        bytes: target_bytes,
+    } = target;
     let span = line_range_span(cert.start, cert.end);
     if span == 0 {
         // Degenerate certified content never matches a window.
         return Ok(MoveScanDecision::Unmatched);
     }
-    let cert_fp =
-        certified_content_fp(reader, repo_root, cache, page_path, anchor_sha, cert, memo)?;
+    let cert_fp = certified_content_fp(repo, block, memo)?;
     let extent = Extent {
         start: 1,
         end: span as u32,
@@ -1881,17 +1892,7 @@ fn compute_move_scan(
     // at-threshold window → Moved; ≥2 → Unknown; none → `zero_matches`.
     // Same-file windows need no identity evidence; cross-file windows do.
     let mut fuzzy: Vec<crate::rk64::Location> = Vec::new();
-    let fuzzy_scanned = fuzzy_locations(
-        repo_root,
-        reader,
-        source,
-        page_path,
-        target_path,
-        target_bytes,
-        cert,
-        anchor_sha,
-        ctx,
-    )?;
+    let fuzzy_scanned = fuzzy_locations(repo, block, target, ctx)?;
     let fuzzy_scanned: Vec<crate::rk64::Location> = fuzzy_scanned
         .into_iter()
         .filter(not_certified_window)
@@ -2018,18 +2019,27 @@ fn fuzzy_window_score(a_lines: &[&str], b_lines: &[&str]) -> f64 {
 /// candidate set, page excluded) whose [`fuzzy_window_score`] with the
 /// certified content reaches [`FUZZY_JACCARD_THRESHOLD`]. Callers turn the
 /// list into Moved / Unknown / zero-matches per Decision 5 step 4.
-#[allow(clippy::too_many_arguments)]
 fn fuzzy_locations(
-    repo_root: &Path,
-    reader: &crate::git::GitReader,
-    source: DocSource,
-    page_path: &str,
-    target_path: &str,
-    target_bytes: Option<&[u8]>,
-    cert: &CertifiedLink,
-    anchor_sha: &str,
+    repo: &DriftRepo<'_>,
+    block: &CertifiedBlock<'_>,
+    target: CurrentTarget<'_>,
     ctx: &mut MoveScanCtx<'_>,
 ) -> Result<Vec<crate::rk64::Location>, EpochError> {
+    let DriftRepo {
+        repo_root,
+        reader,
+        source,
+        ..
+    } = *repo;
+    let CertifiedBlock {
+        page_path,
+        anchor_sha,
+        cert,
+    } = *block;
+    let CurrentTarget {
+        path: target_path,
+        bytes: target_bytes,
+    } = target;
     let span = line_range_span(cert.start, cert.end);
     if span == 0 {
         return Ok(Vec::new());
@@ -3208,10 +3218,12 @@ pub fn collect_with_source(
         page: &str,
     ) -> Result<Vec<LinkClass>, EpochError> {
         classify_page(
-            repo.path(),
-            &reader(repo.path()),
-            &NoopCache,
-            DocSource::WorkingTree,
+            &DriftRepo {
+                repo_root: repo.path(),
+                reader: &reader(repo.path()),
+                cache: &NoopCache,
+                source: DocSource::WorkingTree,
+            },
             page,
             &repo.read(page),
             epoch,
@@ -3791,10 +3803,12 @@ pub fn collect_with_source(
         };
         let page_content = repo.read("wiki/page.md");
         let classes = classify_page(
-            repo.path(),
-            &reader(repo.path()),
-            &NoopCache,
-            DocSource::Git(GitSnapshot::Head),
+            &DriftRepo {
+                repo_root: repo.path(),
+                reader: &reader(repo.path()),
+                cache: &NoopCache,
+                source: DocSource::Git(GitSnapshot::Head),
+            },
             "wiki/page.md",
             &page_content,
             &epoch,

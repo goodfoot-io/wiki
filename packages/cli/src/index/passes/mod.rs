@@ -37,22 +37,27 @@ pub struct PassDelta {
     pub action: DeltaAction,
 }
 
+/// A blob a pass observed at a path: its OID plus whatever the pass
+/// already learned while hashing it.
+#[derive(Debug, Clone)]
+pub struct ObservedBlob {
+    pub oid: BlobOid,
+    /// Bytes read during the pass, for sources where the pass
+    /// reads file content itself (e.g. Worktree). When `Some`,
+    /// the candidate builder uses these instead of re-reading
+    /// from disk, eliminating the TOCTOU window between hash
+    /// and ingest.
+    pub blob_bytes: Option<Vec<u8>>,
+    /// File mtime at the moment of hashing, stored in
+    /// `gen_paths.stat_mtime_ns` so the next refresh can detect
+    /// in-place content edits.
+    pub stat_mtime_ns: Option<i64>,
+}
+
 #[derive(Debug, Clone)]
 pub enum DeltaAction {
     /// Path is present with the given blob OID.
-    Add {
-        oid: BlobOid,
-        /// Bytes read during the pass, for sources where the pass
-        /// reads file content itself (e.g. Worktree). When `Some`,
-        /// the candidate builder uses these instead of re-reading
-        /// from disk, eliminating the TOCTOU window between hash
-        /// and ingest.
-        blob_bytes: Option<Vec<u8>>,
-        /// File mtime at the moment of hashing, stored in
-        /// `gen_paths.stat_mtime_ns` so the next refresh can detect
-        /// in-place content edits.
-        stat_mtime_ns: Option<i64>,
-    },
+    Add(ObservedBlob),
     /// Path is no longer present in this source.
     Remove,
     /// Pass 1 pure rename — same blob OID at a new path. `from` is the
@@ -246,7 +251,7 @@ pub fn refresh(
                 continue;
             }
             let already_added = tree_deltas.iter().any(|d| {
-                d.path == path && matches!(d.action, DeltaAction::Add { .. } | DeltaAction::Rename { .. })
+                d.path == path && matches!(d.action, DeltaAction::Add(_) | DeltaAction::Rename { .. })
             });
             if already_added {
                 continue;
@@ -254,11 +259,11 @@ pub fn refresh(
             tree_deltas.push(PassDelta {
                 path,
                 source: Source::Tree,
-                action: DeltaAction::Add {
+                action: DeltaAction::Add(ObservedBlob {
                     oid,
                     blob_bytes: None,
                     stat_mtime_ns: None,
-                },
+                }),
             });
         }
     }
@@ -301,16 +306,8 @@ pub fn refresh(
         || -> Result<()> {
             for delta in &all_deltas {
                 match &delta.action {
-                    DeltaAction::Add { oid, blob_bytes, stat_mtime_ns } => {
-                        candidate_builder.add(
-                            repo,
-                            repo_root,
-                            &delta.path,
-                            delta.source,
-                            oid,
-                            blob_bytes.as_deref(),
-                            *stat_mtime_ns,
-                        )?;
+                    DeltaAction::Add(blob) => {
+                        candidate_builder.add(repo, repo_root, &delta.path, delta.source, blob)?;
                     }
                     DeltaAction::Remove => {
                         candidate_builder.remove(delta.source, &delta.path);
@@ -412,17 +409,20 @@ struct CandidateBuilder<'a> {
 }
 
 impl<'a> CandidateBuilder<'a> {
-    #[allow(clippy::too_many_arguments)]
     fn add(
         &mut self,
         repo: &gix::Repository,
         repo_root: &Path,
         path_rel: &Path,
         source: Source,
-        oid: &BlobOid,
-        blob_bytes: Option<&[u8]>,
-        stat_mtime_ns: Option<i64>,
+        blob: &ObservedBlob,
     ) -> Result<()> {
+        let ObservedBlob {
+            ref oid,
+            ref blob_bytes,
+            stat_mtime_ns,
+        } = *blob;
+        let blob_bytes = blob_bytes.as_deref();
         let path_str = path_rel.to_string_lossy().to_string();
         // Non-wiki blobs never gain a member row; a stale carried row at
         // this (path, source) is dropped.
@@ -498,7 +498,7 @@ mod tests {
     use std::process::Command;
 
     /// `CandidateBuilder::add` uses the bytes carried through
-    /// `DeltaAction::Add::blob_bytes` instead of re-reading from disk,
+    /// `ObservedBlob::blob_bytes` instead of re-reading from disk,
     /// eliminating the TOCTOU window between the pass-3 read and ingest:
     /// even when the file changes on disk between read and add, the
     /// candidate's new-blob fields come from the carried bytes.
@@ -531,7 +531,17 @@ mod tests {
         };
 
         builder
-            .add(&repo, root, rel, Source::Worktree, &oid_a, Some(content_a.as_ref()), None)
+            .add(
+                &repo,
+                root,
+                rel,
+                Source::Worktree,
+                &ObservedBlob {
+                    oid: oid_a.clone(),
+                    blob_bytes: Some(content_a.to_vec()),
+                    stat_mtime_ns: None,
+                },
+            )
             .expect("add");
 
         let row = builder

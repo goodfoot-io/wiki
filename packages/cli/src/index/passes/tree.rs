@@ -9,7 +9,7 @@ use anyhow::Result;
 use crate::index::{BlobOid, Source};
 use crate::wikiignore::WikiIgnore;
 
-use super::{DeltaAction, PassDelta};
+use super::{DeltaAction, ObservedBlob, PassDelta};
 
 /// SHA-1 of the empty tree, used as the prior tree when `last_head_tree_oid`
 /// is `None`.
@@ -65,11 +65,11 @@ pub fn pass_tree(
                 out.push(PassDelta {
                     path,
                     source: Source::Tree,
-                    action: DeltaAction::Add {
+                    action: DeltaAction::Add(ObservedBlob {
                         oid: BlobOid(id.to_hex().to_string()),
                         blob_bytes: None,
                         stat_mtime_ns: None,
-                    },
+                    }),
                 });
             }
             gix::object::tree::diff::ChangeDetached::Deletion { location, .. } => {
@@ -100,11 +100,11 @@ pub fn pass_tree(
                 out.push(PassDelta {
                     path,
                     source: Source::Tree,
-                    action: DeltaAction::Add {
+                    action: DeltaAction::Add(ObservedBlob {
                         oid: BlobOid(id.to_hex().to_string()),
                         blob_bytes: None,
                         stat_mtime_ns: None,
-                    },
+                    }),
                 });
             }
             gix::object::tree::diff::ChangeDetached::Rewrite {
@@ -152,11 +152,11 @@ pub fn pass_tree(
                             out.push(PassDelta {
                                 path: to,
                                 source: Source::Tree,
-                                action: DeltaAction::Add {
+                                action: DeltaAction::Add(ObservedBlob {
                                     oid: BlobOid(id.to_hex().to_string()),
                                     blob_bytes: None,
                                     stat_mtime_ns: None,
-                                },
+                                }),
                             });
                         }
                     }
@@ -174,11 +174,11 @@ pub fn pass_tree(
                             out.push(PassDelta {
                                 path: to,
                                 source: Source::Tree,
-                                action: DeltaAction::Add {
+                                action: DeltaAction::Add(ObservedBlob {
                                     oid: BlobOid(id.to_hex().to_string()),
                                     blob_bytes: None,
                                     stat_mtime_ns: None,
-                                },
+                                }),
                             });
                         }
                     }

@@ -332,6 +332,12 @@ mod tests {
                 tv_nsec: (mtime_ns % 1_000_000_000) as _,
             },
         ];
+        // SAFETY: `c` is a NUL-terminated `CString` that lives until the end of
+        // this function, so its pointer is valid for the whole call; `times`
+        // is a live `[libc::timespec; 2]` (atime, then mtime), exactly the
+        // two-element array `utimensat` reads through its `times` pointer.
+        // `AT_FDCWD` with flags `0` needs no open descriptor. `utimensat`
+        // retains neither pointer after returning.
         let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) };
         assert_eq!(rc, 0, "utimensat failed");
     }

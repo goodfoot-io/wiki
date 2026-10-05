@@ -89,7 +89,7 @@ fn linked_worktrees(base: &common::FixtureRepo) -> PathBuf {
         .dir
         .path()
         .parent()
-        .unwrap()
+        .expect("fixture dir has a parent")
         .join(format!("wt-linked-{}", std::process::id()));
     let added = std::process::Command::new("git")
         .current_dir(&base.root)

@@ -1,7 +1,7 @@
 ---
 title: Wiki Logging and Perf Instrumentation
 summary: Documents all logging and performance tracing points in the wiki CLI. 
-links-reviewed: 9
+links-reviewed: 10
 ---
 
 ## Overview
@@ -32,11 +32,11 @@ These scopes cover the cold-cache path: when the stat-only freshness gate misses
 |----------|-----------|----------|----------|
 | [index/mod.rs](./src/index/mod.rs#L386-L391) | `index.gix_open` | Time to open the gix repository for a refresh | Empty object |
 | [index/mod.rs](./src/index/mod.rs#L390-L399) | `index.refresh` | Total three-pass refresh (candidate building against the base generation) | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L212-L266) | `index.pass_tree` | Pass 1: diff `HEAD^{tree}` against the previously indexed tree | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L267-L276) | `index.pass_index` | Pass 2: git index entry scan | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L279-L288) | `index.pass_worktree` | Pass 3: worktree walk, read + hash of candidate markdown | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L298-L336) | `index.apply_deltas` | Building the publish candidate from merged deltas (blob parse, gen_paths membership, refcount reconciliation) | `deltas` (count) |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L366-L371) | `index.publish` | Publishing the generation: fts materialization + transactional store write | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L217-L269) | `index.pass_tree` | Pass 1: diff `HEAD^{tree}` against the previously indexed tree | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L272-L281) | `index.pass_index` | Pass 2: git index entry scan | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L284-L293) | `index.pass_worktree` | Pass 3: worktree walk, read + hash of candidate markdown | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L303-L334) | `index.apply_deltas` | Building the publish candidate from merged deltas (blob parse, gen_paths membership, refcount reconciliation) | `deltas` (count) |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L363-L368) | `index.publish` | Publishing the generation: fts materialization + transactional store write | Empty object |
 
 ### File Discovery
 
@@ -51,9 +51,9 @@ The disposable anchor-cache tiers inside [`wiki check`](./src/commands/check.rs)
 
 | Location | Event Name | Meaning |
 |----------|-----------|----------|
-| [check.rs](./src/commands/check.rs#L288-L292) | `anchor_cache` | Emitted once per check invocation after the run body, on every path — early exits included. `meta.hits`, `meta.misses`, `meta.bypasses` tally the row-level outcomes across both tiers; `meta.fingerprint_ms` and `meta.walk_ms` sum each tier's git-leg durations ([drift.rs](./src/commands/drift.rs#L1718) and [drift.rs](./src/commands/drift.rs#L405)), recorded on the miss path only — a served hit runs no git leg — so a fully warm run reports zeros. |
+| [check.rs](./src/commands/check.rs#L342-L346) | `anchor_cache` | Emitted once per check invocation after the run body, on every path — early exits included. `meta.hits`, `meta.misses`, `meta.bypasses` tally the row-level outcomes across both tiers; `meta.fingerprint_ms` and `meta.walk_ms` sum each tier's git-leg durations ([drift.rs](./src/commands/drift.rs#L1749) and [drift.rs](./src/commands/drift.rs#L405)), recorded on the miss path only — a served hit runs no git leg — so a fully warm run reports zeros. |
 
-The tally sites live at the tier seams: the shallow gate ([drift.rs](./src/commands/drift.rs#L303-L304)), the verified-hit serves ([drift.rs](./src/commands/drift.rs#L318-L319), [drift.rs](./src/commands/drift.rs#L1668-L1670)), and the misses that precede computing ([drift.rs](./src/commands/drift.rs#L324-L326), [drift.rs](./src/commands/drift.rs#L1671-L1673)).
+The tally sites live at the tier seams: the shallow gate ([drift.rs](./src/commands/drift.rs#L303-L304)), the verified-hit serves ([drift.rs](./src/commands/drift.rs#L318-L319), [drift.rs](./src/commands/drift.rs#L1715-L1717)), and the misses that precede computing ([drift.rs](./src/commands/drift.rs#L324-L326), [drift.rs](./src/commands/drift.rs#L1718-L1720)).
 
 ## Direct Output Points (println! and eprintln!)
 

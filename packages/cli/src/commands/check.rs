@@ -259,32 +259,86 @@ fn render_diagnostics(diagnostics: &[CheckDiagnostic]) -> String {
 
 // ── Public entry points ───────────────────────────────────────────────────────
 
+/// What `--fix` does this run, from the parsed `--fix`, `--fix-dry-run` and
+/// `--print-applied` flags. Only the combinations the CLI accepts have a
+/// variant: a dry run never applies, and only an applying run can print what
+/// it applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixMode {
+    /// Plain check: report diagnostics, rewrite nothing.
+    Off,
+    /// `--fix --fix-dry-run`: plan the fixes and print the proposal without
+    /// writing any file or consuming any journal.
+    DryRun,
+    /// `--fix`: apply the fixes. With `print_applied` (`--print-applied`),
+    /// stdout carries only the rewritten paths and the summary moves to
+    /// stderr.
+    Apply { print_applied: bool },
+}
+
+/// One `wiki check` invocation as the CLI parsed it.
+#[derive(Debug, Clone, Copy)]
+pub struct CheckRequest<'a> {
+    /// Glob patterns selecting the pages to validate; empty means every page
+    /// under `scan_root`.
+    pub globs: &'a [String],
+    /// The directory globs resolve against (the caller's working directory).
+    pub scan_root: &'a Path,
+    pub repo_root: &'a Path,
+    /// The layer pages and targets are read from.
+    pub source: DocSource,
+    /// `--format json`: machine-readable output.
+    pub json: bool,
+    /// `--no-exit-code`: report, but always exit 0.
+    pub no_exit_code: bool,
+    pub fix: FixMode,
+}
+
+/// The per-run state one check threads through its pre-check, fix pass and
+/// post-fix re-check: where pages are read from, plus the run-scoped caches
+/// every phase shares.
+pub(crate) struct CheckRun<'a> {
+    pub(crate) repo_root: &'a Path,
+    pub(crate) source: DocSource,
+    /// The run's one git handle: every blob read, path listing and
+    /// drift-machinery history read goes through it.
+    pub(crate) reader: &'a GitReader,
+    /// Page contents read this run (or seeded from validated journals in
+    /// dry-run mode).
+    pub(crate) content: ContentCache,
+    /// The repository facts both drift passes need and neither can change
+    /// (the shallow gate, the per-page history capture), so the fix phase's
+    /// captures serve the post-fix re-check's walk too.
+    pub(crate) drift: drift::DriftRunCtx,
+    /// The anchor-cache fault guard every construction site of this run
+    /// shares, so the cache-fault warning fires at most once per run (plan
+    /// decision 7).
+    pub(crate) reporter: crate::cache::CacheReporter,
+}
+
+impl<'a> CheckRun<'a> {
+    pub(crate) fn new(
+        repo_root: &'a Path,
+        source: DocSource,
+        reader: &'a GitReader,
+        reporter: crate::cache::CacheReporter,
+    ) -> Self {
+        Self {
+            repo_root,
+            source,
+            reader,
+            content: ContentCache::new(),
+            drift: drift::DriftRunCtx::new(),
+            reporter,
+        }
+    }
+}
+
 /// Run the check command.
 ///
 /// Returns the exit code: 0 = valid, 1 = validation errors, 2 = runtime error.
-#[allow(clippy::too_many_arguments)]
-pub fn run(
-    globs: &[String],
-    json: bool,
-    scan_root: &Path,
-    repo_root: &Path,
-    no_exit_code: bool,
-    source: DocSource,
-    fix: bool,
-    fix_dry_run: bool,
-    print_applied: bool,
-) -> Result<i32> {
-    let result = run_inner(
-        globs,
-        json,
-        scan_root,
-        repo_root,
-        no_exit_code,
-        source,
-        fix,
-        fix_dry_run,
-        print_applied,
-    );
+pub fn run(request: &CheckRequest<'_>) -> Result<i32> {
+    let result = run_inner(request);
     // The one aggregated per-run anchor-cache event (plan decision 7) —
     // emitted after the body on every path, early exits included, so a warm
     // run reports zero legs rather than nothing. Never per link or per page.
@@ -292,18 +346,19 @@ pub fn run(
     result
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_inner(
-    globs: &[String],
-    json: bool,
-    scan_root: &Path,
-    repo_root: &Path,
-    no_exit_code: bool,
-    source: DocSource,
-    fix: bool,
-    fix_dry_run: bool,
-    print_applied: bool,
-) -> Result<i32> {
+fn run_inner(request: &CheckRequest<'_>) -> Result<i32> {
+    let CheckRequest {
+        globs,
+        scan_root,
+        repo_root,
+        source,
+        json,
+        no_exit_code,
+        fix: fix_mode,
+    } = *request;
+    let fix = fix_mode != FixMode::Off;
+    let fix_dry_run = fix_mode == FixMode::DryRun;
+    let print_applied = fix_mode == FixMode::Apply { print_applied: true };
     // Every hard-error arm funnels through this: print the error (a JSON
     // envelope on stderr under `--format json`, `error: ...` otherwise),
     // then exit 2 — unless `--no-exit-code` is set, in which case the
@@ -413,22 +468,19 @@ fn run_inner(
         return Ok(hard_exit(&msg));
     }
 
-    // Per-run content cache: avoids re-reading wiki pages (frontmatter loop,
-    // link loop, and fix passes all read the same files). In fix mode the
-    // same cache instance is shared across the pre-check, the fix pass, and
-    // the post-fix re-check.
-    let mut content_cache = ContentCache::new();
-
-    // Per-run anchor-cache fault guard (plan decision 7): every construction
-    // site of this run shares it, so the cache-fault warning fires at most
-    // once per run — first fault only — even though the fix phase and the
+    // Per-run state shared across the pre-check, the fix pass, and the
+    // post-fix re-check: the content cache (the frontmatter loop, link loop,
+    // and fix passes all read the same files), the drift context, and the
+    // anchor-cache fault guard (plan decision 7) — every construction site
+    // of this run shares it, so the cache-fault warning fires at most once
+    // per run — first fault only — even though the fix phase and the
     // post-fix re-check each construct their own cache handle.
-    let cache_reporter = crate::cache::CacheReporter::for_invocation();
-
-    // Per-run drift context: the repository facts both drift passes need and
-    // neither can change (the shallow gate, the per-page history capture), so
-    // the fix phase's captures serve the post-fix re-check's walk too.
-    let mut drift_run = drift::DriftRunCtx::new();
+    let mut check_run = CheckRun::new(
+        repo_root,
+        source,
+        &git_reader,
+        crate::cache::CacheReporter::for_invocation(),
+    );
 
     // Fix-arm journal coordination (evaluation F-C): ONE read-only journal
     // classification per run, taken before the pre-check and handed to
@@ -452,23 +504,15 @@ fn run_inner(
     {
         for journal in &scanned.valid {
             for (path_rel, content) in &journal.stages {
-                content_cache.seed_virtual(&repo_root.join(path_rel), content.clone());
+                check_run
+                    .content
+                    .seed_virtual(&repo_root.join(path_rel), content.clone());
             }
         }
     }
 
     let diagnostics = match timed("check.precheck", || {
-        collect_for_files(
-            &files,
-            &index_files,
-            repo_root,
-            source,
-            &git_reader,
-            &mut drift_run,
-            &mut content_cache,
-            !fix,
-            &cache_reporter,
-        )
+        collect_for_files(&mut check_run, &files, &index_files, !fix)
     }) {
         Ok(d) => d,
         Err(e) => return Ok(hard_exit(&e)),
@@ -478,14 +522,9 @@ fn run_inner(
     if fix {
         let plan = match timed("check.fixpass", || {
             check_fix::run_fix_pass(
+                &mut check_run,
                 &files,
-                repo_root,
-                source,
-                &git_reader,
-                &mut drift_run,
                 fix_dry_run,
-                &mut content_cache,
-                &cache_reporter,
                 scanned_journals.unwrap_or_else(check_fix::ScannedJournals::none),
             )
         }) {
@@ -560,21 +599,16 @@ fn run_inner(
             }
         }
 
-        content_cache = ContentCache::new();
+        check_run.content = ContentCache::new();
         let post_diagnostics = match timed("check.recheck", || {
             collect_for_files(
+                &mut check_run,
                 &files,
                 &index_files,
-                repo_root,
-                source,
-                &git_reader,
-                &mut drift_run,
-                &mut content_cache,
                 // Include the drift pass: the pending-bump rule (current field
                 // value differs from the newest committed value) keeps the
                 // just-applied relocations and field initializations green.
                 true,
-                &cache_reporter,
             )
         }) {
             Ok(d) => d,
@@ -852,14 +886,17 @@ fn timed<T>(name: &str, f: impl FnOnce() -> T) -> T {
 }
 
 fn collect_drift_diagnostics(
+    check_run: &mut CheckRun<'_>,
     files: &[PathBuf],
-    repo_root: &Path,
-    source: DocSource,
-    reader: &GitReader,
-    run: &mut drift::DriftRunCtx,
-    content_cache: &mut ContentCache,
-    reporter: &crate::cache::CacheReporter,
 ) -> Result<Vec<CheckDiagnostic>> {
+    let CheckRun {
+        repo_root,
+        source,
+        reader,
+        content: ref mut content_cache,
+        drift: ref run,
+        ref reporter,
+    } = *check_run;
     let mut out = Vec::new();
     // Per-run anchor cache (plan decisions 2, 7, 8): constructed once per
     // run and threaded through the drift seams; any disabled path
@@ -967,10 +1004,12 @@ fn collect_drift_diagnostics(
         }
         let classify_started = std::time::Instant::now();
         let classes = drift::classify_page(
-            repo_root,
-            reader,
-            anchor_cache.cache(),
-            source,
+            &drift::DriftRepo {
+                repo_root,
+                reader,
+                cache: anchor_cache.cache(),
+                source,
+            },
             &page_path,
             content,
             &epoch,
@@ -1050,18 +1089,19 @@ fn collect_drift_diagnostics(
     Ok(out)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn collect_for_files(
+    check_run: &mut CheckRun<'_>,
     files: &[PathBuf],
     index_files: &[PathBuf],
-    repo_root: &Path,
-    source: DocSource,
-    git_reader: &GitReader,
-    drift_run: &mut drift::DriftRunCtx,
-    content_cache: &mut ContentCache,
     drift_pass: bool,
-    reporter: &crate::cache::CacheReporter,
 ) -> Result<Vec<CheckDiagnostic>> {
+    let CheckRun {
+        repo_root,
+        source,
+        reader: git_reader,
+        content: ref mut content_cache,
+        ..
+    } = *check_run;
     let wiki_ignore =
         crate::wikiignore::WikiIgnore::load(repo_root).map_err(|e| miette::miette!("{e}"))?;
     let mut diagnostics: Vec<CheckDiagnostic> = Vec::new();
@@ -1281,15 +1321,7 @@ fn collect_for_files(
     // one of the new kinds. `--fix` runs its own drift phase (Phase 2), so
     // the pass is off during fix-mode pre/post checks for now.
     if drift_pass {
-        let drift_diags = collect_drift_diagnostics(
-            files,
-            repo_root,
-            source,
-            git_reader,
-            drift_run,
-            content_cache,
-            reporter,
-        )?;
+        let drift_diags = collect_drift_diagnostics(check_run, files)?;
         diagnostics.extend(drift_diags);
     }
 
@@ -1342,20 +1374,13 @@ mod tests {
             let raw = discover_files(&[], repo_root, repo_root, source, Some(&git_reader))?;
             filter_files_for_source(raw, repo_root, source, &git_reader)?
         };
-        let mut content_cache = ContentCache::new();
-        let cache_reporter = crate::cache::CacheReporter::for_invocation();
-        let mut drift_run = drift::DriftRunCtx::new();
-        collect_for_files(
-            &files,
-            &index_files,
+        let mut check_run = CheckRun::new(
             repo_root,
             source,
             &git_reader,
-            &mut drift_run,
-            &mut content_cache,
-            true,
-            &cache_reporter,
-        )
+            crate::cache::CacheReporter::for_invocation(),
+        );
+        collect_for_files(&mut check_run, &files, &index_files, true)
     }
 
     fn diag(kind: &str, line: usize) -> CheckDiagnostic {
@@ -1470,15 +1495,15 @@ mod tests {
         repo.commit("add page");
 
         let code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false,
-            crate::index::DocSource::WorkingTree,
-            false,
-            false,
-            false,
+            &CheckRequest {
+                globs: &[],
+                scan_root: repo.path(),
+                repo_root: repo.path(),
+                source: crate::index::DocSource::WorkingTree,
+                json: false,
+                no_exit_code: false,
+                fix: FixMode::Off,
+            },
         )
         .expect("run");
         assert_eq!(code, 0);
@@ -1493,15 +1518,15 @@ mod tests {
         repo.commit("add pages");
 
         let code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false,
-            crate::index::DocSource::WorkingTree,
-            false,
-            false,
-            false,
+            &CheckRequest {
+                globs: &[],
+                scan_root: repo.path(),
+                repo_root: repo.path(),
+                source: crate::index::DocSource::WorkingTree,
+                json: false,
+                no_exit_code: false,
+                fix: FixMode::Off,
+            },
         )
         .expect("run");
         assert_eq!(code, 1);
@@ -1517,15 +1542,15 @@ mod tests {
         // File has no frontmatter fence → not a wiki candidate → not discovered
         // → empty corpus → exit 2.
         let code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false,
-            crate::index::DocSource::WorkingTree,
-            false,
-            false,
-            false,
+            &CheckRequest {
+                globs: &[],
+                scan_root: repo.path(),
+                repo_root: repo.path(),
+                source: crate::index::DocSource::WorkingTree,
+                json: false,
+                no_exit_code: false,
+                fix: FixMode::Off,
+            },
         )
         .expect("run");
         assert_eq!(code, 2);
@@ -1602,15 +1627,15 @@ mod tests {
         repo.commit("add files");
 
         let code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false,
-            crate::index::DocSource::WorkingTree,
-            false,
-            false,
-            false,
+            &CheckRequest {
+                globs: &[],
+                scan_root: repo.path(),
+                repo_root: repo.path(),
+                source: crate::index::DocSource::WorkingTree,
+                json: false,
+                no_exit_code: false,
+                fix: FixMode::Off,
+            },
         )
         .expect("run");
         assert_eq!(code, 0);
@@ -1657,15 +1682,15 @@ mod tests {
             "expected anchor_epoch_missing: {diagnostics:?}"
         );
         let code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false,
-            crate::index::DocSource::WorkingTree,
-            false,
-            false,
-            false,
+            &CheckRequest {
+                globs: &[],
+                scan_root: repo.path(),
+                repo_root: repo.path(),
+                source: crate::index::DocSource::WorkingTree,
+                json: false,
+                no_exit_code: false,
+                fix: FixMode::Off,
+            },
         )
         .expect("run");
         assert_eq!(code, 1);
@@ -1820,17 +1845,17 @@ mod tests {
         repo.git(&["mv", "src/old.rs", "src/new.rs"]);
         // (do not commit so worktree sees the rename in the index)
 
-        let code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false,
-            crate::index::DocSource::WorkingTree,
-            true,  // fix
-            false, // fix_dry_run
-            false, // print_applied
-        )
+        let code = run(&CheckRequest {
+            globs: &[],
+            scan_root: repo.path(),
+            repo_root: repo.path(),
+            source: crate::index::DocSource::WorkingTree,
+            json: false,
+            no_exit_code: false,
+            fix: FixMode::Apply {
+                print_applied: false,
+            },
+        })
         .expect("run");
 
         let content = std::fs::read_to_string(repo.path().join("wiki/page.md")).expect("read page");
@@ -1891,15 +1916,15 @@ mod tests {
 
         // With two possible rename destinations, fix must not apply automatically.
         let code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false,
-            crate::index::DocSource::WorkingTree,
-            true,
-            false,
-            false,
+            &CheckRequest {
+                globs: &[],
+                scan_root: repo.path(),
+                repo_root: repo.path(),
+                source: crate::index::DocSource::WorkingTree,
+                json: false,
+                no_exit_code: false,
+                fix: FixMode::Apply { print_applied: false },
+            },
         )
         .expect("run");
         // Link is still broken → exit 1.
@@ -1923,15 +1948,15 @@ mod tests {
         repo.commit("baseline");
 
         let code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false,
-            crate::index::DocSource::WorkingTree,
-            true,
-            false,
-            false,
+            &CheckRequest {
+                globs: &[],
+                scan_root: repo.path(),
+                repo_root: repo.path(),
+                source: crate::index::DocSource::WorkingTree,
+                json: false,
+                no_exit_code: false,
+                fix: FixMode::Apply { print_applied: false },
+            },
         )
         .expect("run");
 
@@ -1964,15 +1989,15 @@ mod tests {
         repo.commit("baseline");
 
         let code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false,
-            crate::index::DocSource::WorkingTree,
-            true,
-            false,
-            false,
+            &CheckRequest {
+                globs: &[],
+                scan_root: repo.path(),
+                repo_root: repo.path(),
+                source: crate::index::DocSource::WorkingTree,
+                json: false,
+                no_exit_code: false,
+                fix: FixMode::Apply { print_applied: false },
+            },
         )
         .expect("run");
 
@@ -2005,15 +2030,15 @@ mod tests {
         repo.commit("baseline");
 
         let code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false,
-            crate::index::DocSource::WorkingTree,
-            true,
-            false,
-            false,
+            &CheckRequest {
+                globs: &[],
+                scan_root: repo.path(),
+                repo_root: repo.path(),
+                source: crate::index::DocSource::WorkingTree,
+                json: false,
+                no_exit_code: false,
+                fix: FixMode::Apply { print_applied: false },
+            },
         )
         .expect("run");
 
@@ -2048,15 +2073,15 @@ mod tests {
         repo.commit("baseline");
 
         let code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false,
-            crate::index::DocSource::WorkingTree,
-            true,
-            false,
-            false,
+            &CheckRequest {
+                globs: &[],
+                scan_root: repo.path(),
+                repo_root: repo.path(),
+                source: crate::index::DocSource::WorkingTree,
+                json: false,
+                no_exit_code: false,
+                fix: FixMode::Apply { print_applied: false },
+            },
         )
         .expect("run");
 
@@ -2093,15 +2118,15 @@ mod tests {
         );
 
         let code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false,
-            crate::index::DocSource::WorkingTree,
-            true,
-            false,
-            false,
+            &CheckRequest {
+                globs: &[],
+                scan_root: repo.path(),
+                repo_root: repo.path(),
+                source: crate::index::DocSource::WorkingTree,
+                json: false,
+                no_exit_code: false,
+                fix: FixMode::Apply { print_applied: false },
+            },
         )
         .expect("run");
 
@@ -2189,15 +2214,15 @@ mod tests {
 
         // First pass.
         run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false,
-            crate::index::DocSource::WorkingTree,
-            true,
-            false,
-            false,
+            &CheckRequest {
+                globs: &[],
+                scan_root: repo.path(),
+                repo_root: repo.path(),
+                source: crate::index::DocSource::WorkingTree,
+                json: false,
+                no_exit_code: false,
+                fix: FixMode::Apply { print_applied: false },
+            },
         )
         .expect("first fix pass");
 
@@ -2206,15 +2231,15 @@ mod tests {
 
         // Second pass.
         run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false,
-            crate::index::DocSource::WorkingTree,
-            true,
-            false,
-            false,
+            &CheckRequest {
+                globs: &[],
+                scan_root: repo.path(),
+                repo_root: repo.path(),
+                source: crate::index::DocSource::WorkingTree,
+                json: false,
+                no_exit_code: false,
+                fix: FixMode::Apply { print_applied: false },
+            },
         )
         .expect("second fix pass");
 
@@ -2250,15 +2275,15 @@ mod tests {
 
         // Calling run directly with Index source and fix=true; no files should change.
         let _code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false,
-            crate::index::DocSource::Git(GitSnapshot::Index),
-            true,
-            false,
-            false,
+            &CheckRequest {
+                globs: &[],
+                scan_root: repo.path(),
+                repo_root: repo.path(),
+                source: crate::index::DocSource::Git(GitSnapshot::Index),
+                json: false,
+                no_exit_code: false,
+                fix: FixMode::Apply { print_applied: false },
+            },
         )
         .expect("run");
 
@@ -2299,17 +2324,17 @@ mod tests {
 
         // fix=true, source=Index → discover_files calls list_paths which fails
         // (no .git/index).  Must exit 2, not 0.
-        let code = run(
-            &[],
-            false,
-            root,
-            root,
-            false,
-            crate::index::DocSource::Git(GitSnapshot::Index),
-            true, // fix
-            false,
-            false,
-        )
+        let code = run(&CheckRequest {
+            globs: &[],
+            scan_root: root,
+            repo_root: root,
+            source: crate::index::DocSource::Git(GitSnapshot::Index),
+            json: false,
+            no_exit_code: false,
+            fix: FixMode::Apply {
+                print_applied: false,
+            },
+        })
         .expect("run");
         assert_eq!(
             code, 2,
@@ -2325,15 +2350,15 @@ mod tests {
         let repo = TestRepo::new();
         // No wiki pages at all.
         let code = run(
-            &[],
-            false,
-            repo.path(),
-            repo.path(),
-            false,
-            crate::index::DocSource::WorkingTree,
-            false,
-            false,
-            false,
+            &CheckRequest {
+                globs: &[],
+                scan_root: repo.path(),
+                repo_root: repo.path(),
+                source: crate::index::DocSource::WorkingTree,
+                json: false,
+                no_exit_code: false,
+                fix: FixMode::Off,
+            },
         )
         .expect("run");
         assert_eq!(code, 2, "empty corpus must exit 2 in non-fix mode");

@@ -337,14 +337,17 @@ fn rebound_error(path: &Path, found: &str, expected: &str) -> io::Error {
 fn validate_private_meta(meta: &fs::Metadata, path: &Path) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        if meta.uid() != unsafe { libc::geteuid() } {
+        // SAFETY: `geteuid` takes no arguments, has no preconditions, always
+        // succeeds (POSIX defines no error return) and touches no memory owned
+        // by Rust.
+        let euid = unsafe { libc::geteuid() };
+        if meta.uid() != euid {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
-                    "{}: owner uid {} is not the effective uid {}",
+                    "{}: owner uid {} is not the effective uid {euid}",
                     path.display(),
                     meta.uid(),
-                    unsafe { libc::geteuid() }
                 ),
             ));
         }

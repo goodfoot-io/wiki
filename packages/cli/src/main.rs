@@ -346,17 +346,29 @@ fn run(
             if clear_cache {
                 return commands::check::clear_cache();
             }
-            commands::check::run(
-                &globs,
-                json,
-                &scan_root,
-                &repo_root,
-                no_exit_code,
+            // Clap's `requires`/`conflicts_with` already reject every
+            // combination outside the first three arms; the last arm keeps
+            // the mapping exhaustive and fails closed if that ever drifts.
+            let fix_mode = match (fix, fix_dry_run, print_applied) {
+                (false, false, false) => commands::check::FixMode::Off,
+                (true, false, print_applied) => commands::check::FixMode::Apply { print_applied },
+                (true, true, false) => commands::check::FixMode::DryRun,
+                (false, true, _) | (false, false, true) | (true, true, true) => {
+                    eprintln!(
+                        "error: --fix-dry-run and --print-applied require --fix and are mutually exclusive"
+                    );
+                    return Ok(2);
+                }
+            };
+            commands::check::run(&commands::check::CheckRequest {
+                globs: &globs,
+                scan_root: &scan_root,
+                repo_root: &repo_root,
                 source,
-                fix,
-                fix_dry_run,
-                print_applied,
-            )
+                json,
+                no_exit_code,
+                fix: fix_mode,
+            })
         }
         Some(Commands::List { tag, limit, offset }) => {
             commands::list::run(&[], tag.as_deref(), limit, offset, json, &repo_root, source)

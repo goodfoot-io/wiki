@@ -9,7 +9,7 @@ use anyhow::Result;
 use crate::index::{BlobOid, Source};
 use crate::wikiignore::WikiIgnore;
 
-use super::{DeltaAction, PassDelta};
+use super::{DeltaAction, ObservedBlob, PassDelta};
 
 pub fn pass_index(
     dot_git: &Path,
@@ -74,11 +74,11 @@ pub fn pass_index(
             deltas.push(PassDelta {
                 path,
                 source: Source::Index,
-                action: DeltaAction::Add {
+                action: DeltaAction::Add(ObservedBlob {
                     oid: BlobOid(on_disk_oid),
                     blob_bytes: None,
                     stat_mtime_ns: None,
-                },
+                }),
             });
         }
     }

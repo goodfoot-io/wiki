@@ -15,9 +15,14 @@ pub fn detect(dot_git: &Path) -> HostileFs {
         return HostileFs::Yes;
     };
 
-    // SAFETY: `statfs64` accepts a NUL-terminated C string and a pointer to an
-    // uninitialized `libc::statfs64`; both are valid for the call's duration.
+    // SAFETY: `libc::statfs64` is a `#[repr(C)]` plain-old-data struct whose
+    // fields are all integers or integer arrays, so the all-zero bit pattern
+    // is a valid value of the type.
     let mut buf: libc::statfs64 = unsafe { std::mem::zeroed() };
+    // SAFETY: `c_path` is a NUL-terminated `CString` that lives until the end
+    // of this function, so its pointer is valid for the whole call; `&mut buf`
+    // is an aligned, writable, exclusively borrowed `statfs64` the kernel
+    // fills on success. `statfs64` retains neither pointer after returning.
     let rc = unsafe { libc::statfs64(c_path.as_ptr(), &mut buf) };
     if rc != 0 {
         return HostileFs::Yes;

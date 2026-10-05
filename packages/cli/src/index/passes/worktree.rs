@@ -20,7 +20,7 @@ use crate::index::blob::compute_blob_oid;
 use crate::index::{BlobOid, HostileFs, Source};
 use crate::wikiignore::WikiIgnore;
 
-use super::{DeltaAction, PassDelta};
+use super::{DeltaAction, ObservedBlob, PassDelta};
 use crate::index::generations::GenPathRow;
 
 pub fn pass_worktree(
@@ -136,11 +136,11 @@ pub fn pass_worktree(
         deltas.push(PassDelta {
             path: rel,
             source: Source::Worktree,
-            action: DeltaAction::Add {
+            action: DeltaAction::Add(ObservedBlob {
                 oid: BlobOid(hashed.0),
                 blob_bytes: Some(bytes),
                 stat_mtime_ns: cur_mtime,
-            },
+            }),
         });
     }
 
@@ -241,7 +241,7 @@ mod tests {
         assert_eq!(delta.path, PathBuf::from(PAGE));
         assert_eq!(delta.source, Source::Worktree);
         match &delta.action {
-            DeltaAction::Add { oid, .. } => assert_eq!(
+            DeltaAction::Add(ObservedBlob { oid, .. }) => assert_eq!(
                 oid.0, real_oid,
                 "HostileFs::Yes must ignore mtime evidence and rehash the file"
             ),
