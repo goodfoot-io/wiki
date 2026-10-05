@@ -1,14 +1,27 @@
 {
+  "$schema": "https://unpkg.com/knip@5/schema.json",
   "workspaces": {
     ".": {
-      "entry": [".claude/**/*.{js,mjs,ts}", ".devcontainer/**/*.{js,mjs,ts}"],
-      "project": [".claude/**/*.{js,mjs,ts}", ".devcontainer/**/*.{js,mjs,ts}"],
-      "ignore": [".worktrees/**"]
+      "entry": [".claude/skills/**/*.mjs", "scripts/*.mjs"],
+      "project": [".claude/skills/**/*.mjs", "scripts/*.mjs"],
+      "ignoreDependencies": ["@goodfoot/agent-skills"]
     },
-    "packages/*": {
-      "entry": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.{ts,tsx}", "scripts/**/*.{js,ts}"],
-      "project": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.{ts,tsx}", "scripts/**/*.{js,ts}"],
-      "ignore": ["node_modules/**", "dist/**", "build/**", "test/fixtures/**"]
+    "packages/agent-hooks": {
+      "entry": ["src/**/*.ts", "test/**/*.ts", "scripts/*.{js,mjs}"],
+      "project": ["src/**/*.ts", "test/**/*.ts", "scripts/*.{js,mjs}"]
+    },
+    "packages/cli": {
+      "entry": ["scripts/*.{js,mjs}"],
+      "project": ["scripts/*.{js,mjs}"]
+    },
+    "packages/extension": {
+      "entry": ["src/**/*.ts", "test/**/*.ts", "scripts/bundle/*.js"],
+      "project": ["src/**/*.ts", "test/**/*.ts", "scripts/bundle/*.js"]
+    },
+    "packages/vscode-logging": {
+      "entry": ["src/**/*.ts", "test/**/*.ts"],
+      "project": ["src/**/*.ts", "test/**/*.ts"],
+      "ignoreDependencies": ["@types/vscode"]
     }
   }
 }

@@ -1,14 +1,21 @@
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { compareSemver, extractPatchedFilePaths, runWikiCheck } from '../../src/common/wiki-check.js';
+import {
+  compareSemver,
+  extractPatchedFilePaths,
+  findManagedWikiBinary,
+  runWikiCheck,
+  WIKI_EXECUTABLE,
+  type WikiCheckLogger
+} from '../../src/common/wiki-check.js';
 
 let fixtureDir: string | undefined;
 let counter = 0;
 
 function makeBinary(script: string): string {
-  if (!fixtureDir) fixtureDir = mkdirSync(join(tmpdir(), `wiki-check-binaries-`), { recursive: true });
+  if (!fixtureDir) fixtureDir = mkdtempSync(join(tmpdir(), `wiki-check-binaries-`));
   counter += 1;
   const path = join(fixtureDir, `stub-${counter}.sh`);
   writeFileSync(path, `#!/bin/sh\n${script}\n`, 'utf-8');
@@ -49,7 +56,7 @@ describe('runWikiCheck', () => {
   });
 
   it('runs the child in the requested cwd', () => {
-    const workdir = mkdirSync(join(tmpdir(), `wiki-check-cwd-`), { recursive: true });
+    const workdir = mkdtempSync(join(tmpdir(), `wiki-check-cwd-`));
     try {
       const binary = makeBinary('pwd ; exit 1');
       const result = runWikiCheck('/some/file.md', { binary, cwd: workdir });
@@ -95,5 +102,72 @@ describe('extractPatchedFilePaths', () => {
 
   it('returns nothing for a patch that declares no files', () => {
     expect(extractPatchedFilePaths('*** Begin Patch\n*** End Patch')).toEqual([]);
+  });
+});
+
+describe('findManagedWikiBinary', () => {
+  const originalHome = process.env.HOME;
+  let home: string | undefined;
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (home) {
+      rmSync(home, { recursive: true, force: true });
+      home = undefined;
+    }
+  });
+
+  function recordingLogger(): { probe: WikiCheckLogger; warnings: Array<{ message: string; context?: unknown }> } {
+    const warnings: Array<{ message: string; context?: unknown }> = [];
+    return {
+      probe: { info: () => undefined, warn: (message, context) => warnings.push({ message, context }) },
+      warnings
+    };
+  }
+
+  /** A fake home whose VS Code globalStorage holds the extension's managed `bin` root. */
+  function managedBinRoot(): string {
+    home = mkdtempSync(join(tmpdir(), 'managed-wiki-home-'));
+    process.env.HOME = home;
+    const binRoot = join(home, '.config', 'Code', 'User', 'globalStorage', 'goodfoot.wiki-extension', 'bin');
+    mkdirSync(binRoot, { recursive: true });
+    return binRoot;
+  }
+
+  function installBinary(binRoot: string, version: string): string {
+    const targetDir = join(binRoot, version, 'linux-x64');
+    mkdirSync(targetDir, { recursive: true });
+    const binary = join(targetDir, WIKI_EXECUTABLE);
+    writeFileSync(binary, '#!/bin/sh\nexit 0\n', 'utf-8');
+    chmodSync(binary, 0o755);
+    return binary;
+  }
+
+  it('skips stray files and vanished symlinks silently, picking the newest real install', () => {
+    const binRoot = managedBinRoot();
+    installBinary(binRoot, '1.0.0');
+    const newest = installBinary(binRoot, '1.2.0');
+    writeFileSync(join(binRoot, '.DS_Store'), 'junk', 'utf-8');
+    symlinkSync(join(binRoot, 'does-not-exist'), join(binRoot, '9.9.9'));
+    const { probe, warnings } = recordingLogger();
+
+    expect(findManagedWikiBinary(probe)).toBe(newest);
+    expect(warnings).toHaveLength(0);
+  });
+
+  it('reports an unreadable version directory, then falls through to older installs', () => {
+    const binRoot = managedBinRoot();
+    const older = installBinary(binRoot, '1.0.0');
+    // A self-referential symlink lists as a directory candidate but fails to
+    // read with ELOOP — an unexpected error that must not vanish silently.
+    const looping = join(binRoot, '9.9.9');
+    symlinkSync(looping, looping);
+    const { probe, warnings } = recordingLogger();
+
+    expect(findManagedWikiBinary(probe)).toBe(older);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.message).toContain('managed wiki binary directory unreadable');
+    expect(JSON.stringify(warnings[0]?.context)).toContain(looping);
   });
 });

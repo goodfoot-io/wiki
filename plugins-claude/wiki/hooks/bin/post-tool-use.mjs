@@ -526,16 +526,6 @@ function createHookSpecificOutputBuilder(hookType) {
 }
 var postToolUseOutput = /* @__PURE__ */ createHookSpecificOutputBuilder("PostToolUse");
 
-// node_modules/@goodfoot/agent-hooks/dist/agents/claude-code/tool-helpers.js
-function getFilePath(input) {
-  const toolInput = input.tool_input;
-  if (toolInput && typeof toolInput === "object" && "file_path" in toolInput) {
-    const filePath = toolInput.file_path;
-    return typeof filePath === "string" ? filePath : null;
-  }
-  return null;
-}
-
 // node_modules/@goodfoot/agent-hooks/dist/core/stdin.js
 async function readStdin() {
   return new Promise((resolve2, reject) => {
@@ -820,12 +810,15 @@ function isWikiFile(filePath, cwd) {
   let title = "";
   let summary = "";
   for (const line of fmLines) {
-    const titleMatch = line.match(/^title\s*:\s*(.+)$/);
-    if (titleMatch) title = titleMatch[1].trim().replace(/^['"]|['"]$/g, "");
-    const summaryMatch = line.match(/^summary\s*:\s*(.+)$/);
-    if (summaryMatch) summary = summaryMatch[1].trim().replace(/^['"]|['"]$/g, "");
+    const titleValue = line.match(/^title\s*:\s*(.+)$/)?.[1];
+    if (titleValue !== void 0) title = unquoteScalar(titleValue);
+    const summaryValue = line.match(/^summary\s*:\s*(.+)$/)?.[1];
+    if (summaryValue !== void 0) summary = unquoteScalar(summaryValue);
   }
   return title.length > 0 && summary.length > 0;
+}
+function unquoteScalar(raw) {
+  return raw.trim().replace(/^['"]|['"]$/g, "");
 }
 var WIKI_EXECUTABLE = process.platform === "win32" ? "wiki.exe" : "wiki";
 function compareSemver(a, b) {
@@ -856,32 +849,40 @@ function vscodeGlobalStorageRoots() {
   }
   return roots;
 }
-function findManagedWikiBinary() {
+function findManagedWikiBinary(logger2) {
   for (const root of vscodeGlobalStorageRoots()) {
     const binRoot = join(root, "goodfoot.wiki-extension", "bin");
     if (!existsSync2(binRoot)) continue;
-    let versions;
-    try {
-      versions = readdirSync(binRoot);
-    } catch {
-      continue;
-    }
+    const versions = listSubdirectories(binRoot, logger2);
     versions.sort((a, b) => compareSemver(b, a));
     for (const version of versions) {
       const versionDir = join(binRoot, version);
-      let targets;
-      try {
-        targets = readdirSync(versionDir);
-      } catch {
-        continue;
-      }
-      for (const target of targets) {
+      for (const target of listSubdirectories(versionDir, logger2)) {
         const candidate = join(versionDir, target, WIKI_EXECUTABLE);
         if (existsSync2(candidate)) return candidate;
       }
     }
   }
   return null;
+}
+var VANISHED_DIRECTORY_CODES = /* @__PURE__ */ new Set(["ENOENT", "ENOTDIR"]);
+function listSubdirectories(dir, logger2) {
+  try {
+    return readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isDirectory() || entry.isSymbolicLink()).map((entry) => entry.name);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code !== void 0 && VANISHED_DIRECTORY_CODES.has(code)) return [];
+    logger2?.warn("managed wiki binary directory unreadable \u2014 skipped", {
+      dir,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return [];
+  }
+}
+function errorCode(error) {
+  if (typeof error !== "object" || error === null || !("code" in error)) return void 0;
+  const { code } = error;
+  return typeof code === "string" ? code : void 0;
 }
 function resolveWikiBinary(logger2) {
   const override = process.env.WIKI_BIN;
@@ -895,7 +896,7 @@ function resolveWikiBinary(logger2) {
     const first = onPath.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)[0];
     if (first && existsSync2(first)) return first;
   }
-  const managed = findManagedWikiBinary();
+  const managed = findManagedWikiBinary(logger2);
   if (managed) {
     logger2?.info("resolved wiki binary from VS Code globalStorage", { path: managed });
     return managed;
@@ -939,6 +940,21 @@ Install the wiki CLI on PATH, or set WIKI_BIN to its absolute path, then re-save
   return wikiContextBlock(message);
 }
 
+// packages/agent-hooks/src/claude/payload.ts
+function parsePostToolUsePayload(input) {
+  if (typeof input !== "object" || input === null || !("cwd" in input)) return null;
+  const { cwd } = input;
+  if (typeof cwd !== "string" || cwd.length === 0) return null;
+  return { cwd, filePath: readFilePath(input) };
+}
+function readFilePath(input) {
+  if (!("tool_input" in input)) return null;
+  const toolInput = input.tool_input;
+  if (typeof toolInput !== "object" || toolInput === null || !("file_path" in toolInput)) return null;
+  const filePath = toolInput.file_path;
+  return typeof filePath === "string" && filePath.length > 0 ? filePath : null;
+}
+
 // packages/agent-hooks/src/claude/post-tool-use.ts
 var WIKI_CHECK_TIMEOUT_MS = 25e3;
 function wikiUnavailableOutput(filePath, wikiBin, detail) {
@@ -949,11 +965,16 @@ function wikiUnavailableOutput(filePath, wikiBin, detail) {
   });
 }
 var post_tool_use_default = postToolUseHook({ matcher: "Edit|Write|NotebookEdit", timeout: 6e4 }, (input, { logger: logger2 }) => {
-  const filePath = getFilePath(input);
-  if (!filePath) return null;
-  if (!isWikiFile(filePath, input.cwd)) return null;
+  const payload = parsePostToolUsePayload(input);
+  if (payload === null) {
+    logger2.warn("malformed PostToolUse payload \u2014 cwd missing or not a non-empty string; wiki check skipped");
+    return null;
+  }
+  const { cwd, filePath } = payload;
+  if (filePath === null) return null;
+  if (!isWikiFile(filePath, cwd)) return null;
   const wikiBin = resolveWikiBinary(logger2);
-  const result = runWikiCheck(filePath, { binary: wikiBin, timeoutMs: WIKI_CHECK_TIMEOUT_MS, cwd: input.cwd });
+  const result = runWikiCheck(filePath, { binary: wikiBin, timeoutMs: WIKI_CHECK_TIMEOUT_MS, cwd });
   if (result.status === "unavailable") {
     const detail = result.output ?? "spawn failed";
     logger2.warn("wiki check execution error", { error: detail, wikiBin });

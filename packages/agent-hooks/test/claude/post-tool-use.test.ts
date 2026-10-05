@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Logger, type PostToolUseInput } from '@goodfoot/agent-hooks/claude-code';
@@ -12,14 +12,14 @@ let fixtureDir: string | undefined;
 let counter = 0;
 
 function makeFixture(name = 'page.md', content = '---\ntitle: T\nsummary: S\n---\nbody'): string {
-  if (!fixtureDir) fixtureDir = mkdirSync(join(tmpdir(), 'claude-wiki-fixtures-'), { recursive: true });
+  if (!fixtureDir) fixtureDir = mkdtempSync(join(tmpdir(), 'claude-wiki-fixtures-'));
   const path = join(fixtureDir, name);
   writeFileSync(path, content, 'utf-8');
   return path;
 }
 
 function makeBinary(script: string): string {
-  if (!fixtureDir) fixtureDir = mkdirSync(join(tmpdir(), 'claude-wiki-fixtures-'), { recursive: true });
+  if (!fixtureDir) fixtureDir = mkdtempSync(join(tmpdir(), 'claude-wiki-fixtures-'));
   counter += 1;
   const path = join(fixtureDir, `stub-${counter}.sh`);
   writeFileSync(path, `#!/bin/sh\n${script}\n`, 'utf-8');
@@ -174,8 +174,8 @@ describe('post-tool-use', () => {
       // Falls through to PATH/managed/bare-name resolution — never the bogus path.
       expect(resolveWikiBinary(probe)).not.toBe(rejected);
       expect(warnings).toHaveLength(1);
-      expect(warnings[0].message).toContain('WIKI_BIN override rejected');
-      expect(JSON.stringify(warnings[0].context)).toContain(rejected);
+      expect(warnings[0]?.message).toContain('WIKI_BIN override rejected');
+      expect(JSON.stringify(warnings[0]?.context)).toContain(rejected);
     });
   });
 

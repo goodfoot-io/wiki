@@ -3,9 +3,11 @@
  * Wraps the unified `@goodfoot/agent-hooks` CLI so every manifest-emitting
  * invocation -- via `yarn build:hooks`/`yarn build:hooks:codex` or directly
  * via `yarn agent-hooks-cli` -- gets its generated manifest canonicalized
- * afterward (stable hook ordering, no stamped timestamp) via
- * `canonicalizeHookManifest` below. `--agent opencode` emits no manifest and
- * is passed straight through; see main().
+ * afterward (stable hook ordering) via `canonicalizeHookManifest` below.
+ * `--agent opencode` emits no manifest and is passed straight through; see
+ * main(). The CLI stamps no build time: it records the generated bundle set
+ * in a `hooks.meta.json` sidecar (sorted filenames only), which this wrapper
+ * leaves untouched.
  *
  * An earlier version of this wrapper also post-processed the generated
  * `.mjs` output's esbuild module-boundary comments, to correct for the
@@ -60,9 +62,20 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+/** @typedef {{ type?: string, command: string, timeout?: number }} HookCommand */
+/** @typedef {{ matcher?: string, hooks?: HookCommand[] }} HookGroup */
+/**
+ * The CLI-emitted hooks.json: event name → matcher groups. Only the fields
+ * this wrapper reorders or rewrites are declared; the rest round-trip as-is.
+ * @typedef {{ hooks?: Record<string, HookGroup[]> }} HookManifest
+ */
+
+/**
+ * @param {string[]} cliArgs
+ * @returns {string | undefined}
+ */
 function findOutputPath(cliArgs) {
-  for (let i = 0; i < cliArgs.length; i += 1) {
-    const arg = cliArgs[i];
+  for (const [i, arg] of cliArgs.entries()) {
     if (arg === '-o' || arg === '--output') {
       return cliArgs[i + 1];
     }
@@ -82,10 +95,15 @@ function findOutputPath(cliArgs) {
 // one, repeated occurrences of the same value, and the unparsed `--agent=`
 // equals form are all left to upstream, which already fails closed on each
 // before writing any file.
+/**
+ * @param {string[]} cliArgs
+ * @returns {Array<string | undefined> | undefined}
+ */
 function findConflictingAgentValues(cliArgs) {
+  /** @type {Array<string | undefined>} */
   const values = [];
-  for (let i = 0; i < cliArgs.length; i += 1) {
-    if (cliArgs[i] === '--agent') {
+  for (const [i, arg] of cliArgs.entries()) {
+    if (arg === '--agent') {
       values.push(cliArgs[i + 1]);
     }
   }
@@ -93,9 +111,12 @@ function findConflictingAgentValues(cliArgs) {
   return distinct.size > 1 ? [...distinct] : undefined;
 }
 
+/**
+ * @param {string[]} cliArgs
+ * @returns {string | undefined}
+ */
 function findInputPath(cliArgs) {
-  for (let i = 0; i < cliArgs.length; i += 1) {
-    const arg = cliArgs[i];
+  for (const [i, arg] of cliArgs.entries()) {
     if (arg === '-i' || arg === '--input') {
       return cliArgs[i + 1];
     }
@@ -109,28 +130,53 @@ function findInputPath(cliArgs) {
   return undefined;
 }
 
+/**
+ * Bundle stems in the order the `-i` argument declares them, expanding one
+ * `{a,b}` brace group.
+ * @param {string | undefined} inputArg
+ * @returns {string[]}
+ */
 function declaredBundleOrder(inputArg) {
   if (inputArg === undefined) return [];
-  const brace = inputArg.match(/\{([^{}]+)\}/);
+  const brace = /\{([^{}]+)\}/.exec(inputArg);
+  const alternatives = brace?.[1];
   const paths =
-    brace === null
+    brace === null || alternatives === undefined
       ? [inputArg]
-      : brace[1]
+      : alternatives
           .split(',')
           .map((part) => `${inputArg.slice(0, brace.index)}${part}${inputArg.slice(brace.index + brace[0].length)}`);
   return paths.map((path) => basename(path).replace(/\.[^.]+$/, ''));
 }
 
+/**
+ * @param {string} command
+ * @returns {string | undefined}
+ */
 function commandBundle(command) {
   return command.match(/([A-Za-z0-9-]+)\.mjs\b/)?.[1];
 }
 
+/**
+ * @param {string} outputPath
+ * @param {string | undefined} inputArg
+ */
 function canonicalizeHookManifest(outputPath, inputArg) {
+  /** @type {HookManifest} */
   const manifest = JSON.parse(readFileSync(outputPath, 'utf8'));
   const declared = declaredBundleOrder(inputArg);
   const rankByBundle = new Map(declared.map((bundle, index) => [bundle, index]));
-  const rankOfCommand = (command) => rankByBundle.get(commandBundle(command)) ?? Number.MAX_SAFE_INTEGER;
+  /** @param {string} command */
+  const rankOfCommand = (command) => {
+    const bundle = commandBundle(command);
+    return (bundle === undefined ? undefined : rankByBundle.get(bundle)) ?? Number.MAX_SAFE_INTEGER;
+  };
+  /** @param {HookGroup} group */
   const rankOfGroup = (group) => Math.min(...(group.hooks ?? []).map((hook) => rankOfCommand(hook.command)));
+  /**
+   * @param {HookGroup} left
+   * @param {HookGroup} right
+   */
   const compareGroups = (left, right) => {
     const rank = rankOfGroup(left) - rankOfGroup(right);
     if (rank !== 0) return rank;
@@ -153,37 +199,26 @@ function canonicalizeHookManifest(outputPath, inputArg) {
     return leftRank !== rightRank ? leftRank - rightRank : leftEvent.localeCompare(rightEvent);
   });
   manifest.hooks = Object.fromEntries(hookEntries);
-
-  // The CLI stamps build wall-clock time here. It tries to
-  // preserve a prior value when the generated file set is unchanged, but any
-  // rebuild without an existing manifest emits a fresh one -- churning the
-  // committed artifact and tripping the freshness gate. Strip it so emitted
-  // bytes depend only on inputs.
-  if (manifest.__generated && 'timestamp' in manifest.__generated) {
-    delete manifest.__generated.timestamp;
-  }
-
-  if (Array.isArray(manifest.__generated?.files)) {
-    manifest.__generated.files.sort((left, right) => {
-      const leftRank = rankByBundle.get(left.replace(/\.mjs$/, '')) ?? Number.MAX_SAFE_INTEGER;
-      const rightRank = rankByBundle.get(right.replace(/\.mjs$/, '')) ?? Number.MAX_SAFE_INTEGER;
-      return leftRank !== rightRank ? leftRank - rightRank : left.localeCompare(right);
-    });
-  }
   writeFileSync(outputPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 // Mirrors the CLI's own codex emit-time conversion exactly, including
 // the 1-second floor: a sub-second ms budget would otherwise round down to a
 // zero-second (never-cancelling) registration.
+/**
+ * @param {number} timeoutMs
+ * @returns {number}
+ */
 function timeoutMsToSeconds(timeoutMs) {
   return Math.max(1, Math.ceil(timeoutMs / 1000));
 }
 
+/** @param {string} outputPath */
 function convertHookTimeoutsToSeconds(outputPath) {
+  /** @type {HookManifest} */
   const manifest = JSON.parse(readFileSync(outputPath, 'utf8'));
   for (const groups of Object.values(manifest.hooks ?? {})) {
-    for (const group of groups ?? []) {
+    for (const group of groups) {
       for (const hook of group.hooks ?? []) {
         if (typeof hook.timeout === 'number') {
           hook.timeout = timeoutMsToSeconds(hook.timeout);
@@ -232,7 +267,7 @@ async function main() {
     // plugin entry into it with no hooks.json alongside. Both steps below
     // read `-o` as a JSON file, so letting them run would fail on EISDIR --
     // and there is nothing they could canonicalize anyway, since the emitted
-    // bundle carries no hook ordering and no build timestamp.
+    // bundle carries no hook ordering.
     return;
   }
   if (agentValue === 'claude-code') {

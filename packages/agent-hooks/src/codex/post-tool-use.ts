@@ -20,22 +20,23 @@ export const WIKI_POST_MATCHER = 'apply_patch|exec_command|exec|shell|local_shel
 
 /** Narrow the SDK's unknown apply_patch input to its patch-text command. */
 export function narrowPatchText(toolInput: unknown): string | null {
-  if (
-    toolInput !== null &&
-    typeof toolInput !== 'undefined' &&
-    typeof toolInput === 'object' &&
-    'command' in toolInput
-  ) {
-    const command = (toolInput as { command: unknown }).command;
-    if (typeof command === 'string') return command;
-  }
-  return null;
+  if (typeof toolInput !== 'object' || toolInput === null || !('command' in toolInput)) return null;
+  const { command } = toolInput;
+  return typeof command === 'string' ? command : null;
 }
 
 export function createHandler() {
   return async (input: PostToolUseInput, { logger }: HookContext) => {
     const patchText = narrowPatchText(input.tool_input);
     if (patchText === null) return undefined;
+
+    // The SDK types `cwd` as a string but performs no runtime validation of
+    // the payload; treat it as untrusted before resolving paths against it.
+    const cwd: unknown = input.cwd;
+    if (typeof cwd !== 'string' || cwd.length === 0) {
+      logger.warn('malformed PostToolUse payload — cwd missing or not a non-empty string; wiki check skipped');
+      return undefined;
+    }
 
     const filePaths = extractPatchedFilePaths(patchText);
     if (filePaths.length === 0) return undefined;
@@ -45,22 +46,22 @@ export function createHandler() {
     // Single pass over every touched wiki member: --fix auto-repairs drift in
     // place; non-zero exits mean residual conditions the agent must resolve.
     const sections: string[] = [];
-    let unavailableDetail: string | null = null;
+    let unavailable: { filePath: string; detail: string } | null = null;
     for (const filePath of filePaths) {
-      if (!isWikiFile(filePath, input.cwd)) continue;
+      if (!isWikiFile(filePath, cwd)) continue;
 
-      const result = runWikiCheck(filePath, { binary: wikiBin, timeoutMs: WIKI_CHECK_TIMEOUT_MS, cwd: input.cwd });
+      const result = runWikiCheck(filePath, { binary: wikiBin, timeoutMs: WIKI_CHECK_TIMEOUT_MS, cwd });
       if (result.status === 'unavailable') {
-        unavailableDetail ??= result.output ?? 'spawn failed';
+        unavailable ??= { filePath, detail: result.output ?? 'spawn failed' };
         continue;
       }
       if (result.status === 'residual' && result.output) sections.push(result.output);
     }
 
-    if (unavailableDetail !== null) {
-      logger.warn('wiki check execution error', { error: unavailableDetail, wikiBin });
+    if (unavailable !== null) {
+      logger.warn('wiki check execution error', { error: unavailable.detail, wikiBin });
       return postToolUseOutput({
-        additionalContext: wikiUnavailableBlock(filePaths[0], wikiBin, unavailableDetail)
+        additionalContext: wikiUnavailableBlock(unavailable.filePath, wikiBin, unavailable.detail)
       });
     }
 

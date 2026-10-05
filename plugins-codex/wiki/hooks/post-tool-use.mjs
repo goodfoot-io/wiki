@@ -785,12 +785,15 @@ function isWikiFile(filePath, cwd) {
   let title = "";
   let summary = "";
   for (const line of fmLines) {
-    const titleMatch = line.match(/^title\s*:\s*(.+)$/);
-    if (titleMatch) title = titleMatch[1].trim().replace(/^['"]|['"]$/g, "");
-    const summaryMatch = line.match(/^summary\s*:\s*(.+)$/);
-    if (summaryMatch) summary = summaryMatch[1].trim().replace(/^['"]|['"]$/g, "");
+    const titleValue = line.match(/^title\s*:\s*(.+)$/)?.[1];
+    if (titleValue !== void 0) title = unquoteScalar(titleValue);
+    const summaryValue = line.match(/^summary\s*:\s*(.+)$/)?.[1];
+    if (summaryValue !== void 0) summary = unquoteScalar(summaryValue);
   }
   return title.length > 0 && summary.length > 0;
+}
+function unquoteScalar(raw) {
+  return raw.trim().replace(/^['"]|['"]$/g, "");
 }
 var WIKI_EXECUTABLE = process.platform === "win32" ? "wiki.exe" : "wiki";
 function compareSemver(a, b) {
@@ -821,32 +824,40 @@ function vscodeGlobalStorageRoots() {
   }
   return roots;
 }
-function findManagedWikiBinary() {
+function findManagedWikiBinary(logger2) {
   for (const root of vscodeGlobalStorageRoots()) {
     const binRoot = join(root, "goodfoot.wiki-extension", "bin");
     if (!existsSync2(binRoot)) continue;
-    let versions;
-    try {
-      versions = readdirSync(binRoot);
-    } catch {
-      continue;
-    }
+    const versions = listSubdirectories(binRoot, logger2);
     versions.sort((a, b) => compareSemver(b, a));
     for (const version of versions) {
       const versionDir = join(binRoot, version);
-      let targets;
-      try {
-        targets = readdirSync(versionDir);
-      } catch {
-        continue;
-      }
-      for (const target of targets) {
+      for (const target of listSubdirectories(versionDir, logger2)) {
         const candidate = join(versionDir, target, WIKI_EXECUTABLE);
         if (existsSync2(candidate)) return candidate;
       }
     }
   }
   return null;
+}
+var VANISHED_DIRECTORY_CODES = /* @__PURE__ */ new Set(["ENOENT", "ENOTDIR"]);
+function listSubdirectories(dir, logger2) {
+  try {
+    return readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isDirectory() || entry.isSymbolicLink()).map((entry) => entry.name);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code !== void 0 && VANISHED_DIRECTORY_CODES.has(code)) return [];
+    logger2?.warn("managed wiki binary directory unreadable \u2014 skipped", {
+      dir,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return [];
+  }
+}
+function errorCode(error) {
+  if (typeof error !== "object" || error === null || !("code" in error)) return void 0;
+  const { code } = error;
+  return typeof code === "string" ? code : void 0;
 }
 function resolveWikiBinary(logger2) {
   const override = process.env.WIKI_BIN;
@@ -860,7 +871,7 @@ function resolveWikiBinary(logger2) {
     const first = onPath.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)[0];
     if (first && existsSync2(first)) return first;
   }
-  const managed = findManagedWikiBinary();
+  const managed = findManagedWikiBinary(logger2);
   if (managed) {
     logger2?.info("resolved wiki binary from VS Code globalStorage", { path: managed });
     return managed;
@@ -906,8 +917,8 @@ Install the wiki CLI on PATH, or set WIKI_BIN to its absolute path, then re-save
 function extractPatchedFilePaths(patchText) {
   const paths = [];
   for (const match of patchText.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)) {
-    const path = match[1].trim();
-    if (path.length > 0 && !paths.includes(path)) paths.push(path);
+    const path = match[1]?.trim();
+    if (path !== void 0 && path.length > 0 && !paths.includes(path)) paths.push(path);
   }
   return paths;
 }
@@ -915,34 +926,37 @@ function extractPatchedFilePaths(patchText) {
 // packages/agent-hooks/src/codex/post-tool-use.ts
 var WIKI_CHECK_TIMEOUT_MS = 25e3;
 function narrowPatchText(toolInput) {
-  if (toolInput !== null && typeof toolInput !== "undefined" && typeof toolInput === "object" && "command" in toolInput) {
-    const command = toolInput.command;
-    if (typeof command === "string") return command;
-  }
-  return null;
+  if (typeof toolInput !== "object" || toolInput === null || !("command" in toolInput)) return null;
+  const { command } = toolInput;
+  return typeof command === "string" ? command : null;
 }
 function createHandler() {
   return async (input, { logger: logger2 }) => {
     const patchText = narrowPatchText(input.tool_input);
     if (patchText === null) return void 0;
+    const cwd = input.cwd;
+    if (typeof cwd !== "string" || cwd.length === 0) {
+      logger2.warn("malformed PostToolUse payload \u2014 cwd missing or not a non-empty string; wiki check skipped");
+      return void 0;
+    }
     const filePaths = extractPatchedFilePaths(patchText);
     if (filePaths.length === 0) return void 0;
     const wikiBin = resolveWikiBinary(logger2);
     const sections = [];
-    let unavailableDetail = null;
+    let unavailable = null;
     for (const filePath of filePaths) {
-      if (!isWikiFile(filePath, input.cwd)) continue;
-      const result = runWikiCheck(filePath, { binary: wikiBin, timeoutMs: WIKI_CHECK_TIMEOUT_MS, cwd: input.cwd });
+      if (!isWikiFile(filePath, cwd)) continue;
+      const result = runWikiCheck(filePath, { binary: wikiBin, timeoutMs: WIKI_CHECK_TIMEOUT_MS, cwd });
       if (result.status === "unavailable") {
-        unavailableDetail ??= result.output ?? "spawn failed";
+        unavailable ??= { filePath, detail: result.output ?? "spawn failed" };
         continue;
       }
       if (result.status === "residual" && result.output) sections.push(result.output);
     }
-    if (unavailableDetail !== null) {
-      logger2.warn("wiki check execution error", { error: unavailableDetail, wikiBin });
+    if (unavailable !== null) {
+      logger2.warn("wiki check execution error", { error: unavailable.detail, wikiBin });
       return postToolUseOutput({
-        additionalContext: wikiUnavailableBlock(filePaths[0], wikiBin, unavailableDetail)
+        additionalContext: wikiUnavailableBlock(unavailable.filePath, wikiBin, unavailable.detail)
       });
     }
     if (sections.length === 0) return void 0;

@@ -1,7 +1,7 @@
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { type HookContext, Logger, type PostToolUseInput } from '@goodfoot/agent-hooks/codex';
+import { type HookContext, Logger, type PostToolUseInput, type PostToolUseOutput } from '@goodfoot/agent-hooks/codex';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHandler, default as hook, narrowPatchText, WIKI_POST_MATCHER } from '../../src/codex/post-tool-use.js';
 
@@ -12,14 +12,14 @@ let fixtureDir: string | undefined;
 let counter = 0;
 
 function makeWikiFixture(name = 'page.md', content = '---\ntitle: T\nsummary: S\n---\nbody'): string {
-  if (!fixtureDir) fixtureDir = mkdirSync(join(tmpdir(), `codex-wiki-fixtures-`), { recursive: true });
+  if (!fixtureDir) fixtureDir = mkdtempSync(join(tmpdir(), `codex-wiki-fixtures-`));
   const path = join(fixtureDir, name);
   writeFileSync(path, content, 'utf-8');
   return path;
 }
 
 function makeBinary(script: string): string {
-  if (!fixtureDir) fixtureDir = mkdirSync(join(tmpdir(), `codex-wiki-fixtures-`), { recursive: true });
+  if (!fixtureDir) fixtureDir = mkdtempSync(join(tmpdir(), `codex-wiki-fixtures-`));
   counter += 1;
   const path = join(fixtureDir, `stub-${counter}.sh`);
   writeFileSync(path, `#!/bin/sh\n${script}\n`, 'utf-8');
@@ -49,6 +49,12 @@ function inputFor(toolName: string, toolInput: unknown): PostToolUseInput {
     turn_id: 'turn-1',
     tool_input: toolInput
   };
+}
+
+/** The PostToolUse `additionalContext` of a handler result, or '' when absent. */
+function postToolUseContext(result: PostToolUseOutput | undefined): string {
+  const specific = result?.stdout.hookSpecificOutput;
+  return specific?.hookEventName === 'PostToolUse' ? (specific.additionalContext ?? '') : '';
 }
 
 describe('codex post-tool-use', () => {
@@ -101,7 +107,7 @@ describe('codex post-tool-use', () => {
       try {
         const result = await handler(inputFor('apply_patch', { command: patch }), ctx);
         expect(result).toBeDefined();
-        const context = result?.stdout.hookSpecificOutput?.additionalContext ?? '';
+        const context = postToolUseContext(result);
         expect(context.startsWith('<wiki>\n')).toBe(true);
         expect(context.endsWith('\n</wiki>')).toBe(true);
         expect(context).toContain('line-range drift');
@@ -135,7 +141,7 @@ describe('codex post-tool-use', () => {
 
       try {
         const result = await createHandler()(inputFor('apply_patch', { command: patch }), ctx);
-        const context = result?.stdout.hookSpecificOutput?.additionalContext ?? '';
+        const context = postToolUseContext(result);
         expect(context).toContain('wiki validation was SKIPPED');
       } finally {
         delete process.env.WIKI_BIN;

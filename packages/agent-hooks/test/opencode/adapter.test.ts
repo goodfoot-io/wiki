@@ -1,6 +1,7 @@
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { type LogEvent, Logger } from '@goodfoot/agent-hooks';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { WikiCheckResult } from '../../src/common/wiki-check.js';
 import { assemblePlugin, wikiOpencode } from '../../src/opencode/index.js';
@@ -9,7 +10,7 @@ import type { OpencodeAfterOutput, OpencodeToolInput } from '../../src/opencode/
 let fixtureDir: string | undefined;
 
 function makeFile(name: string, content: string): string {
-  if (!fixtureDir) fixtureDir = mkdirSync(join(tmpdir(), `opencode-wiki-`), { recursive: true });
+  if (!fixtureDir) fixtureDir = mkdtempSync(join(tmpdir(), `opencode-wiki-`));
   const path = join(fixtureDir, name);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, content, 'utf-8');
@@ -79,7 +80,7 @@ describe('opencode adapter', () => {
   describe('wiki check wiring', () => {
     it('passes the resolved absolute file path through to the real check runner', async () => {
       const relative = 'notes/rel-page.md';
-      makeFile(relative, '---\ntitle: R\nsummary: Resolved\n---\nbody');
+      const absolute = makeFile(relative, '---\ntitle: R\nsummary: Resolved\n---\nbody');
       process.env.WIKI_BIN = makeBinary('echo "argv: $@" ; exit 1');
       const hooks = assemblePlugin({ directory: fixtureDir });
 
@@ -88,7 +89,7 @@ describe('opencode adapter', () => {
         await hooks['tool.execute.after'](afterInput('edit', { filePath: relative }), output);
         // The residual block carries the diagnostics the stub printed, which
         // echo the spawn argv -- proving the resolved path reached the binary.
-        expect(output.output).toContain(`check --fix ${join(fixtureDir, relative)}`);
+        expect(output.output).toContain(`check --fix ${absolute}`);
       } finally {
         delete process.env.WIKI_BIN;
       }
@@ -223,18 +224,24 @@ describe('opencode adapter', () => {
       expect(output.output?.endsWith('</wiki>')).toBe(true);
     });
 
-    it('never throws when the injected check itself explodes', async () => {
+    it('never throws when the injected check itself explodes, and records the failure', async () => {
       const wikiPath = makeFile('page.md', '---\ntitle: T\nsummary: S\n---\nbody');
       const explode: () => WikiCheckResult = () => {
         throw new Error('executor blew up');
       };
-      const hooks = assemblePlugin({ directory: fixtureDir, executeCheck: explode });
+      const logger = new Logger();
+      const errors: LogEvent[] = [];
+      logger.on('error', (event) => errors.push(event));
+      const hooks = assemblePlugin({ directory: fixtureDir, executeCheck: explode, logger });
 
       const output = afterOutput();
       await expect(
         hooks['tool.execute.after'](afterInput('edit', { filePath: wikiPath }), output)
       ).resolves.toBeUndefined();
       expect(output.output).toBe('tool ran');
+      expect(errors).toHaveLength(1);
+      expect(errors[0]?.message).toContain('tool.execute.after failed');
+      expect(errors[0]?.error?.message).toBe('executor blew up');
     });
 
     it('survives malformed host payloads without throwing', async () => {

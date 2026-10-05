@@ -65,13 +65,18 @@ export function isWikiFile(filePath: string, cwd: string): boolean {
   let title = '';
   let summary = '';
   for (const line of fmLines) {
-    const titleMatch = line.match(/^title\s*:\s*(.+)$/);
-    if (titleMatch) title = titleMatch[1].trim().replace(/^['"]|['"]$/g, '');
-    const summaryMatch = line.match(/^summary\s*:\s*(.+)$/);
-    if (summaryMatch) summary = summaryMatch[1].trim().replace(/^['"]|['"]$/g, '');
+    const titleValue = line.match(/^title\s*:\s*(.+)$/)?.[1];
+    if (titleValue !== undefined) title = unquoteScalar(titleValue);
+    const summaryValue = line.match(/^summary\s*:\s*(.+)$/)?.[1];
+    if (summaryValue !== undefined) summary = unquoteScalar(summaryValue);
   }
 
   return title.length > 0 && summary.length > 0;
+}
+
+/** Trim a frontmatter scalar and strip one layer of surrounding quotes. */
+function unquoteScalar(raw: string): string {
+  return raw.trim().replace(/^['"]|['"]$/g, '');
 }
 
 export const WIKI_EXECUTABLE = process.platform === 'win32' ? 'wiki.exe' : 'wiki';
@@ -114,35 +119,63 @@ export function vscodeGlobalStorageRoots(): string[] {
  * The extension only injects this onto the *integrated terminal* PATH, so a
  * hook subprocess never inherits it — we must find it on disk. Newest version
  * wins. Returns null when no managed binary is present.
+ *
+ * Only directory (and symlink) entries are considered, so stray files (e.g.
+ * `.DS_Store`) are skipped rather than read as directories. A directory that
+ * vanishes between listing and reading, or a symlink that does not resolve to
+ * one (ENOENT/ENOTDIR), is expected and skipped silently; any other read
+ * failure (e.g. EACCES, ELOOP) is reported through `logger` before resolution
+ * moves on, so a skipped install is never invisible.
  */
-export function findManagedWikiBinary(): string | null {
+export function findManagedWikiBinary(logger?: WikiCheckLogger): string | null {
   for (const root of vscodeGlobalStorageRoots()) {
     const binRoot = join(root, 'goodfoot.wiki-extension', 'bin');
     if (!existsSync(binRoot)) continue;
 
-    let versions: string[];
-    try {
-      versions = readdirSync(binRoot);
-    } catch {
-      continue;
-    }
+    const versions = listSubdirectories(binRoot, logger);
     versions.sort((a, b) => compareSemver(b, a)); // newest first
 
     for (const version of versions) {
       const versionDir = join(binRoot, version);
-      let targets: string[];
-      try {
-        targets = readdirSync(versionDir);
-      } catch {
-        continue;
-      }
-      for (const target of targets) {
+      for (const target of listSubdirectories(versionDir, logger)) {
         const candidate = join(versionDir, target, WIKI_EXECUTABLE);
         if (existsSync(candidate)) return candidate;
       }
     }
   }
   return null;
+}
+
+/** Filesystem error codes meaning "this directory is no longer there". */
+const VANISHED_DIRECTORY_CODES = new Set(['ENOENT', 'ENOTDIR']);
+
+/**
+ * Names of the subdirectories of `dir`. A vanished directory yields an empty
+ * list; any other read failure is logged and also yields an empty list.
+ */
+function listSubdirectories(dir: string, logger: WikiCheckLogger | undefined): string[] {
+  try {
+    // A symlink may point at a directory; one that does not surfaces as
+    // ENOTDIR when listed and is skipped like any vanished directory.
+    return readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
+      .map((entry) => entry.name);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code !== undefined && VANISHED_DIRECTORY_CODES.has(code)) return [];
+    logger?.warn('managed wiki binary directory unreadable — skipped', {
+      dir,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return [];
+  }
+}
+
+/** The `code` of a Node system error, if `error` carries a string one. */
+function errorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null || !('code' in error)) return undefined;
+  const { code } = error;
+  return typeof code === 'string' ? code : undefined;
 }
 
 /**
@@ -171,7 +204,7 @@ export function resolveWikiBinary(logger?: WikiCheckLogger): string {
     if (first && existsSync(first)) return first;
   }
 
-  const managed = findManagedWikiBinary();
+  const managed = findManagedWikiBinary(logger);
   if (managed) {
     logger?.info('resolved wiki binary from VS Code globalStorage', { path: managed });
     return managed;
@@ -269,8 +302,8 @@ export function wikiUnavailableBlock(filePath: string, wikiBin: string, detail: 
 export function extractPatchedFilePaths(patchText: string): string[] {
   const paths: string[] = [];
   for (const match of patchText.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)) {
-    const path = match[1].trim();
-    if (path.length > 0 && !paths.includes(path)) paths.push(path);
+    const path = match[1]?.trim();
+    if (path !== undefined && path.length > 0 && !paths.includes(path)) paths.push(path);
   }
   return paths;
 }

@@ -16,9 +16,14 @@ interface HookGroup {
   hooks?: HookCommand[];
 }
 
+/** Event name → matcher groups; PostToolUse is the only event the plugin registers. */
+interface HookEvents {
+  PostToolUse?: HookGroup[];
+  [event: string]: HookGroup[] | undefined;
+}
+
 interface HooksManifest {
-  hooks?: Record<string, HookGroup[]>;
-  __generated?: { files?: string[]; timestamp?: string };
+  hooks?: HookEvents;
 }
 
 function readManifest(relativePath: string): HooksManifest {
@@ -47,8 +52,13 @@ describe('emitted claude hooks.json shape', () => {
   });
 
   it('declares exactly the post-tool-use bundle and stamps no timestamp', () => {
-    expect(manifest.__generated?.files).toEqual(['post-tool-use.mjs']);
-    expect(manifest.__generated && 'timestamp' in manifest.__generated).toBe(false);
+    // The CLI tracks generated bundles in a hooks.meta.json sidecar; the
+    // manifest itself carries the registration only.
+    expect(Object.keys(manifest)).toEqual(['hooks']);
+    const meta: unknown = JSON.parse(
+      readFileSync(resolve(repoRoot, 'plugins-claude/wiki/hooks/hooks.meta.json'), 'utf8')
+    );
+    expect(meta).toStrictEqual({ files: ['post-tool-use.mjs'] });
   });
 
   it('ships an executable bin/post-tool-use.mjs next to the manifest', () => {

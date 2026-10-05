@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -10,7 +10,7 @@ const BIG_FILE_BYTES = 8 * 1024 * 1024;
 let fixtureDir: string | undefined;
 
 function makeFile(name: string, content: string): string {
-  if (!fixtureDir) fixtureDir = mkdirSync(join(tmpdir(), `is-wiki-file-`), { recursive: true });
+  if (!fixtureDir) fixtureDir = mkdtempSync(join(tmpdir(), `is-wiki-file-`));
   const path = join(fixtureDir, name);
   writeFileSync(path, content, 'utf-8');
   return path;
@@ -74,8 +74,9 @@ const procIoReadable = (() => {
 describe.skipIf(!procIoReadable)('isWikiFile bounded read', () => {
   function readRchar(): number {
     const match = readFileSync('/proc/self/io', 'utf-8').match(/^rchar:\s*(\d+)$/m);
-    if (!match) throw new Error('rchar counter unavailable in /proc/self/io');
-    return Number.parseInt(match[1], 10);
+    const counter = match?.[1];
+    if (counter === undefined) throw new Error('rchar counter unavailable in /proc/self/io');
+    return Number.parseInt(counter, 10);
   }
 
   it('consumes bounded read bandwidth regardless of file size', () => {

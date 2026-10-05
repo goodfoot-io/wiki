@@ -1,4 +1,4 @@
-import { getFilePath, postToolUseHook, postToolUseOutput } from '@goodfoot/agent-hooks/claude-code';
+import { postToolUseHook, postToolUseOutput } from '@goodfoot/agent-hooks/claude-code';
 import {
   isWikiFile,
   resolveWikiBinary,
@@ -6,6 +6,7 @@ import {
   wikiContextBlock,
   wikiUnavailableBlock
 } from '../common/wiki-check.js';
+import { parsePostToolUsePayload } from './payload.js';
 
 /** The hook's own spawn timeout is separately bounded below the registration budget. */
 const WIKI_CHECK_TIMEOUT_MS = 25000;
@@ -24,16 +25,21 @@ function wikiUnavailableOutput(filePath: string, wikiBin: string, detail: string
 }
 
 export default postToolUseHook({ matcher: 'Edit|Write|NotebookEdit', timeout: 60000 }, (input, { logger }) => {
-  const filePath = getFilePath(input);
-  if (!filePath) return null;
+  const payload = parsePostToolUsePayload(input);
+  if (payload === null) {
+    logger.warn('malformed PostToolUse payload — cwd missing or not a non-empty string; wiki check skipped');
+    return null;
+  }
+  const { cwd, filePath } = payload;
+  if (filePath === null) return null;
 
-  if (!isWikiFile(filePath, input.cwd)) return null;
+  if (!isWikiFile(filePath, cwd)) return null;
 
   const wikiBin = resolveWikiBinary(logger);
 
   // Single invocation: auto-fix line-range drift and frontmatter; a non-zero
   // exit means residual, unfixable wiki conditions the agent must resolve.
-  const result = runWikiCheck(filePath, { binary: wikiBin, timeoutMs: WIKI_CHECK_TIMEOUT_MS, cwd: input.cwd });
+  const result = runWikiCheck(filePath, { binary: wikiBin, timeoutMs: WIKI_CHECK_TIMEOUT_MS, cwd });
 
   if (result.status === 'unavailable') {
     const detail = result.output ?? 'spawn failed';

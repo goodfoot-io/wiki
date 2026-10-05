@@ -8,12 +8,11 @@ import { afterAll, describe, expect, it } from 'vitest';
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
 const hookScript = join(repoRoot, '.githooks', 'pre-commit.plugin-version.sh');
 
-const FIXTURES = [
-  'plugins-claude/wiki/.claude-plugin/plugin.json',
-  'plugins-codex/wiki/.codex-plugin/plugin.json',
-  'plugins-opencode/wiki/package.json',
-  '.claude-plugin/marketplace.json'
-];
+const CLAUDE_MANIFEST = 'plugins-claude/wiki/.claude-plugin/plugin.json';
+const CODEX_MANIFEST = 'plugins-codex/wiki/.codex-plugin/plugin.json';
+const OPENCODE_MANIFEST = 'plugins-opencode/wiki/package.json';
+const MARKETPLACE = '.claude-plugin/marketplace.json';
+const FIXTURES = [CLAUDE_MANIFEST, CODEX_MANIFEST, OPENCODE_MANIFEST, MARKETPLACE];
 
 function git(cwd: string, args: string[]): string {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
@@ -58,7 +57,7 @@ describe('pre-commit.plugin-version.sh', () => {
     writeFileSync(opencodeManifest, `${JSON.stringify(seeded, null, 2)}\n`);
 
     // Isolate from this repo's git context; PATH must stay so node/git are found.
-    const env = { ...process.env } as Record<string, string | undefined>;
+    const env: NodeJS.ProcessEnv = { ...process.env };
     delete env.GIT_DIR;
     delete env.GIT_WORK_TREE;
     delete env.GIT_INDEX_FILE;
@@ -71,13 +70,16 @@ describe('pre-commit.plugin-version.sh', () => {
     // the pin is on behavior (one shared increment across all four surfaces),
     // which must hold no matter what `yarn bump` has moved the repo to.
     const bumpPatch = (v: string): string => {
-      const [maj, min, pat] = v.split('.').map(Number);
-      return `${maj}.${min}.${pat + 1}`;
+      const match = /^(\d+\.\d+)\.(\d+)$/.exec(v);
+      const head = match?.[1];
+      const patch = match?.[2];
+      if (head === undefined || patch === undefined) throw new Error(`not a MAJOR.MINOR.PATCH version: ${v}`);
+      return `${head}.${Number(patch) + 1}`;
     };
-    const baseManifestVersion = firstVersion(readFileSync(join(repoRoot, FIXTURES[0]), 'utf8'));
+    const baseManifestVersion = firstVersion(readFileSync(join(repoRoot, CLAUDE_MANIFEST), 'utf8'));
     expect(baseManifestVersion).toMatch(/^\d+\.\d+\.\d+$/);
     const bumpedManifestVersion = bumpPatch(baseManifestVersion);
-    const liveMarketplace = readFileSync(join(repoRoot, FIXTURES[3]), 'utf8');
+    const liveMarketplace = readFileSync(join(repoRoot, MARKETPLACE), 'utf8');
     const baseMetadataVersion = firstVersion(liveMarketplace);
     const bumpedMetadataVersion = bumpPatch(baseMetadataVersion);
 
@@ -85,10 +87,10 @@ describe('pre-commit.plugin-version.sh', () => {
       spawnSync('git', ['show', `:${relative}`], { cwd: scratch, encoding: 'utf8' }).stdout;
 
     // (a) one shared increment across all three manifests + marketplace surfaces, in the INDEX
-    expect(firstVersion(indexed(FIXTURES[0]))).toBe(bumpedManifestVersion);
-    expect(firstVersion(indexed(FIXTURES[1]))).toBe(bumpedManifestVersion);
-    expect(firstVersion(indexed(FIXTURES[2]))).toBe(bumpedManifestVersion);
-    const indexedMarketplace = indexed(FIXTURES[3]);
+    expect(firstVersion(indexed(CLAUDE_MANIFEST))).toBe(bumpedManifestVersion);
+    expect(firstVersion(indexed(CODEX_MANIFEST))).toBe(bumpedManifestVersion);
+    expect(firstVersion(indexed(OPENCODE_MANIFEST))).toBe(bumpedManifestVersion);
+    const indexedMarketplace = indexed(MARKETPLACE);
     expect(firstVersion(indexedMarketplace)).toBe(bumpedMetadataVersion); // metadata.version rides one increment too
     const marketplaceDoc = JSON.parse(indexedMarketplace) as { plugins?: { name: string; version?: string }[] };
     expect(marketplaceDoc.plugins?.[0]).toMatchObject({ name: 'wiki', version: bumpedManifestVersion });
@@ -97,7 +99,7 @@ describe('pre-commit.plugin-version.sh', () => {
     const worktreeManifest = readFileSync(opencodeManifest, 'utf8');
     expect(worktreeManifest).toContain('[local-wip]');
     expect(worktreeManifest).toContain(`"version": "${bumpedManifestVersion}"`);
-    const indexBlob = indexed(FIXTURES[2]);
+    const indexBlob = indexed(OPENCODE_MANIFEST);
     expect(indexBlob).toContain(`"version": "${bumpedManifestVersion}"`);
     expect(indexBlob).not.toContain('[local-wip]');
 

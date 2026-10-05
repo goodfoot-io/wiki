@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# Run cargo check for the Rust CLI and TypeScript typecheck for the extension
-# package in parallel. Uses tsgo when available, falling back to tsc.
+# Run cargo check for the Rust CLI and TypeScript typecheck for each TS
+# package (extension, agent-hooks, vscode-logging) in parallel. Uses tsgo when
+# available, falling back to tsc.
 
 WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -47,6 +48,7 @@ typecheck_ts_package() {
 
 typecheck_ts_package "$WORKSPACE_ROOT/packages/extension"
 typecheck_ts_package "$WORKSPACE_ROOT/packages/agent-hooks"
+typecheck_ts_package "$WORKSPACE_ROOT/packages/vscode-logging"
 
 for PID in "${PIDS[@]}"; do
   wait "$PID" || EXIT=1

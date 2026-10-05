@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
+const installedPackageDir = resolve(repoRoot, 'node_modules/@goodfoot/agent-hooks');
 
 const FIXTURE_HOOK = `import { postToolUseHook } from '@goodfoot/agent-hooks/claude-code';
 export default postToolUseHook({ matcher: 'Edit|Write|NotebookEdit', timeout: 60000 }, (input, { logger }) => {
@@ -14,9 +15,27 @@ export default postToolUseHook({ matcher: 'Edit|Write|NotebookEdit', timeout: 60
 });
 `;
 
+/** Every file a claude-code build emits, read as raw text for byte comparison. */
 interface BuildResult {
   bundle: string;
-  manifest: Record<string, unknown>;
+  manifest: string;
+  /** The CLI's tracking sidecar: the generated filenames, beside hooks.json. */
+  meta: string;
+}
+
+/**
+ * The exact `@goodfoot/agent-hooks` version this workspace resolved. The
+ * npm-installed side must install this same version, or the comparison
+ * measures a library upgrade instead of the install layout.
+ */
+function installedVersion(): string {
+  const manifest: unknown = JSON.parse(readFileSync(join(installedPackageDir, 'package.json'), 'utf-8'));
+  if (typeof manifest !== 'object' || manifest === null || !('version' in manifest)) {
+    throw new Error('installed @goodfoot/agent-hooks package.json declares no version');
+  }
+  const { version } = manifest;
+  if (typeof version !== 'string') throw new Error('installed @goodfoot/agent-hooks version is not a string');
+  return version;
 }
 
 function buildFixture(cliEntryPath: string, root: string): BuildResult {
@@ -31,31 +50,22 @@ function buildFixture(cliEntryPath: string, root: string): BuildResult {
   );
   expect(result.status, `CLI build failed: ${result.stderr}`).toBe(0);
 
-  const bundle = readFileSync(join(root, 'out', 'bin', 'hook.mjs'), 'utf-8');
-  const manifest = JSON.parse(readFileSync(join(root, 'out', 'hooks.json'), 'utf-8'));
-  return { bundle, manifest };
-}
-
-// Strips only the fields the wrapper's own canonicalizeHookManifest already
-// normalizes deterministically (timestamp) -- nothing else should differ.
-function stripNondeterministicFields(manifest: Record<string, unknown>): unknown {
-  const generated = manifest.__generated as Record<string, unknown> | undefined;
-  if (generated && 'timestamp' in generated) {
-    const { timestamp, ...rest } = generated;
-    return { ...manifest, __generated: rest };
-  }
-  return manifest;
+  return {
+    bundle: readFileSync(join(root, 'out', 'bin', 'hook.mjs'), 'utf-8'),
+    manifest: readFileSync(join(root, 'out', 'hooks.json'), 'utf-8'),
+    meta: readFileSync(join(root, 'out', 'hooks.meta.json'), 'utf-8')
+  };
 }
 
 describe('build output is byte-stable across symlinked and non-symlinked node_modules layouts', () => {
-  it('produces an identical bundle and manifest through this worktree and a real npm install', () => {
+  it('produces an identical bundle, manifest and sidecar through this worktree and a real npm install', () => {
     // The "symlinked" side: a scratch root whose own node_modules is a
     // symlink to this repo's real, installed node_modules -- placed directly
     // under the root (same depth as the npm-installed side below) so the
     // only variable under test is symlinked vs. real, not resolution depth.
     const symlinkedRoot = mkdtempSync(join(tmpdir(), 'symlinked-build-'));
     symlinkSync(resolve(repoRoot, 'node_modules'), join(symlinkedRoot, 'node_modules'), 'dir');
-    const symlinkedCli = resolve(repoRoot, 'node_modules/@goodfoot/agent-hooks/dist/cli.js');
+    const symlinkedCli = join(installedPackageDir, 'dist/cli.js');
 
     // A real `npm install` produces a fully real, non-symlinked node_modules
     // tree with its own resolved transitive dependencies -- copying just the
@@ -66,7 +76,7 @@ describe('build output is byte-stable across symlinked and non-symlinked node_mo
     writeFileSync(join(npmRoot, 'package.json'), JSON.stringify({ name: 'scratch', private: true }), 'utf-8');
     const install = spawnSync(
       'npm',
-      ['install', '@goodfoot/agent-hooks@1.0.0', '--no-save', '--no-audit', '--no-fund'],
+      ['install', `@goodfoot/agent-hooks@${installedVersion()}`, '--no-save', '--no-audit', '--no-fund'],
       {
         cwd: npmRoot,
         encoding: 'utf-8'
@@ -79,10 +89,17 @@ describe('build output is byte-stable across symlinked and non-symlinked node_mo
       const symlinked = buildFixture(symlinkedCli, symlinkedRoot);
       const npmInstalled = buildFixture(npmCli, npmRoot);
 
+      // Byte equality with no normalization: the CLI stamps no build time
+      // anywhere, so every emitted file must depend only on its inputs.
       expect(npmInstalled.bundle).toBe(symlinked.bundle);
-      expect(stripNondeterministicFields(npmInstalled.manifest)).toEqual(
-        stripNondeterministicFields(symlinked.manifest)
-      );
+      expect(npmInstalled.manifest).toBe(symlinked.manifest);
+      expect(npmInstalled.meta).toBe(symlinked.meta);
+
+      // Pin what "identical" is measured over, so a format change cannot make
+      // the comparison vacuous: the sidecar declares exactly the one bundle,
+      // and the manifest carries the registration only.
+      expect(JSON.parse(symlinked.meta)).toStrictEqual({ files: ['hook.mjs'] });
+      expect(Object.keys(JSON.parse(symlinked.manifest))).toEqual(['hooks']);
     } finally {
       rmSync(symlinkedRoot, { recursive: true, force: true });
       rmSync(npmRoot, { recursive: true, force: true });

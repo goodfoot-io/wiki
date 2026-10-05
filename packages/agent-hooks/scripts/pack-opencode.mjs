@@ -36,6 +36,10 @@ if (!existsSync(join(packageDir, 'dist', 'index.mjs'))) {
 // would vanish from the published package. Walk manually: statSync follows
 // symlinks, so every link is copied as the real file or directory it points
 // at, with mode bits preserved so bin/ scripts stay executable.
+/**
+ * @param {string} source
+ * @param {string} destination
+ */
 function dereferencedCopy(source, destination) {
   const stats = statSync(source);
   if (stats.isDirectory()) {

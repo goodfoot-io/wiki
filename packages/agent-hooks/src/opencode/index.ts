@@ -8,10 +8,14 @@
  *
  * Fail-open by contract: the whole after-hook body is guarded because an
  * uncaught error would surface on a fail-closed host loader — a missed
- * advisory must never block an already-executed tool call.
+ * advisory must never block an already-executed tool call. A guarded failure
+ * is never silent: it is recorded through the agent-hooks logger, the same
+ * `AGENT_HOOKS_LOG_FILE` JSONL channel the claude/codex adapters write to
+ * (file-only, so nothing reaches the in-process host's terminal).
  */
 
 import { isAbsolute, resolve as resolvePath } from 'node:path';
+import { logger as defaultLogger, type Logger } from '@goodfoot/agent-hooks';
 import {
   extractPatchedFilePaths,
   isWikiFile,
@@ -39,12 +43,14 @@ export interface PluginDeps {
   resolveBinary?: () => string;
   /** Check-executor override; defaults to the real {@link runWikiCheck}. */
   executeCheck?: (filePath: string, options: { binary: string }) => WikiCheckResult;
+  /** Diagnostic sink; defaults to the agent-hooks `AGENT_HOOKS_LOG_FILE` logger. */
+  logger?: Logger;
 }
 
 /** Narrow the unknown tool-call args to a usable file path, resolved against the directory. */
 function narrowFilePath(args: unknown, directory: string): string | null {
   if (args === null || typeof args !== 'object' || !('filePath' in args)) return null;
-  const raw = (args as { filePath: unknown }).filePath;
+  const raw = args.filePath;
   if (typeof raw !== 'string' || raw.length === 0) return null;
   return isAbsolute(raw) ? raw : resolvePath(directory, raw);
 }
@@ -52,7 +58,7 @@ function narrowFilePath(args: unknown, directory: string): string | null {
 /** Narrow the apply_patch tool-call args ({patchText}, gpt-models only). */
 function narrowPatchTextArgs(args: unknown): string | null {
   if (args === null || typeof args !== 'object' || !('patchText' in args)) return null;
-  const raw = (args as { patchText: unknown }).patchText;
+  const raw = args.patchText;
   if (typeof raw !== 'string' || raw.length === 0) return null;
   return raw;
 }
@@ -74,7 +80,8 @@ function candidatePaths(toolId: string, args: unknown, directory: string): strin
  */
 export function assemblePlugin(deps: PluginDeps = {}): WikiOpencodeHooks {
   const directory = deps.directory ?? process.cwd();
-  const resolveBinary = deps.resolveBinary ?? (() => resolveWikiBinary());
+  const logger = deps.logger ?? defaultLogger;
+  const resolveBinary = deps.resolveBinary ?? (() => resolveWikiBinary(logger));
   const executeCheck =
     deps.executeCheck ??
     ((filePath: string, options: { binary: string }) =>
@@ -99,28 +106,32 @@ export function assemblePlugin(deps: PluginDeps = {}): WikiOpencodeHooks {
       // Single pass over every touched wiki member: --fix auto-repairs drift in
       // place; non-zero exits mean residual conditions the agent must resolve.
       const sections: string[] = [];
-      let unavailableDetail: string | null = null;
+      let unavailable: { filePath: string; detail: string } | null = null;
       for (const filePath of wikiPaths) {
         const result = executeCheck(filePath, { binary: wikiBin });
         if (result.status === 'unavailable') {
-          unavailableDetail ??= result.output ?? 'spawn failed';
+          unavailable ??= { filePath, detail: result.output ?? 'spawn failed' };
           continue;
         }
         if (result.status === 'residual' && result.output) sections.push(result.output);
       }
-      if (sections.length === 0 && unavailableDetail === null) return;
+      if (unavailable !== null) {
+        logger.warn('wiki check execution error', { error: unavailable.detail, wikiBin });
+      }
+      if (sections.length === 0 && unavailable === null) return;
       if (output === null || typeof output !== 'object') return;
 
       // Unavailable wins over collected residuals, mirroring the codex adapter:
       // an unlaunched binary invalidates any partial sibling diagnostics too.
       const payload =
-        unavailableDetail !== null
-          ? wikiUnavailableBlock(wikiPaths[0], wikiBin, unavailableDetail)
+        unavailable !== null
+          ? wikiUnavailableBlock(unavailable.filePath, wikiBin, unavailable.detail)
           : wikiContextBlock(sections.join('\n\n'));
       const prior = typeof output.output === 'string' ? output.output : '';
       output.output = `${prior}\n${payload}`;
-    } catch {
-      // Fail-open: swallow everything; see module doc.
+    } catch (error) {
+      // Fail-open, but recorded: see module doc.
+      logger.logError(error, 'wiki opencode tool.execute.after failed; wiki check skipped');
     }
   };
 
