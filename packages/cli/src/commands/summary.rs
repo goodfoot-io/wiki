@@ -4,6 +4,7 @@ use miette::{IntoDiagnostic, Result};
 use serde::Serialize;
 
 use crate::index::{DocSource, ResolvedPage, SearchResult, WikiIndex};
+use crate::output::{self, Stdout};
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct SummaryOutput {
@@ -74,25 +75,30 @@ pub fn run(title: &str, json: bool, repo_root: &Path, source: DocSource) -> Resu
     match index.resolve_page(title)? {
         Some(page) => {
             let output = summary_output(page);
+            let mut out = Stdout::lock();
             if json {
-                println!("{}", serde_json::to_string_pretty(&output).into_diagnostic()?);
+                writeln!(out, "{}", serde_json::to_string_pretty(&output).into_diagnostic()?)?;
             } else {
-                println!("{}", format_text_summary(&output, repo_root));
+                writeln!(out, "{}", format_text_summary(&output, repo_root))?;
             }
+            out.flush()?;
             Ok(0)
         }
         None => {
             let suggestions = index.suggest(title)?;
             if json {
-                eprintln!(
+                output::stderr_line(format_args!(
                     "{}",
                     serde_json::json!({
                         "error": format!("page '{}' not found", title),
                         "suggestions": suggestions,
                     })
-                );
+                ));
             } else {
-                eprintln!("{}", render_not_found(title, &suggestions, repo_root));
+                output::stderr_line(format_args!(
+                    "{}",
+                    render_not_found(title, &suggestions, repo_root)
+                ));
             }
             Ok(1)
         }

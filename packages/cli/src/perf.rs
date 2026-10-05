@@ -134,11 +134,11 @@ impl Drop for Span {
         let Some(start) = self.start else {
             return;
         };
-        eprintln!(
+        crate::output::stderr_line(format_args!(
             "wiki perf: {} {:.3} ms",
             self.label,
             start.elapsed().as_secs_f64() * 1000.0
-        );
+        ));
     }
 }
 
@@ -193,7 +193,7 @@ pub fn log_event(name: &str, duration_ms: f64, status: &str, meta: Value) {
         write_event(logger, name, duration_ms, status, meta);
     }
     if stderr_enabled() && name != "command_start" && name != "command_finish" {
-        eprintln!("wiki perf: {name} {duration_ms:.3} ms");
+        crate::output::stderr_line(format_args!("wiki perf: {name} {duration_ms:.3} ms"));
     }
 }
 

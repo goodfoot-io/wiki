@@ -3,6 +3,7 @@ use std::path::Path;
 use miette::{IntoDiagnostic, Result};
 
 use crate::index::{DocSource, WikiIndex};
+use crate::output::Stdout;
 
 use super::summary::format_search_result;
 
@@ -17,27 +18,30 @@ pub fn run(
     let index = WikiIndex::prepare_for_source(repo_root, source)?;
     let (matches, total) = index.search_weighted(query, limit, offset)?;
 
+    let mut out = Stdout::lock();
     if matches.is_empty() {
         if json {
-            println!("[]");
+            writeln!(out, "[]")?;
         }
+        out.flush()?;
         return Ok(0);
     }
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&matches).into_diagnostic()?);
+        writeln!(out, "{}", serde_json::to_string_pretty(&matches).into_diagnostic()?)?;
     } else {
         for (i, result) in matches.iter().enumerate() {
             if i > 0 {
-                println!();
+                writeln!(out)?;
             }
-            println!("{}", format_search_result(result, repo_root));
+            writeln!(out, "{}", format_search_result(result, repo_root))?;
         }
         let remaining = total.saturating_sub(offset + matches.len());
         if remaining > 0 {
-            println!("\n---\n\n*{remaining} other wiki matches.*");
+            writeln!(out, "\n---\n\n*{remaining} other wiki matches.*")?;
         }
     }
+    out.flush()?;
 
     Ok(0)
 }

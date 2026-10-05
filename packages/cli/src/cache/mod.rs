@@ -118,13 +118,15 @@ pub struct CacheReporter(Rc<ReporterState>);
 impl CacheReporter {
     pub fn unavailable(&self, reason: &str) {
         if !self.0.reported.replace(true) {
-            eprintln!("warning: anchor cache unavailable ({reason}); continuing uncached");
+            crate::output::stderr_line(format_args!(
+                "warning: anchor cache unavailable ({reason}); continuing uncached"
+            ));
         }
     }
 
     pub fn rebuilt(&self) {
         if !self.0.reported.replace(true) {
-            eprintln!("warning: anchor cache was corrupt; rebuilt");
+            crate::output::stderr_line(format_args!("warning: anchor cache was corrupt; rebuilt"));
         }
     }
 

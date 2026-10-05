@@ -11,6 +11,7 @@ use crate::git::{GitReader, GitSnapshot};
 use crate::git::resolve_ref;
 use crate::headings::{extract_headings, resolve_heading, Heading};
 use crate::index::DocSource;
+use crate::output::{self, Stdout};
 use crate::parser::{LinkKind, parse_fragment_links};
 
 use super::check_fix;
@@ -368,9 +369,12 @@ fn run_inner(request: &CheckRequest<'_>) -> Result<i32> {
     // same way a validation error is.
     let hard_exit = |err: &dyn std::fmt::Display| -> i32 {
         if json {
-            eprintln!("{}", serde_json::json!({"error": err.to_string()}));
+            output::stderr_line(format_args!(
+                "{}",
+                serde_json::json!({"error": err.to_string()})
+            ));
         } else {
-            eprintln!("error: {err}");
+            output::stderr_line(format_args!("error: {err}"));
         }
         if no_exit_code { 0 } else { 2 }
     };
@@ -534,8 +538,10 @@ fn run_inner(request: &CheckRequest<'_>) -> Result<i32> {
         };
 
         if fix_dry_run {
+            let mut out = Stdout::lock();
             if json {
-                println!(
+                writeln!(
+                    out,
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "fixes": plan.fixes,
@@ -545,20 +551,22 @@ fn run_inner(request: &CheckRequest<'_>) -> Result<i32> {
                         "errors": diagnostics,
                     }))
                     .into_diagnostic()?
-                );
+                )?;
             } else if plan.fixes.is_empty() && plan.skipped.is_empty() {
-                println!("no fixes to apply");
+                writeln!(out, "no fixes to apply")?;
             } else {
                 for f in &plan.fixes {
-                    println!(
+                    writeln!(
+                        out,
                         "fix: {} line {}: {} -> {}",
                         f.file, f.line, f.old_href, f.new_href
-                    );
+                    )?;
                 }
                 for s in &plan.skipped {
-                    println!("skip: {} line {}: {}", s.file, s.line, s.reason);
+                    writeln!(out, "skip: {} line {}: {}", s.file, s.line, s.reason)?;
                 }
             }
+            out.flush()?;
             if (!diagnostics.is_empty()
                 || plan.unverified > 0
                 || plan.certification_skips > 0)
@@ -569,35 +577,39 @@ fn run_inner(request: &CheckRequest<'_>) -> Result<i32> {
             return Ok(0);
         }
 
-        if print_applied {
-            for path in &plan.applied_paths {
-                println!("{path}");
+        {
+            let mut out = Stdout::lock();
+            if print_applied {
+                for path in &plan.applied_paths {
+                    writeln!(out, "{path}")?;
+                }
             }
-        }
 
-        if !json {
-            for f in &plan.fixes {
-                let line = format!(
-                    "fixed: {}:{}  broken_link  {} → {}  ({})",
-                    f.file, f.line, f.old_href, f.new_href, f.reason
-                );
-                if print_applied {
-                    eprintln!("{line}");
-                } else {
-                    println!("{line}");
+            if !json {
+                for f in &plan.fixes {
+                    let line = format!(
+                        "fixed: {}:{}  broken_link  {} → {}  ({})",
+                        f.file, f.line, f.old_href, f.new_href, f.reason
+                    );
+                    if print_applied {
+                        output::stderr_line(format_args!("{line}"));
+                    } else {
+                        writeln!(out, "{line}")?;
+                    }
+                }
+                for s in &plan.skipped {
+                    let line = format!(
+                        "skipped: {}:{}  broken_link  reason: {}",
+                        s.file, s.line, s.reason
+                    );
+                    if print_applied {
+                        output::stderr_line(format_args!("{line}"));
+                    } else {
+                        writeln!(out, "{line}")?;
+                    }
                 }
             }
-            for s in &plan.skipped {
-                let line = format!(
-                    "skipped: {}:{}  broken_link  reason: {}",
-                    s.file, s.line, s.reason
-                );
-                if print_applied {
-                    eprintln!("{line}");
-                } else {
-                    println!("{line}");
-                }
-            }
+            out.flush()?;
         }
 
         check_run.content = ContentCache::new();
@@ -616,8 +628,10 @@ fn run_inner(request: &CheckRequest<'_>) -> Result<i32> {
             Err(e) => return Ok(hard_exit(&e)),
         };
 
+        let mut out = Stdout::lock();
         if json {
-            println!(
+            writeln!(
+                out,
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "fixes": plan.fixes,
@@ -628,15 +642,16 @@ fn run_inner(request: &CheckRequest<'_>) -> Result<i32> {
                     "errors": post_diagnostics,
                 }))
                 .into_diagnostic()?
-            );
+            )?;
         } else {
             let rendered = render_diagnostics(&post_diagnostics);
             if print_applied {
-                eprint!("{rendered}");
+                output::stderr(format_args!("{rendered}"));
             } else {
-                print!("{rendered}");
+                write!(out, "{rendered}")?;
             }
         }
+        out.flush()?;
 
         if (!post_diagnostics.is_empty()
             || plan.unverified > 0
@@ -648,15 +663,18 @@ fn run_inner(request: &CheckRequest<'_>) -> Result<i32> {
         return Ok(0);
     }
 
+    let mut out = Stdout::lock();
     if json {
-        println!(
+        writeln!(
+            out,
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({ "errors": diagnostics }))
                 .into_diagnostic()?
-        );
+        )?;
     } else {
-        print!("{}", render_diagnostics(&diagnostics));
+        write!(out, "{}", render_diagnostics(&diagnostics))?;
     }
+    out.flush()?;
 
     if !diagnostics.is_empty() && !no_exit_code {
         Ok(1)
@@ -850,9 +868,11 @@ fn anchor_cache_for_run_inner(
 /// init lock skips the delete (benign per decision 8's racing clause —
 /// never interleave destructively with a quarantine rename) but says so:
 /// the printed path must not claim a deletion that did not happen. Prints
-/// the cache path to stdout (when the common dir resolved) and always
-/// exits 0; a clear failure is one fault line on stderr, never an
-/// exit-code change.
+/// the cache path to stdout (when the common dir resolved) and exits 0
+/// whether or not the clear succeeded; a clear failure is one fault line on
+/// stderr, never an exit-code change. The one non-zero exit is failing to
+/// write the path itself — a stdout closed by its reader exits 2 silently
+/// like every other command ([`crate::output::StdoutClosed`]).
 pub fn clear_cache() -> Result<i32> {
     let reporter = crate::cache::CacheReporter::for_invocation();
     let anchor_cache = anchor_cache_for_clear(&reporter);
@@ -860,9 +880,11 @@ pub fn clear_cache() -> Result<i32> {
         reporter.unavailable(&e.to_string());
     }
     if let Some(common_dir) = anchor_cache.common_dir() {
-        println!("{}", crate::cache::schema::cache_dir(common_dir).display());
+        let mut out = Stdout::lock();
+        writeln!(out, "{}", crate::cache::schema::cache_dir(common_dir).display())?;
+        out.flush()?;
         if anchor_cache.lock_held {
-            eprintln!("warning: anchor cache busy; not cleared");
+            output::stderr_line(format_args!("warning: anchor cache busy; not cleared"));
         }
     }
     Ok(0)

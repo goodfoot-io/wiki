@@ -2132,9 +2132,9 @@ fn apply_scanned_journals(
     }
 
     if discarded > 0 && !STALE_JOURNAL_WARNED.swap(true, Ordering::Relaxed) {
-        eprintln!(
+        crate::output::stderr_line(format_args!(
             "warning: {discarded} stale fix journal(s) discarded; recomputing cleanly"
-        );
+        ));
     }
     Ok(targets)
 }

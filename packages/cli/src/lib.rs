@@ -12,6 +12,10 @@ mod concurrency;
 pub mod frontmatter;
 pub mod git;
 pub mod index;
+// The stderr helpers serve `cache`/`index`/`perf`; the stdout half
+// (`Stdout`, `StdoutClosed`) is used only by the binary's commands. Public
+// so the lib build does not flag that half as dead, as with `perf` below.
+pub mod output;
 // `index` needs `perf` for its scope events; the command-lifecycle half
 // (init/finish/spans) is called only from the binary's main. Public so the
 // lib build does not flag that half as dead — the binary build, where every

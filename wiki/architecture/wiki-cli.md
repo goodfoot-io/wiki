@@ -3,7 +3,7 @@ title: Wiki CLI
 summary: Fragment link parsing, validation pipeline, and command reference for the wiki CLI tool.
 tags:
   - tooling
-links-reviewed: 6
+links-reviewed: 7
 ---
 
 The wiki CLI validates and maintains fragment links between wiki pages and source code. For the maintenance map of every operator-facing doc and automation prompt that should be checked when CLI behavior changes, see [Wiki Documentation Touchpoints](../meta/wiki-documentation-touchpoints.md).
@@ -14,7 +14,7 @@ The [parser](/packages/cli/src/parser.rs#L6-L12) extracts fragment links from ma
 
 ## Validation Pipeline
 
-The [check command](/packages/cli/src/commands/check.rs#L338-L347) runs a full validation pass: [frontmatter parsing](/packages/cli/src/frontmatter.rs#L123-L135), title/alias collision detection, wikilink resolution, and fragment link verification. Line-range links are classified against the page's git-derived anchor epoch — the cited file's content at the commit where the page's `links-reviewed:` value last changed. With `--fix`, links whose certified content moved are relocated automatically and field-less pages get the field initialized; in-place drift is reported and left for review.
+The [check command](/packages/cli/src/commands/check.rs#L339-L348) runs a full validation pass: [frontmatter parsing](/packages/cli/src/frontmatter.rs#L123-L135), title/alias collision detection, wikilink resolution, and fragment link verification. Line-range links are classified against the page's git-derived anchor epoch — the cited file's content at the commit where the page's `links-reviewed:` value last changed. With `--fix`, links whose certified content moved are relocated automatically and field-less pages get the field initialized; in-place drift is reported and left for review.
 
 ## PostToolUse Hook
 
@@ -26,7 +26,7 @@ Several commands support navigating and searching the wiki from the command line
 
 - **Search**: The [search command](/packages/cli/src/commands/search.rs) is the primary entrypoint for finding wiki content. It performs a weighted search that ranks exact title matches, repo-relative path matches, and full-text matches (BM25) in a single unified flow.
 - **Suggest**: The suggest command (used internally by `check` to recommend fixes) finds the best matches for a query with a minimum score threshold, prioritizing titles and aliases.
-- **Summary**: The [summary command](/packages/cli/src/commands/summary.rs#L72-L82) outputs a page's frontmatter-defined summary along with a repo-relative path to its source file.
+- **Summary**: The [summary command](/packages/cli/src/commands/summary.rs#L73-L85) outputs a page's frontmatter-defined summary along with a repo-relative path to its source file.
 
 ## Rendering
 

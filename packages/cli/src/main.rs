@@ -5,6 +5,7 @@ mod frontmatter;
 mod git;
 mod headings;
 mod index;
+mod output;
 mod parser;
 mod perf;
 mod store;
@@ -19,6 +20,7 @@ use std::time::Instant;
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use miette::{IntoDiagnostic, Result, WrapErr};
+use output::{Stdout, StdoutResultExt as _};
 
 #[derive(Debug, Clone, ValueEnum)]
 enum Format {
@@ -221,7 +223,9 @@ fn run_for_each(
     let mut exit = 0i32;
     for (i, input) in inputs.iter().enumerate() {
         if separate && i > 0 {
-            println!("\n---");
+            let mut out = Stdout::lock();
+            writeln!(out, "\n---")?;
+            out.flush()?;
         }
         let code = f(input)?;
         exit = exit.max(code);
@@ -239,11 +243,13 @@ static JSON_ERRORS: AtomicBool = AtomicBool::new(false);
 /// Install the binary's panic policy: a panic on any thread is an internal
 /// error — one concise stderr report (`{"error": ...}` under
 /// `--format json`), then exit [`ERROR_EXIT`] from inside the hook, before
-/// any unwinding. No partial result can be printed after a panic, and the
-/// exit is never the runtime's 101, which callers would not recognise as an
-/// error code. Only the binary installs this: library code and test
-/// harnesses keep the default hook, so `catch_unwind` / `resume_unwind`
-/// behave normally under `cargo test`.
+/// any unwinding. `process::exit` still flushes std's buffered stdout, so
+/// output written before the panic can reach the reader: the exit code is
+/// what tells the consumer the result is unreliable, and any partial stdout
+/// must not be trusted. The exit is never the runtime's 101, which callers
+/// would not recognise as an error code. Only the binary installs this:
+/// library code and test harnesses keep the default hook, so
+/// `catch_unwind` / `resume_unwind` behave normally under `cargo test`.
 fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         report_panic(info);
@@ -297,14 +303,12 @@ fn main() {
     // resolution) that the command span itself cannot see.
     let process_start = Instant::now();
     install_panic_hook();
-    let cli = Cli::parse();
-    if cli.version {
-        println!("wiki {}", crate::version::VERSION);
-        process::exit(0);
-    }
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => exit_on_parse_error(&e),
+    };
     let json = matches!(cli.format, Some(Format::Json));
     JSON_ERRORS.store(json, Ordering::Relaxed);
-    perf::enable_stderr(cli.perf);
 
     if !json {
         miette::set_hook(Box::new(|_| {
@@ -312,6 +316,11 @@ fn main() {
         }))
         .ok();
     }
+
+    if cli.version {
+        exit_with(write_version().map(|()| 0), json);
+    }
+    perf::enable_stderr(cli.perf);
 
     #[cfg(debug_assertions)]
     inject_test_panic();
@@ -332,17 +341,54 @@ fn main() {
         process_start,
     );
 
+    exit_with(result, json);
+}
+
+/// End the process with the run's verdict. An error is reported on stderr
+/// (`{"error": ...}` under `--format json`, miette's rendering otherwise)
+/// and exits [`ERROR_EXIT`] — except [`output::StdoutClosed`], which exits
+/// [`ERROR_EXIT`] with no report at all: the reader is gone, and the
+/// non-zero code keeps a truncated run from passing for a clean one (exit 0
+/// would mask `wiki check` findings).
+fn exit_with(result: Result<i32>, json: bool) -> ! {
     match result {
         Ok(code) => process::exit(code),
+        Err(e) if output::is_stdout_closed(&e) => process::exit(ERROR_EXIT),
         Err(e) => {
             if json {
-                eprintln!("{}", serde_json::json!({ "error": e.to_string() }));
+                output::stderr_line(format_args!(
+                    "{}",
+                    serde_json::json!({ "error": e.to_string() })
+                ));
             } else {
-                eprintln!("{e:?}");
+                output::stderr_line(format_args!("{e:?}"));
             }
             process::exit(ERROR_EXIT);
         }
     }
+}
+
+/// Answer a [`clap::Error`] from argument parsing the way clap's own
+/// `Error::exit` does — same bytes, same stream, same exit code — except
+/// that write failures are not swallowed wholesale. `--help` goes to
+/// stdout, so a reader that closed early exits [`ERROR_EXIT`] silently like
+/// every other command. A usage error goes to stderr, where a failed write
+/// is ignored under the same last-resort policy as [`output::stderr`]: the
+/// exit code still carries the verdict.
+fn exit_on_parse_error(e: &clap::Error) -> ! {
+    if e.use_stderr() {
+        let _ = e.print();
+        process::exit(e.exit_code());
+    }
+    let printed = e.print().on_stdout().and_then(|()| Stdout::lock().flush());
+    exit_with(printed.map(|()| e.exit_code()), false);
+}
+
+/// `wiki --version`: one line on stdout.
+fn write_version() -> Result<()> {
+    let mut out = Stdout::lock();
+    writeln!(out, "wiki {}", crate::version::VERSION)?;
+    out.flush()
 }
 
 fn run(
@@ -405,13 +451,13 @@ fn run(
             clear_cache,
         }) => {
             if fix && !matches!(source, index::DocSource::WorkingTree) {
-                eprintln!("error: --fix requires --source=worktree");
+                output::stderr_line(format_args!("error: --fix requires --source=worktree"));
                 return Ok(2);
             }
             // `--clear-cache` (plan decision 8): a best-effort delete that
             // short-circuits the check entirely — the cache is constructed
             // exactly as a run constructs it, cleared, the deleted path
-            // printed, and exit 0 returned regardless.
+            // printed, and exit 0 returned whether or not the delete worked.
             if clear_cache {
                 return commands::check::clear_cache();
             }
@@ -423,9 +469,9 @@ fn run(
                 (true, false, print_applied) => commands::check::FixMode::Apply { print_applied },
                 (true, true, false) => commands::check::FixMode::DryRun,
                 (false, true, _) | (false, false, true) | (true, true, true) => {
-                    eprintln!(
+                    output::stderr_line(format_args!(
                         "error: --fix-dry-run and --print-applied require --fix and are mutually exclusive"
-                    );
+                    ));
                     return Ok(2);
                 }
             };
@@ -455,8 +501,12 @@ fn run(
             None => {
                 // No subcommand and no query: print help and the wiki README.
                 let mut cmd = <Cli as clap::CommandFactory>::command();
-                cmd.print_help().ok();
-                println!();
+                // clap writes (and colours) the help itself; its write
+                // error maps like any other stdout write.
+                cmd.print_help().on_stdout()?;
+                let mut out = Stdout::lock();
+                writeln!(out)?;
+                out.flush()?;
                 Ok(0)
             }
         },
@@ -512,7 +562,9 @@ fn acquire_dispatch_rendezvous(
     match acquired {
         Ok(guard) => Some(guard),
         Err(e) => {
-            eprintln!("warning: rendezvous lock unavailable ({e}); proceeding without it");
+            output::stderr_line(format_args!(
+                "warning: rendezvous lock unavailable ({e}); proceeding without it"
+            ));
             None
         }
     }

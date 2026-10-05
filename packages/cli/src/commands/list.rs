@@ -5,6 +5,7 @@ use miette::{IntoDiagnostic, Result};
 use serde::Serialize;
 
 use crate::index::{DocSource, WikiIndex};
+use crate::output::{Stdout, StdoutResultExt as _};
 
 #[derive(Debug, Serialize)]
 pub struct PageEntry {
@@ -25,17 +26,18 @@ pub fn run(
     source: DocSource,
 ) -> Result<i32> {
     let offset = offset.unwrap_or(0);
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
     let mut first = true;
 
+    // The opening bracket is written before the index is prepared and waits
+    // in stdout's line buffer; the lock is not held across the preparation.
     if json {
-        write!(out, "[").into_diagnostic()?;
+        write!(Stdout::lock(), "[")?;
     }
 
     let index = WikiIndex::prepare_for_source(repo_root, source)?;
     let rows = index.list_pages(tag, offset, limit)?;
 
+    let mut out = Stdout::lock();
     for row in rows {
         let page = PageEntry {
             title: row.title,
@@ -47,19 +49,20 @@ pub fn run(
 
         if json {
             if !first {
-                write!(out, ",").into_diagnostic()?;
+                write!(out, ",")?;
             }
             let s = serde_json::to_string(&page).into_diagnostic()?;
-            out.write_all(s.as_bytes()).into_diagnostic()?;
+            write!(out, "{s}")?;
             first = false;
         } else {
-            write_markdown(&mut out, &page).into_diagnostic()?;
+            write_markdown(out.raw(), &page).on_stdout()?;
         }
     }
 
     if json {
-        writeln!(out, "]").into_diagnostic()?;
+        writeln!(out, "]")?;
     }
+    out.flush()?;
 
     Ok(0)
 }

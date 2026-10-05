@@ -96,7 +96,9 @@ static RENDEZVOUS_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 
 fn warn_rendezvous_unavailable_once(context: &str, e: &std::io::Error) {
     if !RENDEZVOUS_WARNED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        eprintln!("warning: rendezvous lock unavailable for {context} ({e}); proceeding unordered");
+        crate::output::stderr_line(format_args!(
+            "warning: rendezvous lock unavailable for {context} ({e}); proceeding unordered"
+        ));
     }
 }
 
@@ -108,7 +110,9 @@ static STORE_DEGRADED_WARNED: std::sync::atomic::AtomicBool =
 
 fn warn_store_degraded_once(reason: &str) {
     if !STORE_DEGRADED_WARNED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        eprintln!("warning: wiki store unavailable ({reason}); serving uncached for this run");
+        crate::output::stderr_line(format_args!(
+            "warning: wiki store unavailable ({reason}); serving uncached for this run"
+        ));
     }
 }
 
@@ -128,9 +132,9 @@ static SERVED_LOST_WARNED: std::sync::atomic::AtomicBool =
 
 fn warn_served_lost_once() {
     if !SERVED_LOST_WARNED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        eprintln!(
+        crate::output::stderr_line(format_args!(
             "warning: served generation no longer readable; rebuilding for this run"
-        );
+        ));
     }
 }
 
