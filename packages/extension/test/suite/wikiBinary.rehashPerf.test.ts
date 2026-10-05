@@ -50,13 +50,13 @@ describe('wikiBinary rehash performance', () => {
           JSON.stringify({
             version,
             assets: {
-              [target!.assetKey]: { name: target!.assetName, sha256 }
+              [target.assetKey]: { name: target.assetName, sha256 }
             }
           }),
           { status: 200 }
         );
       }
-      if (urlStr.includes(target!.assetName)) {
+      if (urlStr.includes(target.assetName)) {
         return new Response(assetBytes, { status: 200 });
       }
       return new Response(null, { status: 404 });

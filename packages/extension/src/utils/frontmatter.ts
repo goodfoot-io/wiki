@@ -121,18 +121,15 @@ function decodeSingleQuoted(inner: string): string {
 function collectBlockScalar(lines: string[], startIdx: number, style: '|' | '>'): string {
   // Determine indent from the first non-empty continuation line.
   let indent = 0;
-  for (let i = startIdx; i < lines.length; i++) {
-    const ln = lines[i]!;
+  for (const ln of lines.slice(startIdx)) {
     if (ln.trim() === '') continue;
-    const m = ln.match(/^(\s+)/);
-    indent = m ? m[1]!.length : 0;
+    indent = ln.match(/^(\s+)/)?.[1]?.length ?? 0;
     break;
   }
   if (indent === 0) return '';
 
   const collected: string[] = [];
-  for (let i = startIdx; i < lines.length; i++) {
-    const ln = lines[i]!;
+  for (const ln of lines.slice(startIdx)) {
     if (ln.trim() === '') {
       collected.push('');
     } else if (ln.match(/^\s/)) {
@@ -236,14 +233,13 @@ export function parseFrontmatter(text: string): FrontmatterInfo {
   const lines = block.split('\n');
   const info: FrontmatterInfo = {};
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
+  for (const [i, line] of lines.entries()) {
     const m = line.match(/^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$/);
     if (m == null) continue;
-    const key = m[1]!;
+    const key = m[1];
     if (key !== 'title' && key !== 'summary') continue;
 
-    const raw = m[2]!.trim();
+    const raw = m[2]?.trim() ?? '';
     let value: string;
 
     if (raw === '|' || raw === '>' || raw === '|-' || raw === '>-' || raw === '|+' || raw === '>+') {
@@ -286,7 +282,9 @@ export async function readFrontmatter(absPath: string): Promise<FrontmatterInfo 
  * @param info - Parsed frontmatter, or null when the file was unreadable.
  * @returns True when both `title` and `summary` are present and non-empty.
  */
-export function hasWikiFrontmatter(info: FrontmatterInfo | null): boolean {
+export function hasWikiFrontmatter(
+  info: FrontmatterInfo | null
+): info is FrontmatterInfo & { title: string; summary: string } {
   if (info == null) return false;
   return (
     typeof info.title === 'string' &&
@@ -338,8 +336,9 @@ export function extractFirstHeading(text: string): string | undefined {
   for (const line of body.split('\n')) {
     const m = line.match(/^(#{1,6})\s+(.+)/);
     if (m == null) continue;
-    if (m[1] === '#') return m[2]!.trim(); // first H1 wins immediately
-    if (firstHeading === undefined) firstHeading = m[2]!.trim();
+    const heading = m[2]?.trim() ?? '';
+    if (m[1] === '#') return heading; // first H1 wins immediately
+    if (firstHeading === undefined) firstHeading = heading;
   }
   return firstHeading;
 }

@@ -13,15 +13,15 @@
 // `yarn validate`, and report-only: it always exits 0. Budgets are shown as
 // `within` / `over` markers, not enforced, until the perf fixes land.
 
-import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, utimesSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
-import { dirname, join, resolve } from "node:path";
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, utimesSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const CLI_DIR = resolve(HERE, "..");
-const WORKSPACE_ROOT = resolve(CLI_DIR, "..", "..");
+const CLI_DIR = resolve(HERE, '..');
+const WORKSPACE_ROOT = resolve(CLI_DIR, '..', '..');
 
 // ---- args ----------------------------------------------------------------
 
@@ -35,21 +35,21 @@ function parseArgs(argv) {
     anchorCache: false,
     anchorRuns: 5,
     anchorCommits: 10000,
-    bin: process.env.WIKI_BENCH_BIN ?? join(CLI_DIR, "target", "build", "release", "wiki"),
-    corpus: WORKSPACE_ROOT,
+    bin: process.env.WIKI_BENCH_BIN ?? join(CLI_DIR, 'target', 'build', 'release', 'wiki'),
+    corpus: WORKSPACE_ROOT
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === "--json") opts.json = true;
-    else if (arg === "--anchor-cache") opts.anchorCache = true;
-    else if (arg === "--runs") opts.runs = Number(argv[++i]);
-    else if (arg === "--warmup") opts.warmup = Number(argv[++i]);
-    else if (arg === "--cold-runs") opts.coldRuns = Number(argv[++i]);
-    else if (arg === "--trials") opts.trials = Number(argv[++i]);
-    else if (arg === "--anchor-runs") opts.anchorRuns = Number(argv[++i]);
-    else if (arg === "--anchor-commits") opts.anchorCommits = Number(argv[++i]);
-    else if (arg === "--bin") opts.bin = resolve(argv[++i]);
-    else if (arg === "--corpus") opts.corpus = resolve(argv[++i]);
+    if (arg === '--json') opts.json = true;
+    else if (arg === '--anchor-cache') opts.anchorCache = true;
+    else if (arg === '--runs') opts.runs = Number(argv[++i]);
+    else if (arg === '--warmup') opts.warmup = Number(argv[++i]);
+    else if (arg === '--cold-runs') opts.coldRuns = Number(argv[++i]);
+    else if (arg === '--trials') opts.trials = Number(argv[++i]);
+    else if (arg === '--anchor-runs') opts.anchorRuns = Number(argv[++i]);
+    else if (arg === '--anchor-commits') opts.anchorCommits = Number(argv[++i]);
+    else if (arg === '--bin') opts.bin = resolve(argv[++i]);
+    else if (arg === '--corpus') opts.corpus = resolve(argv[++i]);
     else {
       console.error(`unknown argument: ${arg}`);
       process.exit(2);
@@ -80,11 +80,11 @@ function summarize(samples) {
     p10: percentile(xs, 10),
     p90: percentile(xs, 90),
     p99: percentile(xs, 99),
-    n: xs.length,
+    n: xs.length
   };
 }
 
-const ms = (x) => (x == null ? "   —  " : `${x.toFixed(1).padStart(6)}`);
+const ms = (x) => (x == null ? '   —  ' : `${x.toFixed(1).padStart(6)}`);
 
 // Median of a plain numeric array (non-null only), or null if empty. Used to
 // collapse a per-trial statistic into a single robust value.
@@ -112,13 +112,13 @@ function aggregateStat(perTrialStats) {
     p10: medianOf(perTrialStats.map((s) => s.p10)),
     p90: medianOf(perTrialStats.map((s) => s.p90)),
     p99: maxOf(perTrialStats.map((s) => s.p99)),
-    n: perTrialStats.length > 0 ? perTrialStats[0].n : 0,
+    n: perTrialStats.length > 0 ? perTrialStats[0].n : 0
   };
 }
 
 // The summarize-shaped fields on every op result that aggregateAcrossTrials
 // collapses across trials.
-const STAT_KEYS = ["wall", "startup", "fast_gate", "refresh", "body"];
+const STAT_KEYS = ['wall', 'startup', 'fast_gate', 'refresh', 'body'];
 
 // Given an array of per-trial result sets — each `{ warm: [...], cold: [...] }`
 // where every op carries summarize-shaped stat objects — return a single result
@@ -136,9 +136,9 @@ function aggregateAcrossTrials(perTrialResults) {
         name: base.name,
         args: base.args,
         failedStatus: perTrialOps.map((o) => o.failedStatus).find((s) => s != null) ?? null,
-        budgetMs: base.budgetMs,
+        budgetMs: base.budgetMs
       };
-      if ("available" in base) agg.available = base.available;
+      if ('available' in base) agg.available = base.available;
       for (const key of STAT_KEYS) {
         agg[key] = aggregateStat(perTrialOps.map((o) => o[key]));
       }
@@ -146,7 +146,7 @@ function aggregateAcrossTrials(perTrialResults) {
     }
     return out;
   };
-  return { warm: aggregatePath("warm"), cold: aggregatePath("cold") };
+  return { warm: aggregatePath('warm'), cold: aggregatePath('cold') };
 }
 
 // ---- environment ---------------------------------------------------------
@@ -155,18 +155,18 @@ function detectFsClass(path) {
   // `stat -f -c %T` reports the filesystem type name (fuseblk, overlayfs,
   // tmpfs, ext4, …). Fail-closed: an undetectable class is `unknown`, and
   // the report flags it so the numbers are never mistaken for the scoreboard.
-  const r = spawnSync("stat", ["-f", "-c", "%T", path], { encoding: "utf8" });
-  if (r.status !== 0 || !r.stdout) return "unknown";
+  const r = spawnSync('stat', ['-f', '-c', '%T', path], { encoding: 'utf8' });
+  if (r.status !== 0 || !r.stdout) return 'unknown';
   return r.stdout.trim();
 }
 
 // fuseblk is the hostile scoreboard this tool actually runs on; overlayfs and
 // tmpfs are softer and must only ever be a labelled lower-bound sanity check.
-const SCOREBOARD_FS = "fuseblk";
+const SCOREBOARD_FS = 'fuseblk';
 
 // ---- driver --------------------------------------------------------------
 
-const LOG_EVENTS = ["startup", "index.fast_gate", "index.gix_open", "index.refresh"];
+const LOG_EVENTS = ['startup', 'index.fast_gate', 'index.gix_open', 'index.refresh'];
 
 // The CLI writes the perf log under the repository's *common* git dir
 // (`<common>/wiki/wiki.log` — `perf::log_path`), never the working tree, so a
@@ -174,12 +174,12 @@ const LOG_EVENTS = ["startup", "index.fast_gate", "index.gix_open", "index.refre
 // Resolve it through git the way the CLI does; `null` means the corpus is not
 // a repository, so there is no log to read.
 function logPath(corpus) {
-  const r = spawnSync("git", ["rev-parse", "--git-common-dir"], {
+  const r = spawnSync('git', ['rev-parse', '--git-common-dir'], {
     cwd: corpus,
-    encoding: "utf8",
+    encoding: 'utf8'
   });
-  const out = r.status === 0 ? r.stdout.trim() : "";
-  return out ? join(resolve(corpus, out), "wiki", "wiki.log") : null;
+  const out = r.status === 0 ? r.stdout.trim() : '';
+  return out ? join(resolve(corpus, out), 'wiki', 'wiki.log') : null;
 }
 
 /// Byte length of the run's log, the anchor a spawn's own events are read
@@ -195,8 +195,8 @@ function readRunEvents(corpus, from = 0) {
   if (!path || !existsSync(path)) return [];
   return readFileSync(path)
     .subarray(from)
-    .toString("utf8")
-    .split("\n")
+    .toString('utf8')
+    .split('\n')
     .filter(Boolean)
     .map((line) => {
       try {
@@ -214,8 +214,8 @@ function spawnOnce(bin, corpus, args) {
   const start = process.hrtime.bigint();
   const r = spawnSync(bin, args, {
     cwd: corpus,
-    encoding: "utf8",
-    env: { ...process.env, WIKI_PERF: "1" },
+    encoding: 'utf8',
+    env: { ...process.env, WIKI_PERF: '1' }
   });
   const wall = Number(process.hrtime.bigint() - start) / 1e6;
 
@@ -224,12 +224,9 @@ function spawnOnce(bin, corpus, args) {
     const e = events.find((ev) => ev.event === name);
     return e ? e.duration_ms : null;
   };
-  const commandTotal = dur("command_finish");
+  const commandTotal = dur('command_finish');
   const terms = Object.fromEntries(LOG_EVENTS.map((n) => [n, dur(n)]));
-  const overhead = LOG_EVENTS.filter((n) => n !== "startup").reduce(
-    (acc, n) => acc + (terms[n] ?? 0),
-    0,
-  );
+  const overhead = LOG_EVENTS.filter((n) => n !== 'startup').reduce((acc, n) => acc + (terms[n] ?? 0), 0);
   const body = commandTotal == null ? null : Math.max(0, commandTotal - overhead);
 
   return {
@@ -237,10 +234,10 @@ function spawnOnce(bin, corpus, args) {
     status: r.status,
     wall,
     startup: terms.startup,
-    fast_gate: terms["index.fast_gate"],
-    refresh: terms["index.refresh"],
+    fast_gate: terms['index.fast_gate'],
+    refresh: terms['index.refresh'],
     body,
-    commandTotal,
+    commandTotal
   };
 }
 
@@ -254,12 +251,12 @@ function benchOp(bin, corpus, op, runs, warmup) {
     name: op.name,
     args: op.args,
     failedStatus: failed ? failed.status : null,
-    wall: pick("wall"),
-    startup: pick("startup"),
-    fast_gate: pick("fast_gate"),
-    refresh: pick("refresh"),
-    body: pick("body"),
-    budgetMs: op.budgetMs,
+    wall: pick('wall'),
+    startup: pick('startup'),
+    fast_gate: pick('fast_gate'),
+    refresh: pick('refresh'),
+    body: pick('body'),
+    budgetMs: op.budgetMs
   };
 }
 
@@ -281,7 +278,7 @@ function benchOpCold(bin, corpus, op, runs, touchFile) {
       fast_gate: unavailable,
       refresh: unavailable,
       body: unavailable,
-      budgetMs: op.budgetMs,
+      budgetMs: op.budgetMs
     };
   }
   const raw = [];
@@ -298,20 +295,20 @@ function benchOpCold(bin, corpus, op, runs, touchFile) {
     args: op.args,
     failedStatus: failed ? failed.status : null,
     available: true,
-    wall: pick("wall"),
-    startup: pick("startup"),
-    fast_gate: pick("fast_gate"),
-    refresh: pick("refresh"),
-    body: pick("body"),
-    budgetMs: op.budgetMs,
+    wall: pick('wall'),
+    startup: pick('startup'),
+    fast_gate: pick('fast_gate'),
+    refresh: pick('refresh'),
+    body: pick('body'),
+    budgetMs: op.budgetMs
   };
 }
 
 // First stable tracked markdown file in the corpus, absolute path, or null.
 function firstTrackedMarkdown(corpus) {
-  const r = spawnSync("git", ["ls-files", "*.md"], { cwd: corpus, encoding: "utf8" });
+  const r = spawnSync('git', ['ls-files', '*.md'], { cwd: corpus, encoding: 'utf8' });
   if (r.status !== 0 || !r.stdout) return null;
-  const first = r.stdout.split("\n").find((line) => line.trim().length > 0);
+  const first = r.stdout.split('\n').find((line) => line.trim().length > 0);
   return first ? join(corpus, first.trim()) : null;
 }
 
@@ -339,8 +336,8 @@ function weightedWall(results, key) {
 
 function perceivedLatency(warm, cold) {
   return {
-    warm: { median: weightedWall(warm, "median"), p99: weightedWall(warm, "p99") },
-    cold: { median: weightedWall(cold, "median"), p99: weightedWall(cold, "p99") },
+    warm: { median: weightedWall(warm, 'median'), p99: weightedWall(warm, 'p99') },
+    cold: { median: weightedWall(cold, 'median'), p99: weightedWall(cold, 'p99') }
   };
 }
 
@@ -349,7 +346,7 @@ function perceivedLatency(warm, cold) {
 // Resolve a summary target that actually exists in the corpus, so the row is
 // stable regardless of which repo the benchmark runs against.
 function firstPageTitle(bin, corpus) {
-  const r = spawnSync(bin, ["list", "--format", "json"], { cwd: corpus, encoding: "utf8" });
+  const r = spawnSync(bin, ['list', '--format', 'json'], { cwd: corpus, encoding: 'utf8' });
   if (r.status !== 0) return null;
   try {
     const parsed = JSON.parse(r.stdout);
@@ -365,17 +362,17 @@ function buildOps(bin, corpus) {
   // scoreboard, not commit gates — they flag drift, they never fail the build.
   const summaryTitle = firstPageTitle(bin, corpus);
   const ops = [
-    { name: "search", args: ["index", "--format", "json"], budgetMs: 200 },
-    { name: "list", args: ["list", "--format", "json"], budgetMs: 200 },
+    { name: 'search', args: ['index', '--format', 'json'], budgetMs: 200 },
+    { name: 'list', args: ['list', '--format', 'json'], budgetMs: 200 }
   ];
   if (summaryTitle) {
-    ops.push({ name: "summary", args: ["summary", summaryTitle], budgetMs: 200 });
+    ops.push({ name: 'summary', args: ['summary', summaryTitle], budgetMs: 200 });
   }
   // `check` validates the corpus directly and stays expensive even on a gate
   // hit, so it gets its own, looser budget and never shares a row. Re-baselined
   // to 400ms now that check medians ~110-130ms: ample headroom over the cold
   // median, tight enough that a real regression trips the `over` marker.
-  ops.push({ name: "check", args: ["check", "--format", "json"], budgetMs: 400 });
+  ops.push({ name: 'check', args: ['check', '--format', 'json'], budgetMs: 400 });
   return ops;
 }
 
@@ -383,10 +380,8 @@ function buildOps(bin, corpus) {
 
 function printOpTable(title, results) {
   console.log(title);
-  console.log(
-    "op        wall(med/p90/p99)        startup  gate    refresh  body    budget   status",
-  );
-  console.log("─".repeat(92));
+  console.log('op        wall(med/p90/p99)        startup  gate    refresh  body    budget   status');
+  console.log('─'.repeat(92));
   for (const r of results) {
     const w = r.wall;
     if (r.available === false) {
@@ -394,48 +389,46 @@ function printOpTable(title, results) {
       continue;
     }
     const over = w.median != null && w.median > r.budgetMs;
-    const status = r.failedStatus != null && r.failedStatus > 1 ? "ERROR" : over ? "over" : "within";
+    const status = r.failedStatus != null && r.failedStatus > 1 ? 'ERROR' : over ? 'over' : 'within';
     console.log(
       `${r.name.padEnd(9)} ` +
         `${ms(w.median)}/${ms(w.p90)}/${ms(w.p99)}  ` +
         `${ms(r.startup.median)}  ${ms(r.fast_gate.median)}  ${ms(r.refresh.median)}  ${ms(r.body.median)}  ` +
-        `${String(r.budgetMs).padStart(5)}ms  ${status}`,
+        `${String(r.budgetMs).padStart(5)}ms  ${status}`
     );
   }
 }
 
 function printTable(warm, cold, perceived, env) {
   const scoreboard = env.fsClass === SCOREBOARD_FS;
-  console.log("");
+  console.log('');
   console.log(`wiki benchmark — ${env.binVersion}`);
   console.log(`corpus:  ${env.corpus}`);
   console.log(
     `fs:      ${env.fsClass}` +
-      (scoreboard
-        ? "  (scoreboard)"
-        : `  (NOT the ${SCOREBOARD_FS} scoreboard — treat as a labelled lower-bound only)`),
+      (scoreboard ? '  (scoreboard)' : `  (NOT the ${SCOREBOARD_FS} scoreboard — treat as a labelled lower-bound only)`)
   );
   console.log(
     `runs:    warm ${env.runs} (first ${env.warmup} discarded as warm-up); ` +
       `cold ${env.coldRuns} (mtime-bumped, none discarded); gate on median` +
-      (env.trials > 1 ? `; trials ${env.trials} (median-of-medians, worst-case p99)` : ""),
+      (env.trials > 1 ? `; trials ${env.trials} (median-of-medians, worst-case p99)` : '')
   );
-  console.log("");
-  printOpTable("warm path (steady-state, gate hits → no refresh)", warm);
-  console.log("");
-  printOpTable("cold path (gate miss → refresh)", cold);
-  console.log("");
+  console.log('');
+  printOpTable('warm path (steady-state, gate hits → no refresh)', warm);
+  console.log('');
+  printOpTable('cold path (gate miss → refresh)', cold);
+  console.log('');
   const pw = perceived.warm;
   const pc = perceived.cold;
   console.log(
     `perceived (freq-weighted):  warm  med ${ms(pw.median)}ms  p99 ${ms(pw.p99)}ms` +
-      `     cold  med ${ms(pc.median)}ms  p99 ${ms(pc.p99)}ms`,
+      `     cold  med ${ms(pc.median)}ms  p99 ${ms(pc.p99)}ms`
   );
-  console.log("");
-  console.log("All times in ms. wall = full process wall-clock; startup/gate/refresh/body are");
+  console.log('');
+  console.log('All times in ms. wall = full process wall-clock; startup/gate/refresh/body are');
   console.log("median per-term spans from wiki.log. The cold path bumps one tracked .md file's");
-  console.log("mtime before each run to force a gate miss (content & git status unchanged).");
-  console.log("Report-only: this command always exits 0.");
+  console.log('mtime before each run to force a gate miss (content & git status unchanged).');
+  console.log('Report-only: this command always exits 0.');
 }
 
 // ---- anchor-cache mode ---------------------------------------------------
@@ -447,17 +440,17 @@ function printTable(warm, cold, perceived, env) {
 // stays Healthy while the anchor walk still blob-reads the page at every
 // walked commit. That makes the per-commit read loop the measured cost,
 // which is exactly the tier-A leg the cache memoizes.
-const TARGET_V1 = "fn stable() {\n    work()\n}\n// A\n";
-const TARGET_V2 = "fn stable() {\n    work()\n}\n// B\n";
+const TARGET_V1 = 'fn stable() {\n    work()\n}\n// A\n';
+const TARGET_V2 = 'fn stable() {\n    work()\n}\n// B\n';
 const SYNTH_PAGE =
-  "---\ntitle: Guide\nsummary: Synthetic anchor-cache benchmark page.\nlinks-reviewed: 1\n---\n\nSee [the target](docs/target.md#L1-L3).\n";
+  '---\ntitle: Guide\nsummary: Synthetic anchor-cache benchmark page.\nlinks-reviewed: 1\n---\n\nSee [the target](docs/target.md#L1-L3).\n';
 
 function buildSyntheticCorpus(commits) {
-  const root = mkdtempSync(join(tmpdir(), "wiki-anchor-bench-"));
-  const git = (args, opts = {}) => spawnSync("git", args, { cwd: root, encoding: "utf8", ...opts });
-  git(["init", "-q", "-b", "main"]);
-  mkdirSync(join(root, "wiki"));
-  mkdirSync(join(root, "docs"));
+  const root = mkdtempSync(join(tmpdir(), 'wiki-anchor-bench-'));
+  const git = (args, opts = {}) => spawnSync('git', args, { cwd: root, encoding: 'utf8', ...opts });
+  git(['init', '-q', '-b', 'main']);
+  mkdirSync(join(root, 'wiki'));
+  mkdirSync(join(root, 'docs'));
 
   // fast-import stream: two target blobs and one page blob, then `commits`
   // commits alternating the target blob. fast-import turns 10k commits into
@@ -468,23 +461,27 @@ function buildSyntheticCorpus(commits) {
     stream.push(`blob\nmark :${i + 1}\ndata ${Buffer.byteLength(body)}\n${body}`);
   }
   for (let i = 0; i < commits; i++) {
-    const target = i % 2 === 0 ? ":1" : ":2";
-    const lines = i === 0 ? [`M 100644 :3 wiki/guide.md`, `M 100644 ${target} docs/target.md`] : [`M 100644 ${target} docs/target.md`];
+    const target = i % 2 === 0 ? ':1' : ':2';
+    const lines =
+      i === 0
+        ? [`M 100644 :3 wiki/guide.md`, `M 100644 ${target} docs/target.md`]
+        : [`M 100644 ${target} docs/target.md`];
     const msg = `c${i}`;
     stream.push(
       `commit refs/heads/main\ncommitter Bench <bench@example.invalid> 1700000000 +0000\ndata ${Buffer.byteLength(msg)}\n${msg}\n` +
-        lines.join("\n") + "\n",
+        lines.join('\n') +
+        '\n'
     );
   }
-  const imp = git(["fast-import", "--quiet"], { input: stream.join("\n") + "\n" });
+  const imp = git(['fast-import', '--quiet'], { input: `${stream.join('\n')}\n` });
   if (imp.status !== 0) throw new Error(`fast-import failed: ${imp.stderr}`);
-  const co = git(["checkout", "-q", "main"]);
+  const co = git(['checkout', '-q', 'main']);
   if (co.status !== 0) throw new Error(`checkout failed: ${co.stderr}`);
   return root;
 }
 
 function commitCount(corpus) {
-  const r = spawnSync("git", ["rev-list", "--count", "HEAD"], { cwd: corpus, encoding: "utf8" });
+  const r = spawnSync('git', ['rev-list', '--count', 'HEAD'], { cwd: corpus, encoding: 'utf8' });
   return r.status === 0 ? Number(r.stdout.trim()) : null;
 }
 
@@ -495,14 +492,14 @@ function commitCount(corpus) {
 function anchorCheckRun(bin, corpus) {
   const from = logSize(corpus);
   const start = process.hrtime.bigint();
-  const r = spawnSync(bin, ["check"], {
+  const r = spawnSync(bin, ['check'], {
     cwd: corpus,
-    encoding: "utf8",
-    env: { ...process.env, WIKI_PERF: "1" },
+    encoding: 'utf8',
+    env: { ...process.env, WIKI_PERF: '1' }
   });
   const wall = Number(process.hrtime.bigint() - start) / 1e6;
   const events = readRunEvents(corpus, from);
-  const agg = events.find((e) => e.event === "anchor_cache");
+  const agg = events.find((e) => e.event === 'anchor_cache');
   const meta = agg?.meta ?? {};
   return {
     ok: r.status === 0 || r.status === 1,
@@ -511,7 +508,7 @@ function anchorCheckRun(bin, corpus) {
     legMs: (meta.fingerprint_ms ?? 0) + (meta.walk_ms ?? 0),
     hits: meta.hits ?? 0,
     misses: meta.misses ?? 0,
-    bypasses: meta.bypasses ?? 0,
+    bypasses: meta.bypasses ?? 0
   };
 }
 
@@ -519,7 +516,7 @@ function anchorCheckRun(bin, corpus) {
 // wipes the cache, one cold check pays both tiers, then `runs` warm checks
 // should pay neither — the served-hit path runs no cache.* span at all.
 function anchorMeasure(bin, corpus, runs) {
-  const clear = spawnSync(bin, ["check", "--clear-cache"], { cwd: corpus, encoding: "utf8" });
+  const clear = spawnSync(bin, ['check', '--clear-cache'], { cwd: corpus, encoding: 'utf8' });
   if (clear.status !== 0) {
     console.error(`warning: --clear-cache exited ${clear.status} in ${corpus}`);
   }
@@ -536,8 +533,8 @@ function anchorMeasure(bin, corpus, runs) {
       hits: medianOf(warm.map((r) => r.hits)),
       misses: medianOf(warm.map((r) => r.misses)),
       bypasses: medianOf(warm.map((r) => r.bypasses)),
-      failedStatus: warm.map((r) => r.failedStatus ?? (r.ok ? null : r.status)).find((s) => s != null) ?? null,
-    },
+      failedStatus: warm.map((r) => r.failedStatus ?? (r.ok ? null : r.status)).find((s) => s != null) ?? null
+    }
   };
 }
 
@@ -545,29 +542,29 @@ function printAnchorReport(env, real, synthetic) {
   const row = (label, m) => {
     const cold = m.cold;
     const w = m.warm;
-    console.log(`${label.padEnd(11)} commits ${String(m.commits ?? "?").padStart(6)}`);
+    console.log(`${label.padEnd(11)} commits ${String(m.commits ?? '?').padStart(6)}`);
     console.log(
       `  cold  wall ${ms(cold.wall)}ms   cache legs ${ms(cold.legMs)}ms   ` +
         `(hits ${cold.hits}, misses ${cold.misses}, bypasses ${cold.bypasses})` +
-        (cold.ok ? "" : `  [run status ${cold.status}]`),
+        (cold.ok ? '' : `  [run status ${cold.status}]`)
     );
     console.log(
       `  warm  wall ${ms(w.wall.median)}ms   cache legs ${ms(w.legMs.median)}ms   ` +
-        `(hits ${w.hits ?? "—"}, misses ${w.misses ?? "—"}, bypasses ${w.bypasses ?? 0})` +
-        (w.failedStatus != null ? `  [run status ${w.failedStatus}]` : ""),
+        `(hits ${w.hits ?? '—'}, misses ${w.misses ?? '—'}, bypasses ${w.bypasses ?? 0})` +
+        (w.failedStatus != null ? `  [run status ${w.failedStatus}]` : '')
     );
   };
-  console.log("");
+  console.log('');
   console.log(`anchor cache — ${env.binVersion}`);
   console.log(`fs:      ${env.fsClass}`);
   console.log(`runs:    1 cold after --clear-cache; ${env.anchorRuns} warm (median)`);
-  console.log("");
-  row("real", real);
-  row("synthetic", synthetic);
-  console.log("");
-  console.log("The cold cache-leg sum is the O(commits × pages) blob-read cost the cache");
-  console.log("memoizes; a fully warm run serves every row and pays no cache.* span at all.");
-  console.log("Report-only: this mode always exits 0.");
+  console.log('');
+  row('real', real);
+  row('synthetic', synthetic);
+  console.log('');
+  console.log('The cold cache-leg sum is the O(commits × pages) blob-read cost the cache');
+  console.log('memoizes; a fully warm run serves every row and pays no cache.* span at all.');
+  console.log('Report-only: this mode always exits 0.');
 }
 
 function runAnchorCacheMode(opts, env) {
@@ -600,13 +597,13 @@ function main() {
 
   if (!existsSync(opts.bin)) {
     console.error(`benchmark binary not found at ${opts.bin}`);
-    console.error("build it first (yarn bench runs the build automatically), or pass --bin <path>.");
+    console.error('build it first (yarn bench runs the build automatically), or pass --bin <path>.');
     process.exit(2);
   }
 
-  let binVersion = "unknown";
+  let binVersion = 'unknown';
   try {
-    binVersion = execFileSync(opts.bin, ["--version"], { encoding: "utf8" }).trim();
+    binVersion = execFileSync(opts.bin, ['--version'], { encoding: 'utf8' }).trim();
   } catch {
     /* leave as unknown */
   }
@@ -619,7 +616,7 @@ function main() {
     warmup: opts.warmup,
     coldRuns: opts.coldRuns,
     trials: opts.trials,
-    anchorRuns: opts.anchorRuns,
+    anchorRuns: opts.anchorRuns
   };
 
   if (opts.anchorCache) runAnchorCacheMode(opts, env);
@@ -628,8 +625,7 @@ function main() {
   // single result set directly so behaviour and output are identical to before.
   const perTrial = [];
   for (let t = 0; t < opts.trials; t++) perTrial.push(measureOnce(opts));
-  const { warm, cold } =
-    opts.trials === 1 ? perTrial[0] : aggregateAcrossTrials(perTrial);
+  const { warm, cold } = opts.trials === 1 ? perTrial[0] : aggregateAcrossTrials(perTrial);
   const perceived = perceivedLatency(warm, cold);
 
   if (opts.json) {

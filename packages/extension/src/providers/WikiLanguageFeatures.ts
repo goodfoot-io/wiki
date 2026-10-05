@@ -178,7 +178,8 @@ export class WikiLanguageFeatures {
       const start = match.index;
       const end = start + match[0].length;
       if (pos >= start && pos <= end) {
-        const href = match[2]!;
+        const href = match[2];
+        if (href === undefined) continue;
         const hrefStart = line.indexOf(href, start);
         if (hrefStart < 0) continue;
         return {
@@ -564,7 +565,8 @@ export class WikiLanguageFeatures {
         if (token?.isCancellationRequested) return;
         const index = nextIndex;
         nextIndex++;
-        const fileUri = files[index]!;
+        const fileUri = files[index];
+        if (fileUri === undefined) return;
         try {
           const text = await readFile(fileUri.fsPath, 'utf8');
           slots[index] = { fileUri, lines: text.split('\n') };
@@ -635,12 +637,12 @@ export class WikiLanguageFeatures {
         sliceStart = Date.now();
       }
 
-      for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-        const lineText = lines[lineIdx]!;
+      for (const [lineIdx, lineText] of lines.entries()) {
         re.lastIndex = 0;
         let match: RegExpExecArray | null;
         for (match = re.exec(lineText); match !== null; match = re.exec(lineText)) {
-          const href = match[2]!;
+          const href = match[2];
+          if (href === undefined) continue;
           const resolved = resolveLinkTarget(href, fileUri.fsPath, wsRoot);
           if (resolved !== targetAbsPath) continue;
           const hrefStart = lineText.indexOf(href, match.index);
@@ -720,12 +722,12 @@ export class WikiLanguageFeatures {
 
     for (const { fileUri, lines } of scans) {
       const sourceDir = path.dirname(fileUri.fsPath);
-      for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-        const lineText = lines[lineIdx]!;
+      for (const [lineIdx, lineText] of lines.entries()) {
         re.lastIndex = 0;
         let match: RegExpExecArray | null;
         for (match = re.exec(lineText); match !== null; match = re.exec(lineText)) {
-          const href = match[2]!;
+          const href = match[2];
+          if (href === undefined) continue;
           const hashIdx = href.indexOf('#');
           const rawPath = hashIdx >= 0 ? href.slice(0, hashIdx) : href;
           const fragment = hashIdx >= 0 ? href.slice(hashIdx) : '';

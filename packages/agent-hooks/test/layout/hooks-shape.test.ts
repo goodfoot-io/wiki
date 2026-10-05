@@ -61,12 +61,12 @@ describe('emitted codex hooks.json shape', () => {
   const manifest = readManifest('plugins-codex/wiki/hooks/hooks.json');
   const groups = expectSingleEvent(manifest, 'codex manifest');
 
-  it('uses the ${PLUGIN_ROOT} command with a seconds timeout and the patch/shell tool matcher', () => {
+  it(`uses the \${PLUGIN_ROOT} command with a seconds timeout and the patch/shell tool matcher`, () => {
     expect(groups[0]?.matcher).toBe('apply_patch|exec_command|exec|shell|local_shell');
     const commands = groups[0]?.hooks ?? [];
     expect(commands).toHaveLength(1);
     expect(commands[0]?.type).toBe('command');
-    expect(commands[0]?.command).toBe('node "${PLUGIN_ROOT}/hooks/post-tool-use.mjs"');
+    expect(commands[0]?.command).toBe(`node "\${PLUGIN_ROOT}/hooks/post-tool-use.mjs"`);
     expect(commands[0]?.timeout).toBe(60);
   });
 

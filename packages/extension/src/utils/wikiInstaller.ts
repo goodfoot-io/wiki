@@ -130,7 +130,7 @@ export class WikiBinaryManager {
   }
 
   private releaseBaseUrl(): string {
-    const envOverride = process.env['WIKI_EXTENSION_RELEASE_BASE_URL'];
+    const envOverride = process.env.WIKI_EXTENSION_RELEASE_BASE_URL;
     if (envOverride != null && envOverride.length > 0) {
       return envOverride;
     }
@@ -138,7 +138,7 @@ export class WikiBinaryManager {
   }
 
   private shouldUsePathFallback(): boolean {
-    const envOverride = process.env['WIKI_EXTENSION_USE_PATH_FALLBACK'];
+    const envOverride = process.env.WIKI_EXTENSION_USE_PATH_FALLBACK;
     if (envOverride != null) {
       return envOverride === '1' || envOverride.toLowerCase() === 'true';
     }

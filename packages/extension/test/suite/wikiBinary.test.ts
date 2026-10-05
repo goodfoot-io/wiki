@@ -28,7 +28,7 @@ describe('wikiBinary', () => {
       writeFixtureBinary(tempDir);
       const resolved = await resolveWikiBinaryOnPath(
         process.platform,
-        `${tempDir}${path.delimiter}${process.env['PATH'] ?? ''}`
+        `${tempDir}${path.delimiter}${process.env.PATH ?? ''}`
       );
       assert.ok(resolved, 'Expected wiki binary to resolve from PATH');
       assert.strictEqual(resolved?.source, 'path');

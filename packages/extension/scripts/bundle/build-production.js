@@ -9,10 +9,10 @@
  *   dist/bundle.cjs        — extension host (CJS, vscode external)
  */
 
-import * as esbuild from 'esbuild';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import * as esbuild from 'esbuild';
 
 const EXTENSION_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DIST = path.join(EXTENSION_ROOT, 'dist');

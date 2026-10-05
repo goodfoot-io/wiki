@@ -19,25 +19,25 @@ import * as assert from 'node:assert';
 import { run } from './index.js';
 
 describe('TEST_PATTERN focused runs', () => {
-  const originalPattern = process.env['TEST_PATTERN'];
+  const originalPattern = process.env.TEST_PATTERN;
 
   afterEach(() => {
     if (originalPattern === undefined) {
-      delete process.env['TEST_PATTERN'];
+      delete process.env.TEST_PATTERN;
     } else {
-      process.env['TEST_PATTERN'] = originalPattern;
+      process.env.TEST_PATTERN = originalPattern;
     }
   });
 
   it('rejects zero-match patterns and accepts valid bare suite names', async () => {
     // A pattern that cannot match any compiled suite must fail loudly rather
     // than report "0 passing" and exit 0.
-    process.env['TEST_PATTERN'] = 'zebraNoMatchingSuite';
+    process.env.TEST_PATTERN = 'zebraNoMatchingSuite';
     await assert.rejects(() => run(), /TEST_PATTERN/i);
 
     // A bare file name (no `suite/` prefix) must be normalized so it matches
     // this very suite under the compiled test root.
-    process.env['TEST_PATTERN'] = 'testPatternFocusedRun';
+    process.env.TEST_PATTERN = 'testPatternFocusedRun';
     await assert.doesNotReject(() => run());
   });
 });

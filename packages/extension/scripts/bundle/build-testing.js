@@ -12,14 +12,14 @@
  *   test/suite/*.test.cjs           — individual test suites
  */
 
-import * as esbuild from 'esbuild';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import * as esbuild from 'esbuild';
 import { glob } from 'glob';
 
 const EXTENSION_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const OUT_DIR = process.env['TEST_DIST_DIR'];
+const OUT_DIR = process.env.TEST_DIST_DIR;
 
 if (!OUT_DIR) {
   console.error('[build-testing] TEST_DIST_DIR env var is required.');
@@ -63,7 +63,7 @@ await esbuild.build({
 // Individual test suites.
 const testFiles = await glob('test/suite/**/*.test.ts', { cwd: EXTENSION_ROOT });
 for (const rel of testFiles) {
-  const baseName = path.basename(rel, '.ts') + '.cjs';
+  const baseName = `${path.basename(rel, '.ts')}.cjs`;
   await esbuild.build({
     entryPoints: [path.join(EXTENSION_ROOT, rel)],
     bundle: true,

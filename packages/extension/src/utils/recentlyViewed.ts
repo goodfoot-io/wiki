@@ -68,8 +68,8 @@ export async function loadValidatedRecentlyViewed(context: vscode.ExtensionConte
       const info = await readFrontmatter(fsPath);
       if (!hasWikiFrontmatter(info)) return null;
       return {
-        label: info!.title!,
-        detail: info!.summary!,
+        label: info.title,
+        detail: info.summary,
         file: fsPath
       } satisfies RecentlyViewedItem;
     })
@@ -77,11 +77,10 @@ export async function loadValidatedRecentlyViewed(context: vscode.ExtensionConte
 
   const items: RecentlyViewedItem[] = [];
   const survivingPaths: string[] = [];
-  for (let i = 0; i < resolved.length; i++) {
-    const item = resolved[i];
+  for (const item of resolved) {
     if (item == null) continue;
     items.push(item);
-    survivingPaths.push(raw[i]!);
+    survivingPaths.push(item.file);
   }
 
   const droppedCount = raw.length - survivingPaths.length;

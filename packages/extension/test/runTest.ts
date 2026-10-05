@@ -75,10 +75,10 @@ function getMinVSCodeVersion(): string {
  */
 function isHeadless(): boolean {
   return !!(
-    process.env['CI'] ||
-    process.env['GITHUB_ACTIONS'] ||
-    process.env['HEADLESS'] ||
-    (os.platform() === 'linux' && !process.env['DISPLAY'])
+    process.env.CI ||
+    process.env.GITHUB_ACTIONS ||
+    process.env.HEADLESS ||
+    (os.platform() === 'linux' && !process.env.DISPLAY)
   );
 }
 
@@ -123,7 +123,7 @@ function cleanX11LockFiles(): void {
  * @throws Error when no display is available or Xvfb fails to start.
  */
 function startXvfb(): cp.ChildProcess | null {
-  if (os.platform() !== 'linux' || process.env['DISPLAY']) {
+  if (os.platform() !== 'linux' || process.env.DISPLAY) {
     return null;
   }
 
@@ -162,11 +162,11 @@ function startXvfb(): cp.ChildProcess | null {
     console.error('[runTest] Xvfb error:', err.message);
   });
 
-  process.env['DISPLAY'] = displayStr;
-  process.env['ELECTRON_DISABLE_SANDBOX'] = '1';
-  process.env['ELECTRON_DISABLE_GPU_SANDBOX'] = '1';
-  process.env['ELECTRON_DISABLE_SECURITY_WARNINGS'] = '1';
-  process.env['HEADLESS'] = '1';
+  process.env.DISPLAY = displayStr;
+  process.env.ELECTRON_DISABLE_SANDBOX = '1';
+  process.env.ELECTRON_DISABLE_GPU_SANDBOX = '1';
+  process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = '1';
+  process.env.HEADLESS = '1';
 
   // Wait up to 10 s for Xvfb to be ready.
   let displayReady = false;
@@ -285,7 +285,7 @@ process.exit(0);
     });
   }
 
-  process.env['PATH'] = `${TEST_BIN_PATH}${path.delimiter}${process.env['PATH'] ?? ''}`;
+  process.env.PATH = `${TEST_BIN_PATH}${path.delimiter}${process.env.PATH ?? ''}`;
 }
 
 /**
@@ -305,7 +305,7 @@ async function main(): Promise<void> {
     }
 
     // Build the extension and test files into the unique dist directory.
-    cp.execSync('node scripts/build/build-testing.js', {
+    cp.execSync('node scripts/bundle/build-testing.js', {
       cwd: EXTENSION_ROOT,
       stdio: 'inherit',
       env: {

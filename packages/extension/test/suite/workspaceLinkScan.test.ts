@@ -20,6 +20,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { WikiLanguageFeatures } from '../../src/providers/WikiLanguageFeatures.js';
 import type { WikiBinaryManager } from '../../src/utils/wikiInstaller.js';
+import { assertDefined } from './assertDefined.js';
 
 /** Minimal shape of the private incoming-link scanner used by these tests. */
 type IncomingLinksAccessor = {
@@ -114,17 +115,20 @@ describe('workspace link scan characterization', () => {
     const linkerAPath = path.join(fxDir, 'linker-a.md');
     const linkerADocText = fs.readFileSync(linkerAPath, 'utf8');
     const linkerALineIdx = 2;
-    const linkerALine = linkerADocText.split('\n')[linkerALineIdx]!;
+    const linkerALine = assertDefined(linkerADocText.split('\n')[linkerALineIdx], 'linker-a fixture line missing');
 
     const plainStart = linkerALine.indexOf('target.md');
     const fragStart = linkerALine.indexOf('target.md#sec');
 
     const linkerBPath = path.join(fxDir, 'sub', 'linker-b.md');
-    const linkerBLine = fs.readFileSync(linkerBPath, 'utf8').split('\n')[2]!;
+    const linkerBLine = assertDefined(
+      fs.readFileSync(linkerBPath, 'utf8').split('\n')[2],
+      'linker-b fixture line missing'
+    );
     const upStart = linkerBLine.indexOf('../target.md');
 
     const targetDocText = fs.readFileSync(targetAbs, 'utf8');
-    const targetLine = targetDocText.split('\n')[2]!;
+    const targetLine = assertDefined(targetDocText.split('\n')[2], 'target fixture line missing');
     const selfStart = targetLine.indexOf('./target.md');
 
     const expected: Array<[string, number, number, number, number]> = [
@@ -175,7 +179,7 @@ describe('workspace link scan characterization', () => {
       const sorted = [...edits].sort((x, y) => y.range.start.character - x.range.start.character);
       const lines = text.split('\n');
       for (const e of sorted) {
-        const line = lines[e.range.start.line]!;
+        const line = assertDefined(lines[e.range.start.line], `edit targets missing line ${e.range.start.line}`);
         lines[e.range.start.line] =
           line.slice(0, e.range.start.character) + e.newText + line.slice(e.range.end.character);
       }
@@ -183,7 +187,10 @@ describe('workspace link scan characterization', () => {
     };
 
     const linkerAPath = path.join(fxDir, 'linker-a.md');
-    const linkerAResult = applyEdits(fs.readFileSync(linkerAPath, 'utf8'), byUri.get(linkerAPath)!);
+    const linkerAResult = applyEdits(
+      fs.readFileSync(linkerAPath, 'utf8'),
+      assertDefined(byUri.get(linkerAPath), 'expected edits for linker-a')
+    );
     assert.strictEqual(
       linkerAResult.split('\n')[2],
       '- [plain](renamed.md) ![pic](target.md) [frag](renamed.md#sec) [ext](https://example.com/x.md)',
@@ -191,14 +198,20 @@ describe('workspace link scan characterization', () => {
     );
 
     const linkerBPath = path.join(fxDir, 'sub', 'linker-b.md');
-    const linkerBResult = applyEdits(fs.readFileSync(linkerBPath, 'utf8'), byUri.get(linkerBPath)!);
+    const linkerBResult = applyEdits(
+      fs.readFileSync(linkerBPath, 'utf8'),
+      assertDefined(byUri.get(linkerBPath), 'expected edits for linker-b')
+    );
     assert.strictEqual(
       linkerBResult.split('\n')[2],
       'Up: [t](../renamed.md "doc")',
       'linker-b: parent-relative href recomputed, title suffix kept outside href'
     );
 
-    const targetResult = applyEdits(fs.readFileSync(targetAbs, 'utf8'), byUri.get(targetAbs)!);
+    const targetResult = applyEdits(
+      fs.readFileSync(targetAbs, 'utf8'),
+      assertDefined(byUri.get(targetAbs), 'expected edits for target')
+    );
     assert.strictEqual(
       targetResult.split('\n')[2],
       'Self ref: [here](renamed.md)',
@@ -221,9 +234,9 @@ describe('workspace link scan characterization', () => {
 
     const entries = edit.entries();
     assert.strictEqual(entries.length, 1, `expected one edited file, got ${entries.length}`);
-    const [, edits] = entries[0]!;
+    const [, edits] = assertDefined(entries[0], 'expected one edited file');
     assert.strictEqual(edits.length, 1);
-    assert.strictEqual(edits[0]!.newText, 'somefile.md', 'fallback must preserve the raw path text');
+    assert.strictEqual(edits[0]?.newText, 'somefile.md', 'fallback must preserve the raw path text');
   });
 
   const canTestPermissions = os.platform() === 'linux' && process.getuid?.() !== 0;
@@ -457,8 +470,9 @@ describe('workspace link scanner source structure', () => {
   function extractBody(source: string, headRe: RegExp): string {
     const head = source.match(headRe);
     assert.ok(head != null, `could not locate ${headRe} in WikiLanguageFeatures.ts — update this test`);
+    const headEnd = assertDefined(head.index, 'regex match must carry an index') + head[0].length;
     let openIdx = -1;
-    for (let i = head.index! + head[0].length; i < source.length; i++) {
+    for (let i = headEnd; i < source.length; i++) {
       if (source[i] === '{') {
         openIdx = i;
         break;
@@ -489,13 +503,14 @@ describe('workspace link scanner source structure', () => {
     if (m == null) return null;
     // The match already consumed the opening paren, so balancing starts one
     // level deep and closes when depth returns to zero.
+    const start = assertDefined(m.index, 'regex match must carry an index');
     let depth = 1;
-    for (let i = m.index! + m[0].length; i < source.length; i++) {
+    for (let i = start + m[0].length; i < source.length; i++) {
       const ch = source[i];
       if (ch === '(') depth++;
       if (ch === ')') {
         depth--;
-        if (depth === 0) return source.slice(m.index!, i + 1);
+        if (depth === 0) return source.slice(start, i + 1);
       }
     }
     return null;
@@ -544,7 +559,7 @@ describe('workspace link scanner source structure', () => {
     // --- _allMarkdownFiles must forward its token into findFiles ---
     const enumHead = source.match(/private async _allMarkdownFiles\(\s*(\w+)\?\s*:\s*vscode\.CancellationToken/);
     assert.ok(enumHead != null, '_allMarkdownFiles must declare an optional CancellationToken parameter');
-    const enumTokenName = enumHead[1]!;
+    const enumTokenName = assertDefined(enumHead[1], 'token parameter name capture missing');
 
     const enumBody = extractBody(source, /private async _allMarkdownFiles\(/);
     const findCall = extractCall(enumBody, /findFiles\(/);
@@ -563,7 +578,7 @@ describe('workspace link scanner source structure', () => {
     // --- _scanWorkspaceMarkdown must pass its token and bail right after ---
     const scanHead = source.match(/private async _scanWorkspaceMarkdown\(\s*(\w+)\?\s*:\s*vscode\.CancellationToken/);
     assert.ok(scanHead != null, '_scanWorkspaceMarkdown must declare an optional CancellationToken parameter');
-    const scanTokenName = scanHead[1]!;
+    const scanTokenName = assertDefined(scanHead[1], 'token parameter name capture missing');
 
     const scanBody = extractBody(source, /private async _scanWorkspaceMarkdown\(/);
     const mdCall = extractCall(scanBody, /this\._allMarkdownFiles\(/);
@@ -577,10 +592,10 @@ describe('workspace link scanner source structure', () => {
     // The first cancellation check after enumeration must sit between the
     // awaited enumeration and the first readFile call, so no file is read
     // once cancellation has landed during enumeration.
-    const callStart = scanBody.indexOf(mdCall!);
+    const callStart = scanBody.indexOf(mdCall);
     const readStart = scanBody.indexOf('readFile(');
     assert.notStrictEqual(readStart, -1, 'readFile call not found in _scanWorkspaceMarkdown');
-    const betweenEnumAndRead = scanBody.slice(callStart + mdCall!.length, readStart);
+    const betweenEnumAndRead = scanBody.slice(callStart + mdCall.length, readStart);
     assert.match(
       betweenEnumAndRead,
       new RegExp(`${scanTokenName}\\??\\.isCancellationRequested`),

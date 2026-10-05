@@ -26,33 +26,33 @@
 //
 // Safety: dry run is the default. Nothing is deleted unless --apply is passed.
 
-import { promises as fs } from "node:fs";
-import path from "node:path";
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 
-const ARTIFACT_DIR_NAMES = new Set(["deps", ".fingerprint", "incremental", "build"]);
+const ARTIFACT_DIR_NAMES = new Set(['deps', '.fingerprint', 'incremental', 'build']);
 // Profile root dirs also hold the final linked binaries/examples directly
 // (cargo hardlinks these from deps/), one fresh copy per worktree that has
 // ever built here — these must be swept too, not just their deps/ subdirs.
-const PROFILE_DIR_NAMES = new Set(["debug", "release"]);
+const PROFILE_DIR_NAMES = new Set(['debug', 'release']);
 
 function parseArgs(argv) {
   const opts = {
-    root: process.env.WIKI_CARGO_TARGET_ROOT || "/var/lib/coaxial/cargo-target",
+    root: process.env.WIKI_CARGO_TARGET_ROOT || '/var/lib/coaxial/cargo-target',
     maxAgeDays: 14,
     apply: false,
-    json: false,
+    json: false
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === "--root") opts.root = argv[++i];
-    else if (arg === "--max-age-days") opts.maxAgeDays = Number(argv[++i]);
-    else if (arg === "--apply") opts.apply = true;
-    else if (arg === "--dry-run") opts.apply = false;
-    else if (arg === "--json") opts.json = true;
-    else if (arg === "--help" || arg === "-h") {
+    if (arg === '--root') opts.root = argv[++i];
+    else if (arg === '--max-age-days') opts.maxAgeDays = Number(argv[++i]);
+    else if (arg === '--apply') opts.apply = true;
+    else if (arg === '--dry-run') opts.apply = false;
+    else if (arg === '--json') opts.json = true;
+    else if (arg === '--help' || arg === '-h') {
       console.log(
-        "Usage: sweep-cargo-target.mjs [--root <path>] [--max-age-days N] [--apply] [--json]\n" +
-          "  Default is a dry run (reports what would be removed). Pass --apply to actually delete.",
+        'Usage: sweep-cargo-target.mjs [--root <path>] [--max-age-days N] [--apply] [--json]\n' +
+          '  Default is a dry run (reports what would be removed). Pass --apply to actually delete.'
       );
       process.exit(0);
     } else {
@@ -126,8 +126,8 @@ async function findCandidates(root) {
       // above the profile dirs (e.g. <crate>/build/{debug,release}/...).
       // Only treat it as an artifact dir in the former case — otherwise walk
       // into it normally so its debug/release children get inspected.
-      const isBuildScriptDir = entry.name === "build" && PROFILE_DIR_NAMES.has(path.basename(dirPath));
-      const isArtifactDir = entry.name !== "build" ? ARTIFACT_DIR_NAMES.has(entry.name) : isBuildScriptDir;
+      const isBuildScriptDir = entry.name === 'build' && PROFILE_DIR_NAMES.has(path.basename(dirPath));
+      const isArtifactDir = entry.name !== 'build' ? ARTIFACT_DIR_NAMES.has(entry.name) : isBuildScriptDir;
       if (isArtifactDir) {
         let children;
         try {
@@ -196,7 +196,7 @@ async function removeEmptyDirsUnder(root) {
 }
 
 function humanSize(bytes) {
-  const units = ["B", "KB", "MB", "GB", "TB"];
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let n = bytes;
   let i = 0;
   while (n >= 1024 && i < units.length - 1) {
@@ -245,7 +245,7 @@ async function main() {
     staleEntries.push({
       path: path.relative(opts.root, candidatePath),
       size,
-      ageDays: Math.floor((Date.now() - mtimeMs) / (24 * 60 * 60 * 1000)),
+      ageDays: Math.floor((Date.now() - mtimeMs) / (24 * 60 * 60 * 1000))
     });
   }
 
@@ -263,14 +263,14 @@ async function main() {
   const result = {
     root: opts.root,
     maxAgeDays: opts.maxAgeDays,
-    mode: opts.apply ? "apply" : "dry-run",
+    mode: opts.apply ? 'apply' : 'dry-run',
     candidatesScanned: candidates.length,
     freshCount,
     staleCount,
     staleBytes,
     staleHuman: humanSize(staleBytes),
     emptyDirsRemoved: removedEmptyDirs.length,
-    topEntries: staleEntries.slice(0, 20).map((e) => ({ ...e, sizeHuman: humanSize(e.size) })),
+    topEntries: staleEntries.slice(0, 20).map((e) => ({ ...e, sizeHuman: humanSize(e.size) }))
   };
 
   if (opts.json) {
@@ -279,13 +279,15 @@ async function main() {
   }
 
   console.log(`Root: ${result.root}`);
-  console.log(`Mode: ${result.mode}${opts.apply ? "" : " (pass --apply to actually delete)"}`);
+  console.log(`Mode: ${result.mode}${opts.apply ? '' : ' (pass --apply to actually delete)'}`);
   console.log(`Age cutoff: ${opts.maxAgeDays} days`);
-  console.log(`Scanned ${result.candidatesScanned} compilation-unit artifacts (${result.freshCount} fresh, ${result.staleCount} stale)`);
+  console.log(
+    `Scanned ${result.candidatesScanned} compilation-unit artifacts (${result.freshCount} fresh, ${result.staleCount} stale)`
+  );
   console.log(`Stale bytes: ${result.staleHuman} (${result.staleBytes} bytes)`);
   if (opts.apply) console.log(`Empty directories pruned: ${result.emptyDirsRemoved}`);
   if (result.topEntries.length > 0) {
-    console.log("\nLargest stale entries:");
+    console.log('\nLargest stale entries:');
     for (const e of result.topEntries) {
       console.log(`  ${e.sizeHuman.padStart(8)}  ${e.ageDays}d old  ${e.path}`);
     }

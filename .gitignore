@@ -91,3 +91,5 @@ npm/*/bin/wiki
 npm/*/bin/wiki.exe
 
 .env.*
+# Claude Code agent worktrees
+.claude/worktrees/

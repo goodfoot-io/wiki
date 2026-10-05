@@ -10,4 +10,3 @@ metafile.json
 .build-swap.lock
 .dist-temp-*
 dist-test-*/
-!scripts/build/

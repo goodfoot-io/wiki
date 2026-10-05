@@ -84,10 +84,10 @@ describe('wikiInstaller — retry recovers from a failed start (bug reproduction
     assert.ok(address && typeof address === 'object', 'Expected HTTP server address');
     const releaseBaseUrl = `http://127.0.0.1:${address.port}`;
 
-    const savedPathFallback = process.env['WIKI_EXTENSION_USE_PATH_FALLBACK'];
-    const savedReleaseUrl = process.env['WIKI_EXTENSION_RELEASE_BASE_URL'];
-    process.env['WIKI_EXTENSION_USE_PATH_FALLBACK'] = '0';
-    process.env['WIKI_EXTENSION_RELEASE_BASE_URL'] = releaseBaseUrl;
+    const savedPathFallback = process.env.WIKI_EXTENSION_USE_PATH_FALLBACK;
+    const savedReleaseUrl = process.env.WIKI_EXTENSION_RELEASE_BASE_URL;
+    process.env.WIKI_EXTENSION_USE_PATH_FALLBACK = '0';
+    process.env.WIKI_EXTENSION_RELEASE_BASE_URL = releaseBaseUrl;
 
     try {
       const context = fakeExtensionContext(storageRoot, version);

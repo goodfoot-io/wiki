@@ -55,15 +55,17 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "node scripts/build/build-production.js",
+    "vscode:prepublish": "node scripts/bundle/build-production.js",
     "build": "vsce package --no-dependencies --follow-symlinks && { [ -n \"${SKIP_INSTALL:-}\" ] || bash scripts/install-vsix.sh; }",
-    "build:testing": "node scripts/build/build-testing.js",
+    "build:testing": "node scripts/bundle/build-testing.js",
     "test": "NODE_OPTIONS='--disable-warning=ExperimentalWarning' tsx ./test/runTest.ts",
-    "lint": "npx biome check --write --unsafe --max-diagnostics 500 ./src ./test ./scripts && jsdoczoom -l",
+    "lint": "biome ci --error-on-warnings . && jsdoczoom -l",
+    "lint:fix": "biome check --write --unsafe .",
     "typecheck": "tsgo --noEmit",
     "clean": "rm -rf dist out dist-test-* *.vsix tsconfig.tsbuildinfo"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.4.11",
     "@goodfoot/vscode-logging": "workspace:*",
     "@goodfoot/wiki": "workspace:*",
     "@types/mocha": "^10.0.10",
@@ -74,6 +76,7 @@
     "@vscode/vsce": "3.7.1",
     "esbuild": "^0.27.2",
     "glob": "^13.0.0",
+    "jsdoczoom": "1.2.6",
     "mocha": "^11.7.5",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"

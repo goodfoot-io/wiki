@@ -26,6 +26,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { WikiLanguageFeatures } from '../../src/providers/WikiLanguageFeatures.js';
 import type { WikiBinaryManager } from '../../src/utils/wikiInstaller.js';
+import { assertDefined } from './assertDefined.js';
 
 function wsRoot(): string {
   const folder = vscode.workspace.workspaceFolders?.[0];
@@ -72,10 +73,10 @@ function assertExactEdits(edit: vscode.WorkspaceEdit, expected: ExpectedEdit[]):
   for (const [uriKey, expList] of expectedByUri) {
     const actList = byUri.get(uriKey);
     assert.ok(actList, `Expected edits for ${uriKey}`);
-    assert.strictEqual(actList!.length, expList.length, `Expected ${expList.length} edit(s) on ${uriKey}`);
+    assert.strictEqual(actList.length, expList.length, `Expected ${expList.length} edit(s) on ${uriKey}`);
 
     for (const exp of expList) {
-      const match = actList!.find(
+      const match = actList.find(
         (te) =>
           te.range.start.line === exp.line &&
           te.range.start.character === exp.startChar &&
@@ -85,7 +86,7 @@ function assertExactEdits(edit: vscode.WorkspaceEdit, expected: ExpectedEdit[]):
       );
       assert.ok(
         match,
-        `Missing edit on ${uriKey} line ${exp.line} chars [${exp.startChar},${exp.endChar}) → ${JSON.stringify(exp.newText)}; got: ${actList!
+        `Missing edit on ${uriKey} line ${exp.line} chars [${exp.startChar},${exp.endChar}) → ${JSON.stringify(exp.newText)}; got: ${actList
           .map(
             (te) =>
               `${te.range.start.line}:${te.range.start.character}-${te.range.end.line}:${te.range.end.character}→${JSON.stringify(te.newText)}`
@@ -125,7 +126,7 @@ describe('buildDirectoryMoveEdit — multi-linker nested rename', () => {
     href: string,
     newText: string
   ): ExpectedEdit {
-    const lineText = content.split('\n')[lineIdx]!;
+    const lineText = assertDefined(content.split('\n')[lineIdx], `Test bug: fixture has no line ${lineIdx}`);
     const hrefStart = lineText.indexOf(`](${href})`) + 2;
     assert.ok(hrefStart >= 2, `Test bug: href "${href}" not found on line ${lineIdx} of fixture`);
     return { uri: fileUri, line: lineIdx, startChar: hrefStart, endChar: hrefStart + href.length, newText };

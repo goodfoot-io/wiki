@@ -73,8 +73,8 @@ describe('LogBuffer', () => {
       buffer.append('warn', 'Message 2');
 
       const entries = buffer.getEntries();
-      expect(entries[0]!.timestamp).toBe(1000);
-      expect(entries[1]!.timestamp).toBe(1100);
+      expect(entries[0]?.timestamp).toBe(1000);
+      expect(entries[1]?.timestamp).toBe(1100);
     });
 
     it('should store all log entry fields correctly', () => {
@@ -102,11 +102,11 @@ describe('LogBuffer', () => {
       buffer.append('trace', 'Trace message');
 
       const entries = buffer.getEntries();
-      expect(entries[0]!.level).toBe('error');
-      expect(entries[1]!.level).toBe('warn');
-      expect(entries[2]!.level).toBe('info');
-      expect(entries[3]!.level).toBe('debug');
-      expect(entries[4]!.level).toBe('trace');
+      expect(entries[0]?.level).toBe('error');
+      expect(entries[1]?.level).toBe('warn');
+      expect(entries[2]?.level).toBe('info');
+      expect(entries[3]?.level).toBe('debug');
+      expect(entries[4]?.level).toBe('trace');
     });
   });
 
@@ -135,9 +135,9 @@ describe('LogBuffer', () => {
 
       const entries = buffer.getEntries();
       expect(entries.length).toBe(3);
-      expect(entries[0]!.message).toBe('Message 2');
-      expect(entries[1]!.message).toBe('Message 3');
-      expect(entries[2]!.message).toBe('Message 4');
+      expect(entries[0]?.message).toBe('Message 2');
+      expect(entries[1]?.message).toBe('Message 3');
+      expect(entries[2]?.message).toBe('Message 4');
     });
 
     it('should maintain chronological order after wraparound', () => {
@@ -152,12 +152,12 @@ describe('LogBuffer', () => {
 
       const entries = buffer.getEntries();
       expect(entries.length).toBe(3);
-      expect(entries[0]!.message).toBe('Message 3');
-      expect(entries[0]!.timestamp).toBe(1200);
-      expect(entries[1]!.message).toBe('Message 4');
-      expect(entries[1]!.timestamp).toBe(1300);
-      expect(entries[2]!.message).toBe('Message 5');
-      expect(entries[2]!.timestamp).toBe(1400);
+      expect(entries[0]?.message).toBe('Message 3');
+      expect(entries[0]?.timestamp).toBe(1200);
+      expect(entries[1]?.message).toBe('Message 4');
+      expect(entries[1]?.timestamp).toBe(1300);
+      expect(entries[2]?.message).toBe('Message 5');
+      expect(entries[2]?.timestamp).toBe(1400);
     });
 
     it('should handle multiple wraparounds correctly', () => {
@@ -170,8 +170,8 @@ describe('LogBuffer', () => {
 
       const entries = buffer.getEntries();
       expect(entries.length).toBe(2);
-      expect(entries[0]!.message).toBe('Message 6');
-      expect(entries[1]!.message).toBe('Message 7');
+      expect(entries[0]?.message).toBe('Message 6');
+      expect(entries[1]?.message).toBe('Message 7');
     });
   });
 
@@ -192,9 +192,9 @@ describe('LogBuffer', () => {
 
       const entries = buffer.getEntries();
       expect(entries.length).toBe(3);
-      expect(entries[0]!.message).toBe('First');
-      expect(entries[1]!.message).toBe('Second');
-      expect(entries[2]!.message).toBe('Third');
+      expect(entries[0]?.message).toBe('First');
+      expect(entries[1]?.message).toBe('Second');
+      expect(entries[2]?.message).toBe('Third');
     });
 
     it('should return a copy of entries (readonly)', () => {
@@ -222,9 +222,9 @@ describe('LogBuffer', () => {
       const entries = buffer.getEntries();
       expect(entries.map((e) => e.message)).toEqual(['C', 'D', 'E']);
       // Verify chronological order by timestamp
-      expect(entries[0]!.timestamp).toBe(1200);
-      expect(entries[1]!.timestamp).toBe(1300);
-      expect(entries[2]!.timestamp).toBe(1400);
+      expect(entries[0]?.timestamp).toBe(1200);
+      expect(entries[1]?.timestamp).toBe(1300);
+      expect(entries[2]?.timestamp).toBe(1400);
     });
   });
 
@@ -318,8 +318,8 @@ describe('LogBuffer', () => {
 
       const entries = buffer.getEntries();
       expect(entries.length).toBe(2);
-      expect(entries[0]!.message).toBe('After clear 1');
-      expect(entries[1]!.message).toBe('After clear 2');
+      expect(entries[0]?.message).toBe('After clear 1');
+      expect(entries[1]?.message).toBe('After clear 2');
     });
 
     it('should reset write index correctly', () => {
@@ -340,8 +340,8 @@ describe('LogBuffer', () => {
 
       const entries = buffer.getEntries();
       expect(entries.length).toBe(2);
-      expect(entries[0]!.message).toBe('X');
-      expect(entries[1]!.message).toBe('Y');
+      expect(entries[0]?.message).toBe('X');
+      expect(entries[1]?.message).toBe('Y');
     });
   });
 

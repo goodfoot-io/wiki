@@ -77,6 +77,12 @@ jobs:
       - name: Install dependencies
         run: yarn install
 
+      - name: Lint (Biome, read-only)
+        run: |
+          yarn lint:root
+          yarn workspace @goodfoot/wiki-agent-hooks lint
+          yarn workspace @goodfoot/vscode-logging lint
+
       - name: Build agent-hooks bundles
         run: yarn workspace @goodfoot/wiki-agent-hooks build
 

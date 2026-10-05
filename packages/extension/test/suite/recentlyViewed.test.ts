@@ -20,6 +20,7 @@ import {
   RECENTLY_VIEWED_KEY,
   recordWikiView
 } from '../../src/utils/recentlyViewed.js';
+import { assertDefined } from './assertDefined.js';
 
 class StubMemento implements vscode.Memento {
   private readonly _store = new Map<string, unknown>();
@@ -69,7 +70,7 @@ describe('recentlyViewed — recordWikiView', () => {
     for (let i = 0; i < RECENTLY_VIEWED_CAP + 5; i++) {
       await recordWikiView(ctx, `/p${i}.md`);
     }
-    const stored = ctx.workspaceState.get<string[]>(RECENTLY_VIEWED_KEY)!;
+    const stored = assertDefined(ctx.workspaceState.get<string[]>(RECENTLY_VIEWED_KEY), 'expected a stored MRU list');
     assert.strictEqual(stored.length, RECENTLY_VIEWED_CAP);
     assert.strictEqual(stored[0], `/p${RECENTLY_VIEWED_CAP + 4}.md`);
   });
@@ -107,7 +108,7 @@ describe('recentlyViewed — loadValidatedRecentlyViewed', () => {
       items.map((i) => i.file),
       [b, a]
     );
-    assert.strictEqual(items[0]!.detail, 'bbb');
+    assert.strictEqual(items[0]?.detail, 'bbb');
   });
 
   it('drops missing files and persists the truncated list', async () => {

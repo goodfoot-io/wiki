@@ -359,7 +359,7 @@ async function fetchWithAbort(fetchImpl: typeof fetch, url: string, signal: Abor
  */
 export async function resolveWikiBinaryOnPath(
   platform: NodeJS.Platform = process.platform,
-  envPath: string = process.env['PATH'] ?? ''
+  envPath: string = process.env.PATH ?? ''
 ): Promise<WikiBinaryHandle | null> {
   const candidate = await findExecutableOnPath(platform === 'win32' ? 'wiki.exe' : 'wiki', platform, envPath);
   return candidate == null ? null : { path: candidate, source: 'path' };
@@ -470,7 +470,7 @@ async function findExecutableOnPath(
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
 
-  const windowsExts = (process.env['PATHEXT'] ?? '.EXE;.CMD;.BAT;.COM').split(';').map((entry) => entry.toLowerCase());
+  const windowsExts = (process.env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';').map((entry) => entry.toLowerCase());
 
   for (const directory of directories) {
     if (platform === 'win32') {

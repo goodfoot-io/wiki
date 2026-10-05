@@ -9,7 +9,8 @@
     "build:hooks:codex": "yarn agent-hooks-cli --agent codex -i \"src/codex/post-tool-use.ts\" -o \"../../plugins-codex/wiki/hooks/hooks.json\" --plugin-root --no-sourcemap",
     "build:opencode": "yarn agent-hooks-cli --agent opencode -i \"src/opencode/index.ts\" -o \"../../plugins-opencode/wiki/dist\" --no-sourcemap",
     "agent-hooks-cli": "node scripts/hooks-cli-wrapper.js",
-    "lint": "npx biome check src test scripts",
+    "lint": "biome ci --error-on-warnings .",
+    "lint:fix": "biome check --write --unsafe .",
     "typecheck": "tsgo --noEmit",
     "test": "vitest run"
   },
@@ -17,6 +18,7 @@
     "@goodfoot/agent-hooks": "1.0.11"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.4.11",
     "@typescript/native-preview": "^7.0.0-dev",
     "typescript": "^5.9.3",
     "vitest": "^3.0.0"

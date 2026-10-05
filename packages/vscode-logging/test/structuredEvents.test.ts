@@ -93,9 +93,9 @@ describe('logRefTrackingEvent', () => {
     });
 
     expect(capturedMessages).toHaveLength(1);
-    expect(capturedMessages[0]!.message).toMatch(/^\[REF_CHANGE\]/);
-    expect(capturedMessages[0]!.message).toContain('ref=main');
-    expect(capturedMessages[0]!.message).toContain('reason=initial');
+    expect(capturedMessages[0]?.message).toMatch(/^\[REF_CHANGE\]/);
+    expect(capturedMessages[0]?.message).toContain('ref=main');
+    expect(capturedMessages[0]?.message).toContain('reason=initial');
   });
 
   it('should truncate git hashes in fields', () => {
@@ -106,8 +106,8 @@ describe('logRefTrackingEvent', () => {
     });
 
     expect(capturedMessages).toHaveLength(1);
-    expect(capturedMessages[0]!.message).toContain('oldHash=abc123d');
-    expect(capturedMessages[0]!.message).toContain('newHash=abc123d');
+    expect(capturedMessages[0]?.message).toContain('oldHash=abc123d');
+    expect(capturedMessages[0]?.message).toContain('newHash=abc123d');
   });
 
   it('should handle undefined values', () => {
@@ -118,7 +118,7 @@ describe('logRefTrackingEvent', () => {
     });
 
     expect(capturedMessages).toHaveLength(1);
-    expect(capturedMessages[0]!.message).toContain('oldHash=undefined');
+    expect(capturedMessages[0]?.message).toContain('oldHash=undefined');
   });
 
   it('should handle numeric values', () => {
@@ -129,9 +129,9 @@ describe('logRefTrackingEvent', () => {
     });
 
     expect(capturedMessages).toHaveLength(1);
-    expect(capturedMessages[0]!.message).toContain('sessionId=123');
-    expect(capturedMessages[0]!.message).toContain('timestamp=1234567890');
-    expect(capturedMessages[0]!.message).toContain('active=true');
+    expect(capturedMessages[0]?.message).toContain('sessionId=123');
+    expect(capturedMessages[0]?.message).toContain('timestamp=1234567890');
+    expect(capturedMessages[0]?.message).toContain('active=true');
   });
 
   it('should handle boolean values', () => {
@@ -141,57 +141,57 @@ describe('logRefTrackingEvent', () => {
     });
 
     expect(capturedMessages).toHaveLength(1);
-    expect(capturedMessages[0]!.message).toContain('hasChanges=true');
-    expect(capturedMessages[0]!.message).toContain('isValid=false');
+    expect(capturedMessages[0]?.message).toContain('hasChanges=true');
+    expect(capturedMessages[0]?.message).toContain('isValid=false');
   });
 
   it('should use debug level for REF_CHANGE', () => {
     logRefTrackingEvent('REF_CHANGE', { ref: 'main' });
 
     expect(capturedMessages).toHaveLength(1);
-    expect(capturedMessages[0]!.level).toBe('debug');
+    expect(capturedMessages[0]?.level).toBe('debug');
   });
 
   it('should use debug level for REF_VALIDATION', () => {
     logRefTrackingEvent('REF_VALIDATION', { valid: true });
 
     expect(capturedMessages).toHaveLength(1);
-    expect(capturedMessages[0]!.level).toBe('debug');
+    expect(capturedMessages[0]?.level).toBe('debug');
   });
 
   it('should use debug level for REFRESH_DECISION', () => {
     logRefTrackingEvent('REFRESH_DECISION', { decision: 'skip' });
 
     expect(capturedMessages).toHaveLength(1);
-    expect(capturedMessages[0]!.level).toBe('debug');
+    expect(capturedMessages[0]?.level).toBe('debug');
   });
 
   it('should use warn level for REF_INVALID', () => {
     logRefTrackingEvent('REF_INVALID', { reason: 'deleted' });
 
     expect(capturedMessages).toHaveLength(1);
-    expect(capturedMessages[0]!.level).toBe('warn');
+    expect(capturedMessages[0]?.level).toBe('warn');
   });
 
   it('should use info level for REF_RECOVER', () => {
     logRefTrackingEvent('REF_RECOVER', { recovered: true });
 
     expect(capturedMessages).toHaveLength(1);
-    expect(capturedMessages[0]!.level).toBe('info');
+    expect(capturedMessages[0]?.level).toBe('info');
   });
 
   it('should use info level for SESSION_UPDATE', () => {
     logRefTrackingEvent('SESSION_UPDATE', { sessionId: 123 });
 
     expect(capturedMessages).toHaveLength(1);
-    expect(capturedMessages[0]!.level).toBe('info');
+    expect(capturedMessages[0]?.level).toBe('info');
   });
 
   it('should use info level for UI_UPDATE', () => {
     logRefTrackingEvent('UI_UPDATE', { component: 'tree' });
 
     expect(capturedMessages).toHaveLength(1);
-    expect(capturedMessages[0]!.level).toBe('info');
+    expect(capturedMessages[0]?.level).toBe('info');
   });
 
   it('should gracefully degrade when no logger is set', () => {
@@ -236,9 +236,11 @@ describe('logRefTrackingEvent', () => {
     });
 
     expect(capturedMessages).toHaveLength(1);
-    const msg = capturedMessages[0]!.message;
     // Should have format: [REF_CHANGE] key1=value1 key2=value2 key3=value3 key4=value4
-    const parts = msg.split('] ')[1]!.split(' ');
+    const body = capturedMessages[0]?.message.split('] ')[1];
+    expect(body).toBeDefined();
+    if (body === undefined) return;
+    const parts = body.split(' ');
     expect(parts.length).toBe(4); // 4 key=value pairs
     expect(parts[0]).toMatch(/^[a-z]+=/);
   });
@@ -247,7 +249,7 @@ describe('logRefTrackingEvent', () => {
     logRefTrackingEvent('REF_CHANGE', {});
 
     expect(capturedMessages).toHaveLength(1);
-    expect(capturedMessages[0]!.message).toBe('[REF_CHANGE] ');
+    expect(capturedMessages[0]?.message).toBe('[REF_CHANGE] ');
   });
 
   it('should preserve category in message', () => {
@@ -264,7 +266,7 @@ describe('logRefTrackingEvent', () => {
     for (const category of categories) {
       capturedMessages = [];
       logRefTrackingEvent(category, { test: 'value' });
-      expect(capturedMessages[0]!.message).toContain(`[${category}]`);
+      expect(capturedMessages[0]?.message).toContain(`[${category}]`);
     }
   });
 });

@@ -36,6 +36,7 @@
 import * as assert from 'node:assert';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { assertDefined } from './assertDefined.js';
 
 describe('onDidRenameFiles handler error handling', () => {
   it('wraps the async callback body in try/catch to prevent unhandled rejections', () => {
@@ -56,7 +57,7 @@ describe('onDidRenameFiles handler error handling', () => {
     );
 
     // Position of the `{` that opens the handler body.
-    const braceStart = match.index! + match[0].length - 1;
+    const braceStart = assertDefined(match.index, 'regex match must carry an index') + match[0].length - 1;
 
     // Count balanced braces to find the matching closing `}`.
     let depth = 0;
