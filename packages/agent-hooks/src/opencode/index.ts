@@ -9,9 +9,10 @@
  * Fail-open by contract: the whole after-hook body is guarded because an
  * uncaught error would surface on a fail-closed host loader — a missed
  * advisory must never block an already-executed tool call. A guarded failure
- * is never silent: it is recorded through the agent-hooks logger, the same
- * `AGENT_HOOKS_LOG_FILE` JSONL channel the claude/codex adapters write to
- * (file-only, so nothing reaches the in-process host's terminal).
+ * is not swallowed: it is passed to the agent-hooks logger, the same JSONL
+ * channel the claude/codex adapters write to. That channel is file-only and
+ * writes only when `AGENT_HOOKS_LOG_FILE` is set, so with it unset the
+ * failure leaves no trace in the in-process host's terminal or the session.
  */
 
 import { isAbsolute, resolve as resolvePath } from 'node:path';

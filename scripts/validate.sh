@@ -62,6 +62,7 @@ agent_skills_trees_fresh() {
 {
   yarn typecheck &&
   yarn lint &&
+  yarn knip &&
   "$LOCAL_WIKI" check &&
   yarn workspace @goodfoot/wiki-agent-hooks build &&
   agent_hooks_bundles_fresh &&

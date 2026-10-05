@@ -15,8 +15,8 @@ EXIT=0
 
 # --- Rust CLI typecheck ---
 if [ -f "$WORKSPACE_ROOT/packages/cli/Cargo.toml" ]; then
-  echo "Running cargo check for packages/cli..."
-  (cd "$WORKSPACE_ROOT/packages/cli" && cargo check --quiet) &
+  echo "Running cargo check --all-targets for packages/cli..."
+  (cd "$WORKSPACE_ROOT/packages/cli" && yarn typecheck) &
   PIDS+=($!)
 else
   echo "Warning: packages/cli/Cargo.toml not found, skipping cargo check." >&2

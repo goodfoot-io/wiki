@@ -124,7 +124,13 @@ jobs:
         run: cd packages/extension && yarn lint
 
       - name: Typecheck
-        run: cd packages/extension && yarn typecheck
+        run: |
+          yarn workspace @goodfoot/wiki-agent-hooks typecheck
+          yarn workspace @goodfoot/vscode-logging typecheck
+          cd packages/extension && yarn typecheck
+
+      - name: Knip
+        run: yarn knip
 
       - name: Test
         run: cd packages/extension && yarn test
