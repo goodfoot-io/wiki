@@ -18,7 +18,6 @@
 //!   `\n`, one trailing `\r` stripped per element, no trailing empty line when
 //!   the buffer ends in `\n`), sliced `lines[start-1..end]` clamped to EOF, and
 //!   joined with `\n`.
-//! - **Whole file**: the raw byte buffer, no canonicalization.
 //! - A degenerate range (`start == 0`, `end < start`, or past EOF) selects no
 //!   content and fingerprints to `0`.
 //!
@@ -77,10 +76,6 @@ fn line_range_span(start: u32, end: u32) -> usize {
 ///
 /// Allocation-free: a single forward pass that stops as soon as the
 /// `end`-terminating newline is seen.
-///
-/// `LineIndex::region` is the indexed equivalent; the test
-/// `byte_slice_and_indexed_entry_points_agree` cross-checks the two against
-/// every vector and range so they cannot drift independently.
 fn line_range_region(bytes: &[u8], start_line: u32, end_line: u32) -> Option<(usize, usize)> {
     if start_line == 0 {
         // `start == 0` has no 1-based line; a degenerate extent selects no
@@ -183,18 +178,17 @@ fn canonical_join_bytes(bytes: &[u8], start: u32, end: u32) -> Vec<u8> {
     slice.join("\n").into_bytes()
 }
 
-/// The extent of a fingerprint: either the whole file, or an inclusive
-/// 1-based line range.
+/// The extent of a fingerprint: the inclusive 1-based line range
+/// `[start, end]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Extent {
-    WholeFile,
-    LineRange { start: u32, end: u32 },
+pub struct Extent {
+    pub start: u32,
+    pub end: u32,
 }
 
-/// One place a stored fingerprint was found in the caller-supplied files.
-/// For a whole-file match `start_line` and `end_line` are both `0` (the
-/// whole-file convention); for a line range they are the 1-based inclusive
-/// bounds of the matching window.
+/// One place a stored fingerprint was found in the caller-supplied files:
+/// `start_line` and `end_line` are the 1-based inclusive bounds of the
+/// matching window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Location {
     pub path: String,
@@ -202,15 +196,14 @@ pub struct Location {
     pub end_line: u32,
 }
 
-/// A reusable, allocation-cheap line index over a byte buffer: the start and
-/// content-end (terminator-excluded) offset of every line, derived once with a
-/// single newline scan. Line counting matches `str::lines` exactly — a `\r\n`
-/// or `\n` ends a line and a trailing line terminator yields no final empty
-/// line.
+/// A reusable, allocation-cheap line index over a byte buffer: the start
+/// offset of every line, derived once with a single newline scan. Line
+/// counting matches `str::lines` exactly — a `\r\n` or `\n` ends a line and a
+/// trailing line terminator yields no final empty line.
 ///
-/// Callers that read a file once and fingerprint **many** ranges against it
-/// build the index once and reuse it across [`cheap_fingerprint_indexed`] and
-/// [`scan_indexed_rk64`], paying the newline scan a single time.
+/// Callers that read a file once and scan it **many** times build the index
+/// once and reuse it across [`scan_indexed_rk64`] queries, paying the newline
+/// scan a single time.
 ///
 /// Line offsets are stored as `u32`, so the buffer must be at most `u32::MAX`
 /// (just under 4 GiB) bytes. A larger buffer is **refused** (panic) rather than
@@ -222,8 +215,6 @@ pub struct LineIndex<'a> {
     bytes: &'a [u8],
     /// Start offset of each line.
     starts: Vec<u32>,
-    /// Content end (exclusive of the `\n`/`\r\n` terminator) of each line.
-    ends: Vec<u32>,
     /// Per-line canonical prefix hashes — the window-fingerprint tables
     /// ([`CanonicalLines`]). Populated lazily on the first windowed scan and
     /// shared across clones via `Arc`.
@@ -329,9 +320,6 @@ pub(crate) trait Scannable {
     fn line_count(&self) -> usize;
     /// The window-fingerprint tables.
     fn canon(&self) -> &CanonicalLines;
-    /// `horner` of the buffer itself, for whole-file extents (which
-    /// fingerprint the raw bytes, not the canonical text).
-    fn whole_fp(&self) -> u64;
 }
 
 impl Scannable for LineIndex<'_> {
@@ -341,10 +329,6 @@ impl Scannable for LineIndex<'_> {
 
     fn canon(&self) -> &CanonicalLines {
         self.canonical_lines()
-    }
-
-    fn whole_fp(&self) -> u64 {
-        horner(self.bytes)
     }
 }
 
@@ -361,16 +345,13 @@ impl Scannable for LineIndex<'_> {
 #[derive(Clone)]
 pub struct ScanIndex {
     canon: CanonicalLines,
-    whole_fp: u64,
 }
 
 impl ScanIndex {
-    /// Build the index for `bytes`: the canonical tables, plus the buffer's
-    /// own hash for whole-file extents.
+    /// Build the index for `bytes`: its canonical window tables.
     pub fn build(bytes: &[u8]) -> ScanIndex {
         ScanIndex {
             canon: CanonicalLines::build(bytes),
-            whole_fp: horner(bytes),
         }
     }
 }
@@ -382,10 +363,6 @@ impl Scannable for ScanIndex {
 
     fn canon(&self) -> &CanonicalLines {
         &self.canon
-    }
-
-    fn whole_fp(&self) -> u64 {
-        self.whole_fp
     }
 }
 
@@ -433,12 +410,10 @@ impl<'a> LineIndex<'a> {
             u32::MAX,
         );
         let mut starts = Vec::new();
-        let mut ends = Vec::new();
         let mut seg = 0usize;
         for (i, &b) in bytes.iter().enumerate() {
             if b == b'\n' {
                 starts.push(seg as u32);
-                ends.push(i as u32);
                 seg = i + 1;
             }
         }
@@ -447,41 +422,17 @@ impl<'a> LineIndex<'a> {
         // `str::lines`).
         if seg < bytes.len() {
             starts.push(seg as u32);
-            ends.push(bytes.len() as u32);
         }
         LineIndex {
             bytes,
             starts,
-            ends,
             canonical: Arc::new(OnceLock::new()),
         }
-    }
-
-    /// The underlying buffer.
-    pub fn bytes(&self) -> &'a [u8] {
-        self.bytes
     }
 
     /// Number of lines, per `str::lines` counting.
     pub fn line_count(&self) -> usize {
         self.starts.len()
-    }
-
-    /// Byte offsets `[start, end)` of the canonical region for the inclusive
-    /// 1-based line range, clamped to the line count. `None` for an empty
-    /// range.
-    fn region(&self, start: u32, end: u32) -> Option<(usize, usize)> {
-        if start == 0 || start > end {
-            // Degenerate extent (`start == 0` or `end < start`): no content,
-            // matching `line_range_span` and `line_range_region`.
-            return None;
-        }
-        let lo = start.saturating_sub(1) as usize;
-        let hi = (end as usize).min(self.line_count());
-        if lo >= hi {
-            return None;
-        }
-        Some((self.starts[lo] as usize, self.ends[hi - 1] as usize))
     }
 
     /// The canonical per-line prefix hashes, computed lazily on the first
@@ -490,8 +441,8 @@ impl<'a> LineIndex<'a> {
     fn canonical_lines(&self) -> &CanonicalLines {
         self.canonical.get_or_init(|| {
             let canon = CanonicalLines::build(self.bytes);
-            // `str::lines` and the newline scan that built `starts`/`ends`
-            // count lines identically (a `\n` ends a line, a trailing
+            // `str::lines` and the newline scan that built `starts` count
+            // lines identically (a `\n` ends a line, a trailing
             // terminator yields no final empty line), so the window bounds
             // derived from `line_count` index these arrays exactly.
             assert_eq!(
@@ -504,28 +455,13 @@ impl<'a> LineIndex<'a> {
     }
 }
 
-/// Cheap fingerprint of an extent's canonical content (whole-file extents
-/// fingerprint the full buffer; a range selecting no line fingerprints to `0`).
+/// Cheap fingerprint of an extent's canonical content (a range selecting no
+/// line fingerprints to `0`).
 pub fn cheap_fingerprint_with_extent(bytes: &[u8], extent: &Extent) -> u64 {
-    match extent {
-        Extent::WholeFile => horner(bytes),
-        Extent::LineRange { start, end } => match line_range_region(bytes, *start, *end) {
-            Some((rs, re)) => canonical_region(bytes, rs, re, *start, *end, horner),
-            None => 0,
-        },
-    }
-}
-
-/// [`cheap_fingerprint_with_extent`] over a prebuilt [`LineIndex`]. Produces an
-/// identical `u64`; the only difference is that the newline scan is already
-/// paid for.
-pub fn cheap_fingerprint_indexed(idx: &LineIndex<'_>, extent: &Extent) -> u64 {
-    match extent {
-        Extent::WholeFile => horner(idx.bytes),
-        Extent::LineRange { start, end } => match idx.region(*start, *end) {
-            Some((rs, re)) => canonical_region(idx.bytes, rs, re, *start, *end, horner),
-            None => 0,
-        },
+    let Extent { start, end } = *extent;
+    match line_range_region(bytes, start, end) {
+        Some((rs, re)) => canonical_region(bytes, rs, re, start, end, horner),
+        None => 0,
     }
 }
 
@@ -536,8 +472,7 @@ pub fn cheap_fingerprint_indexed(idx: &LineIndex<'_>, extent: &Extent) -> u64 {
 /// Exhaustive, fail-closed match set: **all** matches are returned (same `near`
 /// ordering as the reference kernel: stable sort by distance from the 1-based
 /// `near` line, ties toward the lower start line), so ≥2 matches means
-/// ambiguous and the caller refuses to act. A whole-file extent matches whole
-/// files by their fingerprint.
+/// ambiguous and the caller refuses to act.
 pub fn scan_indexed_rk64<T: Scannable>(
     files: &[(String, T)],
     cheap_fp: u64,
@@ -554,26 +489,9 @@ pub fn scan_indexed_rk64<T: Scannable>(
     out
 }
 
-/// [`scan_indexed_rk64`] over borrowed path/bytes pairs, indexing each buffer
-/// with the on-the-spot [`LineIndex`]. Generic over the borrowed forms so
-/// callers with `Vec`-backed inventories need no per-call clones.
-pub fn scan_for_content_hash_rk64<P: AsRef<str>, B: AsRef<[u8]>>(
-    files: &[(P, B)],
-    cheap_fp: u64,
-    extent: Extent,
-    near: Option<u32>,
-) -> Vec<Location> {
-    let indexed: Vec<(String, LineIndex<'_>)> = files
-        .iter()
-        .map(|(path, bytes)| (path.as_ref().to_string(), LineIndex::build(bytes.as_ref())))
-        .collect();
-    scan_indexed_rk64(&indexed, cheap_fp, extent, near)
-}
-
-/// One file's contribution to a scan, for any indexed file: whole-file
-/// extents match the buffer's own hash, line ranges scan every window of the
-/// requested span. No content-hash verify: a matching fingerprint is the
-/// match.
+/// One file's contribution to a scan, for any indexed file: every window of
+/// the extent's span is fingerprinted. No content-hash verify: a matching
+/// fingerprint is the match.
 ///
 /// This is the unit a caller drives across workers when it holds an indexed
 /// inventory: the semantics are identical to [`scan_indexed_rk64`]'s per-file
@@ -586,29 +504,16 @@ pub fn scan_one_indexed<T: Scannable>(
     extent: Extent,
     out: &mut Vec<Location>,
 ) {
-    match extent {
-        Extent::WholeFile => {
-            if idx.whole_fp() == cheap_fp {
-                out.push(Location {
-                    path: path.to_string(),
-                    start_line: 0,
-                    end_line: 0,
-                });
-            }
-        }
-        Extent::LineRange { start, end } => {
-            let span = line_range_span(start, end);
-            if span == 0 {
-                return;
-            }
-            let n = idx.line_count();
-            if n < span {
-                return;
-            }
-            // No content-hash verify: a matching fingerprint is the match.
-            scan_windows(path, idx.canon(), span, (0, n - span), cheap_fp, out);
-        }
+    let span = line_range_span(extent.start, extent.end);
+    if span == 0 {
+        return;
     }
+    let n = idx.line_count();
+    if n < span {
+        return;
+    }
+    // No content-hash verify: a matching fingerprint is the match.
+    scan_windows(path, idx.canon(), span, (0, n - span), cheap_fp, out);
 }
 
 /// Nearest-window ordering: stable sort by distance from the 1-based `near`
@@ -674,16 +579,28 @@ pub fn rk64_from_hex(s: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
-    fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
-    }
-
     fn from_hex(s: &str) -> Vec<u8> {
         assert_eq!(s.len() % 2, 0, "hex input must have even length");
         (0..s.len())
             .step_by(2)
             .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("valid hex"))
             .collect()
+    }
+
+    /// Scan borrowed path/bytes pairs, indexing each buffer on the spot with
+    /// a [`LineIndex`] — the per-query indexing the production move scan
+    /// performs for the link's own target file.
+    fn scan_on_the_spot(
+        files: &[(String, Vec<u8>)],
+        cheap_fp: u64,
+        extent: Extent,
+        near: Option<u32>,
+    ) -> Vec<Location> {
+        let indexed: Vec<(String, LineIndex<'_>)> = files
+            .iter()
+            .map(|(path, bytes)| (path.clone(), LineIndex::build(bytes)))
+            .collect();
+        scan_indexed_rk64(&indexed, cheap_fp, extent, near)
     }
 
     // ── Parity gate: every stored rk64 anchor pair from the .wiki/ corpus at
@@ -716,11 +633,11 @@ mod tests {
             );
             // The embedded content IS the canonical content — for ranges, the
             // already-split/clamped/joined slice the reference fingerprinted.
-            // Hashing it whole-file is exactly the reference's canonical
+            // Hashing it directly is exactly the reference's canonical
             // fingerprint; re-applying the original range to the joined bytes
             // would re-slice and canonically empty it. The kernel's own
-            // line-range canonicalization is proven by the edge tests above.
-            let actual = rk64_to_hex(cheap_fingerprint_with_extent(&content, &Extent::WholeFile));
+            // line-range canonicalization is proven by the edge tests below.
+            let actual = rk64_to_hex(horner(&content));
             assert_eq!(
                 actual, stored,
                 "entry {i} ({path}, {extent:?}): kernel disagrees with the stored pair",
@@ -754,13 +671,13 @@ mod tests {
     #[test]
     
     fn golden_vectors_match_reference_values() {
-        assert_eq!(rk64_to_hex(cheap_fingerprint_with_extent(b"a\nb\nc", &Extent::WholeFile)), "9e8ea13137a80ccb");
-        assert_eq!(rk64_to_hex(cheap_fingerprint_with_extent(b"", &Extent::WholeFile)), "0000000000000000");
-        assert_eq!(rk64_to_hex(cheap_fingerprint_with_extent(b"x", &Extent::WholeFile)), "0000000000000079");
-        assert_eq!(rk64_to_hex(cheap_fingerprint_with_extent(b"whole\ncontent\n", &Extent::WholeFile)), "9acbca60ec42d854");
-        // Whole-file fingerprints hash raw bytes — invalid UTF-8 must not be
-        // lossy-rewritten.
-        assert_eq!(rk64_to_hex(cheap_fingerprint_with_extent(b"line with \xff byte", &Extent::WholeFile)), "39abc29a440ce15f");
+        assert_eq!(rk64_to_hex(horner(b"a\nb\nc")), "9e8ea13137a80ccb");
+        assert_eq!(rk64_to_hex(horner(b"")), "0000000000000000");
+        assert_eq!(rk64_to_hex(horner(b"x")), "0000000000000079");
+        assert_eq!(rk64_to_hex(horner(b"whole\ncontent\n")), "9acbca60ec42d854");
+        // The polynomial hashes the bytes it is given — invalid UTF-8 is not
+        // lossy-rewritten at this layer.
+        assert_eq!(rk64_to_hex(horner(b"line with \xff byte")), "39abc29a440ce15f");
     }
 
     // ── Canonicalization edges: the reference contract, one test per edge.
@@ -771,8 +688,8 @@ mod tests {
     
     fn line_range_joins_lines_with_newlines() {
         let bytes = b"a\nb\nc\nd\n";
-        let range = Extent::LineRange { start: 1, end: 3 };
-        let joined = cheap_fingerprint_with_extent(b"a\nb\nc", &Extent::WholeFile);
+        let range = Extent { start: 1, end: 3 };
+        let joined = horner(b"a\nb\nc");
         assert_eq!(
             cheap_fingerprint_with_extent(bytes, &range),
             joined,
@@ -786,7 +703,7 @@ mod tests {
         let crlf = b"a\r\nb\r\nc\r\n";
         let lf = b"a\nb\nc\n";
         for (start, end) in [(1, 1), (1, 2), (2, 3), (1, 3)] {
-            let range = Extent::LineRange { start, end };
+            let range = Extent { start, end };
             assert_eq!(
                 cheap_fingerprint_with_extent(crlf, &range),
                 cheap_fingerprint_with_extent(lf, &range),
@@ -795,26 +712,21 @@ mod tests {
         }
         // The pinned canonical value for the CRLF 1..=2 range ("a\nb").
         assert_eq!(
-            rk64_to_hex(cheap_fingerprint_with_extent(crlf, &Extent::LineRange { start: 1, end: 2 })),
+            rk64_to_hex(cheap_fingerprint_with_extent(crlf, &Extent { start: 1, end: 2 })),
             "014d1700011b08c6"
-        );
-        // Whole-file extents hash RAW bytes — the twins must differ there.
-        assert_ne!(
-            cheap_fingerprint_with_extent(crlf, &Extent::WholeFile),
-            cheap_fingerprint_with_extent(lf, &Extent::WholeFile)
         );
     }
 
     #[test]
     
-    fn invalid_utf8_is_lossy_rewritten_in_ranges_not_whole_files() {
+    fn invalid_utf8_is_lossy_rewritten_in_ranges() {
         let bytes = b"x\xffy\nz\n";
         let lossy = String::from_utf8_lossy(bytes);
         let first_line = lossy.lines().next().unwrap();
-        let range = Extent::LineRange { start: 1, end: 1 };
+        let range = Extent { start: 1, end: 1 };
         assert_eq!(
             cheap_fingerprint_with_extent(bytes, &range),
-            cheap_fingerprint_with_extent(first_line.as_bytes(), &Extent::WholeFile),
+            horner(first_line.as_bytes()),
             "ranges fingerprint the U+FFFD-rewritten content"
         );
     }
@@ -824,7 +736,7 @@ mod tests {
     fn degenerate_ranges_fingerprint_to_zero() {
         let bytes = b"a\nb\nc\n";
         for (start, end) in [(0u32, 3u32), (5, 3), (0, u32::MAX)] {
-            let range = Extent::LineRange { start, end };
+            let range = Extent { start, end };
             assert_eq!(
                 cheap_fingerprint_with_extent(bytes, &range),
                 0,
@@ -832,14 +744,14 @@ mod tests {
             );
         }
         // Past-EOF ranges clamp: the slice still holds the whole file.
-        let clamped = Extent::LineRange { start: 1, end: 9 };
+        let clamped = Extent { start: 1, end: 9 };
         assert_eq!(
             cheap_fingerprint_with_extent(bytes, &clamped),
-            cheap_fingerprint_with_extent(b"a\nb\nc", &Extent::WholeFile)
+            horner(b"a\nb\nc")
         );
         // A range starting past EOF selects nothing.
         assert_eq!(
-            cheap_fingerprint_with_extent(bytes, &Extent::LineRange { start: 5, end: 6 }),
+            cheap_fingerprint_with_extent(bytes, &Extent { start: 5, end: 6 }),
             0
         );
     }
@@ -850,7 +762,7 @@ mod tests {
         let with_nl = b"a\nb\n";
         let without_nl = b"a\nb";
         for (start, end) in [(1, 2), (2, 2), (1, 9)] {
-            let range = Extent::LineRange { start, end };
+            let range = Extent { start, end };
             assert_eq!(
                 cheap_fingerprint_with_extent(with_nl, &range),
                 cheap_fingerprint_with_extent(without_nl, &range),
@@ -861,25 +773,15 @@ mod tests {
 
     #[test]
     
-    fn byte_slice_and_indexed_entry_points_agree() {
+    fn line_index_counts_lines_like_str_lines() {
         let cases: &[&[u8]] = &[b"", b"a", b"a\n", b"a\nb\nc", b"a\r\nb\r\nc\r\n", b"x\xffy\nz\n"];
         for &bytes in cases {
             let idx = LineIndex::build(bytes);
-            assert_eq!(idx.line_count(), String::from_utf8_lossy(bytes).lines().count());
             assert_eq!(
-                cheap_fingerprint_with_extent(bytes, &Extent::WholeFile),
-                cheap_fingerprint_indexed(&idx, &Extent::WholeFile)
+                idx.line_count(),
+                String::from_utf8_lossy(bytes).lines().count(),
+                "{bytes:?}"
             );
-            for start in 0u32..=6 {
-                for end in 0u32..=8 {
-                    let extent = Extent::LineRange { start, end };
-                    assert_eq!(
-                        cheap_fingerprint_with_extent(bytes, &extent),
-                        cheap_fingerprint_indexed(&idx, &extent),
-                        "{bytes:?} range {start}..={end}"
-                    );
-                }
-            }
         }
     }
 
@@ -907,9 +809,9 @@ mod tests {
     
     fn scan_finds_duplicated_windows_fail_closed() {
         let files = vec![("dup.txt".to_string(), b"x\ny\nz\nq\nx\ny\nz\n".to_vec())];
-        let extent = Extent::LineRange { start: 1, end: 3 };
-        let fp = cheap_fingerprint_with_extent(b"x\ny\nz", &Extent::WholeFile);
-        let hits = scan_for_content_hash_rk64(&files, fp, extent, None);
+        let extent = Extent { start: 1, end: 3 };
+        let fp = horner(b"x\ny\nz");
+        let hits = scan_on_the_spot(&files, fp, extent, None);
         assert_eq!(
             hits,
             vec![
@@ -924,35 +826,21 @@ mod tests {
     
     fn scan_orders_nearest_window_first() {
         let files = vec![("a.txt".to_string(), b"d\nd\nx\nd\nd\n".to_vec())];
-        let extent = Extent::LineRange { start: 1, end: 2 };
-        let fp = cheap_fingerprint_with_extent(b"d\nd", &Extent::WholeFile);
-        let near_top = scan_for_content_hash_rk64(&files, fp, extent, Some(1));
+        let extent = Extent { start: 1, end: 2 };
+        let fp = horner(b"d\nd");
+        let near_top = scan_on_the_spot(&files, fp, extent, Some(1));
         assert_eq!(near_top[0].start_line, 1);
-        let near_bottom = scan_for_content_hash_rk64(&files, fp, extent, Some(4));
+        let near_bottom = scan_on_the_spot(&files, fp, extent, Some(4));
         assert_eq!(near_bottom[0].start_line, 4);
-    }
-
-    #[test]
-    
-    fn scan_matches_whole_files_by_fingerprint() {
-        let files = vec![
-            ("yes.txt".to_string(), b"whole\ncontent\n".to_vec()),
-            ("no.txt".to_string(), b"other\n".to_vec()),
-        ];
-        let fp = cheap_fingerprint_with_extent(b"whole\ncontent\n", &Extent::WholeFile);
-        assert_eq!(
-            scan_for_content_hash_rk64(&files, fp, Extent::WholeFile, None),
-            vec![Location { path: "yes.txt".into(), start_line: 0, end_line: 0 }]
-        );
     }
 
     #[test]
 
     fn scan_handles_crlf_windows_canonically() {
         let files = vec![("crlf.txt".to_string(), b"a\r\nb\r\nc\r\nd\r\n".to_vec())];
-        let extent = Extent::LineRange { start: 1, end: 2 };
-        let fp = cheap_fingerprint_with_extent(b"b\nc", &Extent::WholeFile);
-        let hits = scan_for_content_hash_rk64(&files, fp, extent, None);
+        let extent = Extent { start: 1, end: 2 };
+        let fp = horner(b"b\nc");
+        let hits = scan_on_the_spot(&files, fp, extent, None);
         assert_eq!(
             hits,
             vec![Location { path: "crlf.txt".into(), start_line: 2, end_line: 3 }]
@@ -963,7 +851,7 @@ mod tests {
     /// of every file, fingerprint the canonical content the way the canonical
     /// form defines it — `lines[a..b].join("\n")` — and keep the windows whose
     /// fingerprint matches. This is the per-window `join` the scan performs
-    /// no longer, kept as the oracle [`scan_for_content_hash_rk64`] must
+    /// no longer, kept as the oracle [`scan_indexed_rk64`] must
     /// agree with byte-for-byte on every buffer shape.
     fn join_oracle_hits(files: &[(String, Vec<u8>)], cheap_fp: u64, span: usize) -> Vec<Location> {
         let mut out = Vec::new();
@@ -1024,12 +912,12 @@ mod tests {
                     probes.push(0xdead_beef_dead_beef);
                 }
                 for fp in probes {
-                    let extent = Extent::LineRange {
+                    let extent = Extent {
                         start: 1,
                         end: span as u32,
                     };
                     assert_eq!(
-                        scan_for_content_hash_rk64(&files, fp, extent, None),
+                        scan_on_the_spot(&files, fp, extent, None),
                         join_oracle_hits(&files, fp, span),
                         "buffer {bytes:?} span {span} fp {fp:#x}",
                     );
@@ -1060,11 +948,11 @@ mod tests {
             .map(|(path, bytes)| (path.clone(), ScanIndex::build(bytes)))
             .collect();
         for span in 1..=4u32 {
-            let extent = Extent::LineRange { start: 1, end: span };
+            let extent = Extent { start: 1, end: span };
             for fp in [
-                cheap_fingerprint_with_extent(b"alpha\nbeta", &Extent::WholeFile),
-                cheap_fingerprint_with_extent(b"alpha", &Extent::WholeFile),
-                cheap_fingerprint_with_extent(b"gamma", &Extent::WholeFile),
+                horner(b"alpha\nbeta"),
+                horner(b"alpha"),
+                horner(b"gamma"),
                 0xdead_beef_dead_beef,
             ] {
                 let whole = scan_indexed_rk64(&indexed, fp, extent, None);
@@ -1079,21 +967,13 @@ mod tests {
                 );
             }
         }
-        // Whole-file extents take the same contract.
-        let fp = cheap_fingerprint_with_extent(b"alpha\nbeta\n", &Extent::WholeFile);
-        let whole = scan_indexed_rk64(&indexed, fp, Extent::WholeFile, None);
-        let mut per_file: Vec<Location> = Vec::new();
-        for (path, idx) in &indexed {
-            scan_one_indexed(path, idx, fp, Extent::WholeFile, &mut per_file);
-        }
-        assert_eq!(per_file, whole);
     }
 
     /// The owned [`ScanIndex`] and the on-the-spot [`LineIndex`] must be
     /// interchangeable: a scan over an inventory indexed once has to return
     /// exactly what the same scan returns when every query indexes the buffer
     /// again. Every buffer shape, every span, every probe — a real match and a
-    /// miss — and both extents.
+    /// miss.
     #[test]
     fn owned_index_scans_identically_to_the_on_the_spot_index() {
         let mut fixtures = non_lf_clean_fixtures();
@@ -1112,19 +992,15 @@ mod tests {
                     );
                 }
                 for fp in probes {
-                    for extent in [
-                        Extent::LineRange {
-                            start: 1,
-                            end: span as u32,
-                        },
-                        Extent::WholeFile,
-                    ] {
-                        assert_eq!(
-                            scan_indexed_rk64(&indexed, fp, extent, None),
-                            scan_for_content_hash_rk64(&on_the_spot, fp, extent, None),
-                            "buffer {bytes:?} span {span} fp {fp:#x} extent {extent:?}",
-                        );
-                    }
+                    let extent = Extent {
+                        start: 1,
+                        end: span as u32,
+                    };
+                    assert_eq!(
+                        scan_indexed_rk64(&indexed, fp, extent, None),
+                        scan_on_the_spot(&on_the_spot, fp, extent, None),
+                        "buffer {bytes:?} span {span} fp {fp:#x}",
+                    );
                 }
             }
         }
@@ -1144,7 +1020,7 @@ mod tests {
             .enumerate()
             .map(|(i, bytes)| (format!("f{i}.txt"), ScanIndex::build(&bytes)))
             .collect();
-        let extent = Extent::LineRange { start: 1, end: 1 };
+        let extent = Extent { start: 1, end: 1 };
         // Several fixtures canonicalize to a line `c` (with and without a
         // trailing newline, CRLF and LF alike), so the probe hits more than
         // one file and the comparison is not trivially empty on both sides.

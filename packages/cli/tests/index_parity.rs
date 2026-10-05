@@ -4,31 +4,30 @@
 
 mod common;
 
-use wiki::index::{Source, WikiIndex};
+use wiki::index::{DocSource, WikiIndex};
 
 #[test]
 fn parity_fixture_three_pass_snapshot() {
     let repo = common::make_parity_fixture();
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("WikiIndex::prepare");
+    WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree)
+        .expect("WikiIndex::prepare_for_source");
 
-    let mut rows = index.debug_dump_paths().expect("debug_dump_paths");
-    rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
-    let actual: Vec<(String, Source, String)> = rows;
+    let actual = common::served_path_rows(repo.root.as_path());
 
     // Each (path_rel, source) pair is an independent primary-key row.
     // committed.md and staged.md land in Tree+Index+Worktree because the
     // parity fixture commits .gitignore *after* staging staged.md, so both
     // files appear in HEAD. untracked.md and ignored.md have no git history.
-    let expected: Vec<(&str, Source, &str)> = vec![
-        ("committed.md", Source::Tree, "Committed Page"),
-        ("committed.md", Source::Index, "Committed Page"),
-        ("committed.md", Source::Worktree, "Committed Page"),
-        ("ignored.md", Source::Worktree, "Ignored Page"),
-        ("staged.md", Source::Tree, "Staged Page"),
-        ("staged.md", Source::Index, "Staged Page"),
-        ("staged.md", Source::Worktree, "Staged Page"),
-        ("untracked.md", Source::Worktree, "Untracked Page"),
+    // Rows are ordered by path, then by the stored source literal.
+    let expected: Vec<(&str, &str, &str)> = vec![
+        ("committed.md", "index", "Committed Page"),
+        ("committed.md", "tree", "Committed Page"),
+        ("committed.md", "worktree", "Committed Page"),
+        ("ignored.md", "worktree", "Ignored Page"),
+        ("staged.md", "index", "Staged Page"),
+        ("staged.md", "tree", "Staged Page"),
+        ("staged.md", "worktree", "Staged Page"),
+        ("untracked.md", "worktree", "Untracked Page"),
     ];
 
     assert_eq!(actual.len(), expected.len(), "row count: {actual:?}");

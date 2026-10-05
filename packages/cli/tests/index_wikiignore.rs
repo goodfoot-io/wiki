@@ -12,6 +12,7 @@
 mod common;
 
 use wiki::index::{DocSource, WikiIndex};
+use wiki::git::GitSnapshot;
 
 /// A file already in the index that becomes wikiignored on the next refresh
 /// must be removed (its page no longer resolves).
@@ -22,7 +23,7 @@ fn test_pass_worktree_removes_wikiignored_file_from_index() {
     repo.git_add("drafts/secret.md");
     repo.git_commit("add secret");
 
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare");
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare");
     assert!(
         index.resolve_page("Secret").expect("resolve").is_some(),
         "file is indexed before it is wikiignored"
@@ -31,7 +32,7 @@ fn test_pass_worktree_removes_wikiignored_file_from_index() {
 
     // Now wikiignore it and refresh.
     repo.write_file(".wikiignore", "drafts/\n");
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare after ignore");
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare after ignore");
     assert!(
         index.resolve_page("Secret").expect("resolve").is_none(),
         "wikiignored file must be removed from the index"
@@ -50,7 +51,7 @@ fn test_pass_worktree_clean_dir_carry_forward_respects_wikiignore() {
     repo.git_add("docs/secret.md");
     repo.git_commit("add docs");
 
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare");
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare");
     assert!(index.resolve_page("Secret").expect("resolve").is_some());
     drop(index);
 
@@ -58,7 +59,7 @@ fn test_pass_worktree_clean_dir_carry_forward_respects_wikiignore() {
     // is folded into the freshness gate, so a refresh runs and the clean-dir
     // carry-forward must omit the wikiignored child.
     repo.write_file(".wikiignore", "docs/secret.md\n");
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare after ignore");
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare after ignore");
     assert!(
         index.resolve_page("Secret").expect("resolve").is_none(),
         "wikiignored child in a clean dir must be removed"
@@ -81,7 +82,7 @@ fn test_pass_worktree_uningnore_restores_visibility() {
     repo.git_add("drafts/page.md");
     repo.git_commit("add draft");
 
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare");
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare");
     assert!(
         index.resolve_page("Draft").expect("resolve").is_none(),
         "never-indexed wikiignored file is absent"
@@ -92,7 +93,7 @@ fn test_pass_worktree_uningnore_restores_visibility() {
     // the freshness gate; the WalkDir walker still visits the (never-indexed)
     // file and indexes it.
     repo.write_file(".wikiignore", "# nothing ignored\n");
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare after un-ignore");
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare after un-ignore");
     assert!(
         index.resolve_page("Draft").expect("resolve").is_some(),
         "un-ignored file must become visible again"
@@ -117,7 +118,7 @@ fn test_pass_tree_excludes_wikiignored_committed_file() {
     repo.git_commit("add secret and wikiignore");
 
     let index =
-        WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Head).expect("prepare head");
+        WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Git(GitSnapshot::Head)).expect("prepare head");
     assert!(
         index.resolve_page("Secret").expect("resolve").is_none(),
         "wikiignored committed file must be absent from --source head"
@@ -137,7 +138,7 @@ fn test_pass_tree_removes_newly_wikiignored_committed_file() {
 
     // Populate the index for the Tree source so a row exists for this file.
     let index =
-        WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Head).expect("prepare head");
+        WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Git(GitSnapshot::Head)).expect("prepare head");
     assert!(
         index.resolve_page("Secret").expect("resolve").is_some(),
         "file is visible before wikiignore"
@@ -150,7 +151,7 @@ fn test_pass_tree_removes_newly_wikiignored_committed_file() {
     repo.git_commit("add wikiignore");
 
     let index =
-        WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Head).expect("prepare head after ignore");
+        WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Git(GitSnapshot::Head)).expect("prepare head after ignore");
     assert!(
         index.resolve_page("Secret").expect("resolve").is_none(),
         "wikiignored committed file must be removed from --source head after wikiignore commit"
@@ -176,7 +177,7 @@ fn test_pass_tree_uningnore_unchanged_blob_restores_head() {
 
     // Seed the Head DB.
     let index =
-        WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Head).expect("prepare head");
+        WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Git(GitSnapshot::Head)).expect("prepare head");
     assert!(index.resolve_page("Doc").expect("resolve").is_some());
     assert!(index.resolve_page("Pub").expect("resolve").is_some());
     drop(index);
@@ -186,7 +187,7 @@ fn test_pass_tree_uningnore_unchanged_blob_restores_head() {
     repo.git_add(".wikiignore");
     repo.git_commit("ignore doc");
 
-    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Head)
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Git(GitSnapshot::Head))
         .expect("prepare head after ignore");
     assert!(
         index.resolve_page("Doc").expect("resolve").is_none(),
@@ -200,7 +201,7 @@ fn test_pass_tree_uningnore_unchanged_blob_restores_head() {
     repo.git_add(".wikiignore");
     repo.git_commit("un-ignore doc");
 
-    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Head)
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Git(GitSnapshot::Head))
         .expect("prepare head after un-ignore");
     assert!(
         index.resolve_page("Doc").expect("resolve").is_some(),
@@ -234,7 +235,7 @@ fn test_pass_index_excludes_wikiignored_file_when_wikiignore_unstaged() {
     repo.git_commit("add pub and doc");
 
     // Seed the Index DB — both files must be visible.
-    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Index)
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Git(GitSnapshot::Index))
         .expect("prepare index initial");
     assert!(
         index.resolve_page("Doc").expect("resolve").is_some(),
@@ -250,7 +251,7 @@ fn test_pass_index_excludes_wikiignored_file_when_wikiignore_unstaged() {
     repo.write_file(".wikiignore", "wiki/doc.md\n");
 
     // Pass 2 must still exclude doc.md even though the git index didn't change.
-    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Index)
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Git(GitSnapshot::Index))
         .expect("prepare index after unstaged wikiignore");
     assert!(
         index.resolve_page("Doc").expect("resolve").is_none(),
@@ -264,7 +265,7 @@ fn test_pass_index_excludes_wikiignored_file_when_wikiignore_unstaged() {
 
     // Un-ignore: remove the pattern (still unstaged) — doc.md must come back.
     repo.write_file(".wikiignore", "# nothing ignored\n");
-    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Index)
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Git(GitSnapshot::Index))
         .expect("prepare index after un-ignore");
     assert!(
         index.resolve_page("Doc").expect("resolve").is_some(),
@@ -284,7 +285,7 @@ fn test_pass_index_excludes_wikiignored_staged_file() {
     repo.git_add(".wikiignore");
     repo.git_add("drafts/secret.md");
 
-    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Index)
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::Git(GitSnapshot::Index))
         .expect("prepare index");
     assert!(
         index.resolve_page("Secret").expect("resolve").is_none(),

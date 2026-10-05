@@ -25,9 +25,7 @@ fn second_process_returns_without_waiting_on_rendezvous_lock() {
     // publication in a sibling process. Acquired through the production API
     // so the lock file and its private parent subtree are created exactly
     // as the open paths create them.
-    let _held = rendezvous::try_acquire_exclusive(&common)
-        .expect("rendezvous acquire")
-        .expect("free store grants exclusive");
+    let _held = rendezvous::acquire_exclusive(&common).expect("free store grants exclusive");
 
     let start = Instant::now();
 
@@ -144,9 +142,7 @@ fn contended_timeout_serves_own_worktree_corpus_not_foreign() {
     // times out into the floor — which must answer with THIS worktree's
     // corpus, byte-identical to the reference.
     let common = common::git_common_dir(&wt2);
-    let _held = rendezvous::try_acquire_exclusive(&common)
-        .expect("rendezvous acquire")
-        .expect("free store grants exclusive");
+    let _held = rendezvous::acquire_exclusive(&common).expect("free store grants exclusive");
 
     let started = Instant::now();
     let contended = run_wiki(&wt2, &["--format", "json", "committed"]);
@@ -195,9 +191,7 @@ fn contended_cold_store_answers_uncached_reference() {
     std::fs::remove_dir_all(&wiki_dir).expect("re-cold the store");
 
     // Contended against the cold store.
-    let _held = rendezvous::try_acquire_exclusive(&common)
-        .expect("rendezvous acquire")
-        .expect("absent lock grants exclusive");
+    let _held = rendezvous::acquire_exclusive(&common).expect("absent lock grants exclusive");
 
     let started = Instant::now();
     let contended = run_wiki(&repo.root, &["--format", "json", "luminal"]);

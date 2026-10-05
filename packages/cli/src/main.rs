@@ -1,7 +1,4 @@
 mod commands;
-// Phase 0 tdd-bootstrap stubs — first consumers land in Phases 1–2, which
-// removes the allow.
-#[allow(dead_code)]
 mod cache;
 mod frontmatter;
 mod git;
@@ -10,9 +7,6 @@ mod index;
 mod parser;
 mod perf;
 mod store;
-// Phase 0 tdd-bootstrap stubs — first consumers land in Phases 1–2, which
-// removes the allow.
-#[allow(dead_code)]
 mod rk64;
 mod version;
 mod wikiignore;
@@ -255,8 +249,8 @@ fn main() {
 
     let source: index::DocSource = match cli.source {
         SourceArg::Worktree => index::DocSource::WorkingTree,
-        SourceArg::Index => index::DocSource::Index,
-        SourceArg::Head => index::DocSource::Head,
+        SourceArg::Index => index::DocSource::Git(git::GitSnapshot::Index),
+        SourceArg::Head => index::DocSource::Git(git::GitSnapshot::Head),
     };
 
     let result = run(

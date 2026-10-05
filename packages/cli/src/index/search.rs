@@ -11,6 +11,7 @@ use std::path::Path;
 use rusqlite::{Connection, params, params_from_iter};
 
 use crate::index::generations::source_sql;
+use crate::git::GitSnapshot;
 use crate::index::{DocSource, ResolvedPage, SearchResult, Snippet};
 
 impl DocSource {
@@ -20,8 +21,8 @@ impl DocSource {
     /// `generations::source_sql` alone; no numeric encoding exists.
     pub(crate) fn gen_source(self) -> crate::index::Source {
         match self {
-            DocSource::Head => crate::index::Source::Tree,
-            DocSource::Index => crate::index::Source::Index,
+            DocSource::Git(GitSnapshot::Head) => crate::index::Source::Tree,
+            DocSource::Git(GitSnapshot::Index) => crate::index::Source::Index,
             DocSource::WorkingTree => crate::index::Source::Worktree,
         }
     }

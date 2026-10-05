@@ -75,12 +75,6 @@ pub fn try_acquire_shared(common_dir: &Path) -> io::Result<Option<RendezvousGuar
     try_acquire(common_dir, Mode::Shared)
 }
 
-/// Try once for the exclusive mode without waiting: `Ok(Some(_))` —
-/// acquired; `Ok(None)` — anyone else holds it right now.
-pub fn try_acquire_exclusive(common_dir: &Path) -> io::Result<Option<RendezvousGuard>> {
-    try_acquire(common_dir, Mode::Exclusive)
-}
-
 /// Acquire the shared rendezvous lock, waiting up to ~10 s of 10 ms retries.
 pub fn acquire_shared(common_dir: &Path) -> io::Result<RendezvousGuard> {
     acquire_for(common_dir, Mode::Shared, WAIT_BUDGET)
@@ -144,11 +138,11 @@ mod tests {
     fn exclusive_excludes_and_is_excluded_by_everything() {
         let dir = tempfile::tempdir().expect("tempdir");
 
-        let held = try_acquire_exclusive(dir.path())
+        let held = try_acquire(dir.path(), Mode::Exclusive)
             .expect("try exclusive")
             .expect("free store grants exclusive");
         assert!(
-            try_acquire_exclusive(dir.path()).expect("try again").is_none(),
+            try_acquire(dir.path(), Mode::Exclusive).expect("try again").is_none(),
             "a second exclusive must be refused"
         );
         assert!(
@@ -161,7 +155,7 @@ mod tests {
             .expect("try shared after release")
             .expect("release lets a shared holder in");
         assert!(
-            try_acquire_exclusive(dir.path())
+            try_acquire(dir.path(), Mode::Exclusive)
                 .expect("try exclusive")
                 .is_none(),
             "exclusive must be refused while shared is held"
@@ -174,7 +168,7 @@ mod tests {
     #[test]
     fn bounded_wait_errors_after_the_budget() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let held = try_acquire_exclusive(dir.path())
+        let held = try_acquire(dir.path(), Mode::Exclusive)
             .expect("try exclusive")
             .expect("hold exclusive");
 
@@ -195,7 +189,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         drop(acquire_exclusive(dir.path()).expect("acquire"));
         assert!(
-            try_acquire_exclusive(dir.path())
+            try_acquire(dir.path(), Mode::Exclusive)
                 .expect("try again")
                 .is_some(),
             "the released lock must be acquirable"

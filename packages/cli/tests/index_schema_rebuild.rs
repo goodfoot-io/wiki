@@ -4,7 +4,7 @@
 
 mod common;
 
-use wiki::index::WikiIndex;
+use wiki::index::{DocSource, WikiIndex};
 
 fn seeded_repo() -> common::FixtureRepo {
     let repo = common::FixtureRepo::new();
@@ -24,7 +24,7 @@ fn seeded_repo() -> common::FixtureRepo {
 fn merged_store_corruption_rebuilds_without_creating_wiki_dir() {
     let repo = seeded_repo();
 
-    drop(WikiIndex::prepare(repo.root.as_path()).expect("initial prepare"));
+    drop(WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("initial prepare"));
 
     let db = common::target_db_path(&repo.root);
     assert!(db.exists(), "merged store must exist after prepare");
@@ -36,7 +36,7 @@ fn merged_store_corruption_rebuilds_without_creating_wiki_dir() {
     }
     std::fs::write(&db, b"this is not a sqlite database").expect("corrupt db file");
 
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare must rebuild, not fail");
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare must rebuild, not fail");
     let page = index
         .resolve_page("Seed")
         .expect("resolve_page")

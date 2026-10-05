@@ -8,14 +8,14 @@ mod common;
 
 use std::time::Instant;
 
-use wiki::index::{SEARCH_LIMIT, WikiIndex};
+use wiki::index::{DocSource, SEARCH_LIMIT, WikiIndex};
 
 #[test]
 fn warm_search_p95_under_50ms() {
     let repo = common::make_parity_fixture();
 
     // Prime the index with one search so the DB is warm in the OS page cache.
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare");
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare");
     let _ = index.search_weighted("committed", SEARCH_LIMIT, 0);
 
     // Measure 5 warm calls.

@@ -9,7 +9,7 @@
 
 mod common;
 
-use wiki::index::{SEARCH_LIMIT, WikiIndex};
+use wiki::index::{DocSource, SEARCH_LIMIT, WikiIndex};
 
 #[test]
 fn only_full_wiki_pages_appear_in_results() {
@@ -37,7 +37,7 @@ fn only_full_wiki_pages_appear_in_results() {
     repo.git_add(".");
     repo.git_commit("add membership fixtures");
 
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare");
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare");
 
     // Search for "body" which appears in all four files.
     let (results, _total) = index

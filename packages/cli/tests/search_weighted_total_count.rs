@@ -16,7 +16,7 @@
 
 mod common;
 
-use wiki::index::WikiIndex;
+use wiki::index::{DocSource, WikiIndex};
 
 #[test]
 fn search_weighted_total_is_uncapped() {
@@ -41,7 +41,7 @@ fn search_weighted_total_is_uncapped() {
     repo.git_add(".");
     repo.git_commit("add search_weighted total count fixtures");
 
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare");
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare");
     let (_rows, total) = index
         .search_weighted("gadget", 10, 0)
         .expect("search_weighted");

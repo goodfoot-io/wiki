@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 use crate::index::freshness;
 use crate::index::generations::{
     self, GenPathRow, Generation, GenerationsStore, PublishCandidate, StateFingerprint,
-    EMPTY_TREE_BASE, ZERO_INDEX_CHECKSUM,
+    EMPTY_TREE_BASE, ZERO_INDEX_CHECKSUM, ZERO_WIKIIGNORE_HASH,
 };
 use crate::index::ingest::{WikiBlobFields, parse_blob};
 use crate::index::{BlobOid, HostileFs, Source};
@@ -62,16 +62,14 @@ pub enum DeltaAction {
     Rename { from: PathBuf, oid: BlobOid },
 }
 
-/// Counters returned from the orchestrator.
+/// What the orchestrator published and what to serve.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RefreshOutcome {
-    pub fts_retokenizations: u64,
-    pub pass3_full_rescans: u64,
-    /// Number of directories Pass 3 descended into and stat/hashed
-    /// markdown files for. The dir-mtime Merkle short-circuit is gone
-    /// (plan D6): every directory is walked, and carry-forward happens at
-    /// `(path_rel, stat_mtime_ns)` file granularity.
-    pub pass3_dir_walks: u64,
+    /// Blobs newly parsed and queued for ingest by this refresh — zero for
+    /// a pure rename (content-addressing means a known oid never
+    /// re-parses) and for a conflict-discard (nothing was published).
+    #[cfg(test)]
+    pub new_blobs: usize,
     /// True when publish reported [`PublishOutcome::ConflictDiscarded`] —
     /// an identical generation already existed, so the winner (byte-for-
     /// byte the same canonical state) is served instead.
@@ -119,7 +117,7 @@ fn read_blob_bytes(
 /// Tree reconciliation.
 pub(crate) fn compute_wikiignore_hash(repo_root: &Path) -> [u8; 20] {
     let path = repo_root.join(crate::index::WIKIIGNORE_RELPATH);
-    let mut out = [0u8; 20];
+    let mut out = ZERO_WIKIIGNORE_HASH;
     if let Ok(bytes) = std::fs::read(&path) {
         let digest = gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, &bytes)
             .expect("SHA-1 hashing is infallible")
@@ -208,7 +206,6 @@ pub fn refresh(
         queued_new: HashSet::new(),
         known_oids,
         non_wiki_oids: HashSet::new(),
-        fts_retokenizations: 0,
     };
 
     // Pass 1: Tree (committed snapshot).
@@ -279,8 +276,6 @@ pub fn refresh(
         })?;
 
     // Pass 3: Worktree.
-    let mut pass3_full_rescans: u64 = 0;
-    let mut pass3_dir_walks: u64 = 0;
     let worktree_deltas =
         crate::perf::scope_result("index.pass_worktree", serde_json::json!({}), || {
             worktree::pass_worktree(
@@ -288,8 +283,6 @@ pub fn refresh(
                 repo_root,
                 &base_worktree_rows,
                 hostile_fs,
-                &mut pass3_full_rescans,
-                &mut pass3_dir_walks,
                 &wiki_ignore,
             )
         })?;
@@ -361,7 +354,8 @@ pub fn refresh(
         paths,
         new_blobs: std::mem::take(&mut candidate_builder.new_blobs),
     };
-    let fts_retokenizations = candidate_builder.fts_retokenizations;
+    #[cfg(test)]
+    let new_blobs = candidate.new_blobs.len();
 
     // Compute-outside-write-txn invariant: the candidate above is inert
     // data; publish owns the only transaction of the refresh. The error is
@@ -378,16 +372,14 @@ pub fn refresh(
 
     Ok(match outcome {
         generations::PublishOutcome::Published { generation } => RefreshOutcome {
-            fts_retokenizations,
-            pass3_full_rescans,
-            pass3_dir_walks,
+            #[cfg(test)]
+            new_blobs,
             conflict_discarded: false,
             served_gen_id: generation.gen_id,
         },
         generations::PublishOutcome::ConflictDiscarded { existing } => RefreshOutcome {
-            fts_retokenizations: 0,
-            pass3_full_rescans,
-            pass3_dir_walks,
+            #[cfg(test)]
+            new_blobs: 0,
             conflict_discarded: true,
             served_gen_id: existing.gen_id,
         },
@@ -417,7 +409,6 @@ struct CandidateBuilder<'a> {
     known_oids: HashSet<String>,
     /// Oids whose bytes failed `parse_blob` during this refresh.
     non_wiki_oids: HashSet<String>,
-    fts_retokenizations: u64,
 }
 
 impl<'a> CandidateBuilder<'a> {
@@ -452,7 +443,6 @@ impl<'a> CandidateBuilder<'a> {
                     // Later deltas for the same oid must not re-parse or
                     // re-queue: content is immutable per oid.
                     self.known_oids.insert(oid.0.clone());
-                    self.fts_retokenizations += 1;
                 }
                 None => {
                     self.non_wiki_oids.insert(oid.0.clone());
@@ -538,7 +528,6 @@ mod tests {
             queued_new: HashSet::new(),
             known_oids: HashSet::new(),
             non_wiki_oids: HashSet::new(),
-            fts_retokenizations: 0,
         };
 
         builder
@@ -570,7 +559,6 @@ mod tests {
             queued_new: HashSet::new(),
             known_oids: HashSet::new(),
             non_wiki_oids: HashSet::new(),
-            fts_retokenizations: 0,
         };
 
         let ghost = BlobOid("f".repeat(40));
@@ -595,5 +583,53 @@ mod tests {
         assert_eq!(row.oid, real);
         assert!(!builder.members.contains_key(&(Source::Tree, "source.md".to_string())));
         assert_eq!(builder.members.len(), 1, "displaced ghost row fully dropped");
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .status()
+            .expect("spawn git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// Run one full refresh of `root` against `store`, reopening the repo
+    /// so it observes the latest git state.
+    fn refresh_once(root: &Path, store: &GenerationsStore) -> RefreshOutcome {
+        let repo = gix::open(root).expect("gix open");
+        refresh(&repo, root, &root.join(".git"), store, HostileFs::No).expect("refresh")
+    }
+
+    /// A committed `git mv` is content-addressed away: the renamed page's
+    /// oid is already known, so the refresh publishes a new generation
+    /// without parsing or queueing any blob for ingest.
+    #[test]
+    fn committed_rename_ingests_no_new_blobs() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "user.name", "Test"]);
+        std::fs::write(
+            root.join("foo.md"),
+            "---\ntitle: Foo Page\nsummary: The foo summary.\n---\n\nFoo body.\n",
+        )
+        .expect("write foo.md");
+        git(root, &["add", "foo.md"]);
+        git(root, &["commit", "-q", "-m", "add foo.md"]);
+
+        let store = GenerationsStore::open_ephemeral().expect("ephemeral store");
+        let first = refresh_once(root, &store);
+        assert!(!first.conflict_discarded);
+        assert_eq!(first.new_blobs, 1, "the cold refresh ingests foo.md's blob");
+
+        git(root, &["mv", "foo.md", "bar.md"]);
+        git(root, &["commit", "-q", "-m", "rename foo.md -> bar.md"]);
+
+        let second = refresh_once(root, &store);
+        assert!(!second.conflict_discarded, "the rename changes state, so it publishes");
+        assert_ne!(second.served_gen_id, first.served_gen_id);
+        assert_eq!(second.new_blobs, 0, "a rename must not re-parse or re-ingest the blob");
     }
 }

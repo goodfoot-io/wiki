@@ -16,7 +16,7 @@
 
 mod common;
 
-use wiki::index::WikiIndex;
+use wiki::index::{DocSource, WikiIndex};
 
 /// Expected ordering for a "quantum" query.  Tags and keywords share BM25
 /// weight 3, so positions 2-3 are a tied bucket whose internal order is
@@ -69,7 +69,7 @@ fn ranking_matches_bm25_weight_tuple() {
     repo.git_commit("add ranking fixtures");
 
     // Raise SEARCH_LIMIT for this test so all 6 results come back.
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare");
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare");
     let (results, _total) = index
         .search_weighted("quantum", 10, 0)
         .expect("search_weighted");

@@ -159,7 +159,7 @@ mod tests {
             "---\ntitle: My Page\naliases:\n  - alt\nsummary: This is the summary.\n---\nBody text.\n",
         );
 
-        let index = WikiIndex::prepare(repo.path()).expect("prepare");
+        let index = WikiIndex::prepare_for_source(repo.path(), crate::index::DocSource::WorkingTree).expect("prepare");
         let output = summary_output(index.resolve_page("alt").expect("resolve").expect("page"));
         assert_eq!(output.title, "My Page");
         assert_eq!(output.alias.as_deref(), Some("alt"));

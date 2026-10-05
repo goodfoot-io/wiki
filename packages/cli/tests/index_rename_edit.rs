@@ -19,7 +19,7 @@
 
 mod common;
 
-use wiki::index::WikiIndex;
+use wiki::index::{DocSource, WikiIndex};
 use wiki::index::blob::compute_blob_oid;
 
 /// Ten-line body so that changing a single line keeps the edited file well
@@ -56,7 +56,7 @@ fn committed_rename_with_edit_rebalances_blob_refcounts() {
     repo.write_file("a.md", &old_bytes);
     repo.git_add("a.md");
     repo.git_commit("add a.md");
-    drop(WikiIndex::prepare(repo.root.as_path()).expect("prepare initial"));
+    drop(WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare initial"));
 
     // One commit that both renames a.md -> b.md AND edits one body line,
     // so the tree diff sees a Rewrite with a NEW blob OID.
@@ -65,20 +65,16 @@ fn committed_rename_with_edit_rebalances_blob_refcounts() {
     repo.git_add("b.md");
     repo.git_commit("rename a.md to b.md with an edit");
 
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare after rename+edit");
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare after rename+edit");
 
     // The served generation has no a.md rows left and three b.md rows
     // (Tree from the rewrite decomposition plus Index and Worktree adds).
-    let (old_blobs, old_served_paths) = index
-        .debug_blob_path_counts(&old_oid.0)
-        .expect("debug_blob_path_counts old oid");
+    let (old_blobs, old_served_paths) = common::served_blob_path_counts(repo.root.as_path(), &old_oid.0);
     assert_eq!(
         old_served_paths, 0,
         "a.md must be gone from the served generation's corpus"
     );
-    let (new_blobs, new_paths) = index
-        .debug_blob_path_counts(&new_oid.0)
-        .expect("debug_blob_path_counts new oid");
+    let (new_blobs, new_paths) = common::served_blob_path_counts(repo.root.as_path(), &new_oid.0);
     assert_eq!(new_blobs, 1, "exactly one blobs row for the edited content");
     assert_eq!(new_paths, 3, "Tree + Index + Worktree gen_paths rows for b.md");
 

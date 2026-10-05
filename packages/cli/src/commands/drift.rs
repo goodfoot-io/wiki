@@ -28,6 +28,7 @@ use std::time::Instant;
 use thiserror::Error;
 
 use crate::frontmatter::{self, scalar_to_string};
+use crate::git::GitSnapshot;
 use crate::index::DocSource;
 use crate::rk64::{
     Extent, LineIndex, ScanIndex, cheap_fingerprint_with_extent, scan_indexed_rk64,
@@ -1541,7 +1542,7 @@ fn classify_link(
         let cert_fp = certified_content_fp(reader, repo_root, cache, page_path, anchor_sha, cert, &mut memo)?;
         let cur_fp = cheap_fingerprint_with_extent(
             bytes,
-            &Extent::LineRange {
+            &Extent {
                 start: link.start,
                 end: link.end,
             },
@@ -1574,7 +1575,7 @@ fn classify_link(
     // edit the reviewer must ratify.
     let cur_fp = cheap_fingerprint_with_extent(
         bytes,
-        &Extent::LineRange {
+        &Extent {
             start: link.start,
             end: link.end,
         },
@@ -1697,7 +1698,7 @@ fn certified_content_fp(
         Some(bytes) => {
             let fp = cheap_fingerprint_with_extent(
                 &bytes,
-                &Extent::LineRange {
+                &Extent {
                     start: cert.start,
                     end: cert.end,
                 },
@@ -1725,7 +1726,7 @@ fn certified_content_fp(
 fn current_content_fp(bytes: Option<&[u8]>, start: u32, end: u32) -> u64 {
     match bytes {
         None => 0,
-        Some(bytes) => cheap_fingerprint_with_extent(bytes, &Extent::LineRange { start, end }),
+        Some(bytes) => cheap_fingerprint_with_extent(bytes, &Extent { start, end }),
     }
 }
 
@@ -1801,7 +1802,7 @@ fn compute_move_scan(
     }
     let cert_fp =
         certified_content_fp(reader, repo_root, cache, page_path, anchor_sha, cert, memo)?;
-    let extent = Extent::LineRange {
+    let extent = Extent {
         start: 1,
         end: span as u32,
     };
@@ -2877,7 +2878,7 @@ fn candidate_files(
     // so they stay serial.
     let read: Vec<Option<Vec<u8>>> = match source {
         DocSource::WorkingTree => parallel_map(&paths, |path| read_worktree(repo_root, path)),
-        DocSource::Head | DocSource::Index => {
+        DocSource::Git(_) => {
             let mut read = Vec::with_capacity(paths.len());
             for path in &paths {
                 read.push(read_current(reader, repo_root, source, path)?);
@@ -2920,8 +2921,8 @@ fn read_current(
 ) -> Result<Option<Vec<u8>>, EpochError> {
     match source {
         DocSource::WorkingTree => Ok(read_worktree(repo_root, path)),
-        DocSource::Head => read_blob_at(reader, repo_root, "HEAD", path),
-        DocSource::Index => read_blob_at(reader, repo_root, "", path),
+        DocSource::Git(GitSnapshot::Head) => read_blob_at(reader, repo_root, "HEAD", path),
+        DocSource::Git(GitSnapshot::Index) => read_blob_at(reader, repo_root, "", path),
     }
 }
 
@@ -3793,7 +3794,7 @@ pub fn collect_with_source(
             repo.path(),
             &reader(repo.path()),
             &NoopCache,
-            DocSource::Head,
+            DocSource::Git(GitSnapshot::Head),
             "wiki/page.md",
             &page_content,
             &epoch,

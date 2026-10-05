@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::check::{ContentCache, anchor_cache_for_run};
 use super::drift;
 use crate::frontmatter::parse_frontmatter;
-use crate::git::GitReader;
+use crate::git::{GitReader, GitSnapshot};
 use crate::headings::{extract_headings, github_slug, resolve_heading, Heading};
 use crate::index::DocSource;
 use crate::parser::{LinkKind, parse_fragment_links};
@@ -23,7 +23,6 @@ use crate::parser::{LinkKind, parse_fragment_links};
 /// What kind of rewrite the fix performs.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(dead_code)]
 pub enum FixKind {
     /// Fix 1: rewrite a broken link whose target was renamed.
     BrokenLinkRename,
@@ -38,7 +37,6 @@ pub enum FixKind {
 /// How confident the fixer is that the proposed rewrite is correct.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(dead_code)]
 pub enum Confidence {
     /// One unambiguous rename; safe to apply automatically.
     High,
@@ -606,7 +604,7 @@ fn find_baseline_with_slug(
     anchor_slug: &str,
 ) -> Result<Option<String>> {
     // Layer: HEAD
-    if let Some(content) = reader.read_blob(DocSource::Head, rel_path)? {
+    if let Some(content) = reader.read_blob(GitSnapshot::Head, rel_path)? {
         let headings = extract_headings(&content);
         if resolve_heading(anchor_slug, &headings) {
             return Ok(Some(content));
@@ -1455,7 +1453,7 @@ fn run_drift_fix_phase(
         let page_path = file_rel.replace('\\', "/");
 
         let current_value = drift::read_links_reviewed(&content);
-        let committed_value = match reader.read_blob(DocSource::Head, &page_path) {
+        let committed_value = match reader.read_blob(GitSnapshot::Head, &page_path) {
             Ok(Some(head_content)) => drift::read_links_reviewed(&head_content),
             _ => drift::LinksReviewedRead::Readable(None),
         };

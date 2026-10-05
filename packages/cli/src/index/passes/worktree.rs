@@ -7,7 +7,7 @@
 //! re-ingested from this walk. There is no dir-mtime Merkle short-circuit
 //! and no `dir_mtimes` table anymore. On a hostile filesystem
 //! (`HostileFs::Yes`) the mtime evidence is never consulted — every file
-//! re-ingests and the orchestrator bumps `pass3_full_rescans`.
+//! is re-read and re-hashed.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -28,14 +28,9 @@ pub fn pass_worktree(
     repo_root: &Path,
     base_rows: &[GenPathRow],
     hostile_fs: HostileFs,
-    pass3_full_rescans: &mut u64,
-    pass3_dir_walks: &mut u64,
     wiki_ignore: &WikiIgnore,
 ) -> Result<Vec<PassDelta>> {
     let is_hostile = matches!(hostile_fs, HostileFs::Yes);
-    if is_hostile {
-        *pass3_full_rescans += 1;
-    }
 
     // Base-generation Worktree state: per-file oid and walk mtime. The
     // `(path_rel, stat_mtime_ns)` pair IS the carry-forward key.
@@ -98,9 +93,8 @@ pub fn pass_worktree(
         };
 
         if entry.file_type().is_dir() {
-            // Every descended directory counts — there is no clean-dir
+            // Every directory is descended — there is no clean-dir
             // short-circuit anymore; carry-forward happens per file below.
-            *pass3_dir_walks += 1;
             continue;
         }
 
@@ -177,4 +171,81 @@ fn is_markdown(p: &std::path::Path) -> bool {
         .and_then(|s| s.to_str())
         .map(|s| s.eq_ignore_ascii_case("md"))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    const PAGE: &str = "page.md";
+    const STALE_OID: &str = "0000000000000000000000000000000000000001";
+
+    /// A fresh repo holding one markdown page, plus a base Worktree row for
+    /// it whose mtime matches the file on disk but whose oid is stale — the
+    /// state a hostile filesystem's untrustworthy mtimes can leave behind.
+    /// Returns the page's real oid alongside.
+    fn stale_mtime_matched_fixture() -> (tempfile::TempDir, Vec<GenPathRow>, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let status = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .expect("spawn git init");
+        assert!(status.success(), "git init failed");
+
+        let bytes = b"# Page\n\nBody.\n";
+        let page = dir.path().join(PAGE);
+        std::fs::write(&page, bytes).expect("write page");
+        let real_oid = compute_blob_oid(bytes).0;
+        assert_ne!(real_oid, STALE_OID);
+
+        let base_rows = vec![GenPathRow {
+            source: Source::Worktree,
+            path_rel: PAGE.to_string(),
+            oid: BlobOid(STALE_OID.to_string()),
+            parent_dir: String::new(),
+            stat_mtime_ns: Some(mtime_ns(&page).expect("stat page")),
+        }];
+        (dir, base_rows, real_oid)
+    }
+
+    fn run(
+        dir: &tempfile::TempDir,
+        base_rows: &[GenPathRow],
+        hostile_fs: HostileFs,
+    ) -> Vec<PassDelta> {
+        let repo = gix::open(dir.path()).expect("gix::open");
+        let wiki_ignore = WikiIgnore::load(dir.path()).expect("load .wikiignore");
+        pass_worktree(&repo, dir.path(), base_rows, hostile_fs, &wiki_ignore)
+            .expect("pass_worktree")
+    }
+
+    #[test]
+    fn trusted_fs_carries_an_mtime_matched_row_forward_unread() {
+        let (dir, base_rows, _) = stale_mtime_matched_fixture();
+        let deltas = run(&dir, &base_rows, HostileFs::No);
+        assert!(
+            deltas.is_empty(),
+            "an mtime-matched row must be carried forward (stale oid kept) \
+             without a delta, got {deltas:?}"
+        );
+    }
+
+    #[test]
+    fn hostile_fs_rehashes_an_mtime_matched_row() {
+        let (dir, base_rows, real_oid) = stale_mtime_matched_fixture();
+        let deltas = run(&dir, &base_rows, HostileFs::Yes);
+        assert_eq!(deltas.len(), 1, "expected exactly one re-ingest delta, got {deltas:?}");
+        let delta = &deltas[0];
+        assert_eq!(delta.path, PathBuf::from(PAGE));
+        assert_eq!(delta.source, Source::Worktree);
+        match &delta.action {
+            DeltaAction::Add { oid, .. } => assert_eq!(
+                oid.0, real_oid,
+                "HostileFs::Yes must ignore mtime evidence and rehash the file"
+            ),
+            other => panic!("expected an Add delta, got {other:?}"),
+        }
+    }
 }

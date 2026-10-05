@@ -14,6 +14,8 @@ use serde::Serialize;
 
 use generations::GenerationsStore;
 
+use crate::git::GitSnapshot;
+
 /// The promoted wikiignore location: a repo-root-relative tracked input,
 /// anchored identically to the pre-promotion location (plan D14). The one
 /// literal for every index-side consumer (freshness fold, refresh hash).
@@ -132,66 +134,20 @@ fn warn_served_lost_once() {
     }
 }
 
-/// Stat-only check that the working tree is unchanged since the last verified
-/// index state. Resolves `.git`, opens the index DB read-only, and runs
-/// Read-only digest gate for callers that only need the freshness verdict:
-/// compute the canonical fingerprint and look it up in the merged store.
-///
-/// Returns `true` only when an unverified-row-safe lookup confirms the
-/// exact state as a retained generation. Any error, missing `.git`, missing
-/// store file, or stale state returns `false` (fail-open toward doing the
-/// work — callers must re-hash when this is `false`). A missing store never
-/// gets created here.
-///
-/// Retained as a public stat helper and exercised by the worktree-freshness
-/// integration tests.
-#[allow(dead_code)]
-pub fn tree_unchanged(repo_root: &Path) -> bool {
-    let Some(dot_git) = find_dot_git(repo_root) else {
-        return false;
-    };
-    let Some(common_dir) = resolve_common_dir(repo_root) else {
-        return false;
-    };
-    if !crate::cache::schema::db_path(&common_dir).exists() {
-        return false;
-    }
-    let wikiignore_hash =
-        passes::compute_wikiignore_hash(repo_root);
-    let fingerprint = match freshness::current_fingerprint(
-        repo_root,
-        &dot_git,
-        None,
-        &wikiignore_hash,
-    ) {
-        Ok(Some(fp)) => fp,
-        _ => return false,
-    };
-    match GenerationsStore::open(&common_dir) {
-        Ok(store) => matches!(store.lookup_digest(&fingerprint), Ok(Some(_))),
-        Err(_) => false,
-    }
-}
-
 /// Hard cap on the number of results `wiki "<query>"` will print.
 pub const SEARCH_LIMIT: i64 = 3;
 
-#[allow(dead_code)]
+/// Hard cap on the number of suggestions offered for a missed lookup.
 const SUGGESTION_LIMIT: i64 = 3;
 
-/// Selects which git snapshot `WikiIndex` reads from.
-///
-/// The variants are preserved verbatim from the pre-rewrite surface so
-/// `commands/{search,summary,check,check_fix,list,mod}.rs` keep compiling
-/// unchanged.
+/// Selects which document snapshot `WikiIndex` and the commands read from:
+/// the working tree, or a git snapshot (index or `HEAD`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocSource {
     /// Read from the working tree (default, existing behaviour).
     WorkingTree,
-    /// Read from the git index (staging area).
-    Index,
-    /// Read from the HEAD commit.
-    Head,
+    /// Read from a git snapshot: the index (staging area) or `HEAD`.
+    Git(GitSnapshot),
 }
 
 impl DocSource {
@@ -202,8 +158,8 @@ impl DocSource {
             // scoped one — pass `repo_root` as both `repo` and `walk_root`
             // with no prefix so behaviour matches the pre-scoping walk.
             DocSource::WorkingTree => crate::git::repo_inventory(repo_root, repo_root, None),
-            DocSource::Index => crate::git::index_tracked_paths(repo_root),
-            DocSource::Head => crate::git::head_tracked_paths(repo_root),
+            DocSource::Git(GitSnapshot::Index) => crate::git::index_tracked_paths(repo_root),
+            DocSource::Git(GitSnapshot::Head) => crate::git::head_tracked_paths(repo_root),
         }
     }
 
@@ -222,8 +178,8 @@ impl DocSource {
                     }
                 }
             }
-            DocSource::Index => crate::git::read_index_blob(repo_root, path_rel),
-            DocSource::Head => crate::git::read_head_blob(repo_root, path_rel),
+            DocSource::Git(GitSnapshot::Index) => crate::git::read_index_blob(repo_root, path_rel),
+            DocSource::Git(GitSnapshot::Head) => crate::git::read_head_blob(repo_root, path_rel),
         }
     }
 }
@@ -291,7 +247,7 @@ pub struct BlobOid(pub String);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostileFs {
     No,
-    #[allow(dead_code)]
+
     Yes,
 }
 
@@ -305,32 +261,16 @@ pub struct WikiIndex {
     dot_git: PathBuf,
     common_dir: PathBuf,
     source: DocSource,
-    #[allow(dead_code)]
+
     repo: Option<gix::Repository>,
     store: GenerationsStore,
     served_gen: Option<i64>,
-    last_stats: IndexStats,
 }
 
 impl WikiIndex {
-    /// Convenience constructor used by tests that default to the working
-    /// tree.
-    #[allow(dead_code)]
-    pub fn prepare(repo_root: &Path) -> Result<Self> {
-        Self::prepare_for_source(repo_root, DocSource::WorkingTree)
-    }
-
     /// Open the index database for `source`, run the freshness fast
     /// triple, optionally refresh, and return a read-only handle.
     pub fn prepare_for_source(repo_root: &Path, source: DocSource) -> Result<Self> {
-        Self::prepare_with_fs_class_inner(repo_root, source, None)
-    }
-
-    fn prepare_with_fs_class_inner(
-        repo_root: &Path,
-        source: DocSource,
-        forced_fs_class: Option<HostileFs>,
-    ) -> Result<Self> {
         // Locate the .git directory by walking up from repo_root.
         let dot_git = find_dot_git(repo_root).ok_or_else(|| {
             miette::miette!(
@@ -351,7 +291,7 @@ impl WikiIndex {
             warn_store_degraded_once("busy mid-init in another process");
         }
 
-        let fs_class = forced_fs_class.unwrap_or_else(|| fs_class::detect(&dot_git));
+        let fs_class = fs_class::detect(&dot_git);
 
         let mut index = WikiIndex {
             repo_root: repo_root.to_path_buf(),
@@ -361,40 +301,36 @@ impl WikiIndex {
             repo: None,
             store,
             served_gen: None,
-            last_stats: IndexStats::default(),
         };
 
         // Digest gate: hash the canonical freshness inputs and look the
-        // generation up. A forced HostileFs::Yes skips the gate so the test
-        // can observe a Pass 3 full rescan. Any error degrades to a miss —
-        // fail-open toward rehash, exactly like the old triple gate.
-        if forced_fs_class != Some(HostileFs::Yes) {
-            let gate = crate::perf::scope_result(
-                "index.fast_gate",
-                serde_json::json!({}),
-                || -> Result<Option<i64>> {
-                    let wikiignore_hash = passes::compute_wikiignore_hash(repo_root);
-                    let fingerprint = match freshness::current_fingerprint(
-                        repo_root,
-                        &dot_git,
-                        None,
-                        &wikiignore_hash,
-                    ) {
-                        Ok(Some(fp)) => fp,
-                        _ => return Ok(None),
-                    };
-                    Ok(index
-                        .store
-                        .lookup_digest(&fingerprint)
-                        .ok()
-                        .flatten()
-                        .map(|generation| generation.gen_id))
-                },
-            );
-            if let Ok(Some(gen_id)) = gate {
-                index.served_gen = Some(gen_id);
-                return Ok(index);
-            }
+        // generation up. Any error degrades to a miss — fail-open toward
+        // rehash, exactly like the old triple gate.
+        let gate = crate::perf::scope_result(
+            "index.fast_gate",
+            serde_json::json!({}),
+            || -> Result<Option<i64>> {
+                let wikiignore_hash = passes::compute_wikiignore_hash(repo_root);
+                let fingerprint = match freshness::current_fingerprint(
+                    repo_root,
+                    &dot_git,
+                    None,
+                    &wikiignore_hash,
+                ) {
+                    Ok(Some(fp)) => fp,
+                    _ => return Ok(None),
+                };
+                Ok(index
+                    .store
+                    .lookup_digest(&fingerprint)
+                    .ok()
+                    .flatten()
+                    .map(|generation| generation.gen_id))
+            },
+        );
+        if let Ok(Some(gen_id)) = gate {
+            index.served_gen = Some(gen_id);
+            return Ok(index);
         }
 
         // Gate miss ⇒ exclusive rendezvous (plan D7 mode table: refresh
@@ -483,15 +419,8 @@ impl WikiIndex {
         };
         index.served_gen = Some(outcome.served_gen_id);
         // A conflict-discard means the identical generation already existed:
-        // the refresh did no ingest work, so the counters stay at zero
-        // (the old CAS-lost contract, expressed through publish).
+        // the refresh published nothing, so there is nothing to maintain.
         if !outcome.conflict_discarded {
-            index.last_stats = IndexStats {
-                pass3_full_rescans: outcome.pass3_full_rescans,
-                fts_retokenizations: outcome.fts_retokenizations,
-                pass3_dir_walks: outcome.pass3_dir_walks,
-            };
-
             // Maintenance pass in the same exclusive window (plan D10):
             // recency-liveness eviction, ordered teardown, WAL truncation.
             // Best-effort — a GC failure never fails a successful refresh.
@@ -543,13 +472,6 @@ impl WikiIndex {
         })
         .map_err(|e| miette::miette!("uncached refresh failed: {e}"))?;
         index.served_gen = Some(outcome.served_gen_id);
-        if !outcome.conflict_discarded {
-            index.last_stats = IndexStats {
-                pass3_full_rescans: outcome.pass3_full_rescans,
-                fts_retokenizations: outcome.fts_retokenizations,
-                pass3_dir_walks: outcome.pass3_dir_walks,
-            };
-        }
         index.repo = Some(repo);
         Ok(index)
     }
@@ -845,85 +767,6 @@ impl WikiIndex {
             }
         }
     }
-
-    /// Open the index for `source`, injecting a filesystem classification
-    /// so tests can force `HostileFs::Yes` without needing a real overlayfs.
-    ///
-    /// Phase 3 wires this into `fs_class.rs` detection; until then, bodies
-    /// stay `unimplemented!()`.
-    #[allow(dead_code)]
-    pub fn prepare_with_fs_class(
-        repo_root: &Path,
-        source: DocSource,
-        fs_class: HostileFs,
-    ) -> Result<Self> {
-        Self::prepare_with_fs_class_inner(repo_root, source, Some(fs_class))
-    }
-
-    /// Dump the served generation's path rows joined to their blob titles,
-    /// sorted by `path_rel`. Test-only diagnostic used by
-    /// `tests/index_parity.rs`.
-    #[allow(dead_code)]
-    pub fn debug_dump_paths(&self) -> Result<Vec<(String, Source, String)>> {
-        let Some(gen_id) = self.served() else {
-            return Ok(Vec::new());
-        };
-        let conn = self.store.conn();
-        let mut stmt = conn
-            .prepare(
-                "SELECT p.path_rel, p.source, b.title
-                 FROM gen_paths p JOIN blobs b ON b.oid = p.oid
-                 WHERE p.gen_id = ?1
-                 ORDER BY p.path_rel ASC",
-            )
-            .map_err(|e| miette::miette!("debug_dump_paths prepare: {e}"))?;
-        let rows = stmt
-            .query_map([gen_id], |row| {
-                let path: String = row.get(0)?;
-                let source_lit: String = row.get(1)?;
-                let title: String = row.get(2)?;
-                let source = generations::source_from_sql(&source_lit)
-                    .unwrap_or(Source::Worktree);
-                Ok((path, source, title))
-            })
-            .map_err(|e| miette::miette!("debug_dump_paths query: {e}"))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|e| miette::miette!("debug_dump_paths collect: {e}"))
-    }
-
-    /// Count global `blobs` rows and the served generation's `gen_paths`
-    /// rows for a given OID. Test-only diagnostic used by
-    /// `tests/index_promotion.rs` and `tests/index_rename_clobber.rs`.
-    #[allow(dead_code)]
-    pub fn debug_blob_path_counts(&self, oid: &str) -> Result<(usize, usize)> {
-        let conn = self.store.conn();
-        let blob_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM blobs WHERE oid = ?1", [oid], |r| {
-                r.get(0)
-            })
-            .map_err(|e| miette::miette!("blob_count: {e}"))?;
-        let path_count = match self.served() {
-            Some(gen_id) => conn
-                .query_row(
-                    "SELECT COUNT(*) FROM gen_paths WHERE oid = ?1 AND gen_id = ?2",
-                    rusqlite::params![oid, gen_id],
-                    |r| r.get(0),
-                )
-                .map_err(|e| miette::miette!("path_count: {e}"))?,
-            None => 0,
-        };
-        Ok((blob_count as usize, path_count as usize))
-    }
-
-    /// Return diagnostic counters accumulated during the last refresh.
-    ///
-    /// Exposed for `index_hostile_fs` (asserts `pass3_full_rescans > 0`) and
-    /// `index_rename` (asserts `fts_retokenizations == 0`).  Phase 3 fills in
-    /// real bookkeeping; until then the body is `unimplemented!()`.
-    #[allow(dead_code)]
-    pub fn stats(&self) -> IndexStats {
-        self.last_stats
-    }
 }
 
 /// Raw `list_pages` projection before tag/offset/limit post-processing.
@@ -937,20 +780,6 @@ pub struct PageRow {
     pub summary: String,
     pub aliases: Vec<String>,
     pub tags: Vec<String>,
-}
-
-/// Diagnostic counters from the most recent refresh pass.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct IndexStats {
-    /// Number of times Pass 3 performed a full rescan (hostile filesystems
-    /// disable mtime-based carry-forward entirely).
-    pub pass3_full_rescans: u64,
-    /// Blobs newly tokenized during the most recent refresh — zero for a
-    /// pure rename (content-addressing means an existing oid never re-parses).
-    pub fts_retokenizations: u64,
-    /// Number of directories Pass 3 descended into and walked. There is no
-    /// clean-dir skip anymore; carry-forward is per file.
-    pub pass3_dir_walks: u64,
 }
 
 #[cfg(test)]
@@ -997,7 +826,7 @@ mod list_pages_tests {
         create_file(root, "plain.md", "no frontmatter here\n");
         commit_repo(root);
 
-        let index = WikiIndex::prepare_for_source(root, DocSource::Head).unwrap();
+        let index = WikiIndex::prepare_for_source(root, DocSource::Git(GitSnapshot::Head)).unwrap();
         let rows = index.list_pages(None, 0, None).unwrap();
         let titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
         assert_eq!(titles, vec!["Good"]);
@@ -1012,7 +841,7 @@ mod list_pages_tests {
         // Add an uncommitted page; HEAD must not see it.
         create_file(root, "fresh.md", &page("Fresh", "s", ""));
 
-        let head = WikiIndex::prepare_for_source(root, DocSource::Head).unwrap();
+        let head = WikiIndex::prepare_for_source(root, DocSource::Git(GitSnapshot::Head)).unwrap();
         let head_titles: Vec<String> = head
             .list_pages(None, 0, None)
             .unwrap()
@@ -1040,7 +869,7 @@ mod list_pages_tests {
         create_file(root, "cap.md", &page("CapPage", "s", "Foo"));
         commit_repo(root);
 
-        let index = WikiIndex::prepare_for_source(root, DocSource::Head).unwrap();
+        let index = WikiIndex::prepare_for_source(root, DocSource::Git(GitSnapshot::Head)).unwrap();
 
         // Prefix "fo" must NOT match exact token "foo".
         let none = index.list_pages(Some("fo"), 0, None).unwrap();
@@ -1177,7 +1006,7 @@ mod list_pages_tests {
         create_file(root, "c.md", &page("Cherry", "s", ""));
         commit_repo(root);
 
-        let index = WikiIndex::prepare_for_source(root, DocSource::Head).unwrap();
+        let index = WikiIndex::prepare_for_source(root, DocSource::Git(GitSnapshot::Head)).unwrap();
 
         let first_two: Vec<String> = index
             .list_pages(None, 0, Some(2))

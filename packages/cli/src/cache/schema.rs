@@ -102,16 +102,6 @@ pub fn db_path(common_dir: &Path) -> PathBuf {
     store_dir(common_dir).join(DB_FILE_NAME)
 }
 
-/// The init lock file path.
-pub fn init_lock_path(common_dir: &Path) -> PathBuf {
-    store_dir(common_dir).join(INIT_LOCK_FILE_NAME)
-}
-
-/// The rendezvous lock file path.
-pub fn rendezvous_lock_path(common_dir: &Path) -> PathBuf {
-    store_dir(common_dir).join(RENDEZVOUS_LOCK_FILE_NAME)
-}
-
 /// Which tier of the consolidated store a table, epoch, or invalidation
 /// belongs to (plan D2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

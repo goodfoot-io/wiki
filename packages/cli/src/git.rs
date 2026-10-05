@@ -1,13 +1,9 @@
-//! Pre-existing legacy helpers left over from the deleted Turso-era `index.rs`.
-//! They remain part of the lib surface (used by integration tests) but are
-//! unused inside the bin crate. Suppress bin-crate dead_code without
-//! affecting the lib build.
-#![allow(dead_code)]
+//! In-process git access (via gix): repository discovery, working-tree
+//! inventory, index/HEAD path listings and blob reads, and the
+//! [`GitReader`] handle that reuses one open repository across a run.
 
 use std::collections::HashSet;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -15,14 +11,15 @@ use gix::bstr::{BStr, ByteSlice};
 use miette::{IntoDiagnostic, Result, WrapErr, miette};
 use serde_json::json;
 
-use crate::index::DocSource;
-
-/// Git-side accelerator configuration that can improve status and inventory
-/// queries without changing correctness semantics.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct GitAccelerationState {
-    pub untracked_cache: Option<bool>,
-    pub split_index: Option<bool>,
+/// A git-backed document snapshot: the staging area or the `HEAD` commit.
+/// The working tree is not a git snapshot, so [`GitReader`] cannot be asked
+/// to read from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitSnapshot {
+    /// The git index (staging area).
+    Index,
+    /// The `HEAD` commit's tree.
+    Head,
 }
 
 fn open_repo(repo: &Path) -> Result<gix::Repository> {
@@ -137,45 +134,6 @@ pub fn resolve_ref(repo: &Path, ref_name: &str) -> Result<String> {
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to resolve ref '{ref_name}'"))?;
     Ok(spec.detach().to_string())
-}
-
-/// Return the full SHA for `HEAD`.
-pub fn head_sha(repo: &Path) -> Result<String> {
-    let repo = open_repo(repo)?;
-    let mut head = repo
-        .head()
-        .into_diagnostic()
-        .wrap_err("failed to read HEAD")?;
-    let id = head
-        .try_peel_to_id()
-        .into_diagnostic()
-        .wrap_err("failed to peel HEAD to an object id")?
-        .ok_or_else(|| miette!("HEAD is unborn"))?;
-    Ok(id.to_string())
-}
-
-/// Return true when the index contains any tracked files at all.
-pub fn has_tracked_files(repo: &Path) -> Result<bool> {
-    let repo = open_repo(repo)?;
-    let index = repo
-        .index_or_load_from_head_or_empty()
-        .into_diagnostic()
-        .wrap_err("failed to load git index")?;
-    Ok(match &index {
-        gix::worktree::IndexPersistedOrInMemory::Persisted(index) => !index.entries().is_empty(),
-        gix::worktree::IndexPersistedOrInMemory::InMemory(index) => !index.entries().is_empty(),
-    })
-}
-
-/// Return the current Git accelerator configuration that affects inventory and
-/// status queries without requiring daemon features.
-pub fn git_acceleration_state(repo: &Path) -> Result<GitAccelerationState> {
-    let repo = open_repo(repo)?;
-    let config = repo.config_snapshot();
-    Ok(GitAccelerationState {
-        untracked_cache: config.boolean("core.untrackedCache"),
-        split_index: config.boolean("core.splitIndex"),
-    })
 }
 
 /// Whether a repo-relative path lies under `prefix`. A `None` prefix means
@@ -301,79 +259,6 @@ pub(crate) fn untracked_walk(repo: &Path, walk_root: &Path) -> (Vec<String>, u64
         .into_inner()
         .expect("repo_inventory walk mutex poisoned");
     (matched, visited.load(Ordering::Relaxed))
-}
-
-/// Return the subset of `candidates` (repo-relative paths) that git treats as
-/// **ignored** — matched by any gitignore source (`.gitignore`,
-/// `.git/info/exclude`, `core.excludesFile`). Resolution is delegated to
-/// `git check-ignore --stdin` so nested ignore files, negations, and config
-/// excludes are honoured exactly as git itself would.
-///
-/// `git check-ignore` exits 0 when one or more paths are ignored and **1 when
-/// none are** — the latter is a normal "nothing ignored" result, not a failure,
-/// so it is mapped to an empty set. Any other exit (e.g. 128) is a genuine
-/// error and is propagated.
-///
-/// A path being ignored is distinct from it being untracked: an
-/// untracked-but-not-ignored file is a legitimate anchor target that resolves
-/// once committed, whereas an ignored path (a build artifact) is never
-/// committed and can never resolve. Only the latter is reported here.
-pub fn ignored_paths(repo: &Path, candidates: &[String]) -> Result<HashSet<String>> {
-    if candidates.is_empty() {
-        return Ok(HashSet::new());
-    }
-
-    let mut child = Command::new("git")
-        .current_dir(repo)
-        .args(["check-ignore", "--stdin"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .into_diagnostic()
-        .wrap_err("failed to spawn `git check-ignore --stdin`")?;
-
-    {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| miette!("failed to open stdin for `git check-ignore`"))?;
-        for path in candidates {
-            writeln!(stdin, "{path}")
-                .into_diagnostic()
-                .wrap_err("failed to write path to `git check-ignore` stdin")?;
-        }
-        // `stdin` drops here, closing the pipe so check-ignore can finish.
-    }
-
-    let output = child
-        .wait_with_output()
-        .into_diagnostic()
-        .wrap_err("failed to collect output from `git check-ignore`")?;
-
-    // Exit 0 = some paths ignored; exit 1 = none ignored (normal). Anything
-    // else is a real failure.
-    match output.status.code() {
-        Some(0) | Some(1) => {}
-        other => {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            return Err(miette!(
-                "git check-ignore failed (exit {:?}): {}",
-                other,
-                stderr
-            ));
-        }
-    }
-
-    let stdout = String::from_utf8(output.stdout)
-        .into_diagnostic()
-        .wrap_err("git check-ignore output is not valid UTF-8")?;
-    Ok(stdout
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_owned)
-        .collect())
 }
 
 // ─── Index / HEAD helpers ─────────────────────────────────────────────────────
@@ -566,8 +451,6 @@ fn for_each_tree_entry_recursive(
             // Submodule gitlinks (`Commit`): wiki content does not live in
             // submodules; full traversal is out of scope.  Skip silently.
             gix::object::tree::EntryKind::Commit => {}
-            #[allow(unreachable_patterns)]
-            _ => {}
         }
     }
     Ok(())
@@ -694,29 +577,6 @@ fn read_head_blob_inner(
     Ok(None)
 }
 
-/// Read the raw bytes of the blob at `commit_sha_hex`:`path_rel` (a full
-/// 40-hex commit SHA) — the in-process equivalent of `git show
-/// <sha>:<path>`, opening the repository first. Multi-commit history walks
-/// should hold a [`GitReader`] and call
-/// [`GitReader::read_blob_at_commit`] instead, so the open cost is paid
-/// once.
-///
-/// `Ok(None)` when the path is absent at that commit, resolves through a
-/// non-directory entry or a submodule gitlink, or names an unloadable blob
-/// object — the full `git show` exit-128 family, whose members callers
-/// disambiguate via the availability probe when it matters. A bad object id,
-/// a missing commit or tree object, and other structural failures are
-/// `Err`. Like `git show`, symlinks are NOT dereferenced — the link's own
-/// bytes are returned.
-pub fn read_blob_at_commit(
-    repo_root: &Path,
-    commit_sha_hex: &str,
-    path_rel: &str,
-) -> Result<Option<Vec<u8>>> {
-    let repo = open_repo(repo_root)?;
-    read_blob_at_commit_inner(&repo, commit_sha_hex, path_rel)
-}
-
 fn read_blob_at_commit_inner(
     repo: &gix::Repository,
     commit_sha_hex: &str,
@@ -811,40 +671,6 @@ fn blob_bytes_at_tree_path(
     Ok(None)
 }
 
-/// Return `true` if `path_rel` has an entry in the git index.
-///
-/// Fails closed when `.git/index` is absent — see `open_persisted_index`.
-pub fn has_index_entry(repo: &Path, path_rel: &str) -> Result<bool> {
-    let repo = open_repo(repo)?;
-    let index = open_persisted_index(&repo)?;
-    Ok(index
-        .entry_by_path(gix::bstr::BStr::new(path_rel.as_bytes()))
-        .is_some())
-}
-
-/// Return `true` if `path_rel` exists in the `HEAD` tree.
-pub fn has_head_entry(repo: &Path, path_rel: &str) -> Result<bool> {
-    Ok(read_head_blob(repo, path_rel)?.is_some())
-}
-
-/// Return a liveness signal for the git index, used as the cache-revision key
-/// for `DocSource::Index`.  The signal is the hex of the index file's trailing
-/// SHA-1 checksum (verified by gix on load), so any change to staged content
-/// produces a new signal — including same-size restages that would alias on a
-/// coarse `(mtime, size)` key.
-///
-/// Fails closed when `.git/index` is absent: this signal is load-bearing for
-/// cache correctness, and `--source=index` errors before the signal is asked
-/// for in the missing-index case.
-pub fn index_revision_signal(repo: &Path) -> Result<String> {
-    let gix_repo = open_repo(repo)?;
-    let index = open_persisted_index(&gix_repo)?;
-    let checksum = index.checksum().ok_or_else(|| {
-        miette!("git index has no checksum — cannot derive cache-revision signal")
-    })?;
-    Ok(checksum.to_hex().to_string())
-}
-
 // ─── GitReader ─────────────────────────────────────────────────────────────────
 
 /// Opens a gix repository once and reuses it for multiple operations.
@@ -855,7 +681,7 @@ pub struct GitReader {
     repo: gix::Repository,
 }
 
-#[allow(dead_code)]
+
 impl GitReader {
     /// Open the git repository at `repo_root`.
     pub fn open(repo_root: &Path) -> Result<Self> {
@@ -863,35 +689,32 @@ impl GitReader {
         Ok(GitReader { repo })
     }
 
-    /// Read the blob content for `path_rel` from the given `source`.
+    /// Read the blob content for `path_rel` from the given `snapshot`.
     ///
     /// For `Index` this reads from the git index; for `Head` from the HEAD tree.
     /// Returns `Err` on infrastructure failures, `Ok(None)` when the path is absent,
     /// and `Ok(Some(content))` on success.
-    pub fn read_blob(&self, source: DocSource, path_rel: &str) -> Result<Option<String>> {
-        match source {
-            DocSource::Index => read_index_blob_inner(&self.repo, path_rel, 0),
-            DocSource::Head => read_head_blob_inner(&self.repo, path_rel, 0),
-            DocSource::WorkingTree => {
-                unreachable!("GitReader is not used with WorkingTree")
-            }
+    pub fn read_blob(&self, snapshot: GitSnapshot, path_rel: &str) -> Result<Option<String>> {
+        match snapshot {
+            GitSnapshot::Index => read_index_blob_inner(&self.repo, path_rel, 0),
+            GitSnapshot::Head => read_head_blob_inner(&self.repo, path_rel, 0),
         }
     }
 
-    /// Return `true` when `path_rel` exists in the given `source`.
-    pub fn has_entry(&self, source: DocSource, path_rel: &str) -> Result<bool> {
-        match source {
-            DocSource::Index => {
+    /// Return `true` when `path_rel` exists in the given `snapshot`.
+    ///
+    /// Fails closed when `.git/index` is absent for `Index` — see
+    /// `open_persisted_index`.
+    pub fn has_entry(&self, snapshot: GitSnapshot, path_rel: &str) -> Result<bool> {
+        match snapshot {
+            GitSnapshot::Index => {
                 let index = open_persisted_index(&self.repo)?;
                 Ok(index
                     .entry_by_path(gix::bstr::BStr::new(path_rel.as_bytes()))
                     .is_some())
             }
-            DocSource::Head => {
+            GitSnapshot::Head => {
                 Ok(read_head_blob_inner(&self.repo, path_rel, 0)?.is_some())
-            }
-            DocSource::WorkingTree => {
-                unreachable!("GitReader is not used with WorkingTree")
             }
         }
     }
@@ -899,8 +722,15 @@ impl GitReader {
     /// Read the raw bytes of the blob at `commit_sha_hex`:`path_rel` (a full
     /// 40-hex commit SHA) — the in-process equivalent of `git show
     /// <sha>:<path>` — reusing this reader's open repository so a multi-
-    /// commit history walk pays the open cost once. See
-    /// [`read_blob_at_commit`] for the absent/error contract.
+    /// commit history walk pays the open cost once.
+    ///
+    /// `Ok(None)` when the path is absent at that commit, resolves through a
+    /// non-directory entry or a submodule gitlink, or names an unloadable blob
+    /// object — the full `git show` exit-128 family, whose members callers
+    /// disambiguate via the availability probe when it matters. A bad object id,
+    /// a missing commit or tree object, and other structural failures are
+    /// `Err`. Like `git show`, symlinks are NOT dereferenced — the link's own
+    /// bytes are returned.
     pub fn read_blob_at_commit(
         &self,
         commit_sha_hex: &str,
@@ -909,10 +739,10 @@ impl GitReader {
         read_blob_at_commit_inner(&self.repo, commit_sha_hex, path_rel)
     }
 
-    /// Return all repo-relative paths tracked in the given `source`.
-    pub fn list_paths(&self, source: DocSource) -> Result<Vec<String>> {
-        match source {
-            DocSource::Index => {
+    /// Return all repo-relative paths tracked in the given `snapshot`.
+    pub fn list_paths(&self, snapshot: GitSnapshot) -> Result<Vec<String>> {
+        match snapshot {
+            GitSnapshot::Index => {
                 let index = open_persisted_index(&self.repo)?;
                 let mut paths = Vec::new();
                 for entry in index.entries() {
@@ -925,7 +755,7 @@ impl GitReader {
                 paths.dedup();
                 Ok(paths)
             }
-            DocSource::Head => {
+            GitSnapshot::Head => {
                 let root_tree_id = head_root_tree_id(&self.repo)?;
                 let mut paths = Vec::new();
                 for_each_tree_entry_recursive(
@@ -937,9 +767,6 @@ impl GitReader {
                 paths.sort();
                 paths.dedup();
                 Ok(paths)
-            }
-            DocSource::WorkingTree => {
-                unreachable!("GitReader is not used with WorkingTree")
             }
         }
     }
@@ -1068,40 +895,6 @@ mod tests {
             resolve_ref(repo.path(), "refs/heads/does-not-exist").is_err(),
             "expected error for missing ref"
         );
-    }
-
-    #[test]
-    fn has_tracked_files_false_for_empty_repo() {
-        let repo = TestRepo::new();
-        assert!(!has_tracked_files(repo.path()).expect("tracked files probe"));
-    }
-
-    #[test]
-    fn has_tracked_files_true_for_staged_file_without_head() {
-        let repo = TestRepo::new();
-        repo.create_file("doc.md", "hello\n");
-        repo.git(&["add", "-A"]);
-        assert!(has_tracked_files(repo.path()).expect("tracked files probe"));
-    }
-
-    #[test]
-    fn head_sha_fails_for_unborn_head() {
-        let repo = TestRepo::new();
-        assert!(
-            head_sha(repo.path()).is_err(),
-            "expected unborn HEAD to fail"
-        );
-    }
-
-    #[test]
-    fn git_acceleration_state_reads_optional_config() {
-        let repo = TestRepo::new();
-        repo.git(&["config", "core.untrackedCache", "true"]);
-        repo.git(&["config", "core.splitIndex", "false"]);
-
-        let state = git_acceleration_state(repo.path()).expect("git acceleration state");
-        assert_eq!(state.untracked_cache, Some(true));
-        assert_eq!(state.split_index, Some(false));
     }
 
     #[test]
@@ -1304,16 +1097,17 @@ mod tests {
     }
 
     #[test]
-    fn has_index_entry_true_for_staged() {
+    fn has_entry_index_true_for_staged() {
         let repo = TestRepo::new();
         repo.create_file("staged.md", "content\n");
         repo.git(&["add", "staged.md"]);
 
-        assert!(has_index_entry(repo.path(), "staged.md").expect("has_index_entry"));
+        let reader = GitReader::open(repo.path()).expect("open reader");
+        assert!(reader.has_entry(GitSnapshot::Index, "staged.md").expect("has_entry"));
     }
 
     #[test]
-    fn has_index_entry_false_for_untracked() {
+    fn has_entry_index_false_for_untracked() {
         let repo = TestRepo::new();
         // Stage a placeholder so `.git/index` exists; the probed path itself
         // is untracked, so the entry lookup must report `false`.
@@ -1321,7 +1115,8 @@ mod tests {
         repo.git(&["add", "placeholder.md"]);
         repo.create_file("untracked.md", "content\n");
 
-        assert!(!has_index_entry(repo.path(), "untracked.md").expect("has_index_entry"));
+        let reader = GitReader::open(repo.path()).expect("open reader");
+        assert!(!reader.has_entry(GitSnapshot::Index, "untracked.md").expect("has_entry"));
     }
 
     /// Finding 1 regression: when `.git/index` is absent, `--source=index`
@@ -1343,100 +1138,25 @@ mod tests {
             read_index_blob(repo.path(), "doc.md").is_err(),
             "read_index_blob must fail when .git/index is absent"
         );
+        let reader = GitReader::open(repo.path()).expect("open reader");
         assert!(
-            has_index_entry(repo.path(), "doc.md").is_err(),
-            "has_index_entry must fail when .git/index is absent"
+            reader.has_entry(GitSnapshot::Index, "doc.md").is_err(),
+            "GitReader::has_entry must fail when .git/index is absent"
         );
         assert!(
-            index_revision_signal(repo.path()).is_err(),
-            "index_revision_signal must fail when .git/index is absent"
-        );
-    }
-
-    /// Finding 2 regression: `index_revision_signal` keys on the index file's
-    /// content checksum.  Two restages that produce same-size content but
-    /// differ in bytes must yield different signals.
-    #[test]
-    fn index_revision_signal_differs_for_same_size_restage() {
-        let repo = TestRepo::new();
-        // Same-length payloads so `(mtime, size)` may collide on coarse FS.
-        repo.create_file("doc.md", "AAAA\n");
-        repo.git(&["add", "doc.md"]);
-        let sig_a = index_revision_signal(repo.path()).expect("sig a");
-
-        repo.create_file("doc.md", "BBBB\n");
-        repo.git(&["add", "doc.md"]);
-        let sig_b = index_revision_signal(repo.path()).expect("sig b");
-
-        assert_ne!(
-            sig_a, sig_b,
-            "checksum-based index signal must change when staged content changes"
+            reader.list_paths(GitSnapshot::Index).is_err(),
+            "GitReader::list_paths must fail when .git/index is absent"
         );
     }
 
     #[test]
-    fn ignored_paths_reports_only_gitignored_candidates() {
-        let repo = TestRepo::new();
-        repo.create_file(".gitignore", "generated.ts\n");
-        repo.create_file("generated.ts", "artifact\n");
-        repo.create_file("src/real.ts", "real\n");
-        // Untracked-but-not-ignored: present on disk, no .gitignore match.
-        repo.create_file("src/new.ts", "new\n");
-        repo.commit("init");
-
-        let candidates = vec![
-            "generated.ts".to_owned(),
-            "src/real.ts".to_owned(),
-            "src/new.ts".to_owned(),
-        ];
-        let ignored = ignored_paths(repo.path(), &candidates).expect("ignored_paths");
-
-        assert!(
-            ignored.contains("generated.ts"),
-            "gitignored path must be reported"
-        );
-        assert!(
-            !ignored.contains("src/real.ts"),
-            "tracked path must not be reported as ignored"
-        );
-        assert!(
-            !ignored.contains("src/new.ts"),
-            "untracked-but-not-ignored path must not be reported as ignored"
-        );
-    }
-
-    #[test]
-    fn ignored_paths_empty_when_none_ignored() {
-        let repo = TestRepo::new();
-        repo.create_file("a.ts", "a\n");
-        repo.commit("init");
-
-        // No .gitignore at all → check-ignore exits 1, which must map to an
-        // empty set rather than an error.
-        let ignored =
-            ignored_paths(repo.path(), &["a.ts".to_owned()]).expect("ignored_paths must not error");
-        assert!(ignored.is_empty());
-    }
-
-    #[test]
-    fn ignored_paths_empty_input_returns_empty() {
-        let repo = TestRepo::new();
-        repo.create_file("a.ts", "a\n");
-        repo.commit("init");
-        assert!(
-            ignored_paths(repo.path(), &[])
-                .expect("ignored_paths")
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn has_head_entry_true_for_committed() {
+    fn has_entry_head_true_for_committed() {
         let repo = TestRepo::new();
         repo.create_file("committed.md", "content\n");
         repo.commit("initial");
 
-        assert!(has_head_entry(repo.path(), "committed.md").expect("has_head_entry"));
+        let reader = GitReader::open(repo.path()).expect("open reader");
+        assert!(reader.has_entry(GitSnapshot::Head, "committed.md").expect("has_entry"));
     }
 
     #[cfg(unix)]
@@ -1482,14 +1202,15 @@ mod tests {
     }
 
     #[test]
-    fn has_head_entry_false_for_staged_only() {
+    fn has_entry_head_false_for_staged_only() {
         let repo = TestRepo::new();
         repo.create_file("committed.md", "content\n");
         repo.commit("initial");
         repo.create_file("staged_only.md", "content\n");
         repo.git(&["add", "staged_only.md"]);
 
-        assert!(!has_head_entry(repo.path(), "staged_only.md").expect("has_head_entry"));
+        let reader = GitReader::open(repo.path()).expect("open reader");
+        assert!(!reader.has_entry(GitSnapshot::Head, "staged_only.md").expect("has_entry"));
     }
 
     // ── read_blob_at_commit (P3 in-process blob reads) ────────────────────────
@@ -1558,8 +1279,10 @@ mod tests {
             (&c3, "docs/page.md", None),
             (&c1, "docs/nope.md", None),
         ];
+        let reader = GitReader::open(repo.path()).expect("open reader");
         for (sha, path, expected) in cases {
-            let got = read_blob_at_commit(repo.path(), sha, path)
+            let got = reader
+                .read_blob_at_commit(sha, path)
                 .unwrap_or_else(|e| panic!("read_blob_at_commit {sha}:{path} failed: {e:?}"));
             let want = git_show_blob(&repo, sha, path).expect("git show oracle");
             assert_eq!(got.as_deref(), expected, "fixture sanity at {sha}:{path}");
@@ -1570,40 +1293,23 @@ mod tests {
         }
     }
 
-    /// The GitReader form must behave identically to the standalone form —
-    /// the drift walk holds one open repository across many commit reads.
-    #[test]
-    fn git_reader_read_blob_at_commit_matches_standalone() {
-        let (repo, shas) = repo_with_rename_history();
-        let reader = GitReader::open(repo.path()).expect("open reader");
-        for sha in shas {
-            for path in ["docs/page.md", "docs/renamed.md", "other.txt"] {
-                assert_eq!(
-                    reader.read_blob_at_commit(&sha, path).expect("reader read"),
-                    read_blob_at_commit(repo.path(), &sha, path).expect("standalone read"),
-                    "reader and standalone forms disagree at {sha}:{path}"
-                );
-            }
-        }
-    }
-
     /// A non-hex or abbreviated object id is an error, never a silent
     /// `None` — fail closed like every other object failure.
     #[test]
     fn read_blob_at_commit_fails_closed_on_bad_sha() {
         let (repo, _) = repo_with_rename_history();
+        let reader = GitReader::open(repo.path()).expect("open reader");
         for bad in ["not-a-sha", "abcdef"] {
             assert!(
-                read_blob_at_commit(repo.path(), bad, "other.txt").is_err(),
+                reader.read_blob_at_commit(bad, "other.txt").is_err(),
                 "'{bad}' must error"
             );
         }
         // A well-formed hex id that names no object errors too.
-        assert!(read_blob_at_commit(
-            repo.path(),
-            "0000000000000000000000000000000000000000",
-            "other.txt"
-        )
-        .is_err());
+        assert!(
+            reader
+                .read_blob_at_commit("0000000000000000000000000000000000000000", "other.txt")
+                .is_err()
+        );
     }
 }

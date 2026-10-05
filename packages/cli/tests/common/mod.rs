@@ -4,11 +4,12 @@
 //! — the production-side ban does not apply to test fixture code.
 //!
 //! This module is compiled into each integration-test binary that does `mod common;`.
-//! Each binary uses only a subset of these helpers, so an unused-in-this-crate item
-//! would otherwise trip `dead_code` per binary even though the suite as a whole uses
-//! them all. `FixtureRepo::dir` is an intentional RAII guard kept alive for the test's
-//! lifetime and never read directly.
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "each integration-test binary uses only a subset of these shared fixture \
+              helpers, so items unused by one binary would trip dead_code there; \
+              `FixtureRepo::dir` is an RAII guard kept alive and never read"
+)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -131,6 +132,53 @@ pub fn git_common_dir(repo_root: &Path) -> PathBuf {
 /// `<git-common-dir>/wiki/store.sqlite`.
 pub fn target_db_path(repo_root: &Path) -> PathBuf {
     git_common_dir(repo_root).join("wiki").join("store.sqlite")
+}
+
+/// The newest generation's id in the merged store — the generation a
+/// `WikiIndex` that just refreshed serves.
+fn newest_gen_id(conn: &rusqlite::Connection) -> i64 {
+    conn.query_row(
+        "SELECT gen_id FROM generations ORDER BY created_at DESC, gen_id DESC LIMIT 1",
+        [],
+        |r| r.get(0),
+    )
+    .expect("the store holds a generation")
+}
+
+/// The newest generation's `(path_rel, source literal, title)` rows,
+/// ordered by path then source literal.
+pub fn served_path_rows(repo_root: &Path) -> Vec<(String, String, String)> {
+    let conn = rusqlite::Connection::open(target_db_path(repo_root)).expect("open merged store");
+    let gen_id = newest_gen_id(&conn);
+    let mut stmt = conn
+        .prepare(
+            "SELECT p.path_rel, p.source, b.title
+             FROM gen_paths p JOIN blobs b ON b.oid = p.oid
+             WHERE p.gen_id = ?1
+             ORDER BY p.path_rel ASC, p.source ASC",
+        )
+        .expect("prepare gen_paths dump");
+    let rows = stmt
+        .query_map([gen_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .expect("gen_paths dump");
+    rows.map(|r| r.expect("row")).collect()
+}
+
+/// `(global blobs rows, newest generation's gen_paths rows)` for `oid`.
+pub fn served_blob_path_counts(repo_root: &Path, oid: &str) -> (usize, usize) {
+    let conn = rusqlite::Connection::open(target_db_path(repo_root)).expect("open merged store");
+    let gen_id = newest_gen_id(&conn);
+    let blobs: i64 = conn
+        .query_row("SELECT COUNT(*) FROM blobs WHERE oid = ?1", [oid], |r| r.get(0))
+        .expect("count blobs");
+    let paths: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM gen_paths WHERE oid = ?1 AND gen_id = ?2",
+            rusqlite::params![oid, gen_id],
+            |r| r.get(0),
+        )
+        .expect("count gen_paths");
+    (blobs as usize, paths as usize)
 }
 
 /// Build the "parity" fixture repo:

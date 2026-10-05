@@ -12,7 +12,7 @@
 
 mod common;
 
-use wiki::index::WikiIndex;
+use wiki::index::{DocSource, WikiIndex};
 
 #[test]
 fn pure_rename_of_non_wiki_md_is_index_noop() {
@@ -35,7 +35,7 @@ fn pure_rename_of_non_wiki_md_is_index_noop() {
 
     // First prepare succeeds: alpha.md is indexed; plain.md is silently
     // skipped because it has no `title`+`summary` frontmatter.
-    drop(WikiIndex::prepare(repo.root.as_path()).expect("first prepare"));
+    drop(WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("first prepare"));
 
     // Pure rename of the non-wiki file — same content, same blob OID.
     repo.git_mv("plain.md", "renamed-plain.md");
@@ -43,5 +43,5 @@ fn pure_rename_of_non_wiki_md_is_index_noop() {
 
     // This should succeed (rename is a no-op for non-wiki files), but under
     // the current code it fails with FOREIGN KEY constraint failed.
-    WikiIndex::prepare(repo.root.as_path()).expect("second prepare after non-wiki rename");
+    WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("second prepare after non-wiki rename");
 }

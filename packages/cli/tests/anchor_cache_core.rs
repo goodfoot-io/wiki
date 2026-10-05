@@ -22,11 +22,11 @@ use tempfile::TempDir;
 
 use wiki::cache::key::{fingerprint_key, sha256_hex, walk_key};
 use wiki::cache::schema::{
-    ANCHOR_WALK_DDL, APPLICATION_ID, BUSY_TIMEOUT_MS, DB_FILE_NAME, FINGERPRINT_DDL, META_DDL,
-    ProbeOutcome, SCHEMA_VERSION, SuspectKind, Tier, db_path, init_lock_path, open_connection,
-    probe, quarantine,
+    ANCHOR_WALK_DDL, APPLICATION_ID, BUSY_TIMEOUT_MS, DB_FILE_NAME, FINGERPRINT_DDL,
+    INIT_LOCK_FILE_NAME, META_DDL, ProbeOutcome, SCHEMA_VERSION, SuspectKind, Tier, db_path,
+    open_connection, probe, quarantine,
 };
-use wiki::cache::{AnchorCache, CacheStore, WalkRow};
+use wiki::cache::{AnchorCache, CacheReporter, CacheStore, WalkRow};
 
 /// A 40-hex commit SHA for fixtures.
 const SHA: &str = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6a7b8c9d0";
@@ -110,7 +110,7 @@ fn db_artifacts(cache_dir: &Path) -> Vec<PathBuf> {
 
 /// Open the store for a fixture common dir, asserting the init lock is free.
 fn open_store(common_dir: &Path) -> CacheStore {
-    CacheStore::open(common_dir)
+    CacheStore::open_with_reporter(common_dir, CacheReporter::default())
         .expect("open store")
         .expect("init lock is not held in a test fixture")
 }
@@ -232,18 +232,6 @@ fn page_writes_remain_queued_until_one_explicit_flush() {
         .query_row("SELECT count(*) FROM fingerprint", [], |r| r.get(0))
         .unwrap();
     assert_eq!(after, 8, "one page flush publishes the whole batch");
-}
-
-#[test]
-fn clear_releases_its_connection_before_the_destructive_window() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let store = open_store(dir.path());
-    assert!(store.connection_is_open());
-    store.clear().expect("clear");
-    assert!(
-        !store.connection_is_open(),
-        "clear must release SQLite before the destructive window"
-    );
 }
 
 /// Restores the process cwd on drop. `git::common_dir()` discovers from the
@@ -1000,7 +988,7 @@ fn clear_empties_both_tiers_and_preserves_the_directory() {
         b"aside",
     )
     .expect("write aside");
-    let lock = init_lock_path(dir.path());
+    let lock = cache.join(INIT_LOCK_FILE_NAME);
     assert!(lock.exists(), "the open path leaves the init lock behind");
 
     store.clear().expect("clear");

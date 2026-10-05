@@ -65,7 +65,7 @@ fn measure_match_statements(db_path: &Path, query: &str) -> (usize, usize) {
 #[test]
 fn build_index_at_merged_store() {
     let repo = common::FixtureRepo::new();
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare");
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare");
     drop(index);
 
     let db_path = common::target_db_path(&repo.root);
@@ -93,7 +93,7 @@ fn total_count_probes_do_not_scale_at_merged_store() {
     }
     repo.git_add(".");
     repo.git_commit("add shared-title pre-match fixtures");
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare");
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare");
     drop(index);
     let db_path = common::target_db_path(&repo.root);
     assert!(db_path.exists(), "merged store should exist after prepare");

@@ -15,7 +15,7 @@
 
 mod common;
 
-use wiki::index::WikiIndex;
+use wiki::index::{DocSource, WikiIndex};
 
 #[test]
 fn exact_alias_matches_token_wise_for_multi_alias_pages() {
@@ -34,7 +34,7 @@ fn exact_alias_matches_token_wise_for_multi_alias_pages() {
     repo.git_add("multi_alias.md");
     repo.git_commit("add multi-alias page");
 
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare");
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare");
     let (results, _total) = index
         .search_weighted("UniqueAlias", 10, 0)
         .expect("search_weighted");

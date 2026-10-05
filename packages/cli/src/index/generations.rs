@@ -131,7 +131,6 @@
 //!   ++ frame(wikiignore_hash) ++ frame(worktree_sig)
 //!
 //! digest      = SHA-256(canonical)     // raw 32 bytes, stored in `generations.digest`
-//! digest_hex  = sha256_hex(canonical)  // diagnostics/logging form only
 //!
 //! worktree_sig =
 //!     SHA-256( frame(path₁) ++ frame(mtime₁.to_string()) ++ … )
@@ -180,7 +179,6 @@ pub const EMPTY_TREE_BASE: &str = "";
 pub const ZERO_INDEX_CHECKSUM: [u8; 20] = [0u8; 20];
 
 /// 20-zero wikiignore SHA-1 sentinel (no wikiignore file in this state).
-#[allow(dead_code)] // consumed alongside the tier-scoped bump (clear-cache wave)
 pub const ZERO_WIKIIGNORE_HASH: [u8; 20] = [0u8; 20];
 
 /// Retention bound (plan D10): after the always-live newest generation, the
@@ -227,13 +225,6 @@ impl StateFingerprint {
         push_field(&mut buf, &self.wikiignore_hash);
         push_field(&mut buf, &self.worktree_sig);
         Sha256::digest(&buf).into()
-    }
-
-    /// Lowercase-hex diagnostics form of [`Self::digest`] (via
-    /// `cache::key::sha256_hex`). Never used as a storage key.
-    #[allow(dead_code)] // diagnostics/logging consumer lands with store events
-    pub fn digest_hex(&self) -> String {
-        crate::cache::key::sha256_hex(&self.digest())
     }
 }
 
@@ -373,7 +364,7 @@ pub struct GcStats {
 
 /// Handle to the index freshness tier of the merged store. One RW
 /// connection, opened WAL; all writes flow through
-/// `retry_busy`-wrapped transactions routed via [`Self::with_write_txn`].
+/// `retry_busy`-wrapped `BEGIN IMMEDIATE` transactions (publish, maintain).
 ///
 /// Single-handle, single-thread discipline: a held write transaction
 /// borrows the connection exclusively, so reads through the same handle
@@ -381,16 +372,12 @@ pub struct GcStats {
 #[derive(Debug)]
 pub struct GenerationsStore {
     conn: RefCell<Connection>,
-    #[allow(dead_code)] // read via path(); the binary reaches neither yet
+
     db_file: PathBuf,
     /// Set when this handle serves an ephemeral in-memory tier because the
     /// shared store was untouchable (mid-repair window, plan F6). Purely
     /// informational: the caller owns the single diagnostic line.
     degraded: Cell<bool>,
-    /// Depth of write transactions opened through this handle. Mirrors the
-    /// connection's autocommit state because every write transaction routes
-    /// through [`Self::with_write_txn`] / publish / maintain by construction.
-    txn_depth: Cell<u32>,
 }
 
 impl GenerationsStore {
@@ -555,7 +542,6 @@ impl GenerationsStore {
                 conn: RefCell::new(conn),
                 db_file: db_file.to_path_buf(),
                 degraded: Cell::new(false),
-                txn_depth: Cell::new(0),
             })
         })
     }
@@ -575,15 +561,7 @@ impl GenerationsStore {
             conn: RefCell::new(conn),
             db_file: PathBuf::from(":memory:"),
             degraded: Cell::new(false),
-            txn_depth: Cell::new(0),
         })
-    }
-
-    /// Path of the underlying database file (tests and diagnostics open it
-    /// read-only to verify physical-layout contracts).
-    #[allow(dead_code)] // physical-layout checks; no binary caller this phase
-    pub fn path(&self) -> &Path {
-        &self.db_file
     }
 
     /// Shared read access for serve-phase statements. Multi-statement
@@ -691,7 +669,6 @@ impl GenerationsStore {
         let digest = candidate.fingerprint.digest();
         retry_busy(|| {
             let mut conn = self.conn.borrow_mut();
-            let _guard = TxnGuard::new(&self.txn_depth);
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
             // Conflict check inside the write transaction: an identical
@@ -833,7 +810,6 @@ impl GenerationsStore {
         let bytes_before = store_bytes(&self.db_file);
         let stats = retry_busy(|| {
             let mut conn = self.conn.borrow_mut();
-            let _guard = TxnGuard::new(&self.txn_depth);
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
             let generations_before: i64 =
@@ -912,46 +888,6 @@ impl GenerationsStore {
         Ok(stats)
     }
 
-    /// Non-FTS serving mediation leg: the exact `gen_paths` rows of
-    /// `generation_id` for `source`, ordered by path — what `list_pages`,
-    /// exact-title/path resolution, and the refresh delta base join
-    /// through, scoped to the served generation.
-    #[allow(dead_code)] // store-level spec surface; serving goes through search.rs joins
-    pub fn generation_paths(
-        &self,
-        generation_id: i64,
-        source: Source,
-    ) -> Result<Vec<GenPathRow>, CacheError> {
-        let conn = self.conn.borrow();
-        let mut stmt = conn.prepare(
-            "SELECT source, path_rel, oid, parent_dir, stat_mtime_ns
-             FROM gen_paths WHERE gen_id = ?1 AND source = ?2
-             ORDER BY path_rel ASC",
-        )?;
-        let literal = source_sql(source);
-        let rows = stmt.query_map(rusqlite::params![generation_id, literal], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, Option<i64>>(4)?,
-            ))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (src, path_rel, oid, parent_dir, stat_mtime_ns) = row?;
-            out.push(GenPathRow {
-                source: source_from_sql(&src).unwrap_or(Source::Worktree),
-                path_rel,
-                oid: BlobOid(oid),
-                parent_dir,
-                stat_mtime_ns,
-            });
-        }
-        Ok(out)
-    }
-
     /// All three sources' rows of one generation, keyed for the refresh
     /// merge pipeline. Delta-base loading helper for the orchestrator.
     pub(crate) fn all_generation_paths(
@@ -984,14 +920,6 @@ impl GenerationsStore {
             });
         }
         Ok(out)
-    }
-
-    /// Fail-open convenience wrapper over [`Self::verify_served`] on this
-    /// handle's connection: would a query against `gen_id` serve right now?
-    #[allow(dead_code)] // acceptance-check surface; binary serves via read txns
-    pub fn generation_is_served(&self, gen_id: i64) -> bool {
-        let conn = self.conn.borrow();
-        Self::verify_served(&conn, gen_id).unwrap_or(false)
     }
 
     /// The newest generation by `(created_at, gen_id)` — the refresh delta
@@ -1037,49 +965,6 @@ impl GenerationsStore {
     pub fn is_degraded(&self) -> bool {
         self.degraded.get()
     }
-
-    /// True iff this handle currently sits inside a write transaction.
-    /// Exposes the compute-outside-write-txn invariant to checks and
-    /// integration assertions: heavy parse/ingest must be observable
-    /// outside the publish window. Accurate because every write
-    /// transaction routes through this handle's guarded entry points.
-    #[allow(dead_code)] // invariant probe consumed by acceptance checks
-    pub fn is_in_write_txn(&self) -> bool {
-        self.txn_depth.get() > 0
-    }
-
-    /// Run `f` inside one `retry_busy`-wrapped `BEGIN IMMEDIATE`
-    /// transaction on this handle's connection — the only sanctioned way to
-    /// take a generic write transaction, so every writer inherits the
-    /// bounded-busy contract by construction. While the transaction is
-    /// open, `f` must not touch the connection except through
-    /// [`Self::is_in_write_txn`] (the borrow is exclusive).
-    #[allow(dead_code)] // sanctioned generic writer; first production caller is the journals wave
-    pub fn with_write_txn<T>(
-        &self,
-        mut f: impl FnMut(&Self) -> Result<T, CacheError>,
-    ) -> Result<T, CacheError> {
-        // Re-entrant across retry_busy attempts (plan F1): a BUSY on
-        // BEGIN IMMEDIATE — or on any statement inside `f` — rolls the
-        // transaction back before the retry re-invokes `f`, so no partial
-        // work can double-apply.
-        retry_busy(|| {
-            let mut conn = self.conn.borrow_mut();
-            let _guard = TxnGuard::new(&self.txn_depth);
-            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let outcome = f(self);
-            match outcome {
-                Ok(value) => {
-                    tx.commit()?;
-                    Ok(value)
-                }
-                Err(e) => {
-                    drop(tx); // rollback on drop
-                    Err(e)
-                }
-            }
-        })
-    }
 }
 
 /// True when the error is an exhausted-`SQLITE_BUSY` result: contention,
@@ -1119,25 +1004,6 @@ pub(crate) fn quarantine_forced(db_file: &Path) {
     {
         crate::cache::diagnostics::record(&conn, "quarantine_performed");
         crate::cache::diagnostics::record(&conn, "rebuild_completed");
-    }
-}
-
-/// RAII depth marker for [`GenerationsStore::txn_depth`]; panic-safe on the
-/// early-return paths inside a transaction body.
-struct TxnGuard<'a> {
-    depth: &'a Cell<u32>,
-}
-
-impl<'a> TxnGuard<'a> {
-    fn new(depth: &'a Cell<u32>) -> Self {
-        depth.set(depth.get() + 1);
-        Self { depth }
-    }
-}
-
-impl Drop for TxnGuard<'_> {
-    fn drop(&mut self) {
-        self.depth.set(self.depth.get().saturating_sub(1));
     }
 }
 

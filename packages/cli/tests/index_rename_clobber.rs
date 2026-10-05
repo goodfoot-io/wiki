@@ -16,7 +16,7 @@ mod common;
 use std::path::Path;
 
 use rusqlite::Connection;
-use wiki::index::WikiIndex;
+use wiki::index::{DocSource, WikiIndex};
 use wiki::index::blob::compute_blob_oid;
 
 /// A blob that is recognisably fake — its content differs from any real
@@ -45,12 +45,12 @@ fn rename_onto_occupied_destination_decrements_displaced_blob_in_merged_store() 
     repo.write_file("dest.md", dest_bytes);
     repo.git_add("dest.md");
     repo.git_commit("add dest.md");
-    drop(WikiIndex::prepare(repo.root.as_path()).expect("prepare dest"));
+    drop(WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare dest"));
 
     // Delete dest.md so the tree no longer contains it.
     repo.git_rm("dest.md");
     repo.git_commit("remove dest.md");
-    drop(WikiIndex::prepare(repo.root.as_path()).expect("prepare after remove"));
+    drop(WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare after remove"));
 
     // ── Phase 2: inject prior-state skew into the merged store ──
     let fake_oid = compute_blob_oid(FAKE_BYTES);
@@ -92,12 +92,12 @@ fn rename_onto_occupied_destination_decrements_displaced_blob_in_merged_store() 
     repo.write_file("source.md", source_bytes);
     repo.git_add("source.md");
     repo.git_commit("add source.md");
-    drop(WikiIndex::prepare(repo.root.as_path()).expect("prepare source"));
+    drop(WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare source"));
 
     repo.git_mv("source.md", "dest.md");
     repo.git_commit("rename source.md -> dest.md");
 
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare after rename");
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare after rename");
 
     // ── Phase 4: assert correctness ──
 
@@ -136,9 +136,7 @@ fn rename_onto_occupied_destination_decrements_displaced_blob_in_merged_store() 
     }
 
     // The renamed content survives intact.
-    let (src_blobs, _) = index
-        .debug_blob_path_counts(&source_oid.0)
-        .expect("debug_blob_path_counts source oid");
+    let (src_blobs, _) = common::served_blob_path_counts(repo.root.as_path(), &source_oid.0);
     assert_eq!(src_blobs, 1, "exactly one blobs row for the renamed content");
 
     let page = index

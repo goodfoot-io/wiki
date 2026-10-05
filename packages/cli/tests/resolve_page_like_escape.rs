@@ -33,7 +33,7 @@
 
 mod common;
 
-use wiki::index::WikiIndex;
+use wiki::index::{DocSource, WikiIndex};
 
 #[test]
 fn resolve_page_treats_like_metacharacters_as_literals() {
@@ -62,7 +62,7 @@ fn resolve_page_treats_like_metacharacters_as_literals() {
 
     repo.git_commit("add test_page.md and test-page.md");
 
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare");
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare");
 
     // Query with `.md` suffix to enter the `input.contains('/') ||
     // input.ends_with(".md")` guard at L350 and reach the LIKE-based path

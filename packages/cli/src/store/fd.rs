@@ -48,9 +48,9 @@ use std::os::windows::fs::OpenOptionsExt as WindowsOpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 
 /// The one mode a wiki-derived private directory may have: owner-only.
-/// Enforced on unix (see `apply_private_dir_mode`); retained as the
-/// documented contract on targets without POSIX mode bits.
-#[cfg_attr(not(unix), allow(dead_code))]
+/// Enforced on unix (see `apply_private_dir_mode`); targets without POSIX
+/// mode bits have no counterpart.
+#[cfg(unix)]
 pub const PRIVATE_DIR_MODE: u32 = 0o700;
 
 /// Creation mode for lock and database files: owner read/write only.

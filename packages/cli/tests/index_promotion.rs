@@ -3,7 +3,7 @@
 
 mod common;
 
-use wiki::index::WikiIndex;
+use wiki::index::{DocSource, WikiIndex};
 use wiki::index::blob::compute_blob_oid;
 
 #[test]
@@ -18,13 +18,11 @@ fn untracked_promoted_to_index_shares_blob() {
     repo.write_file("foo.md", bytes);
     let oid = compute_blob_oid(bytes.as_bytes());
 
-    let _before = WikiIndex::prepare(repo.root.as_path()).expect("prepare before add");
+    let _before = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare before add");
     repo.git_add("foo.md");
-    let after = WikiIndex::prepare(repo.root.as_path()).expect("prepare after add");
+    WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare after add");
 
-    let (blobs, paths) = after
-        .debug_blob_path_counts(&oid.0)
-        .expect("debug_blob_path_counts");
+    let (blobs, paths) = common::served_blob_path_counts(repo.root.as_path(), &oid.0);
     assert_eq!(blobs, 1, "exactly one blobs row for foo.md OID");
     assert_eq!(paths, 2, "Index + Worktree paths rows for foo.md OID");
 }

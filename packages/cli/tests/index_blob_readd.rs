@@ -7,7 +7,7 @@
 
 mod common;
 
-use wiki::index::WikiIndex;
+use wiki::index::{DocSource, WikiIndex};
 use wiki::index::blob::compute_blob_oid;
 
 #[test]
@@ -20,23 +20,21 @@ fn refcount_zero_then_same_oid_readd_in_one_refresh() {
     repo.write_file("z.md", bytes);
     repo.git_add("z.md");
     repo.git_commit("add z.md");
-    drop(WikiIndex::prepare(repo.root.as_path()).expect("prepare full"));
+    drop(WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare full"));
 
     // `git rm` drops the index and worktree rows; only (z.md, Tree) remains,
     // so the blob's refcount is exactly 1 going into the final refresh.
     repo.git_rm("z.md");
-    drop(WikiIndex::prepare(repo.root.as_path()).expect("prepare tree-only"));
+    drop(WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare tree-only"));
 
     // One refresh now sees: Tree removal of z.md (refcount 1 -> 0, blob row
     // deleted), then Index + Worktree additions of b.md with the same OID.
     repo.git_commit("remove z.md");
     repo.write_file("b.md", bytes);
     repo.git_add("b.md");
-    let index = WikiIndex::prepare(repo.root.as_path()).expect("prepare re-add");
+    let index = WikiIndex::prepare_for_source(repo.root.as_path(), DocSource::WorkingTree).expect("prepare re-add");
 
-    let (blobs, paths) = index
-        .debug_blob_path_counts(&oid.0)
-        .expect("debug_blob_path_counts");
+    let (blobs, paths) = common::served_blob_path_counts(repo.root.as_path(), &oid.0);
     assert_eq!(blobs, 1, "blob row re-inserted after mid-refresh deletion");
     assert_eq!(paths, 2, "Index + Worktree paths rows for b.md");
 

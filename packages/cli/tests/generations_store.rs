@@ -24,12 +24,11 @@
 //!     `index_dir_mtime_merkle.rs`
 //! 11. retention bound, recency liveness rule — D10
 //! 12. never serve an unverified row — D5 serve-time verification
-//! 13. compute-outside-write-txn invariant — D5 refresh ordering
-//! 14. best-effort access-bucket update never fails a read — D5 gate hit
+//! 13. best-effort access-bucket update never fails a read — D5 gate hit
 
 mod common;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OpenFlags};
@@ -128,6 +127,48 @@ fn candidate(fingerprint: StateFingerprint, pages: &[Page]) -> PublishCandidate 
     }
 }
 
+/// The store's database file under a fixture common dir.
+fn db_file(tmp: &TempDir) -> PathBuf {
+    wiki::cache::schema::db_path(tmp.path())
+}
+
+/// The worktree-source `gen_paths` rows of one generation, ordered by path
+/// — read directly from the store file.
+fn worktree_rows(db: &Path, gen_id: i64) -> Vec<GenPathRow> {
+    let conn = raw_conn(db);
+    let mut stmt = conn
+        .prepare(
+            "SELECT path_rel, oid, parent_dir, stat_mtime_ns
+             FROM gen_paths WHERE gen_id = ?1 AND source = 'worktree'
+             ORDER BY path_rel ASC",
+        )
+        .expect("prepare gen_paths");
+    let rows = stmt
+        .query_map([gen_id], |r| {
+            Ok(GenPathRow {
+                source: Source::Worktree,
+                path_rel: r.get(0)?,
+                oid: BlobOid(r.get(1)?),
+                parent_dir: r.get(2)?,
+                stat_mtime_ns: r.get(3)?,
+            })
+        })
+        .expect("gen_paths rows");
+    rows.map(|r| r.expect("row")).collect()
+}
+
+/// Whether a query against `gen_id` would serve: the generation row and
+/// its per-generation FTS child both exist (serve-time verification).
+fn generation_is_served(db: &Path, gen_id: i64) -> bool {
+    let conn = raw_conn(db);
+    let fts = scalar(
+        &conn,
+        &format!("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'fts_{gen_id}'"),
+    );
+    let row = scalar(&conn, &format!("SELECT COUNT(*) FROM generations WHERE gen_id = {gen_id}"));
+    fts > 0 && row > 0
+}
+
 /// Read-only direct access for physical-layout contracts.
 fn raw_conn(path: &Path) -> Connection {
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -189,7 +230,6 @@ fn state_digest_is_injective_over_field_order_and_boundaries() {
 
     // Determinism: identical fingerprints hash identically.
     assert_eq!(base.digest(), base.clone().digest());
-    assert_eq!(base.digest_hex(), base.clone().digest_hex());
 
     // Field-order injectivity: transposing two same-width fields' values
     // must change the digest — positional concatenation would collide.
@@ -258,7 +298,7 @@ fn worktree_signature_canonicalizes_order_and_boundaries() {
 
 #[test]
 fn publish_conflict_discards_loser_fts_table_and_serves_existing() {
-    let (_tmp, store) = open_store();
+    let (tmp, store) = open_store();
     let fp = fingerprint(1);
 
     let winner = published(
@@ -266,7 +306,7 @@ fn publish_conflict_discards_loser_fts_table_and_serves_existing() {
         candidate(fp.clone(), &[Page::new("a.md", "Alpha", 100), Page::new("b.md", "Beta", 200)]),
     );
 
-    let fts_before = fts_tables(&raw_conn(store.path()));
+    let fts_before = fts_tables(&raw_conn(&db_file(&tmp)));
     assert_eq!(fts_before.len(), 1, "one generation, one fts_ table");
 
     // Same canonical state, different corpus: the digest conflicts. The
@@ -291,7 +331,7 @@ fn publish_conflict_discards_loser_fts_table_and_serves_existing() {
         }
     }
 
-    let conn = raw_conn(store.path());
+    let conn = raw_conn(&db_file(&tmp));
     assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM generations"), 1);
     assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM gen_paths WHERE path_rel = 'junk.md'"), 0);
     assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM blobs WHERE title = 'Junk'"), 0);
@@ -304,7 +344,7 @@ fn publish_conflict_discards_loser_fts_table_and_serves_existing() {
 
 #[test]
 fn divergent_generations_coexist_serving_their_own_corpus() {
-    let (_tmp, store) = open_store();
+    let (tmp, store) = open_store();
 
     let old_gen = published(
         &store,
@@ -340,8 +380,8 @@ fn divergent_generations_coexist_serving_their_own_corpus() {
     assert_eq!(served_new.gen_id, new_gen.gen_id);
 
     // Non-FTS leg: each generation serves exactly its own corpus mapping.
-    let old_paths = store.generation_paths(old_gen.gen_id, Source::Worktree).expect("old paths");
-    let new_paths = store.generation_paths(new_gen.gen_id, Source::Worktree).expect("new paths");
+    let old_paths = worktree_rows(&db_file(&tmp), old_gen.gen_id);
+    let new_paths = worktree_rows(&db_file(&tmp), new_gen.gen_id);
     let has = |rows: &[GenPathRow], rel: &str| rows.iter().any(|r| r.path_rel == rel);
     assert!(has(&old_paths, "gamma.md"), "deleted page stays resolvable through the older generation");
     assert!(!has(&new_paths, "gamma.md"));
@@ -349,7 +389,7 @@ fn divergent_generations_coexist_serving_their_own_corpus() {
     assert!(!has(&old_paths, "delta.md"));
 
     // FTS leg: token corpora stay disjoint per generation.
-    let conn = raw_conn(store.path());
+    let conn = raw_conn(&db_file(&tmp));
     let old_fts = format!("fts_{}", old_gen.gen_id);
     let new_fts = format!("fts_{}", new_gen.gen_id);
     assert_eq!(ranked_oids(&conn, &old_fts, "gamma").len(), 1);
@@ -362,8 +402,8 @@ fn divergent_generations_coexist_serving_their_own_corpus() {
 
 #[test]
 fn warm_rankings_equal_cold_rebuild_of_same_digest() {
-    let (_warm_tmp, warm) = open_store();
-    let (_cold_tmp, cold) = open_store();
+    let (warm_tmp, warm) = open_store();
+    let (cold_tmp, cold) = open_store();
     let fp = fingerprint(7);
     let pages = [
         Page::new("docs/alpha.md", "Gadget Alpha", 100),
@@ -388,8 +428,8 @@ fn warm_rankings_equal_cold_rebuild_of_same_digest() {
         "same canonical state must hash identically across stores"
     );
 
-    let warm_conn = raw_conn(warm.path());
-    let cold_conn = raw_conn(cold.path());
+    let warm_conn = raw_conn(&db_file(&warm_tmp));
+    let cold_conn = raw_conn(&db_file(&cold_tmp));
     for query in ["gadget", "alpha", "prose"] {
         assert_eq!(
             ranked_oids(&warm_conn, &format!("fts_{}", warm_gen.gen_id), query),
@@ -401,7 +441,7 @@ fn warm_rankings_equal_cold_rebuild_of_same_digest() {
 
 #[test]
 fn retained_generation_is_never_physically_deleted_by_later_publish() {
-    let (_tmp, store) = open_store();
+    let (tmp, store) = open_store();
 
     let old_page = Page::new("old_only.md", "Old Only", 100);
     let shared_page = Page::new("shared.md", "Shared", 200);
@@ -421,7 +461,7 @@ fn retained_generation_is_never_physically_deleted_by_later_publish() {
         candidate(fingerprint(2), &[shared_page, Page::new("new_only.md", "New Only", 300)]),
     );
 
-    let conn = raw_conn(store.path());
+    let conn = raw_conn(&db_file(&tmp));
     assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM generations"), 2);
 
     // The displaced page's blob row survives with positive refcount...
@@ -492,7 +532,7 @@ fn retained_generation_is_never_physically_deleted_by_later_publish() {
 
 #[test]
 fn carry_forward_matches_path_and_mtime_pairs() {
-    let (_tmp, store) = open_store();
+    let (tmp, store) = open_store();
 
     let gen1 = published(
         &store,
@@ -514,8 +554,8 @@ fn carry_forward_matches_path_and_mtime_pairs() {
         ),
     );
 
-    let original = store.generation_paths(gen1.gen_id, Source::Worktree).expect("gen1 paths");
-    let carried = store.generation_paths(gen2.gen_id, Source::Worktree).expect("gen2 paths");
+    let original = worktree_rows(&db_file(&tmp), gen1.gen_id);
+    let carried = worktree_rows(&db_file(&tmp), gen2.gen_id);
     fn find<'a>(rows: &'a [GenPathRow], rel: &str) -> &'a GenPathRow {
         rows.iter()
             .find(|r| r.path_rel == rel)
@@ -532,14 +572,14 @@ fn carry_forward_matches_path_and_mtime_pairs() {
 
     // Immutability: the older generation is untouched by the newer publish.
     assert_eq!(
-        store.generation_paths(gen1.gen_id, Source::Worktree).expect("still intact").len(),
+        worktree_rows(&db_file(&tmp), gen1.gen_id).len(),
         3
     );
 }
 
 #[test]
 fn deleted_directory_leaves_no_trace_in_the_serving_generation() {
-    let (_tmp, store) = open_store();
+    let (tmp, store) = open_store();
 
     // Rewrite of index_dir_mtimes_prune: the stale-dir contract becomes a
     // carry-forward count. The old world recorded per-directory mtime rows
@@ -558,7 +598,7 @@ fn deleted_directory_leaves_no_trace_in_the_serving_generation() {
         ),
     );
     assert_eq!(
-        store.generation_paths(gen1.gen_id, Source::Worktree).expect("gen1 paths").len(),
+        worktree_rows(&db_file(&tmp), gen1.gen_id).len(),
         3
     );
 
@@ -568,16 +608,16 @@ fn deleted_directory_leaves_no_trace_in_the_serving_generation() {
         candidate(fingerprint(2), &[Page::new("root.md", "Root", 100)]),
     );
 
-    let serving = store.generation_paths(gen2.gen_id, Source::Worktree).expect("gen2 paths");
+    let serving = worktree_rows(&db_file(&tmp), gen2.gen_id);
     assert_eq!(serving.len(), 1, "stale subdir rows pruned from the serving generation");
     assert!(serving.iter().all(|r| r.parent_dir.is_empty()));
 
     // Retained history still shows the deleted subtree.
     assert_eq!(
-        store.generation_paths(gen1.gen_id, Source::Worktree).expect("gen1 retained").len(),
+        worktree_rows(&db_file(&tmp), gen1.gen_id).len(),
         3
     );
-    let conn = raw_conn(store.path());
+    let conn = raw_conn(&db_file(&tmp));
     assert!(fts_tables(&conn).contains(&format!("fts_{}", gen1.gen_id)));
     assert_eq!(ranked_oids(&conn, &format!("fts_{}", gen1.gen_id), "one").len(), 1);
     assert_eq!(ranked_oids(&conn, &format!("fts_{}", gen2.gen_id), "one").len(), 0);
@@ -585,10 +625,10 @@ fn deleted_directory_leaves_no_trace_in_the_serving_generation() {
 
 #[test]
 fn hostile_fs_disables_carry_forward_full_rescan_only() {
-    let (_tmp, store) = open_store();
+    let (tmp, store) = open_store();
 
     // Rewrite of index_hostile_dir_mtimes: hostile FS never consults stored
-    // mtimes (pass3_full_rescans upstream), so every walked file lands in
+    // mtimes (see `pass_worktree`), so every walked file lands in
     // the next generation from THIS walk — no row enters on stored-mtime
     // evidence, and stored rows cannot poison served mtimes.
     published(
@@ -601,7 +641,7 @@ fn hostile_fs_disables_carry_forward_full_rescan_only() {
 
     // Sabotage the stored mtimes: a hostile refresh ignores them entirely.
     {
-        let conn = writable_conn(store.path());
+        let conn = writable_conn(&db_file(&tmp));
         conn.execute_batch("UPDATE gen_paths SET stat_mtime_ns = 555;").expect("sabotage mtimes");
     }
 
@@ -613,18 +653,18 @@ fn hostile_fs_disables_carry_forward_full_rescan_only() {
         ),
     );
 
-    let rows = store.generation_paths(gen2.gen_id, Source::Worktree).expect("gen2 paths");
+    let rows = worktree_rows(&db_file(&tmp), gen2.gen_id);
     assert_eq!(rows.len(), 2, "full rescan publishes the complete walked corpus");
     assert!(
         rows.iter().all(|r| r.stat_mtime_ns == Some(100) || r.stat_mtime_ns == Some(200)),
         "rows must reflect walk truth, never sabotaged stored mtimes"
     );
-    assert_eq!(scalar(&raw_conn(store.path()), "SELECT COUNT(*) FROM generations"), 2);
+    assert_eq!(scalar(&raw_conn(&db_file(&tmp)), "SELECT COUNT(*) FROM generations"), 2);
 }
 
 #[test]
 fn carry_forward_reingests_only_changed_files() {
-    let (_tmp, store) = open_store();
+    let (tmp, store) = open_store();
 
     // Rewrite of index_dir_mtime_merkle: the Merkle short-circuit contract
     // becomes a carry-forward count. Eight files across four dirs; editing
@@ -650,8 +690,8 @@ fn carry_forward_reingests_only_changed_files() {
     let gen1 = published(&store, candidate(fingerprint(1), &cold));
     let gen2 = published(&store, candidate(fingerprint(2), &warm));
 
-    let old = store.generation_paths(gen1.gen_id, Source::Worktree).expect("gen1 paths");
-    let new = store.generation_paths(gen2.gen_id, Source::Worktree).expect("gen2 paths");
+    let old = worktree_rows(&db_file(&tmp), gen1.gen_id);
+    let new = worktree_rows(&db_file(&tmp), gen2.gen_id);
     assert_eq!(old.len(), 8);
     assert_eq!(new.len(), 8);
 
@@ -661,11 +701,11 @@ fn carry_forward_reingests_only_changed_files() {
     assert_eq!(differing[0], "docs1/a.md");
 }
 
-// ── 11–14: retention, verification, invariants ──────────────────────────
+// ── 11–13: retention, verification, invariants ──────────────────────────
 
 #[test]
 fn retention_keeps_newest_plus_recency_bound_per_d10() {
-    let (_tmp, store) = open_store();
+    let (tmp, store) = open_store();
 
     // Twelve sequential publishes; each adds one unique page plus carries
     // the shared corpus forward. created_at must increase monotonically so
@@ -694,7 +734,7 @@ fn retention_keeps_newest_plus_recency_bound_per_d10() {
     // access buckets beat everything; give the newest the worst bucket —
     // recency protection wins over access recency.
     {
-        let conn = writable_conn(store.path());
+        let conn = writable_conn(&db_file(&tmp));
         conn.execute_batch(
             "UPDATE generations SET access_bucket = 1000000 WHERE gen_id IN (1, 2, 3);
              UPDATE generations SET access_bucket = 0 WHERE gen_id = 10;",
@@ -715,7 +755,7 @@ fn retention_keeps_newest_plus_recency_bound_per_d10() {
     assert!(stats.bytes_before > 0);
     assert!(stats.bytes_after > 0);
 
-    let conn = raw_conn(store.path());
+    let conn = raw_conn(&db_file(&tmp));
     assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM generations"), RETAINED_GENERATIONS as i64 + 1);
     let survivors = fts_tables(&conn);
     for id in [1i64, 2, 3, 6, 7, 8, 9, 11, 12] {
@@ -749,7 +789,7 @@ fn retention_keeps_newest_plus_recency_bound_per_d10() {
 
 #[test]
 fn unverified_generation_row_never_serves() {
-    let (_tmp, store) = open_store();
+    let (tmp, store) = open_store();
     let fp = fingerprint(3);
     let generation = published(
         &store,
@@ -762,7 +802,7 @@ fn unverified_generation_row_never_serves() {
     // blob_count mismatching its member set ⇒ miss (fail-open toward
     // rehash), restorable once the row verifies again.
     {
-        let conn = writable_conn(store.path());
+        let conn = writable_conn(&db_file(&tmp));
         conn.execute_batch("UPDATE generations SET blob_count = blob_count + 1;")
             .expect("corrupt blob_count");
     }
@@ -771,7 +811,7 @@ fn unverified_generation_row_never_serves() {
         "a row failing serve-time verification must be reported as a miss"
     );
     {
-        let conn = writable_conn(store.path());
+        let conn = writable_conn(&db_file(&tmp));
         conn.execute(
             "UPDATE generations SET blob_count = ?1 WHERE gen_id = ?2",
             rusqlite::params![generation.blob_count, generation.gen_id],
@@ -783,7 +823,7 @@ fn unverified_generation_row_never_serves() {
     // Missing fts_ child ⇒ miss; recreating the exact schema restores
     // serviceability.
     {
-        let conn = writable_conn(store.path());
+        let conn = writable_conn(&db_file(&tmp));
         let gid = generation.gen_id;
         conn.execute_batch(&format!("DROP TABLE fts_{gid};")).expect("drop fts child");
     }
@@ -792,7 +832,7 @@ fn unverified_generation_row_never_serves() {
         "missing fts_ table must be reported as a miss"
     );
     {
-        let conn = writable_conn(store.path());
+        let conn = writable_conn(&db_file(&tmp));
         conn.execute_batch(&format!(
             "CREATE VIRTUAL TABLE fts_{gid} USING fts5(
                  title, aliases_text, tags_text, keywords_text, summary, body,
@@ -807,29 +847,8 @@ fn unverified_generation_row_never_serves() {
 }
 
 #[test]
-fn compute_happens_outside_write_txn() {
-    let (_tmp, store) = open_store();
-    assert!(!store.is_in_write_txn(), "freshly opened handle is autocommit");
-
-    // The sanctioned write window exposes itself; heavy parse/ingest never
-    // runs inside one because PublishCandidate is inert data built outside.
-    store
-        .with_write_txn(|inner| {
-            assert!(inner.is_in_write_txn(), "inside the explicit write txn");
-            Ok(())
-        })
-        .expect("write txn closure");
-    assert!(!store.is_in_write_txn(), "txn closed on scope exit");
-
-    let cand = candidate(fingerprint(4), &[Page::new("a.md", "Alpha", 100)]);
-    assert!(!store.is_in_write_txn(), "candidate construction is outside any txn");
-    published(&store, cand);
-    assert!(!store.is_in_write_txn(), "publish leaves no txn open");
-}
-
-#[test]
 fn best_effort_access_touch_never_fails_lookup() {
-    let (_tmp, store) = open_store();
+    let (tmp, store) = open_store();
     let fp = fingerprint(5);
     published(&store, candidate(fp.clone(), &[Page::new("a.md", "Alpha", 100)]));
 
@@ -837,7 +856,7 @@ fn best_effort_access_touch_never_fails_lookup() {
     // SELECT proceeds on its WAL snapshot, the best-effort access_bucket
     // UPDATE times out busy and is swallowed — the read neither fails nor
     // waits unboundedly (hot reads are not writes).
-    let holder = writable_conn(store.path());
+    let holder = writable_conn(&db_file(&tmp));
     holder
         .execute_batch("BEGIN IMMEDIATE; CREATE TABLE hold_the_write_lock (x INTEGER);")
         .expect("acquire write lock");
@@ -861,8 +880,8 @@ fn best_effort_access_touch_never_fails_lookup() {
 fn busy_write_txn_during_open_and_publish_degrades_not_panics() {
     // Part A — publish retries to success when the writer releases early.
     {
-        let (_tmp, store) = open_store();
-        let db = store.path().to_path_buf();
+        let (tmp, store) = open_store();
+        let db = db_file(&tmp);
         let holder = Connection::open(&db).expect("holder connection");
         holder
             .execute_batch("BEGIN IMMEDIATE; CREATE TABLE hold_a (x INTEGER);")
@@ -892,8 +911,8 @@ fn busy_write_txn_during_open_and_publish_degrades_not_panics() {
     // Part B — publish errors gracefully (never panics) when the writer
     // holds through the whole bounded budget.
     {
-        let (_tmp, store) = open_store();
-        let db = store.path().to_path_buf();
+        let (tmp, store) = open_store();
+        let db = db_file(&tmp);
         let holder = Connection::open(&db).expect("holder connection");
         holder
             .execute_batch("BEGIN IMMEDIATE; CREATE TABLE hold_b (x INTEGER);")
@@ -941,13 +960,13 @@ fn busy_write_txn_during_open_and_publish_degrades_not_panics() {
 /// such churn instead of answering `no such table`.
 #[test]
 fn served_generation_verification_degrades_after_gc_eviction() {
-    let (_tmp, store) = open_store();
+    let (tmp, store) = open_store();
 
     let first = published(
         &store,
         candidate(fingerprint(1), &[Page::new("pinned.md", "Pinned", 100)]),
     );
-    assert!(store.generation_is_served(first.gen_id));
+    assert!(generation_is_served(&db_file(&tmp), first.gen_id));
 
     // Churn eleven same-hour generations past it (distinct fingerprints,
     // identical corpus shape).
@@ -968,7 +987,7 @@ fn served_generation_verification_degrades_after_gc_eviction() {
         stats.evicted_gen_ids
     );
     assert!(
-        !store.generation_is_served(first.gen_id),
+        !generation_is_served(&db_file(&tmp), first.gen_id),
         "an evicted pinned generation must verify as unserved (miss semantics), not Err"
     );
 }
@@ -1042,10 +1061,10 @@ fn init_lock_held_degrades_without_hardening_leak_or_hard_error() {
 
         let store = GenerationsStore::open(tmp.path()).expect("uncontended open");
         assert!(!store.is_degraded());
-        assert!(
-            !wiki::index::generations::GenerationsStore::open(tmp.path())
-                .expect("reopen")
-                .generation_is_served(0),
+        drop(GenerationsStore::open(tmp.path()).expect("reopen"));
+        assert_eq!(
+            scalar(&raw_conn(&db), "SELECT COUNT(*) FROM generations"),
+            0,
             "fresh quarantine leaves zero generations; reopen stays healthy"
         );
     }

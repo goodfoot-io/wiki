@@ -1,7 +1,7 @@
 ---
 title: Wiki Logging and Perf Instrumentation
 summary: Documents all logging and performance tracing points in the wiki CLI. 
-links-reviewed: 8
+links-reviewed: 9
 ---
 
 ## Overview
@@ -22,21 +22,21 @@ Perf scope events measure execution time and record success/error status. They a
 
 | Location | Scope Name | Measures | Metadata |
 |----------|-----------|----------|----------|
-| [main.rs](./src/main.rs#L310) | `command.<name>` | Total wall time of the command (stderr span only; not written to `wiki.log`) | — |
+| [main.rs](./src/main.rs#L304) | `command.<name>` | Total wall time of the command (stderr span only; not written to `wiki.log`) | — |
 
 ### Index Refresh
 
-These scopes cover the cold-cache path: when the stat-only freshness gate misses, [`WikiIndex::prepare_for_source`](./src/index/mod.rs#L323-L327) resolves the digest gate and drives the three-pass refresh onto the generations store.
+These scopes cover the cold-cache path: when the stat-only freshness gate misses, [`WikiIndex::prepare_for_source`](./src/index/mod.rs#L271-L273) resolves the digest gate and drives the three-pass refresh onto the generations store.
 
 | Location | Scope Name | Measures | Metadata |
 |----------|-----------|----------|----------|
-| [index/mod.rs](./src/index/mod.rs#L450-L455) | `index.gix_open` | Time to open the gix repository for a refresh | Empty object |
-| [index/mod.rs](./src/index/mod.rs#L454-L463) | `index.refresh` | Total three-pass refresh (candidate building against the base generation) | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L215-L269) | `index.pass_tree` | Pass 1: diff `HEAD^{tree}` against the previously indexed tree | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L271-L283) | `index.pass_index` | Pass 2: git index entry scan | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L285-L304) | `index.pass_worktree` | Pass 3: worktree walk, read + hash of candidate markdown | Empty object |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L306-L366) | `index.apply_deltas` | Building the publish candidate from merged deltas (blob parse, gen_paths membership, refcount reconciliation) | `deltas` (count) |
-| [index/passes/mod.rs](./src/index/passes/mod.rs#L372-L377) | `index.publish` | Publishing the generation: fts materialization + transactional store write | Empty object |
+| [index/mod.rs](./src/index/mod.rs#L386-L391) | `index.gix_open` | Time to open the gix repository for a refresh | Empty object |
+| [index/mod.rs](./src/index/mod.rs#L390-L399) | `index.refresh` | Total three-pass refresh (candidate building against the base generation) | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L212-L266) | `index.pass_tree` | Pass 1: diff `HEAD^{tree}` against the previously indexed tree | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L267-L276) | `index.pass_index` | Pass 2: git index entry scan | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L279-L288) | `index.pass_worktree` | Pass 3: worktree walk, read + hash of candidate markdown | Empty object |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L298-L336) | `index.apply_deltas` | Building the publish candidate from merged deltas (blob parse, gen_paths membership, refcount reconciliation) | `deltas` (count) |
+| [index/passes/mod.rs](./src/index/passes/mod.rs#L366-L371) | `index.publish` | Publishing the generation: fts materialization + transactional store write | Empty object |
 
 ### File Discovery
 
@@ -51,9 +51,9 @@ The disposable anchor-cache tiers inside [`wiki check`](./src/commands/check.rs)
 
 | Location | Event Name | Meaning |
 |----------|-----------|----------|
-| [check.rs](./src/commands/check.rs#L290-L294) | `anchor_cache` | Emitted once per check invocation after the run body, on every path — early exits included. `meta.hits`, `meta.misses`, `meta.bypasses` tally the row-level outcomes across both tiers; `meta.fingerprint_ms` and `meta.walk_ms` sum each tier's git-leg durations ([drift.rs](./src/commands/drift.rs#L1717) and [drift.rs](./src/commands/drift.rs#L404)), recorded on the miss path only — a served hit runs no git leg — so a fully warm run reports zeros. |
+| [check.rs](./src/commands/check.rs#L288-L292) | `anchor_cache` | Emitted once per check invocation after the run body, on every path — early exits included. `meta.hits`, `meta.misses`, `meta.bypasses` tally the row-level outcomes across both tiers; `meta.fingerprint_ms` and `meta.walk_ms` sum each tier's git-leg durations ([drift.rs](./src/commands/drift.rs#L1718) and [drift.rs](./src/commands/drift.rs#L405)), recorded on the miss path only — a served hit runs no git leg — so a fully warm run reports zeros. |
 
-The tally sites live at the tier seams: the shallow gate ([drift.rs](./src/commands/drift.rs#L302-L303)), the verified-hit serves ([drift.rs](./src/commands/drift.rs#L317-L318), [drift.rs](./src/commands/drift.rs#L1667-L1669)), and the misses that precede computing ([drift.rs](./src/commands/drift.rs#L323-L325), [drift.rs](./src/commands/drift.rs#L1670-L1672)).
+The tally sites live at the tier seams: the shallow gate ([drift.rs](./src/commands/drift.rs#L303-L304)), the verified-hit serves ([drift.rs](./src/commands/drift.rs#L318-L319), [drift.rs](./src/commands/drift.rs#L1668-L1670)), and the misses that precede computing ([drift.rs](./src/commands/drift.rs#L324-L326), [drift.rs](./src/commands/drift.rs#L1671-L1673)).
 
 ## Direct Output Points (println! and eprintln!)
 

@@ -73,10 +73,6 @@ pub enum CacheError {
     /// SQLite operation failed (probe, open, statement).
     #[error("wiki store SQLite failure: {0}")]
     Sqlite(#[from] rusqlite::Error),
-    /// The database was corrupt (NOTADB / CORRUPT / meta mismatch) and the
-    /// single quarantine-and-recreate attempt also failed.
-    #[error("wiki store is corrupt and could not be recreated: {0}")]
-    Corrupt(String),
 }
 
 /// Invocation-scoped cache diagnostic budget. Clones share the same guard,
@@ -84,11 +80,11 @@ pub enum CacheError {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InjectedFault {
     Operational,
-    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    #[cfg(debug_assertions)]
     Schema,
     /// Overwrites the store file with garbage bytes, forcing the
     /// corruption-class quarantine path (plan D11's witness harness).
-    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    #[cfg(debug_assertions)]
     Corrupt,
 }
 
@@ -273,10 +269,9 @@ impl CacheStore {
     /// probe/quarantine/DDL (git-span's shape), then released before the
     /// working connection opens; a held lock means another process is mid-
     /// init, so this run serves uncached rather than waiting.
-    pub fn open(common_dir: &Path) -> Result<Option<Self>, CacheError> {
-        Self::open_with_reporter(common_dir, CacheReporter::default())
-    }
-
+    ///
+    /// `reporter` carries the invocation's one-diagnostic budget (see
+    /// [`CacheReporter::for_invocation`]).
     pub fn open_with_reporter(
         common_dir: &Path,
         reporter: CacheReporter,
@@ -376,10 +371,6 @@ impl CacheStore {
 
     /// Construct a cache-management handle without opening SQLite. This is
     /// required on Windows, where an open database cannot be unlinked.
-    pub fn for_clear(common_dir: &Path) -> Self {
-        Self::for_clear_with_reporter(common_dir, CacheReporter::default())
-    }
-
     pub fn for_clear_with_reporter(common_dir: &Path, reporter: CacheReporter) -> Self {
         Self {
             conn: RefCell::new(None),
@@ -392,10 +383,10 @@ impl CacheStore {
         }
     }
 
-    /// Whether this handle currently retains SQLite. Exposed as a narrow
-    /// ordering seam for platform-sensitive clear tests.
-    #[doc(hidden)]
-    pub fn connection_is_open(&self) -> bool {
+    /// Whether this handle currently retains SQLite — the ordering seam for
+    /// the platform-sensitive clear test.
+    #[cfg(test)]
+    fn connection_is_open(&self) -> bool {
         self.conn.borrow().is_some()
     }
 
@@ -855,8 +846,7 @@ mod tests {
             "gone",
         ));
         let sqlite = CacheError::from(rusqlite::Error::InvalidQuery);
-        let corrupt = CacheError::Corrupt("witness".into());
-        for error in [io.to_string(), sqlite.to_string(), corrupt.to_string()] {
+        for error in [io.to_string(), sqlite.to_string()] {
             assert!(
                 !error.contains("anchor"),
                 "shared faults must not claim the anchor tier: {error}"
@@ -870,5 +860,19 @@ mod tests {
                 "shared faults must name the store layer: {error}"
             );
         }
+    }
+
+    #[test]
+    fn clear_releases_its_connection_before_the_destructive_window() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = CacheStore::open_with_reporter(dir.path(), CacheReporter::default())
+            .expect("open store")
+            .expect("init lock is not held in a test fixture");
+        assert!(store.connection_is_open());
+        store.clear().expect("clear");
+        assert!(
+            !store.connection_is_open(),
+            "clear must release SQLite before the destructive window"
+        );
     }
 }

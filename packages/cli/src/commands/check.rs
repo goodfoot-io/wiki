@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::commands::discover_files;
 use crate::frontmatter::{Frontmatter, build_index, parse_frontmatter};
-use crate::git::GitReader;
+use crate::git::{GitReader, GitSnapshot};
 use crate::git::resolve_ref;
 use crate::headings::{extract_headings, resolve_heading, Heading};
 use crate::index::DocSource;
@@ -133,9 +133,9 @@ fn source_aware_is_dir(
 ) -> bool {
     match source {
         DocSource::WorkingTree => repo_root.join(rel_path).is_dir(),
-        DocSource::Index | DocSource::Head => {
+        DocSource::Git(snapshot) => {
             let prefix = format!("{}/", rel_path.to_string_lossy().trim_end_matches('/'));
-            let paths = match git_reader.list_paths(source) {
+            let paths = match git_reader.list_paths(snapshot) {
                 Ok(p) => p,
                 Err(_) => return false,
             };
@@ -156,9 +156,7 @@ fn source_aware_exists(
 ) -> bool {
     match source {
         DocSource::WorkingTree => repo_root.join(rel_path).exists(),
-        DocSource::Index | DocSource::Head => {
-            git_reader.has_entry(source, rel_path).unwrap_or(false)
-        }
+        DocSource::Git(snapshot) => git_reader.has_entry(snapshot, rel_path).unwrap_or(false),
     }
 }
 
@@ -171,17 +169,17 @@ fn read_via_source(
 ) -> std::io::Result<String> {
     match source {
         DocSource::WorkingTree => std::fs::read_to_string(path),
-        DocSource::Index | DocSource::Head => {
+        DocSource::Git(snapshot) => {
             let path_rel = path
                 .strip_prefix(repo_root)
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| path.to_string_lossy().into_owned());
-            let result = git_reader.read_blob(source, &path_rel);
+            let result = git_reader.read_blob(snapshot, &path_rel);
             match result {
                 Ok(Some(s)) => Ok(s),
                 Ok(None) => Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
-                    format!("{path_rel} not present in source {:?}", source),
+                    format!("{path_rel} not present in source {snapshot:?}"),
                 )),
                 Err(e) => Err(std::io::Error::other(e.to_string())),
             }
@@ -196,11 +194,11 @@ fn filter_files_for_source(
     source: DocSource,
     git_reader: &GitReader,
 ) -> Result<Vec<PathBuf>> {
-    if matches!(source, DocSource::WorkingTree) {
+    let DocSource::Git(snapshot) = source else {
         return Ok(files);
-    }
+    };
     let listed: std::collections::HashSet<String> =
-        git_reader.list_paths(source)?.into_iter().collect();
+        git_reader.list_paths(snapshot)?.into_iter().collect();
     Ok(files
         .into_iter()
         .filter(|p| {
@@ -631,55 +629,6 @@ fn run_inner(
     }
 }
 
-/// Collect diagnostics for the given glob patterns without printing output.
-#[allow(dead_code)]
-pub fn collect(globs: &[String], repo_root: &Path) -> Result<Vec<CheckDiagnostic>> {
-    collect_with_source(globs, repo_root, DocSource::WorkingTree)
-}
-
-/// Collect diagnostics with an explicit `DocSource`.
-pub fn collect_with_source(
-    globs: &[String],
-    repo_root: &Path,
-    source: DocSource,
-) -> Result<Vec<CheckDiagnostic>> {
-    // This entry point (hook/tests) scans from the repo root rather than a
-    // narrower working directory.  discover_files returns Ok(vec![]) for an
-    // empty corpus; propagate that as an error so the caller sees "no wiki
-    // pages found" rather than an empty diagnostic list with exit 0.
-
-    // Open the git repository exactly once for the run (see `run_inner`).
-    let git_reader = GitReader::open(repo_root)?;
-
-    let files = discover_files(globs, repo_root, repo_root, source, Some(&git_reader))?;
-    if files.is_empty() {
-        return Err(miette::miette!(
-            "no wiki pages found (no .md files matched)"
-        ));
-    }
-    let files = filter_files_for_source(files, repo_root, source, &git_reader)?;
-    let index_files = if globs.is_empty() {
-        files.clone()
-    } else {
-        let raw = discover_files(&[], repo_root, repo_root, source, Some(&git_reader))?;
-        filter_files_for_source(raw, repo_root, source, &git_reader)?
-    };
-    let mut content_cache = ContentCache::new();
-    let cache_reporter = crate::cache::CacheReporter::for_invocation();
-    let mut drift_run = drift::DriftRunCtx::new();
-    collect_for_files(
-        &files,
-        &index_files,
-        repo_root,
-        source,
-        &git_reader,
-        &mut drift_run,
-        &mut content_cache,
-        true,
-        &cache_reporter,
-    )
-}
-
 /// Extract the anchor portion (after `#`) from a markdown link href, if present.
 ///
 /// Returns `None` when the href contains no `#`. Line-range anchors like
@@ -959,7 +908,7 @@ fn collect_drift_diagnostics(
         // The newest committed value is the page blob at HEAD; a page absent
         // at HEAD (new file) has none. A HEAD read failure is treated as an
         // absent field, matching the pre-tri-state behavior.
-        let committed_value = match read_via_source(path, repo_root, DocSource::Head, reader) {
+        let committed_value = match read_via_source(path, repo_root, DocSource::Git(GitSnapshot::Head), reader) {
             Ok(head_content) => drift::read_links_reviewed(&head_content),
             Err(_) => drift::LinksReviewedRead::Readable(None),
         };
@@ -1360,6 +1309,55 @@ mod tests {
     /// Serialize tests that share process-level state (e.g. PATH or env vars).
     static PATH_MUTEX: Mutex<()> = Mutex::new(());
 
+    /// Collect diagnostics for the given glob patterns without printing output.
+    fn collect(globs: &[String], repo_root: &Path) -> Result<Vec<CheckDiagnostic>> {
+        collect_with_source(globs, repo_root, DocSource::WorkingTree)
+    }
+
+    /// Collect diagnostics with an explicit `DocSource`, scanning from the
+    /// repo root (the collect-without-printing harness for these tests).
+    fn collect_with_source(
+        globs: &[String],
+        repo_root: &Path,
+        source: DocSource,
+    ) -> Result<Vec<CheckDiagnostic>> {
+        // This harness scans from the repo root rather than a
+        // narrower working directory.  discover_files returns Ok(vec![]) for an
+        // empty corpus; propagate that as an error so the caller sees "no wiki
+        // pages found" rather than an empty diagnostic list with exit 0.
+
+        // Open the git repository exactly once for the run (see `run_inner`).
+        let git_reader = GitReader::open(repo_root)?;
+
+        let files = discover_files(globs, repo_root, repo_root, source, Some(&git_reader))?;
+        if files.is_empty() {
+            return Err(miette::miette!(
+                "no wiki pages found (no .md files matched)"
+            ));
+        }
+        let files = filter_files_for_source(files, repo_root, source, &git_reader)?;
+        let index_files = if globs.is_empty() {
+            files.clone()
+        } else {
+            let raw = discover_files(&[], repo_root, repo_root, source, Some(&git_reader))?;
+            filter_files_for_source(raw, repo_root, source, &git_reader)?
+        };
+        let mut content_cache = ContentCache::new();
+        let cache_reporter = crate::cache::CacheReporter::for_invocation();
+        let mut drift_run = drift::DriftRunCtx::new();
+        collect_for_files(
+            &files,
+            &index_files,
+            repo_root,
+            source,
+            &git_reader,
+            &mut drift_run,
+            &mut content_cache,
+            true,
+            &cache_reporter,
+        )
+    }
+
     fn diag(kind: &str, line: usize) -> CheckDiagnostic {
         CheckDiagnostic {
             kind: kind.into(),
@@ -1755,7 +1753,7 @@ mod tests {
             diags_wt
         );
 
-        let diags_idx = collect_with_source(&[], repo.path(), crate::index::DocSource::Index)
+        let diags_idx = collect_with_source(&[], repo.path(), crate::index::DocSource::Git(GitSnapshot::Index))
             .expect("collect idx");
         assert!(
             diags_idx.iter().any(|d| d.kind == "link_broken"),
@@ -1792,7 +1790,7 @@ mod tests {
         fs::remove_dir_all(repo.path().join("wiki/docs")).expect("remove docs dir");
 
         // Validate against HEAD — the directory exists at HEAD, so link is valid.
-        let diags = collect_with_source(&[], repo.path(), crate::index::DocSource::Head)
+        let diags = collect_with_source(&[], repo.path(), crate::index::DocSource::Git(GitSnapshot::Head))
             .expect("collect");
         assert!(
             diags.iter().all(|d| d.kind != "broken_link"),
@@ -2257,7 +2255,7 @@ mod tests {
             repo.path(),
             repo.path(),
             false,
-            crate::index::DocSource::Index,
+            crate::index::DocSource::Git(GitSnapshot::Index),
             true,
             false,
             false,
@@ -2273,7 +2271,7 @@ mod tests {
 
     /// Finding 1 regression: a genuine infrastructure error during `discover_files`
     /// (not the empty-corpus condition) must exit 2 in `--fix` mode, not degrade to
-    /// an empty-corpus success.  We use `DocSource::Index` on a repo with no git
+    /// an empty-corpus success.  We use `--source=index` on a repo with no git
     /// index at all (no `git add` ever run) so that `list_paths` fails with a real
     /// git error; this is distinct from the empty-corpus condition (Ok(vec![])).
     ///
@@ -2307,7 +2305,7 @@ mod tests {
             root,
             root,
             false,
-            crate::index::DocSource::Index,
+            crate::index::DocSource::Git(GitSnapshot::Index),
             true, // fix
             false,
             false,
@@ -2457,7 +2455,7 @@ mod tests {
         std::fs::remove_file(repo.path().join("src/utils.rs")).expect("remove file");
 
         let diags =
-            collect_with_source(&[], repo.path(), crate::index::DocSource::Head).expect("collect");
+            collect_with_source(&[], repo.path(), crate::index::DocSource::Git(GitSnapshot::Head)).expect("collect");
 
         let bl: Vec<_> = diags.iter().filter(|d| d.kind == "broken_link").collect();
         assert_eq!(bl.len(), 1, "expected exactly one broken_link: {diags:?}");

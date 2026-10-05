@@ -13,7 +13,7 @@ use serde_json::json;
 
 #[cfg(test)]
 use crate::frontmatter::Frontmatter;
-use crate::git::GitReader;
+use crate::git::{GitReader, GitSnapshot};
 use crate::git::repo_inventory;
 use crate::index::DocSource;
 use crate::perf;
@@ -255,7 +255,7 @@ pub fn discover_files(
             );
 
             let mut files = match source {
-                DocSource::Index | DocSource::Head => {
+                DocSource::Git(snapshot) => {
                     if globs.is_empty() {
                         discover_default_files(repo_root, &walk_root, prefix.as_deref(), source, git_reader, &wiki_ignore)?
                     } else {
@@ -267,7 +267,7 @@ pub fn discover_files(
                             globs,
                             repo_root,
                             prefix.as_deref(),
-                            source,
+                            snapshot,
                             git_reader,
                             &wiki_ignore,
                         )?
@@ -376,9 +376,9 @@ fn discover_default_files(
     // to `prefix` (the current working directory) by filtering the repo-
     // relative path list.
     match source {
-        DocSource::Index | DocSource::Head => {
+        DocSource::Git(snapshot) => {
             let all_paths = if let Some(gr) = git_reader {
-                gr.list_paths(source)?
+                gr.list_paths(snapshot)?
             } else {
                 source.list_paths(repo_root)?
             };
@@ -396,7 +396,7 @@ fn discover_default_files(
                     // YAML is malformed, they are trying to be wiki pages and
                     // callers like check/collect will emit diagnostics for errors.
                     let content = if let Some(gr) = git_reader {
-                        gr.read_blob(source, p)
+                        gr.read_blob(snapshot, p)
                     } else {
                         source.read(repo_root, p)
                     };
@@ -565,7 +565,7 @@ fn is_fixture_path(path_rel: &str) -> bool {
     path_rel.contains("/tests/fixtures/") || path_rel.contains("\\tests\\fixtures\\")
 }
 
-/// Filter a `DocSource`'s path list against the same glob semantics as
+/// Filter a git snapshot's path list against the same glob semantics as
 /// `discover_files_by_walk`: globs are normalised to repo-relative form and
 /// matched against the source's repo-relative paths.  Used under
 /// `--source=index|head` so glob discovery never reads the worktree.
@@ -573,7 +573,7 @@ fn discover_files_by_glob_in_source(
     globs: &[String],
     repo_root: &Path,
     prefix: Option<&Path>,
-    source: DocSource,
+    snapshot: GitSnapshot,
     git_reader: Option<&GitReader>,
     wiki_ignore: &Arc<crate::wikiignore::WikiIgnore>,
 ) -> Result<Vec<PathBuf>> {
@@ -591,9 +591,9 @@ fn discover_files_by_glob_in_source(
         .wrap_err("failed to build glob set")?;
 
     let all_paths = if let Some(gr) = git_reader {
-        gr.list_paths(source)?
+        gr.list_paths(snapshot)?
     } else {
-        source.list_paths(repo_root)?
+        DocSource::Git(snapshot).list_paths(repo_root)?
     };
     let mut files = Vec::new();
     for path_rel in all_paths {
@@ -989,12 +989,6 @@ mod tests {
                 fs::create_dir_all(parent).expect("create_dir_all");
             }
             fs::write(&full, content).expect("write file");
-        }
-
-        #[allow(dead_code)]
-        fn commit(&self, message: &str) {
-            self.git(&["add", "-A"]);
-            self.git(&["commit", "-m", message]);
         }
 
         fn git(&self, args: &[&str]) {

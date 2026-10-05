@@ -11,10 +11,10 @@ pub mod cache;
 pub mod frontmatter;
 pub mod git;
 pub mod index;
-// The command-lifecycle half of `perf` (init/finish/spans) is only called
-// from the binary's main; the lib target needs the module solely for the
-// scope events inside `index`.
-#[allow(dead_code)]
-mod perf;
+// `index` needs `perf` for its scope events; the command-lifecycle half
+// (init/finish/spans) is called only from the binary's main. Public so the
+// lib build does not flag that half as dead — the binary build, where every
+// module is private, remains the dead-code check for it.
+pub mod perf;
 pub mod store;
 pub mod wikiignore;
