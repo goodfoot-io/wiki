@@ -96,7 +96,7 @@ export const LogLevel = {
 export type LogLevel = (typeof LogLevel)[keyof typeof LogLevel];
 
 // ViewColumn enum
-export const ViewColumn = {
+const ViewColumn = {
   Active: -1,
   Beside: -2,
   One: 1,
@@ -110,10 +110,10 @@ export const ViewColumn = {
   Nine: 9
 } as const;
 
-export type ViewColumn = (typeof ViewColumn)[keyof typeof ViewColumn];
+type ViewColumn = (typeof ViewColumn)[keyof typeof ViewColumn];
 
 // OutputChannel interface
-export interface OutputChannel {
+interface OutputChannel {
   readonly name: string;
   append(value: string): void;
   appendLine(value: string): void;
@@ -160,7 +160,7 @@ export class StubLogOutputChannel implements LogOutputChannel {
   error(_error: string | Error, ..._args: unknown[]): void {}
 }
 
-export class StubOutputChannel implements OutputChannel {
+class StubOutputChannel implements OutputChannel {
   constructor(readonly name: string) {}
 
   append(_value: string): void {}

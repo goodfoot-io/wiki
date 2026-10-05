@@ -10,17 +10,21 @@
 
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { formatLogError, getWikiLogger } from '../utils/logger.js';
-import { loadValidatedRecentlyViewed, recordWikiView } from '../utils/recentlyViewed.js';
-import { runWikiCommand } from '../utils/wikiBinary.js';
-import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
+import {
+  formatLogError,
+  getWikiLogger,
+  loadValidatedRecentlyViewed,
+  recordWikiView,
+  runWikiCommand,
+  type WikiBinaryManager
+} from '../utils/index.js';
 
 function qpLog() {
   return getWikiLogger().getChildLogger({ label: 'QuickPick' });
 }
 
 /** Item returned by `wiki list --format json`. */
-export interface WikiListItem {
+interface WikiListItem {
   title: string;
   aliases: string[];
   tags: string[];
@@ -148,7 +152,7 @@ export async function openWikiFile(file: string): Promise<void> {
 /**
  * Handler returned by {@link createSearchHandler}.
  */
-export interface SearchHandler {
+interface SearchHandler {
   /** Handle a query change event from the QuickPick. */
   onQueryChange: (query: string) => void;
   /** Abort any in-flight search. */

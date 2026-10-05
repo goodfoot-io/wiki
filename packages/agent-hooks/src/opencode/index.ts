@@ -28,8 +28,6 @@ import {
 } from '../common/wiki-check.js';
 import type { OpencodeAfterOutput, OpencodePluginInput, OpencodeToolInput, WikiOpencodeHooks } from './types.js';
 
-export type { OpencodeAfterOutput, OpencodePluginInput, OpencodeToolInput, WikiOpencodeHooks } from './types.js';
-
 /** Tool ids whose writes can touch wiki members (no notebook concept on opencode). */
 const WRITE_TOOL_IDS = new Set(['edit', 'write']);
 const PATCH_TOOL_ID = 'apply_patch';
@@ -37,7 +35,7 @@ const PATCH_TOOL_ID = 'apply_patch';
 const WIKI_CHECK_TIMEOUT_MS = 25000;
 
 /** Injected surfaces for {@link assemblePlugin} — every field optional. */
-export interface PluginDeps {
+interface PluginDeps {
   /** Directory opencode resolved the plugin in; defaults to process cwd. */
   directory?: string;
   /** Binary resolution override; defaults to the core's resolver. */

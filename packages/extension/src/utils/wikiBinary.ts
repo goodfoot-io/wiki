@@ -27,18 +27,13 @@ export interface WikiBinaryHandle {
   version?: string;
 }
 
-export type WikiBinaryResolution =
-  | { kind: 'managed'; path: string; version: string }
-  | { kind: 'path'; path: string }
-  | { kind: 'missing'; reason: string };
-
-export interface WikiCommandResult {
+interface WikiCommandResult {
   stdout: string;
   stderr: string;
   exitCode: number;
 }
 
-export interface WikiChecksumsManifest {
+interface WikiChecksumsManifest {
   version: string;
   assets: Record<string, { name: string; sha256: string }>;
 }
@@ -61,7 +56,7 @@ interface ManagedBinaryManifest {
  */
 const inflightInstalls = new Map<string, Promise<InstallManagedWikiBinaryResult>>();
 
-export interface InstallManagedWikiBinaryParams {
+interface InstallManagedWikiBinaryParams {
   storageRoot: string;
   version: string;
   releaseBaseUrl: string;

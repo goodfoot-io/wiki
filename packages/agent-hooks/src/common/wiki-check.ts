@@ -25,7 +25,7 @@ export interface WikiCheckLogger {
  * tail — including a split multibyte character at the window boundary — is
  * never scanned.
  */
-export function readFrontmatterPrefix(absPath: string): string {
+function readFrontmatterPrefix(absPath: string): string {
   const buf = Buffer.alloc(FRONTMATTER_SCAN_BYTES);
   const fd = openSync(absPath, 'r');
   try {
@@ -95,7 +95,7 @@ export function compareSemver(a: string, b: string): number {
 }
 
 /** Candidate VS Code `globalStorage` roots across editions and platforms. */
-export function vscodeGlobalStorageRoots(): string[] {
+function vscodeGlobalStorageRoots(): string[] {
   const home = homedir();
   const roots = [
     join(home, '.vscode-server', 'data', 'User', 'globalStorage'),
@@ -226,7 +226,7 @@ export interface WikiCheckResult {
   output?: string;
 }
 
-export interface WikiCheckOptions {
+interface WikiCheckOptions {
   /** Absolute or PATH-resolvable path to the `wiki` binary to spawn. */
   binary: string;
   /** Spawn timeout in milliseconds; defaults to {@link DEFAULT_WIKI_CHECK_TIMEOUT_MS}. */

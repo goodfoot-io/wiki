@@ -9,7 +9,7 @@
 
 import * as path from 'node:path';
 
-export interface WikiPlatformTarget {
+interface WikiPlatformTarget {
   platform: NodeJS.Platform;
   arch: NodeJS.Architecture;
   assetKey: string;

@@ -9,14 +9,21 @@
 import * as vscode from 'vscode';
 import { wikiQuickPick } from './commands/wikiQuickPick.js';
 import { WikiLanguageFeatures } from './providers/WikiLanguageFeatures.js';
-import { formatLogError, getWikiLogger, registerWikiLogger } from './utils/logger.js';
-import { WikiBinaryManager, wasManagedInstall } from './utils/wikiInstaller.js';
+import {
+  formatLogError,
+  getWikiLogger,
+  registerWikiLogger,
+  WikiBinaryManager,
+  wasManagedInstall
+} from './utils/index.js';
 
 /**
  * Called by VS Code when the extension is activated.
- * Registers the wiki custom editor and commands.
+ * Registers the wiki custom editor and commands. Public because the VS Code
+ * extension host calls it; no module imports it.
  *
  * @param context - The VS Code extension context providing subscriptions and URIs.
+ * @public
  */
 export function activate(context: vscode.ExtensionContext): void {
   registerWikiLogger(context);
@@ -121,7 +128,10 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 /**
- * Called by VS Code when the extension is deactivated.
+ * Called by VS Code when the extension is deactivated. Public because the
+ * VS Code extension host calls it; no module imports it.
+ *
+ * @public
  */
 export function deactivate(): void {
   // No-op: subscriptions are disposed by VS Code.

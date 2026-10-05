@@ -21,7 +21,7 @@ export const RECENTLY_VIEWED_KEY = 'wiki.recentlyViewed';
 /** Silent upper bound — older entries fall off as new ones are pushed. */
 export const RECENTLY_VIEWED_CAP = 50;
 
-export interface RecentlyViewedItem extends vscode.QuickPickItem {
+interface RecentlyViewedItem extends vscode.QuickPickItem {
   file: string;
 }
 

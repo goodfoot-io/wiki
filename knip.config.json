@@ -7,19 +7,32 @@
       "ignoreDependencies": ["@goodfoot/agent-skills"]
     },
     "packages/agent-hooks": {
-      "entry": ["src/**/*.ts", "test/**/*.ts", "scripts/*.{js,mjs}"],
-      "project": ["src/**/*.ts", "test/**/*.ts", "scripts/*.{js,mjs}"]
+      "entry": [
+        "src/claude/post-tool-use.ts",
+        "src/codex/post-tool-use.ts",
+        "src/opencode/index.ts",
+        "test/**/*.ts",
+        "scripts/*.{js,mjs}"
+      ],
+      "project": ["src/**/*.ts", "test/**/*.ts", "scripts/*.{js,mjs}"],
+      "includeEntryExports": true
     },
     "packages/cli": {
       "entry": ["scripts/*.{js,mjs}"],
       "project": ["scripts/*.{js,mjs}"]
     },
     "packages/extension": {
-      "entry": ["src/**/*.ts", "test/**/*.ts", "scripts/bundle/*.js"],
-      "project": ["src/**/*.ts", "test/**/*.ts", "scripts/bundle/*.js"]
+      "entry": [
+        "src/extension.ts",
+        "test/suite/index.ts",
+        "test/suite/**/*.test.ts",
+        "scripts/bundle/*.js"
+      ],
+      "project": ["src/**/*.ts", "test/**/*.ts", "scripts/bundle/*.js"],
+      "includeEntryExports": true
     },
     "packages/vscode-logging": {
-      "entry": ["src/**/*.ts", "test/**/*.ts"],
+      "entry": ["test/index.ts"],
       "project": ["src/**/*.ts", "test/**/*.ts"],
       "ignoreDependencies": ["@types/vscode"]
     }

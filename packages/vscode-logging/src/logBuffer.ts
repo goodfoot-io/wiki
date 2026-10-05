@@ -10,7 +10,7 @@
 
 import { type PerformanceTimeSource, systemPerformanceTimeSource } from './timeSource.js';
 
-export type LogLevel = 'error' | 'warn' | 'info' | 'debug' | 'trace';
+type LogLevel = 'error' | 'warn' | 'info' | 'debug' | 'trace';
 
 export interface LogEntry {
   level: LogLevel;

@@ -10,7 +10,7 @@
  */
 
 /** The validated subset of a PostToolUse payload the wiki hook reads. */
-export interface ClaudePostToolUsePayload {
+interface ClaudePostToolUsePayload {
   /** The session working directory relative tool paths resolve against. */
   cwd: string;
   /**

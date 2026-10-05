@@ -13,10 +13,13 @@
 import { readFile, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { type FrontmatterInfo, readFrontmatter } from '../utils/frontmatter.js';
-import { getWikiLogger } from '../utils/logger.js';
-import { runWikiCommand } from '../utils/wikiBinary.js';
-import type { WikiBinaryManager } from '../utils/wikiInstaller.js';
+import {
+  type FrontmatterInfo,
+  getWikiLogger,
+  readFrontmatter,
+  runWikiCommand,
+  type WikiBinaryManager
+} from '../utils/index.js';
 
 /** Single diagnostic from `wiki check --format json`. */
 interface CheckDiag {

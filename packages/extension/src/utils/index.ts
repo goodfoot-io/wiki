@@ -9,9 +9,8 @@
  * @summary Cross-cutting host utilities — frontmatter, logger, binary install/spawn, MRU, platform target.
  */
 
-export * from './frontmatter.js';
-export * from './logger.js';
-export * from './recentlyViewed.js';
-export * from './wikiBinary.js';
-export * from './wikiInstaller.js';
-export * from './wikiPlatform.js';
+export { type FrontmatterInfo, readFrontmatter } from './frontmatter.js';
+export { formatLogError, getWikiLogger, registerWikiLogger } from './logger.js';
+export { loadValidatedRecentlyViewed, recordWikiView } from './recentlyViewed.js';
+export { runWikiCommand } from './wikiBinary.js';
+export { WikiBinaryManager, wasManagedInstall } from './wikiInstaller.js';
