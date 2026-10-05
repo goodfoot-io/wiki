@@ -3,8 +3,11 @@ allow-unwrap-in-tests = true
 # Stdout and stderr are reached only through `src/output.rs`, which makes
 # every stdout write fallible (a closed reader becomes `StdoutClosed`) and
 # owns the one stderr helper. The panic hook and the build script are the
-# only other sanctioned call sites, each with a narrow `#[expect]`.
+# only other sanctioned call sites, each with a narrow `#[expect]`. clap's
+# exiting entry points would swallow a closed stdout during `--help`.
 disallowed-methods = [
     { path = "std::io::stdout", reason = "write stdout through `output::Stdout`, whose writes map a closed reader to `StdoutClosed`" },
     { path = "std::io::stderr", reason = "write stderr through `output::stderr` / `output::stderr_line`" },
+    { path = "clap::Parser::parse", reason = "use `Cli::try_parse` so `--help` on a closed stdout exits 2 instead of clap swallowing the write error" },
+    { path = "clap::error::Error::exit", reason = "answer parse errors through `exit_on_parse_error`, which maps a closed stdout to `StdoutClosed`" },
 ]

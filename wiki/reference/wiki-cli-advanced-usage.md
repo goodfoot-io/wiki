@@ -3,14 +3,14 @@ title: Wiki CLI Advanced Usage
 summary: Advanced wiki CLI usage including glob targeting, JSON output, and stdin/path input.
 tags:
   - reference
-links-reviewed: 6
+links-reviewed: 7
 ---
 
 # Wiki CLI Advanced Usage
 
 ## Listing Pages
 
-[`wiki list`](/packages/cli/src/commands/list.rs#L19-L99) enumerates all pages with their title, summary, aliases, tags, and file path.
+[`wiki list`](/packages/cli/src/commands/list.rs#L18-L98) enumerates all pages with their title, summary, aliases, tags, and file path.
 
 ```bash
 # List every page
@@ -217,10 +217,10 @@ All commands use a consistent three-value exit code convention:
 | 0 | Success (or success with non-fatal warnings) |
 | 1 | Validation / business-logic errors found for commands that use that state |
 | 2 | Runtime or system error, including an internal error (a panic on any thread), reported on stderr as `internal error: …` (`{"error": "internal error: …"}` under `--format json`) |
-| 2 | Stdout closed by the reader before the command finished writing (`wiki … \| head -0`). Bytes written before the close still reach the reader; nothing is written to stderr. The non-zero code keeps a truncated run from passing for a clean one, so `wiki check` findings are never masked as exit 0. See [`output.rs`](/packages/cli/src/output.rs) |
+| 2 | Stdout closed by the reader before the command finished writing (`wiki list \| head -c 100` on output larger than the pipe buffer). Bytes written before the close still reach the reader; nothing is written to stderr. The non-zero code keeps a truncated run from passing for a clean one, so `wiki check` findings are never masked as exit 0. See [`output.rs`](/packages/cli/src/output.rs) |
 
 A closed stdout is not a validation finding, so `wiki check --no-exit-code` still exits 2 when it happens.
 
-Under `wiki … | head -N` the exit code depends on whether the output fits in the pipe buffer (64 KiB on Linux). If it does not fit, a write after `head` exits hits the closed pipe, and the command exits 2. If it fits, the writes usually finish before `head` exits, and the command keeps its normal code. That is a race, though, not a guarantee. A `set -o pipefail` pipeline can therefore see 0 or 2 for the same command.
+Under `wiki … | head -N` the exit code depends on whether the output fits in the pipe buffer (64 KiB on Linux). If it does not fit, a write after `head` exits hits the closed pipe, and the command exits 2. If it fits, the outcome is a race between the CLI's writes and `head` exiting. Usually the writes finish first and the command keeps its normal code, though with `head -0` the reader usually closes first. A `set -o pipefail` pipeline can therefore see 0 or 2 for the same command.
 
 `wiki check --fix` writes its fixes to disk before printing anything. If stdout closes during a `--fix` run, the report of what changed is lost, but the fixes have already been applied. Run `git status` or `wiki check` to see what changed.

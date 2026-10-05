@@ -1,11 +1,10 @@
-use std::io::{self, Write};
 use std::path::Path;
 
 use miette::{IntoDiagnostic, Result};
 use serde::Serialize;
 
 use crate::index::{DocSource, WikiIndex};
-use crate::output::{Stdout, StdoutResultExt as _};
+use crate::output::Stdout;
 
 #[derive(Debug, Serialize)]
 pub struct PageEntry {
@@ -54,7 +53,7 @@ pub fn run(
             write!(out, "{s}")?;
             first = false;
         } else {
-            write_markdown(out.raw(), &page).on_stdout()?;
+            write_markdown(&mut out, &page)?;
         }
     }
 
@@ -66,7 +65,7 @@ pub fn run(
     Ok(0)
 }
 
-fn write_markdown<W: Write>(out: &mut W, entry: &PageEntry) -> io::Result<()> {
+fn write_markdown(out: &mut Stdout, entry: &PageEntry) -> Result<()> {
     writeln!(out, "**{}** — `{}`", entry.title, entry.file)?;
     let mut meta = Vec::new();
     if !entry.aliases.is_empty() {

@@ -113,9 +113,9 @@ fn closed_stdout_exits_2_silently_for_every_command() {
 }
 
 /// Pages in the mid-stream fixture, and the summary size of each: together
-/// about 1 MiB of `list` output, sixteen times Linux's default 64 KiB pipe
-/// buffer.
-const BIG_PAGES: usize = 128;
+/// about 4 MiB of `list` output: well past Linux's default pipe buffer, which
+/// is 64 KiB on 4 KiB-page kernels and 1 MiB on 64 KiB-page kernels.
+const BIG_PAGES: usize = 512;
 const BIG_SUMMARY_BYTES: usize = 8 * 1024;
 
 /// A committed repository whose `list` output far exceeds a pipe buffer,

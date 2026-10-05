@@ -83,12 +83,6 @@ impl Stdout {
     pub fn flush(&mut self) -> Result<()> {
         self.0.flush().on_stdout()
     }
-
-    /// The raw lock, for helpers generic over [`io::Write`]; map their
-    /// result with [`StdoutResultExt::on_stdout`].
-    pub fn raw(&mut self) -> &mut io::StdoutLock<'static> {
-        &mut self.0
-    }
 }
 
 /// Write `args` to stderr, ignoring any write error.
