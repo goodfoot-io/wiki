@@ -45,6 +45,27 @@ const TEST_BIN_PATH = `/tmp/wiki-ext-test-bin-${INSTANCE_ID}`;
 const TEST_DIST_PATH = path.join(EXTENSION_ROOT, `dist-test-${INSTANCE_ID}`);
 
 /**
+ * VS Code launch arguments shared by the first attempt and the SIGSEGV retry.
+ *
+ * Installed extensions are excluded by pointing `--extensions-dir` at an
+ * empty per-run directory rather than passing `--disable-extensions`: that
+ * flag makes VS Code ignore every per-id `--disable-extension`, and the
+ * built-in Markdown language features must be disabled explicitly. Their
+ * update-links-on-file-move handler races this extension's rename edits, and
+ * their bundle loads Node's deprecated `punycode` module (DEP0040) into the
+ * shared extension host.
+ */
+const LAUNCH_ARGS = [
+  TEST_WORKSPACE_PATH,
+  `--extensions-dir=${path.join(USER_DATA_DIR_PATH, 'extensions')}`,
+  '--disable-extension',
+  'vscode.markdown-language-features',
+  '--disable-gpu',
+  '--no-sandbox',
+  `--user-data-dir=${USER_DATA_DIR_PATH}`
+];
+
+/**
  * Mutable state shared between setup and cleanup.
  */
 const state = {
@@ -259,6 +280,11 @@ if (args[0] === 'list' && args[1] === '--format' && args[2] === 'json') {
   process.exit(0);
 }
 
+if (args[0] === 'check' && args[1] === '--format' && args[2] === 'json') {
+  writeJson({ errors: [] });
+  process.exit(0);
+}
+
 if (args[0] === 'summary' && args[2] === '--format' && args[3] === 'json') {
   const target = args[1];
   const workspacePath = process.env.TEST_WORKSPACE_PATH || process.cwd();
@@ -322,9 +348,10 @@ async function main(): Promise<void> {
     prepareTestWorkspace();
     installWikiFixtureBinary();
 
-    // Remove VSCODE_ and ELECTRON_RUN_AS_NODE env vars that cause MODULE_NOT_FOUND errors.
+    // Remove VSCODE_ and ELECTRON_RUN_AS_NODE env vars that cause MODULE_NOT_FOUND errors,
+    // and NODE_OPTIONS: it configures this tsx runner, and packaged Electron rejects it.
     const problematicVars = Object.keys(process.env).filter(
-      (key) => key.startsWith('VSCODE_') || key === 'ELECTRON_RUN_AS_NODE'
+      (key) => key.startsWith('VSCODE_') || key === 'ELECTRON_RUN_AS_NODE' || key === 'NODE_OPTIONS'
     );
     for (const key of problematicVars) {
       delete process.env[key];
@@ -335,13 +362,7 @@ async function main(): Promise<void> {
       extensionDevelopmentPath,
       extensionTestsPath,
       extensionTestsEnv: { ...process.env, TEST_WORKSPACE_PATH, WIKI_EXTENSION_USE_PATH_FALLBACK: '1' },
-      launchArgs: [
-        TEST_WORKSPACE_PATH,
-        '--disable-extensions',
-        '--disable-gpu',
-        '--no-sandbox',
-        `--user-data-dir=${USER_DATA_DIR_PATH}`
-      ]
+      launchArgs: LAUNCH_ARGS
     });
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
@@ -379,13 +400,7 @@ async function main(): Promise<void> {
           extensionDevelopmentPath,
           extensionTestsPath,
           extensionTestsEnv: { ...process.env, TEST_WORKSPACE_PATH, WIKI_EXTENSION_USE_PATH_FALLBACK: '1' },
-          launchArgs: [
-            TEST_WORKSPACE_PATH,
-            '--disable-extensions',
-            '--disable-gpu',
-            '--no-sandbox',
-            `--user-data-dir=${USER_DATA_DIR_PATH}`
-          ]
+          launchArgs: LAUNCH_ARGS
         });
       } catch (retryErr) {
         console.error('[runTest] Retry after SIGSEGV also failed:', retryErr);

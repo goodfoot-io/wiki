@@ -1395,7 +1395,7 @@ fn run_drift_fix_phase(
     // lock, open error) falls back to uncached computation. `reporter`
     // is shared with the post-fix re-check's construction site, so the
     // cache-fault warning fires at most once per run (plan decision 7).
-    let anchor_cache = anchor_cache_for_run(reporter);
+    let anchor_cache = anchor_cache_for_run(repo_root, reporter);
 
     let mut unverified = 0;
     let mut certification_skips = 0;
@@ -1837,8 +1837,8 @@ fn unix_ms() -> u64 {
 /// common git dir string. Two worktrees of one repo share it, so identical
 /// target sets in either worktree collide onto one journal — safe, because
 /// journals live per-worktree while the digest pins the destination set.
-fn journal_repo_identity() -> Result<String> {
-    let dir = crate::git::common_dir()?;
+fn journal_repo_identity(repo_root: &Path) -> Result<String> {
+    let dir = crate::git::common_dir_at(repo_root)?;
     Ok(dir.to_string_lossy().into_owned())
 }
 
@@ -2078,7 +2078,7 @@ pub(crate) fn scan_fix_journals(repo_root: &Path) -> Result<ScannedJournals> {
     // Without the repository identity the scope digest cannot be verified;
     // leave every journal untouched rather than discard recovery data on a
     // technicality. The next run with resolvable identity settles them.
-    let Ok(identity_dir) = crate::git::common_dir() else {
+    let Ok(identity_dir) = crate::git::common_dir_at(repo_root) else {
         return Ok(ScannedJournals::none());
     };
     let identity = identity_dir.to_string_lossy().into_owned();
@@ -2167,7 +2167,7 @@ fn materialize_with_journal(repo_root: &Path, patches: &HashMap<PathBuf, String>
     let dot_git = crate::index::find_dot_git(repo_root).ok_or_else(|| {
         miette::miette!("cannot locate the git directory for fix journals")
     })?;
-    let identity = journal_repo_identity()?;
+    let identity = journal_repo_identity(repo_root)?;
     let pairs: Vec<(String, String)> = staged
         .iter()
         .map(|(p, s, _)| (p.clone(), s.clone()))

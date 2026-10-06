@@ -786,8 +786,11 @@ impl AnchorCacheHandle {
 /// construction site of one run (the fix phase and the post-fix
 /// re-check each construct), so the "first fault only" rule of plan decision
 /// 7 holds across them.
-pub(crate) fn anchor_cache_for_run(reporter: &crate::cache::CacheReporter) -> AnchorCacheHandle {
-    anchor_cache_for_run_inner(reporter, true)
+pub(crate) fn anchor_cache_for_run(
+    repo_root: &Path,
+    reporter: &crate::cache::CacheReporter,
+) -> AnchorCacheHandle {
+    anchor_cache_for_run_inner(repo_root, reporter, true)
 }
 
 /// The `--clear-cache` construction (plan decision 8): cache management,
@@ -818,6 +821,7 @@ pub(crate) fn anchor_cache_for_clear(reporter: &crate::cache::CacheReporter) -> 
 }
 
 fn anchor_cache_for_run_inner(
+    repo_root: &Path,
     reporter: &crate::cache::CacheReporter,
     respect_kill_switch: bool,
 ) -> AnchorCacheHandle {
@@ -826,7 +830,7 @@ fn anchor_cache_for_run_inner(
         common_dir,
         lock_held: false,
     };
-    let common_dir = match crate::git::common_dir() {
+    let common_dir = match crate::git::common_dir_at(repo_root) {
         Ok(dir) => dir,
         Err(e) => {
             reporter.unavailable(&e.to_string());
@@ -927,7 +931,7 @@ fn collect_drift_diagnostics(
     // (common-dir resolution failure, `WIKI_ANCHOR_CACHE=0`, held init
     // lock, open error) falls back to uncached computation with at most one
     // fault line, shared across the run's construction sites.
-    let anchor_cache = anchor_cache_for_run(reporter);
+    let anchor_cache = anchor_cache_for_run(repo_root, reporter);
     // Shared across pages: the move scan's candidate inventory is loaded once
     // per pass, on the first link that needs it. Its repository facts — the
     // per-destination rename histories the evidence loop consults — come from
@@ -1414,6 +1418,23 @@ mod tests {
             line,
             message: "boom".into(),
         }
+    }
+
+    /// The run's anchor cache resolves the store from the run's repository
+    /// root, never the process cwd — otherwise an in-process run against
+    /// another repository reads and writes the cwd repository's store.
+    #[test]
+    fn anchor_cache_for_run_resolves_store_from_repo_root() {
+        let repo = TestRepo::new();
+        let reporter = crate::cache::CacheReporter::for_invocation();
+        let handle = anchor_cache_for_run(repo.path(), &reporter);
+        let expected = repo.path().canonicalize().expect("canonicalize repo").join(".git");
+        let resolved = handle
+            .common_dir()
+            .expect("common dir resolves for the run's repository")
+            .canonicalize()
+            .expect("canonicalize common dir");
+        assert_eq!(resolved, expected);
     }
 
     #[test]

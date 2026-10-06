@@ -1,4 +1,4 @@
-packages/cli/src/git.rs#L611-L691 rk64:5baf365cdd7850ca
+packages/cli/src/git.rs#L498-L578 rk64:5baf365cdd7850ca
 packages/cli/src/git.rs#L817-L828 rk64:01ce4b48f13136c1
 packages/cli/src/index/mod.rs#L212-L228 rk64:462f67d51dc827ce
 

@@ -92,13 +92,23 @@ pub fn repo_root() -> Result<PathBuf> {
 /// `common_dir()` carries `..` segments (spike S2). A discovery failure is
 /// `Err`; the caller disables the anchor cache for the run (uncached
 /// computation is always correct).
+///
+/// Discovery starts from the current working directory; callers that run
+/// against an explicit repository root use [`common_dir_at`] instead, so the
+/// store they touch is that repository's, never the process cwd's.
 pub fn common_dir() -> Result<PathBuf> {
     let cwd = std::env::current_dir()
         .into_diagnostic()
         .wrap_err("failed to read current working directory")?;
-    let repo = gix::discover_with_environment_overrides(cwd)
+    common_dir_at(&cwd)
+}
+
+/// [`common_dir`] with discovery starting at `start` (a repository root or
+/// any path inside one) rather than the current working directory.
+pub fn common_dir_at(start: &Path) -> Result<PathBuf> {
+    let repo = gix::discover_with_environment_overrides(start)
         .into_diagnostic()
-        .wrap_err("failed to discover git repository from the current directory")?;
+        .wrap_err_with(|| format!("failed to discover git repository from {}", start.display()))?;
     Ok(normalize_lexically(repo.common_dir().to_path_buf()))
 }
 
